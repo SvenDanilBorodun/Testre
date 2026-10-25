@@ -98,31 +98,31 @@ services:
       # the both-arms path and OMITS it (→ empty) when the Roboter-Studio
       # leader toggle regenerates the `.env` with EDUBOTICS_FOLLOWER_ONLY=1.
       - LEADER_PORT=${LEADER_PORT}
-      # Robot profile id — entrypoint_omx.sh branches on it (edu6_studio →
+      # Robot profile id — entrypoint_omx.sh branches on it (v1_studio →
       # the Feetech driver node instead of the OMX bringup; default = today's
       # OMX phases). The server container has its own copy further down.
       - EDUBOTICS_ROBOT_TYPE=${EDUBOTICS_ROBOT_TYPE:-omx_full}
-      # edu6 per-joint direction convention (7 comma-separated ±1) — bench
-      # knob for rig gate R6; empty = the baked default (all +1). Read by
-      # edu6_arm_node.py.
-      - EDUBOTICS_EDU6_JOINT_SIGNS=${EDUBOTICS_EDU6_JOINT_SIGNS:-}
-      # edu6 boot plausibility band, in encoder ticks (empty = 400 ≈ 35°). The
+      # Feetech per-joint direction convention (6 comma-separated ±1) — bench
+      # knob for rig gate VR3; empty = the baked default (all +1). A flip needs
+      # re-provisioning. Read by feetech_arm_node.py.
+      - EDUBOTICS_FEETECH_JOINT_SIGNS=${EDUBOTICS_FEETECH_JOINT_SIGNS:-}
+      # Feetech boot plausibility band, in encoder ticks (empty = 400 ≈ 35°). The
       # boot probe refuses a joint reading this far outside its designed EEPROM
       # window — it hunts a hand-turned 360° wrap, which misses by >=795 ticks
       # on every detectable joint, so the band has 2x headroom. Bench knob for
-      # rig gate R9 (torque-off collapse measures where a LIMP arm rests, i.e.
-      # the false-alarm side); >= 4096 disables. Read by edu6_arm_node.py.
-      - EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS=${EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS:-}
-      # edu6 torque-on edge guard, in encoder ticks (empty = 40 ≈ 3.5°). A
+      # rig gate VR6 (torque-off collapse measures where a LIMP arm rests, i.e.
+      # the false-alarm side); >= 4096 disables. Read by feetech_arm_node.py.
+      - EDUBOTICS_FEETECH_BOOT_POS_TOL_TICKS=${EDUBOTICS_FEETECH_BOOT_POS_TOL_TICKS:-}
+      # Feetech torque-on edge guard, in encoder ticks (empty = 40 ≈ 3.5°). A
       # torque-ON TRANSITION is refused while ANY joint rests this close to the
       # tick-0/4095 position-map edge: the STS position loop is not wrap-aware
       # (measured 2026-07-26), so a goal seeded there drives the long way round.
-      # POLARITY IS THE INVERSE of EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS above: 0
+      # POLARITY IS THE INVERSE of EDUBOTICS_FEETECH_BOOT_POS_TOL_TICKS above: 0
       # DISABLES this guard (the one-variable rollback) and a LARGER value refuses
       # MORE poses — 2048+ would refuse every reading, so those fall back to the
-      # default with a [WARN]. Read by edu6_arm_node.py.
-      - EDUBOTICS_EDU6_EDGE_MARGIN_TICKS=${EDUBOTICS_EDU6_EDGE_MARGIN_TICKS:-}
-      # edu6 post-energise wrong-way abort threshold, in encoder ticks (empty =
+      # default with a [WARN]. Read by feetech_arm_node.py.
+      - EDUBOTICS_FEETECH_EDGE_MARGIN_TICKS=${EDUBOTICS_FEETECH_EDGE_MARGIN_TICKS:-}
+      # Feetech post-energise wrong-way abort threshold, in encoder ticks (empty =
       # 2048 = half a revolution). Immediately AFTER switching torque on, the
       # driver re-reads position once and switches torque back OFF if a servo's
       # own naive `Goal − Present` error exceeds this AND is longer than the true
@@ -130,33 +130,31 @@ services:
       # driving a full turn the wrong way. Unlike the edge margin above this needs
       # no assumption about timing: it measures what the arm actually did. 0
       # DISABLES it (the one-variable rollback); values below 401 or above 4095
-      # fall back to the default with a [WARN]. Read by edu6_arm_node.py.
-      - EDUBOTICS_EDU6_TORQUE_ABORT_TICKS=${EDUBOTICS_EDU6_TORQUE_ABORT_TICKS:-}
-      # edu6 commanded-goal edge clamp, in encoder ticks (empty = 128 ≈ 11.25°).
+      # fall back to the default with a [WARN]. Read by feetech_arm_node.py.
+      - EDUBOTICS_FEETECH_TORQUE_ABORT_TICKS=${EDUBOTICS_FEETECH_TORQUE_ABORT_TICKS:-}
+      # Feetech commanded-goal edge clamp, in encoder ticks (empty = 128 ≈ 11.25°).
       # Every tick written as Goal_Position is kept this far clear of the
-      # tick-0/4095 position-map edge. Six of the twelve arm-joint limit bounds map
-      # EXACTLY onto that edge (joint2 hi, joint3 lo, joint4 and joint6 both ends),
-      # so a command at one of them PINNED the goal on the seam and one encoder
-      # sample across the boundary then committed the joint to a full revolution at
+      # tick-0/4095 position-map edge. Two of the ten arm-joint limit bounds map
+      # EXACTLY onto that edge (joint2 hi and joint3 hi, both +π), so a command at
+      # one of them would PIN the goal on the seam and one encoder sample across
+      # the boundary would then commit the joint to a full revolution at
       # 4.36 rad/s — the non-wrap-aware STS position loop again, but with no
       # torque-on event for the two guards above to hang off. Deliberately WIDER
-      # than EDUBOTICS_EDU6_EDGE_MARGIN_TICKS: that guard judges an arm at rest
+      # than EDUBOTICS_FEETECH_EDGE_MARGIN_TICKS: that guard judges an arm at rest
       # (dither only), this one a moving joint arriving at a pinned goal, which
-      # must also survive overshoot — unmeasured on this arm until rig gate R5, so
-      # the default buys headroom where headroom is free. SAME POLARITY as the edge
+      # must also survive overshoot — unmeasured until rig gate VR14, so the
+      # default buys headroom where headroom is free. SAME POLARITY as the edge
       # margin (0 DISABLES this clamp — the one-variable rollback; larger clamps
-      # HARDER), and therefore the INVERSE of EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS.
-      # Above 246 the clamp would start shifting real grasp solutions, so those
-      # fall back to the default with a [WARN]. 246 is one tick under joint3's
-      # ANALYTIC floor of 247 (solve() gives q3 = γ + ALPHA0 − π/2 with γ ≥ 0, so
-      # q3 ≥ −158.33167° for EVERY solution) — a derived bound, deliberately not a
-      # sweep result: this number was wrong three times from grids that could not
-      # resolve full extension. Costs the outer 11.25° of commanded travel at those
-      # six bounds only (jog/replay extremes — hand-guide is torque-off and keeps
-      # the full range); HOME sits 483 ticks from the edge and the closest real
-      # Edu6IKSolver solution over the operating envelope (z ≥ 0) is 253.
-      # Read by edu6_arm_node.py.
-      - EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS=${EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS:-}
+      # HARDER), and therefore the INVERSE of EDUBOTICS_FEETECH_BOOT_POS_TOL_TICKS.
+      # Above 130 the clamp would start shifting real grasp solutions, so those
+      # fall back to the default with a [WARN]. 130 is one tick under joint3's
+      # ANALYTIC bound of 131 ticks from the edge (solve() gives q3 = _G_OFFSET − g
+      # with g ≥ 0, so q3 ≤ 2.938642 rad for EVERY solution) — a derived bound,
+      # deliberately not a sweep result. Costs the outer 11.25° of commanded
+      # travel at those two bounds only (jog/replay extremes — hand-guide is
+      # torque-off and keeps the full range); HOME sits 1082 ticks from the edge.
+      # Read by feetech_arm_node.py.
+      - EDUBOTICS_FEETECH_GOAL_EDGE_MARGIN_TICKS=${EDUBOTICS_FEETECH_GOAL_EDGE_MARGIN_TICKS:-}
       - CAMERA_DEVICE_1=${CAMERA_DEVICE_1:-}
       - CAMERA_NAME_1=${CAMERA_NAME_1:-gripper}
       - CAMERA_DEVICE_2=${CAMERA_DEVICE_2:-}
@@ -194,7 +192,7 @@ services:
       # NOTHING moves the arm at container start: entrypoint_omx.sh skips its
       # whole Phase 3, omx_l_leader_ai.launch.py leaves the leader's trajectory
       # broadcaster OUT of the boot spawner (so /leader/joint_trajectory has no
-      # publisher and teleop cannot run), and edu6_arm_node.py only energises.
+      # publisher and teleop cannot run), and feetech_arm_node.py only energises.
       # activation_agent.py then holds the home glide, the leader sync and the
       # teleop spawn until a logged-in student presses „Roboter aktivieren" on
       # the Startseite. Torque is deliberately NOT gated — an un-torqued arm
@@ -207,40 +205,37 @@ services:
       # not exist on the Pi; `usb_cam` is the native-Linux path.
       - EDUBOTICS_CAMERA_SOURCE=usb_cam
       # ── safe Grundstellung: boot-home table-floor pre-check ─────────────
-      # Read by edu6_arm_node.py; forwarded HERE TOO because
+      # Read by feetech_arm_node.py; forwarded HERE TOO because
       # ci.yml::env-forwarding-guard builds `forwarded` as a UNION over the four
       # compose files, so a knob present only in the student compose passes the
       # guard while being silently ABSENT on the Pi. See docker-compose.yml for
       # the derivation. 0 DISABLES the check — the one-variable rollback.
-      # (EDUBOTICS_ROBOT_TYPE and the five EDUBOTICS_EDU6_* knobs are forwarded
+      # (EDUBOTICS_ROBOT_TYPE and the five EDUBOTICS_FEETECH_* knobs are forwarded
       # ABOVE, next to LEADER_PORT, mirroring the student compose's order. That
-      # closed the CONTAINER-env half of edu6-on-Pi; the HOST halves have since
-      # landed too — the two this comment used to list as blockers, plus a
-      # writer for the type it never mentioned — so it no longer records one:
+      # closes the CONTAINER-env half of a Feetech arm on the Pi; the HOST halves
+      # have landed too:
       #   * the scan is FAMILY-AWARE — identify_arm.find_serial_paths_for_arms
       #     filters /dev/serial/by-id per family, and scan_and_identify_arms
-      #     sends --protocol=feetech for edu6, with the family derived from the
-      #     selected type (constants.arm_family_for_robot_type);
+      #     sends --protocol=feetech for a Feetech arm, with the family derived
+      #     from the selected type (constants.arm_family_for_robot_type);
       #   * the type has a WRITER other than an SSH hand-edit — POST /robot-type
       #     (agent.handle_set_robot_type), behind the System-tab selector; and
       #   * „Umgebung starten" gates on the PROFILE, not on "both arms"
       #     (agent._hardware_ready wants a leader only when scan_requires_leader
       #     — AND, since 2026-07-29, every arm the profile uses being of that
-      #     profile's own ARM FAMILY, so crossing OMX <-> edu6 INVALIDATES a
+      #     profile's own ARM FAMILY, so crossing OMX <-> V1 INVALIDATES a
       #     scan rather than starting the wrong entrypoint branch against it)
       #     and regenerates with follower_only=None, which generate_env_file
       #     DERIVES from the type. A leaderless `.env` is therefore what a
       #     follower-only profile writes BY DEFAULT — not something only the
       #     Roboter-Studio leader toggle can ask for.
       # What is still UNPROVEN, recorded here because a green suite does not say
-      # it: no rig gate has a Pi-side result (the four that ARE done — R1/R2/R6/
-      # R9 — ran on a Windows bench; CLAUDE.md records R1's port as COM5),
-      # nobody has plugged an edu6 arm into a Pi at all, and
-      # identify_arm._EDU6_BYID_MARKERS is still
-      # the Windows twin's six-way GUESS at the CH343P's by-id NAME (R1 measured
-      # the VID/PID 1A86:55D3, which is a different string). DISCOVERY rides
-      # that guess; only IDENTITY is proven downstream, by the servos answering
-      # the Feetech ping.)
+      # it: no V1 rig gate has a result yet (docs/KNOWN-ISSUES.md VR1–VR16),
+      # nobody has plugged a V1 into a Pi at all, and
+      # identify_arm._FEETECH_BYID_MARKERS is still the Windows twin's six-way
+      # GUESS at the CH343P's by-id NAME (rig gate VR2; the VID/PID 1A86:55D3 is
+      # a different string). DISCOVERY rides that guess; only IDENTITY is proven
+      # downstream, by the servos answering the Feetech ping.)
       - EDUBOTICS_HOME_FLOOR_TOL_M=${EDUBOTICS_HOME_FLOOR_TOL_M:-}
       # camera_ingest_node.py (native_bridge only) reads these two. On the
       # usb_cam Pi path the entrypoint never starts that node, so both are
@@ -525,8 +520,8 @@ services:
       # default = unset → the ArmProfile's pickup_close_rad, which is None on
       # EVERY shipped profile after the 2026-09-08 revert, so the unset default
       # is the arm's full hardware close everywhere. Setting this to a rig's own
-      # gripper_closed_rad therefore changes nothing; set it ABOVE that (edu6
-      # 1.0, edu1 0.10 — never 0) to opt a rig into a bounded squeeze. It is NOT
+      # gripper_closed_rad therefore changes nothing; set it ABOVE that (V1
+      # 0.05 — never 0) to opt a rig into a bounded squeeze. It is NOT
       # band-checked, and it does not reach „schließe Greifer". Read by
       # workflow/handlers/motion.py.
       - EDUBOTICS_PICKUP_CLOSE_RAD=${EDUBOTICS_PICKUP_CLOSE_RAD:-}

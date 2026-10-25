@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
-"""Feetech vendor-bench provisioning — calibrate once, forever (plan §6).
+"""Feetech vendor-bench provisioning — calibrate once, forever.
 
-Serves BOTH Roboter-Studio arms; ``--arm`` selects which, and it defaults to
-``edu6`` so every existing bench command line is byte-identical.
+Serves the V1 Roboter-Studio arm; ``--arm`` selects the arm spec and defaults
+to ``v1``.
 
 Run ONCE per arm on the assembly bench, with the arm jigged to the mechanical
-reference pose (every joint at its designed zero, gripper fully CLOSED):
+reference pose (every joint at its designed zero — the V1 folded flat, joint2
+and joint3 at their window ends — and the claw fully CLOSED):
 
-    python3 tools/edu6_provision.py --port /dev/ttyACM0 --serial EDU6-0001
-    python3 tools/edu6_provision.py --arm edu1 --port /dev/ttyACM0 \
-        --serial EDU1-0001 --signs 1,1,1,1,1,1
+    python3 tools/feetech_provision.py --arm v1 --port /dev/ttyACM0 \
+        --serial V1-0001 --signs 1,1,1,1,1,1
 
-The FILE keeps its edu6 name for the same reason the driver does: it is cited
-by the bench runbook and by the tests, and a rename buys a nicer name at the
-cost of every operator's muscle memory during a bring-up that is still open.
-
-What it does, in the §6 order (order matters — limits are interpreted in the
+What it does, in this order (order matters — limits are interpreted in the
 offset-corrected frame, and the offset must be baked under the SAME
 position-reporting semantics the runtime will use):
 
@@ -40,8 +36,8 @@ position-reporting semantics the runtime will use):
    ranges — "how far the human waved it" is too sloppy for a student-facing
    IK model), via the ONE shared window implementation in ``feetech_bus``
    (the driver's boot probe verifies the same windows — audit H1).
-6. Write the safety EEPROM in the same pass: ``Max_Torque_Limit`` (the §8
-   pinch floor — R2/R4 pending values), ``Protection_Current``,
+6. Write the safety EEPROM in the same pass: ``Max_Torque_Limit`` (the
+   pinch floor — rig gate VR5), ``Protection_Current``,
    ``Overload_Torque``, **``Operating_Mode = 0``** (position — a wheel-mode
    servo would turn boot-home into a continuous-rotation runaway that
    position limits cannot stop, audit H2), ``Return_Delay_Time = 0``.
@@ -57,18 +53,18 @@ position-reporting semantics the runtime will use):
    Stored locally (``<arm>_records/<serial>.json``) and, when SUPABASE_URL +
    SUPABASE_SERVICE_ROLE_KEY are exported, upserted into the
    ``edu6_arm_records`` table (migration 036) keyed by the arm serial
-   (the vendor STICKER serial — decision Q3). That table is SHARED by both
-   Feetech arms — it was named before there was a second one, and renaming a
-   fielded table is worse than a name that reads narrow — so ``profile_id`` is
-   the ONLY thing in the artifact that says which arm a record describes.
+   (the vendor STICKER serial). That table is SHARED by every Feetech arm —
+   it was named before the V1 existed, and renaming a fielded table is worse
+   than a name that reads narrow — so ``profile_id`` is the ONLY thing in the
+   artifact that says which arm a record describes.
 
 NEVER write EEPROM unconditionally: every write path is read-compare-write.
 EEPROM endurance is unverified — treat it as a five-figure budget.
 
-The gripper servo (the LAST id — 7 on edu6, 6 on edu1) is jigged CLOSED (jaws
-touching) = its designed zero. Servo direction signs are the ``--signs`` option
-(R6 / E3 fix the convention; the same values ship as the driver's joint-signs
-env knob).
+The claw servo (the LAST id, 6) is jigged CLOSED (blades touching) = its
+designed zero. Servo direction signs are the ``--signs`` option (rig gate VR3
+fixes the convention; the same values ship as the driver's joint-signs env
+knob).
 """
 
 from __future__ import annotations
@@ -88,62 +84,47 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]
 import feetech_bus as fb  # noqa: E402
 
 
-# ── arm spec (edu6 DEFAULTS; `--arm edu1` rebinds them in main) ──────────────
-# Kept as plain module-level literals under their historic names: the deps-free
-# suite compares them against the driver node's own literals, and a table
-# lookup would break that AST comparison for no gain.
-SERVO_IDS = (1, 2, 3, 4, 5, 6, 7)
+# ── arm spec (V1; `--arm` rebinds them in main) ──────────────────────────────
+# Kept as plain module-level literals: the deps-free suite compares them against
+# the driver node's own literals, and a table lookup would break that AST
+# comparison for no gain.
+SERVO_IDS = (1, 2, 3, 4, 5, 6)
 CENTER_TICK = 2048
 TICKS_PER_REV = 4096
 RAD_PER_TICK = 2.0 * math.pi / TICKS_PER_REV
 
-# Designed joint limits (URDF; the gripper band mirrors the driver node).
+# Designed joint limits (URDF; the claw band mirrors the driver node). joint4
+# (4th tuple) is ±110° = 1.9198 rad; joint1 and joint5 are ±90° — widen by
+# INDEX, never by search-replace. What this tool writes into
+# Min/Max_Position_Limit IS what the driver's boot probe verifies, so moving a
+# value here means re-running `--arm v1` on every provisioned arm, or it will
+# refuse to boot with „nicht provisioniert".
 JOINT_LIMITS_RAD = (
-    (-1.5708, 1.5708), (0.0, 3.1416), (-3.1416, 0.0), (-3.1416, 3.1416),
-    (-1.5708, 1.9199), (-3.1416, 3.1416), (0.0, 1.79),
+    (-1.5708, 1.5708), (0.0, 3.1416), (0.0, 3.1416),
+    (-1.9198, 1.9198), (-1.5708, 1.5708),
+    (0.0, 1.5708),      # claw: 0 = blades closed
 )
 
-# Per-arm overrides. Values MIRROR the driver node's `_EDU1_*` literals
-# (docker/open_manipulator/edu6_arm_node.py) — the boot probe verifies the
+# Per-arm specs. Values MIRROR the driver node's literals
+# (docker/open_manipulator/feetech_arm_node.py) — the boot probe verifies the
 # EEPROM window this tool writes, so a divergence here makes every provisioned
-# Edu:1 refuse to boot with „nicht provisioniert".
+# arm refuse to boot with „nicht provisioniert".
 _ARM_SPECS = {
-    'edu6': {
-        'servo_ids': (1, 2, 3, 4, 5, 6, 7),
+    'v1': {
+        'servo_ids': (1, 2, 3, 4, 5, 6),
         'joint_limits_rad': JOINT_LIMITS_RAD,
-        'records_dir': 'edu6_records',
-        'serial_example': 'EDU6-0001',
+        'records_dir': 'v1_records',
+        'serial_example': 'V1-0001',
         # THE machine-readable family tag on the emitted record, and the only
         # one: `persist` upserts the whole record as a single jsonb blob into a
         # table whose schema is (arm_serial, record, timestamps), so nothing
-        # else in the artifact says which arm it describes. It was an
-        # unconditional 'edu6_studio' literal until 2026-09-05, which stamped
-        # every Edu:1 record as a 6-axis arm both locally and in Supabase.
-        # It is deliberately NOT in `record_checksum` (which hashes
-        # serial+signs+servos), so adding it re-digests nothing.
-        'profile_id': 'edu6_studio',
+        # else in the artifact says which arm it describes. It is deliberately
+        # NOT in `record_checksum` (which hashes serial+signs+servos).
+        'profile_id': 'v1_studio',
         # Product name for the German identity-gate refusal. Naming the wrong
         # product at the moment a foreign servo is found is worse than saying
         # nothing: the operator reaches for the wrong arm's checklist.
-        'display_de': 'EduBotics 6-Achs',
-    },
-    'edu1': {
-        'servo_ids': (1, 2, 3, 4, 5, 6),
-        # joint4 (4th tuple) is ±115° = 2.0071 rad since 2026-09-10; joint1 and
-        # joint5 keep ±90°. The three tuples used to read identically, so widen
-        # by INDEX, never by search-replace. What this tool writes into
-        # Min/Max_Position_Limit IS what the driver's boot probe verifies, so
-        # every already-provisioned Edu:1 must be re-run through
-        # `--arm edu1` or it will refuse to boot with „nicht provisioniert".
-        'joint_limits_rad': (
-            (-1.5708, 1.5708), (0.0, 3.1416), (0.0, 3.1416),
-            (-2.0071, 2.0071), (-1.5708, 1.5708),
-            (0.0, 1.5708),      # claw: 0 = jaws closed
-        ),
-        'records_dir': 'edu1_records',
-        'serial_example': 'EDU1-0001',
-        'profile_id': 'edu1_studio',
-        'display_de': 'Edu:1',
+        'display_de': 'V1',
     },
 }
 
@@ -153,8 +134,8 @@ def apply_arm_spec(arm: str) -> dict:
 
     A REBIND rather than threading the spec through every helper: `provision`
     and its callees read these as module globals, and the alternative is a
-    dozen signature changes to a bench tool whose edu6 path is already
-    validated. Called ONCE from main(), before any bus I/O.
+    dozen signature changes to a bench tool. Called ONCE from main(), before
+    any bus I/O.
     """
     global SERVO_IDS, JOINT_LIMITS_RAD
     spec = _ARM_SPECS[arm]
@@ -162,19 +143,19 @@ def apply_arm_spec(arm: str) -> dict:
     JOINT_LIMITS_RAD = spec['joint_limits_rad']
     return spec
 
-# Safety EEPROM values (plan §8; the gripper pinch floor is R2/R4-pending).
+# Safety EEPROM values (the claw pinch floor is pending rig gate VR5).
 # These are compile-time constants ON PURPOSE — a safety floor must not be a
 # casual command-line argument, so there is NO per-bench-run override flag.
 # Change the value here and re-run the bench provisioning to move the floor.
 ARM_MAX_TORQUE = 800        # arm joints must hold their own weight
-GRIPPER_MAX_TORQUE = 150    # ≈10 N pinch at the assumed 45 mm lever (R4 gate)
+GRIPPER_MAX_TORQUE = 150    # the claw's pinch floor (rig gate VR5)
 # Overcurrent trip (addr 28, ×6.5 mA). Bench decision 2026-07-24: keep the
 # factory ~2 A (310) rather than the plan's 975 mA — the STS3250 shoulder/
 # elbow (joints 2/3) draw more than 975 mA holding the arm's weight, so a
 # lower trip nuisance-fires (servo cuts torque → arm sags). The real force
 # safety is Max_Torque + the factory sustained-overload protection (addr
-# 34/35/36, untouched). Finalize from live Present_Current at rig gate R6.
-PROTECTION_CURRENT = 310    # ×6.5 mA ≈ 2015 mA (R6-tune)
+# 34/35/36, untouched). Finalize from live Present_Current on the rig.
+PROTECTION_CURRENT = 310    # ×6.5 mA ≈ 2015 mA (rig-tune)
 OVERLOAD_TORQUE = 80
 RETURN_DELAY = 0
 
@@ -186,7 +167,7 @@ JIG_POSE_TOLERANCE_TICKS = 4
 
 def designed_zero_tick(_joint_index: int) -> int:
     """Every joint's jig pose reads CENTER_TICK after the offset write; the
-    gripper (index 6) is jigged CLOSED = its designed zero too."""
+    claw (the last index) is jigged CLOSED = its designed zero too."""
     return CENTER_TICK
 
 
@@ -264,14 +245,14 @@ def provision(bus, serial: str, signs, spec: dict,
         # Min/Max_Position_Limit window the driver's boot probe verifies as a
         # provisioning fingerprint, so this is the mismatch that actually
         # bricks an arm: it would be written one window and checked against
-        # another, and the servo-id check above cannot see that at all (both
-        # Feetech arms would still agree on ids).
+        # another, and the servo-id check above cannot see that at all (two
+        # specs with the same ids would still agree on them).
         raise SystemExit(
             '[FEHLER] Interner Fehler: Arm-Spezifikation und geladene '
             'Gelenkgrenzen passen nicht zusammen — apply_arm_spec() wurde '
             'nicht für denselben Arm aufgerufen.')
     display = spec['display_de']
-    # 0. identity gate. Both arms MIX STS3215 with STS3250 on the high-load
+    # 0. identity gate. The arm MIXES STS3215 with STS3250 on the high-load
     # shoulder + elbow BY DESIGN — accept the STS-series set and record each
     # servo's ACTUAL model (never hardcode 777).
     models: dict[int, int] = {}
@@ -334,7 +315,7 @@ def provision(bus, serial: str, signs, spec: dict,
             # reason: the jig read that bakes Homing_Offset must run under the
             # same map the runtime uses. read-compare-write, so a factory-default
             # servo costs no EEPROM cycle. The driver's boot probe reports a
-            # deviation (as a WARNING — see Edu6ArmNode.probe_bus for why it is
+            # deviation (as a WARNING — see FeetechArmNode.probe_bus for why it is
             # not a refusal); this is the write that makes the arm match.
             _write_verify_u8(bus, sid, fb.REG_ANGULAR_RESOLUTION,
                              fb.ANGULAR_RESOLUTION_SINGLE_TURN,
@@ -424,9 +405,9 @@ def provision(bus, serial: str, signs, spec: dict,
             # ONE shared formatter with the driver's boot fingerprint, so a
             # stored record and a bench log are string-comparable.
             'firmware': fb.format_firmware(firmware[0], firmware[1]),
-            # Recorded so a future arm's map scaling is auditable from the record
-            # alone — EDU6-0001 predates this field, which is exactly why the
-            # driver's boot check WARNS instead of refusing.
+            # Recorded so an arm's map scaling is auditable from the record
+            # alone — an arm provisioned before this field existed is exactly
+            # why the driver's boot check WARNS instead of refusing.
             'angular_resolution': bus.read(
                 sid, fb.REG_ANGULAR_RESOLUTION, 1)[1][0],
         })
@@ -483,9 +464,9 @@ def persist(record: dict, out_dir: Path) -> Path:
                 'record': record,
             }).execute()
             # The TABLE is shared by every Feetech arm (migration 036 named
-            # it before there was a second one); the record's profile_id is
-            # what separates them. Say "Arm-Datenbank" so an Edu:1 operator is
-            # not told their arm went into a 6-axis-only artifact.
+            # it before the V1 existed); the record's profile_id is what
+            # separates them. Say "Arm-Datenbank" so a V1 operator is not told
+            # their arm went into some other arm's artifact.
             print('[OK] Supabase-Arm-Datenbank (edu6_arm_records) '
                   'aktualisiert.')
         except Exception as e:  # noqa: BLE001 — the local file is the commit
@@ -499,11 +480,11 @@ def persist(record: dict, out_dir: Path) -> Path:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument('--arm', default='edu6', choices=sorted(_ARM_SPECS),
-                    help='which Feetech arm is on the bench (default: edu6)')
+    ap.add_argument('--arm', default='v1', choices=sorted(_ARM_SPECS),
+                    help='which Feetech arm is on the bench (default: v1)')
     ap.add_argument('--port', required=True)
     ap.add_argument('--serial', required=True,
-                    help='vendor sticker serial, e.g. EDU6-0001 / EDU1-0001')
+                    help='vendor sticker serial, e.g. V1-0001')
     ap.add_argument('--signs', default=None,
                     help='comma-separated ±1 joint direction signs, one per '
                          'servo (default: all +1)')

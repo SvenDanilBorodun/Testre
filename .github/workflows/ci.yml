@@ -721,8 +721,8 @@ jobs:
     # Both shipped at once: EDUBOTICS_ROBOT_TYPE sat on the opi compose but
     # only under `physical_ai_server`, so an Orange Pi's arm container never
     # saw the variable `entrypoint_omx.sh` branches on and ran the OMX
-    # Dynamixel bringup against a Feetech bus, while the five
-    # EDUBOTICS_EDU6_* rollback knobs reached a Pi not at all — with this
+    # Dynamixel bringup against a Feetech bus, while the five Feetech-driver
+    # rollback knobs reached a Pi not at all — with this
     # job green throughout (measured).
     #
     # Per-TARGET, per-SERVICE completeness is `compose-env-parity`'s job,
@@ -760,7 +760,7 @@ jobs:
                 --include='*.py' --include='*.sh' \
                 robotis_ai_setup/docker/open_manipulator/entrypoint_omx.sh \
                 robotis_ai_setup/docker/open_manipulator/camera_ingest_node.py \
-                robotis_ai_setup/docker/open_manipulator/edu6_arm_node.py \
+                robotis_ai_setup/docker/open_manipulator/feetech_arm_node.py \
                 robotis_ai_setup/docker/open_manipulator/activation_agent.py \
                 robotis_ai_setup/docker/open_manipulator/feetech_bus.py \
                 robotis_ai_setup/wsl_rootfs/start-dockerd.sh \

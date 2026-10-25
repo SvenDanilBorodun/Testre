@@ -12,7 +12,7 @@ FOLLOWER_ONLY="${EDUBOTICS_FOLLOWER_ONLY:-0}"
 
 # Explicit student activation (2026-09-07). Bringing this container up used to
 # BE a powered motion: Phase 3 below homed the follower or glided it onto the
-# leader pose, edu6_arm_node.py homed itself, and the leader's trajectory
+# leader pose, feetech_arm_node.py homed itself, and the leader's trajectory
 # broadcaster spawned in Phase 1 — so on a both-arms rig the follower began
 # mirroring the leader before any browser was open. With this flag set (the
 # default) nothing here moves the arm. The arm comes up torqued and SILENT,
@@ -20,14 +20,14 @@ FOLLOWER_ONLY="${EDUBOTICS_FOLLOWER_ONLY:-0}"
 # leader sync and the teleop spawn until a logged-in student presses „Roboter
 # aktivieren" on the Startseite.
 #
-# Torque is deliberately NOT gated: both Feetech arms backdrive and the OMX
+# Torque is deliberately NOT gated: the Feetech arm backdrives and the OMX
 # follower is held only by servo torque, so an un-torqued arm falls rather than
 # waits. Gating MOTION, not POWER, is the same call start_boot_home already
 # makes when its floor guard refuses (CLAUDE.md Rule §2).
 #
 # EDUBOTICS_REQUIRE_ACTIVATION=0 is the one-variable rollback to the old
 # behaviour, in all four places that read it: here, omx_l_leader_ai.launch.py
-# (broadcaster back in the boot spawner), edu6_arm_node.py (boot home) and
+# (broadcaster back in the boot spawner), feetech_arm_node.py (boot home) and
 # activation_agent.py (reports `active` from the start).
 # The value is WHITESPACE-NORMALISED before the comparison, and that is not
 # cosmetic. The other three readers all call .strip(); this one did not, and
@@ -228,12 +228,11 @@ wait_for_device() {
 
 wait_for_device "$FOLLOWER_PORT" "Follower arm"
 
-# --- Feetech branch (edu6_studio / edu1_studio) ---
+# --- Feetech branch (v1_studio) ---
 # A Feetech arm replaces phases 1-3 entirely: no ros2_control, no leader,
-# no quintic-sync script — edu6_arm_node.py owns the serial bus, publishes
-# /joint_states, executes /leader/joint_trajectory and self-homes at boot.
-# ONE driver serves both arms; it reads EDUBOTICS_ROBOT_TYPE itself and picks
-# the servo count, joint names, limits and HOME from its own spec block.
+# no quintic-sync script — feetech_arm_node.py owns the serial bus, publishes
+# /joint_states, executes /leader/joint_trajectory and homes on demand. Its
+# servo count, joint names, limits and HOME are plain constants in the driver.
 # Phase 4 (cameras) STILL runs below: the compose healthcheck requires BOTH
 # /joint_states AND every configured camera topic, so a branch that skipped
 # the camera phase would never go healthy and physical_ai_server would never
@@ -242,17 +241,17 @@ wait_for_device "$FOLLOWER_PORT" "Follower arm"
 # still works as belt-and-suspenders because the node ALIASES
 # /dynamixel_hardware_interface/set_dxl_torque.
 #
-# The family test is a `case`, not a chain of string equalities, so adding a
-# third Feetech arm is ONE line here instead of three scattered `!=` tests that
-# can drift apart (the OMX phases below invert this same question twice).
+# The family test is a `case`, not a chain of string equalities, so adding
+# another Feetech arm is ONE line here instead of scattered `!=` tests that can
+# drift apart (the OMX phases below invert this same question twice).
 case "${EDUBOTICS_ROBOT_TYPE:-omx_full}" in
-    edu6_studio|edu1_studio) FEETECH_ARM=1 ;;
-    *)                       FEETECH_ARM=0 ;;
+    v1_studio) FEETECH_ARM=1 ;;
+    *)         FEETECH_ARM=0 ;;
 esac
 
 if [ "$FEETECH_ARM" = "1" ]; then
     echo "[LAUNCH] ${EDUBOTICS_ROBOT_TYPE} — Feetech-Treiber (STS-Serie) wird gestartet..."
-    python3 /usr/local/bin/edu6_arm_node.py &
+    python3 /usr/local/bin/feetech_arm_node.py &
     PIDS="$!"
 
     # Same readiness gate as the OMX follower: /joint_states visible. The
@@ -363,7 +362,7 @@ fi
 # Publish trajectory directly to /leader/joint_trajectory (the topic the
 # follower's arm_controller subscribes to via remapping).
 # Uses quintic smoothing over 3s so the follower glides to the leader position.
-# A Feetech arm homes inside edu6_arm_node.py (on demand since the activation
+# A Feetech arm homes inside feetech_arm_node.py (on demand since the activation
 # gate; quintic, same guards) and has
 # no gripper_joint_1 — the OMX FOLLOWER_ONLY home block below would otherwise
 # wait 10s for a joint that never arrives and log a false '[WARN] No

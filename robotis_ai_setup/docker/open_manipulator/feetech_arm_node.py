@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
-"""Feetech STS driver node — the ONE driver for both Roboter-Studio arms.
+"""Feetech STS driver node for the V1 Roboter-Studio arm (``v1_studio``).
 
-Serves ``edu6_studio`` (7 servos: joint1..joint6 + end_gear) and
-``edu1_studio`` (6 servos: joint1..joint5 + the claw). The FILE keeps its edu6
-name because it is a plain ``COPY`` into the image referenced by the Dockerfile,
-``entrypoint_omx.sh``, ``.github/scripts/image_source_parity.sh``, ``ci.yml``
-and ``docs/edu6-hardware-bringup.md``; renaming it is a five-site change to a
-path that is still mid rig-validation, and the alternative — a second copy of
-2200 lines including all three torque-on wrap guards — is worse than a
-misleading filename. The arm-specific values are ALL in the override block
-below; everything after it iterates ``SERVO_IDS`` / ``JOINT_LIMITS_RAD`` /
-``JOINT_SIGNS`` and is arm-agnostic by construction.
+Drives the V1's 6 servos (joint1..joint5 + the claw, ids 1..6 in joint order).
+The arm-specific values are plain module constants at the top of this file;
+everything after them iterates ``SERVO_IDS`` / ``JOINT_LIMITS_RAD`` /
+``JOINT_SIGNS`` and is arm-agnostic by construction. Rig bring-up and the open
+rig gates (VR1–VR16): ``docs/v1-hardware-bringup.md``.
 
-The ROS contract this node satisfies (edu6 plan §3.2) is exactly what makes
+The ROS contract this node satisfies is exactly what makes
 ``physical_ai_server`` work untouched:
 
 * pub ``/joint_states`` (name + position + velocity, EVERY joint per message,
@@ -29,11 +24,11 @@ The ROS contract this node satisfies (edu6 plan §3.2) is exactly what makes
   and SYNC_WRITEs acceleration+goal to every servo (``Goal_Time`` is a
   documented no-op on STS — streaming is the only correct execution, the same
   conclusion LeRobot and feetech_ros2_driver reached).
-* srv :data:`HOME_SERVICE` (``/edu6/home`` / ``/edu1/home``, std_srvs/Trigger)
+* srv :data:`HOME_SERVICE` (``/v1/home``, std_srvs/Trigger)
   + the family-neutral alias ``/edubotics/home_arm`` — the home-on-demand rail
   activation_agent.py pulls. Boot itself only energises; see main().
-* srv :data:`TORQUE_SERVICE` (``/edu6/set_torque`` / ``/edu1/set_torque``,
-  std_srvs/SetBool) + the LEGACY ALIAS
+* srv :data:`TORQUE_SERVICE` (``/v1/set_torque``, std_srvs/SetBool) + the
+  LEGACY ALIAS
   ``/dynamixel_hardware_interface/set_dxl_torque`` — so a stale client (incl.
   the entrypoint's shutdown trap) can never silently fail to disable torque.
 
@@ -55,7 +50,7 @@ if a servo's own naive position error is going the long way round (no transition
 gate; see TORQUE_ABORT_ERROR_TICKS), and every COMMANDED tick is clamped clear of
 the edge so a finished trajectory can never PIN the goal on it (see
 GOAL_EDGE_MARGIN_TICKS — the one of the three that reduces commanded range, by the
-outer 11.25° of six joint bounds).
+outer 11.25° of the two joint bounds that sit on a register end).
 
 Bus loops run on their OWN threads (not a ROS executor — the ~35-service
 MultiThreadedExecutor starvation class from the server node does not exist
@@ -77,7 +72,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import feetech_bus as fb  # noqa: E402  (COPY'd next to this file in the image)
-import edu6_geometry as eg  # noqa: E402  (ditto — the whole-link box model)
+import feetech_geometry as fg  # noqa: E402  (ditto — the whole-link box model)
 
 import rclpy  # noqa: E402
 from rclpy.node import Node  # noqa: E402
@@ -88,28 +83,42 @@ from std_srvs.srv import Trigger  # noqa: E402
 from trajectory_msgs.msg import JointTrajectory  # noqa: E402
 
 
-# ── arm constants — edu6_studio DEFAULTS (mirror robot_profiles._EDU6_*;
-# no-drift-tested). REBOUND below when EDUBOTICS_ROBOT_TYPE=edu1_studio.
-# They stay plain literals under their historic names on purpose: the deps-free
-# suites AST-read exactly these names (tests/test_feetech_bus.py executes each
-# module-level assignment in order, tests/test_edu6_geometry.py literal_evals
-# HOME_JOINTS_RAD), and neither can evaluate a table lookup.
-SERVO_IDS = (1, 2, 3, 4, 5, 6, 7)
-JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6',
-               'end_gear_joint')
-HOME_JOINTS_RAD = (0.0, 0.70, -2.40, 0.0, 0.70, 0.0)
-GRIPPER_OPEN_RAD = 1.75
+# ── arm constants — v1_studio (mirror robot_profiles._V1_*; no-drift-tested).
+# Plain literals on purpose: the deps-free suites AST-read exactly these names
+# (tests/test_feetech_bus.py executes each module-level assignment in order,
+# tests/test_feetech_geometry.py literal_evals HOME_JOINTS_RAD), and neither
+# can evaluate a table lookup.
+#
+# ``RL_joint`` is the CAD's name for the driven claw blade (``LF_joint`` rides
+# its <mimic> and is never commanded). Its band is 0 = jaws CLOSED … 1.5708 =
+# full open, open numerically LARGER, because every shared consumer assumes it
+# (motion.check_grasp_held, object_catalog's band check, SimArm's close
+# classifier). Servo models are the mixed set the probe accepts: STS3215 on
+# 1/4/5/6, STS3250 on the high-load shoulder + elbow 2/3.
+SERVO_IDS = (1, 2, 3, 4, 5, 6)
+JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'RL_joint')
+HOME_JOINTS_RAD = (0.0, 0.64, 1.48, 0.90, 0.0)
+GRIPPER_OPEN_RAD = 0.90
 TICKS_PER_REV = 4096
 CENTER_TICK = 2048
 RAD_PER_TICK = 2.0 * math.pi / TICKS_PER_REV
 
 # URDF joint limits (the software refuse-band; the servo EEPROM limits are the
 # hardware floor underneath).
+#
+# joint4 (4th tuple) is ±110° = 1.9198 rad (rounded inward), the owner-stated
+# ceiling. joint1 and joint5 are ±90° — widen by INDEX, never by search-replace.
+# ⚠ Moving any value here without re-running
+# `tools/feetech_provision.py --arm v1` on the physical arm makes probe_bus
+# refuse the boot with „nicht provisioniert": these radians ARE the EEPROM
+# fingerprint it verifies.
 JOINT_LIMITS_RAD = (
-    (-1.5708, 1.5708), (0.0, 3.1416), (-3.1416, 0.0), (-3.1416, 3.1416),
-    (-1.5708, 1.9199), (-3.1416, 3.1416),
-    # gripper (end_gear servo): 0 = closed … open command band
-    (0.0, 1.79),
+    (-1.5708, 1.5708), (0.0, 3.1416), (0.0, 3.1416),
+    (-1.9198, 1.9198), (-1.5708, 1.5708),
+    # claw (RL_joint): 0 = closed … the full physical band. The PROFILE's open
+    # command is 0.90; the driver band is the mechanical stop, so a jog can
+    # still open the claw the whole way.
+    (0.0, 1.5708),
 )
 
 LOOP_HZ = 50.0
@@ -139,9 +148,9 @@ BOOT_TORQUE_ON_RETRY_S = 1.0
 READ_FAIL_STOP_S = 1.0
 # Fixed conservative servo acceleration. Official unit (ST3215 memory table
 # V3.7): 100 steps/s² per LSB ≈ 8.79°/s²·LSB — so 50 ⇒ 5000 steps/s²
-# ≈ 7.7 rad/s² (R2/R5 confirm on the bench). Plus a Goal_Speed cap as a
-# SECOND, independent speed limit that composes with the trajectory velocity
-# floor (0.8 × the URDF 5.45 rad/s ≈ 2840 steps/s).
+# ≈ 7.7 rad/s² (rig gate VR12 confirms on the bench). Plus a Goal_Speed cap as
+# a SECOND, independent speed limit that composes with the trajectory velocity
+# floor (2840 steps/s ≈ 4.36 rad/s ≈ 0.92 × the profile's 4.72 rad/s).
 WRITE_ACCELERATION = 50
 GOAL_SPEED_CAP_STEPS = 2840
 # Speed used ONLY for the hold-where-you-are write that precedes torque-on
@@ -157,7 +166,7 @@ GOAL_SPEED_CAP_STEPS = 2840
 # creep. The first _write_targets tick restores the full cap, so nothing else
 # is slowed. Before 2026-07-25 the seed wrote the goal ALONE, leaving the servo
 # to use whatever Goal_Speed/Acceleration its RAM held from power-on — values
-# this driver has never written and never read (R5 reads them on the bench).
+# this driver has never written and never read (rig gate VR12 reads them).
 SEED_SPEED_STEPS = 200
 # Present_Load full scale: the STS register reads ±1000 = ±100 % of applied PWM
 # (sign bit 10, NOT 15 like position/speed). Published as JointState.effort as a
@@ -166,95 +175,31 @@ SEED_SPEED_STEPS = 200
 #
 # NOTE it is a PWM/torque FRACTION, not the newton-metres ROS nominally puts in
 # `effort` — the STS exposes no torque constant, so N·m would be a fabricated
-# number. The fraction is what the bench gates actually want (R4 pinch force,
-# R6 joint sweeps) and it costs nothing: bytes 4-5 of the 6-byte sync_read the
+# number. The fraction is what the bench gates actually want (VR5 grasp force,
+# VR3 joint sweeps) and it costs nothing: bytes 4-5 of the 6-byte sync_read the
 # read loop ALREADY performs are Present_Load, and were being discarded.
 PRESENT_LOAD_FULLSCALE = 1000.0
 
 # Per-joint direction between URDF positive rotation and servo tick growth.
 # The vendor provisioning jig fixes offsets so HOME reads its designed ticks;
-# signs are the remaining convention, bench-set at rig gate R6 and overridable
-# per rig without an image rebuild.
-_DEFAULT_SIGNS = (1, 1, 1, 1, 1, 1, 1)
+# signs are the remaining convention, bench-set at rig gate VR3 and overridable
+# per rig without an image rebuild. ``_parse_signs`` validates against
+# ``len(SERVO_IDS)``, so a setting of the wrong length is REJECTED with a [WARN]
+# rather than silently mis-applied.
+_DEFAULT_SIGNS = (1, 1, 1, 1, 1, 1)
 
-# Torque service name and whole-link geometry spec for the DEFAULT (edu6) arm.
-TORQUE_SERVICE = '/edu6/set_torque'
-#: Home-on-demand. Family-scoped like TORQUE_SERVICE, plus a family-NEUTRAL
-#: alias so activation_agent.py has ONE name to call on either Feetech arm
-#: instead of re-deriving the family. Same two-names-one-callback shape as the
-#: torque service and its legacy alias.
-HOME_SERVICE = '/edu6/home'
+# Torque service name and whole-link geometry spec.
+TORQUE_SERVICE = '/v1/set_torque'
+#: Home-on-demand, plus a family-NEUTRAL alias so activation_agent.py has ONE
+#: name to call on a Feetech arm instead of re-deriving the family. Same
+#: two-names-one-callback shape as the torque service and its legacy alias.
+HOME_SERVICE = '/v1/home'
 HOME_SERVICE_ALIAS = '/edubotics/home_arm'
-GEOMETRY_SPEC = eg.EDU6
-
-# ── edu1_studio overrides ────────────────────────────────────────────────────
-# The Edu:1 is the same Feetech STS bus with one fewer joint: 5 arm joints
-# (joint1 yaw, joint2/3/4 parallel pitch, joint5 tool roll) plus the claw servo,
-# IDs 1..6 in joint order. Models are the same mixed set the probe already
-# accepts (STS3215 on 1/4/5/6, STS3250 on the high-load shoulder + elbow 2/3),
-# so NOTHING below the override needs to know which arm it is driving.
-#
-# ``RL_joint`` is the CAD's name for the driven claw finger (``LF_joint`` rides
-# its <mimic> and is never commanded). Its band is 0 = jaws CLOSED … 1.57 = full
-# open, which is the OPPOSITE sign to the raw SolidWorks export — the shipped
-# URDF copy flips that joint's axis so open is numerically LARGER, because every
-# shared consumer assumes it (motion.check_grasp_held, object_catalog's band
-# check, SimArm's close classifier). See robot_profiles._EDU1_HOME_JOINTS_RAD.
-#
-# The per-rig knobs are the EXISTING EDU6-prefixed env vars, not a parallel
-# EDU1-prefixed set: they are Feetech-DRIVER knobs (joint signs, boot
-# plausibility band, the three tick-edge guards) and exactly one arm runs per
-# rig, so a second set would double a surface that has to stay in lockstep
-# across two composes and two CI guards for no behavioural gain.
-# ``_parse_signs`` validates against ``len(SERVO_IDS)``, so a 7-value setting
-# left over from an edu6 rig is REJECTED with a [WARN] rather than silently
-# mis-applied.
-#
-# (Written WITHOUT the literal prefix on purpose: ci.yml::env-forwarding-guard
-# greps this file for /EDUBOTICS_[A-Z0-9_]+/ and treats every hit as a name that
-# must appear on a compose environment list, so a prose "PREFIX_*" would fail the
-# build on a variable that does not exist.)
-_EDU1_SERVO_IDS = (1, 2, 3, 4, 5, 6)
-_EDU1_JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5',
-                     'RL_joint')
-_EDU1_HOME_JOINTS_RAD = (0.0, 0.64, 1.48, 0.90, 0.0)
-_EDU1_GRIPPER_OPEN_RAD = 0.90
-_EDU1_JOINT_LIMITS_RAD = (
-    # joint4 (4th tuple) is ±115° = 2.0071 rad, the OWNER-STATED physical
-    # ceiling, since 2026-09-10. joint1 and joint5 keep ±90° — the three tuples
-    # used to be textually identical, so widen by INDEX, never by search-replace.
-    # Moving any value here without re-running
-    # `tools/edu6_provision.py --arm edu1` on the physical arm makes probe_bus
-    # refuse the boot with „nicht provisioniert": these radians ARE the EEPROM
-    # fingerprint it verifies.
-    (-1.5708, 1.5708), (0.0, 3.1416), (0.0, 3.1416),
-    (-2.0071, 2.0071), (-1.5708, 1.5708),
-    # claw (RL_joint): 0 = closed … the full physical band. The PROFILE's open
-    # command is 0.90; the driver band is the mechanical stop, so a jog can
-    # still open the claw the whole way.
-    (0.0, 1.5708),
-)
-_EDU1_DEFAULT_SIGNS = (1, 1, 1, 1, 1, 1)
-_EDU1_TORQUE_SERVICE = '/edu1/set_torque'
-_EDU1_HOME_SERVICE = '/edu1/home'
-
-ROBOT_TYPE = (os.environ.get('EDUBOTICS_ROBOT_TYPE') or '').strip()
-IS_EDU1 = ROBOT_TYPE == 'edu1_studio'
-if IS_EDU1:
-    SERVO_IDS = _EDU1_SERVO_IDS
-    JOINT_NAMES = _EDU1_JOINT_NAMES
-    HOME_JOINTS_RAD = _EDU1_HOME_JOINTS_RAD
-    GRIPPER_OPEN_RAD = _EDU1_GRIPPER_OPEN_RAD
-    JOINT_LIMITS_RAD = _EDU1_JOINT_LIMITS_RAD
-    _DEFAULT_SIGNS = _EDU1_DEFAULT_SIGNS
-    TORQUE_SERVICE = _EDU1_TORQUE_SERVICE
-    HOME_SERVICE = _EDU1_HOME_SERVICE
-    GEOMETRY_SPEC = eg.EDU1
+GEOMETRY_SPEC = fg.V1
 
 # Arm joints = every joint but the gripper, which is ALWAYS the last channel.
 # Derived, never restated: the boot-home glide, the arrival verifier and the
-# table-floor pre-check all slice by it, and a hardcoded 6 was what made the
-# pre-edu1 code arm-specific.
+# table-floor pre-check all slice by it.
 N_ARM_JOINTS = len(JOINT_NAMES) - 1
 
 
@@ -268,19 +213,19 @@ def _parse_signs(raw: str | None) -> tuple[int, ...]:
     try:
         vals = tuple(int(v) for v in raw.split(','))
     except (TypeError, ValueError):
-        print(f'[WARN] EDUBOTICS_EDU6_JOINT_SIGNS={raw!r} is not a comma-'
+        print(f'[WARN] EDUBOTICS_FEETECH_JOINT_SIGNS={raw!r} is not a comma-'
               f'separated integer list — using defaults {_DEFAULT_SIGNS}.',
               flush=True)
         return _DEFAULT_SIGNS
     if len(vals) != len(SERVO_IDS) or any(v not in (-1, 1) for v in vals):
-        print(f'[WARN] EDUBOTICS_EDU6_JOINT_SIGNS={raw!r} must be '
+        print(f'[WARN] EDUBOTICS_FEETECH_JOINT_SIGNS={raw!r} must be '
               f'{len(SERVO_IDS)} values from {{-1, 1}} — using defaults '
               f'{_DEFAULT_SIGNS}.', flush=True)
         return _DEFAULT_SIGNS
     return vals
 
 
-JOINT_SIGNS = _parse_signs(os.environ.get('EDUBOTICS_EDU6_JOINT_SIGNS'))
+JOINT_SIGNS = _parse_signs(os.environ.get('EDUBOTICS_FEETECH_JOINT_SIGNS'))
 
 # How far outside its designed window a joint may READ at boot before the probe
 # refuses (see probe_bus).
@@ -289,9 +234,10 @@ JOINT_SIGNS = _parse_signs(os.environ.get('EDUBOTICS_EDU6_JOINT_SIGNS'))
 # of its zero while limp, which the encoder then reports from the other side of
 # our tick↔angle map. That wrap puts the reading at tick ≈0 or ≈4095, i.e.
 # OUTSIDE the designed window by at least: joint1 1023, joint2 2048, joint3
-# 2047, joint5 795, gripper 880 ticks. So any band below ~795 catches every
-# wrap on every joint that has a detectable window — 400 keeps 2× headroom on
-# the tightest (joint5) while being far more forgiving of the innocent case.
+# 2048, joint4 795, joint5 1023, claw 1023 ticks (joint2/joint3 only on the
+# tick-0 side — their windows end AT tick 4095). So any band below ~795 catches
+# every wrap on every joint that has a detectable window — 400 keeps 2× headroom
+# on the tightest (joint4) while being far more forgiving of the innocent case.
 #
 # The innocent case is why 400 and not the original 114 (=10°): this probe runs
 # BEFORE torque-on, i.e. on an arm that has flopped under gravity, and a limp
@@ -299,7 +245,7 @@ JOINT_SIGNS = _parse_signs(os.environ.get('EDUBOTICS_EDU6_JOINT_SIGNS'))
 # joint5 settling 11° past its −90° stop would refuse „Umgebung starten"
 # outright. Detection power is unchanged; only the false-alarm rate drops.
 #
-# Env-overridable so rig gate R9 (torque-off collapse — it measures where a limp
+# Env-overridable so rig gate VR6 (torque-off collapse — it measures where a limp
 # arm actually rests) can retune per rig without an image rebuild. A value ≥
 # TICKS_PER_REV disables the check; forwarded on the compose environment list.
 _DEFAULT_BOOT_POSITION_TOLERANCE_TICKS = 400
@@ -314,12 +260,12 @@ def _parse_boot_pos_tolerance(raw: str | None) -> int:
     try:
         value = int(raw.strip())
     except (TypeError, ValueError):
-        print(f'[WARN] EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS={raw!r} is not an '
+        print(f'[WARN] EDUBOTICS_FEETECH_BOOT_POS_TOL_TICKS={raw!r} is not an '
               f'integer — using the default '
               f'{_DEFAULT_BOOT_POSITION_TOLERANCE_TICKS}.', flush=True)
         return _DEFAULT_BOOT_POSITION_TOLERANCE_TICKS
     if value < 0:
-        print(f'[WARN] EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS={raw!r} must be >= 0 '
+        print(f'[WARN] EDUBOTICS_FEETECH_BOOT_POS_TOL_TICKS={raw!r} must be >= 0 '
               f'— using the default '
               f'{_DEFAULT_BOOT_POSITION_TOLERANCE_TICKS}.', flush=True)
         return _DEFAULT_BOOT_POSITION_TOLERANCE_TICKS
@@ -327,25 +273,26 @@ def _parse_boot_pos_tolerance(raw: str | None) -> int:
 
 
 BOOT_POSITION_TOLERANCE_TICKS = _parse_boot_pos_tolerance(
-    os.environ.get('EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS'))
+    os.environ.get('EDUBOTICS_FEETECH_BOOT_POS_TOL_TICKS'))
 
-# ── torque-on edge guard (measured 2026-07-26 on arm EDU6-0001) ──────────────
+# ── torque-on edge guard ─────────────────────────────────────────────────────
 # How close to the tick-0/4095 position-map edge ANY joint may rest before a
 # torque-ON TRANSITION is refused (see edge_parked_joints).
 #
 # The measured fact behind it: the STS position loop is NOT wrap-aware. It
 # computes its error as a naive `goal − present` over the 0..4095 register, so a
 # goal and a position on opposite sides of the 4095/0 boundary make it drive the
-# LONG way round. Bench datum: joint6 parked at tick 12 with the goal set to 4090
-# — 18 ticks apart the short way — drove UPWARD at 200 steps/s (the SEED_SPEED
-# the seed write itself installs, ≈0.31 rad/s ⇒ ~20.5 s for a full turn) and only
-# stopped because the bench tool cut torque at 3.7°; nothing in the SERVO would
-# have stopped it short of a full revolution (and the gripper wiring runs through
-# joint6). The creep rate is why this is an interruptible hazard rather than an
-# instant one — do not restate it as the motion cap (GOAL_SPEED_CAP_STEPS): on
-# the service path the seeded Goal_Speed is never replaced, because _torque_cb
-# clears the trajectory and _write_targets only runs on a non-empty buffer. Only
-# the BOOT path overrides it, ~20 ms later, with the boot-home glide.
+# LONG way round. Bench datum (measured 2026-07-26 on an STS3215 joint): parked
+# at tick 12 with the goal set to 4090 — 18 ticks apart the short way — the
+# joint drove the wrong way at 200 steps/s (the SEED_SPEED the seed write itself
+# installs, ≈0.31 rad/s ⇒ ~20.5 s for a full turn) and only stopped because the
+# bench tool cut torque at 3.7°; nothing in the SERVO would have stopped it
+# short of a full revolution. The creep rate is why this is an interruptible
+# hazard rather than an instant one — do not restate it as the motion cap
+# (GOAL_SPEED_CAP_STEPS): on the service path the seeded Goal_Speed is never
+# replaced, because _torque_cb clears the trajectory and _write_targets only
+# runs on a non-empty buffer. Only the BOOT path overrides it, ~20 ms later,
+# with the boot-home glide.
 #
 # How that becomes reachable in production: set_torque(True) seeds
 # `Goal_Position = Present_Position` read a few milliseconds earlier. On a joint
@@ -354,69 +301,57 @@ BOOT_POSITION_TOLERANCE_TICKS = _parse_boot_pos_tolerance(
 # error jumps from ~0 to ~4095. Exposure is the torque-ON TRANSITION ONLY —
 # commanded trajectories interpolate in radians and rad_to_tick clamps into
 # [0, 4095], so tick travel is monotonic and never crosses the boundary; boot
-# home interpolates from the measured pose; and autonomous grasping never parks
-# joint6 outside ±90° (the jaw fold) with joint4 ≡ 0.
+# home interpolates from the measured pose; and autonomous grasping never
+# comes within 131 ticks of a register end (below).
 #
-# WHICH JOINTS: all of them (re-derived 2026-07-26 — the earlier full-circle-only
-# derivation rested on a FALSE claim, that trimming a window immunises the joint
-# because the servo clamps Goal_Position into it. The clamp bounds the GOAL, not
-# the PATH: trim joint4/joint6 to ±170° → window (114, 3982); a joint hand-parked
-# at tick 4095 seeds goal 4095, the servo clamps it to 3982, and if `present`
-# crosses to tick 2 before the loop reads it the naive error is 3980 ticks = 350°.
-# Nor would the plausibility band catch that park — 4095 is only 113 ticks outside
-# a ±170° window, well inside BOOT_POSITION_TOLERANCE_TICKS.) Judging every joint
-# cannot over-refuse, because a reading within `margin` of a register edge on a
-# joint whose designed window does NOT contain that edge is necessarily far
-# OUTSIDE the window — at the shipped 40 ticks: joint1 ≥984, joint5 ≥756,
-# gripper ≥841 ticks out, i.e. 66°-176° past a designed limit, versus R9's worst
-# innocent excursion of 107 ticks. On the boot path BOOT_POSITION_TOLERANCE_TICKS
-# (400) already refuses every one of those, so there the check is redundant, not
-# additive; on the service re-torque path (where no band runs) it refuses exactly
-# the states in which the servo would pull the joint 66°+ to its clamp edge.
-# Meanwhile it is the ONLY thing covering the readings that are IN-window and
-# therefore invisible to the band:
-#   * joint4/joint6 — full-circle windows, every reading is in range;
-#   * joint2 (hi = 4095) and joint3 (lo = 0) — their windows TOUCH a register
-#     end, so a wrapped or at-the-stop reading there is in-window. Bounded
-#     consequence, unlike the roll joints: the shoulder/elbow are structurally
-#     interfered at ±180°, so the wrong-way command (goal clamped to the far
-#     window end, ~2048 ticks ≈ 180° away) stalls against `Max_Torque 800`
-#     instead of completing a revolution. At BOOT a J2/J3 wrap lands 2043-2048
-#     ticks outside the window and the band catches it anyway — the genuinely
-#     exposed path is the service re-torque;
+# WHICH JOINTS: all of them. The servo's EEPROM clamp bounds the GOAL, not the
+# PATH, so a trimmed window does NOT immunise a joint: a joint hand-parked at
+# tick 4095 seeds goal 4095, the servo clamps it into its window, and if
+# `present` crosses to tick 2 before the loop reads it the naive error is
+# thousands of ticks. Judging every joint cannot over-refuse, because a reading
+# within `margin` of a register edge on a joint whose designed window does NOT
+# contain that edge is necessarily far OUTSIDE the window — at the shipped 40
+# ticks: joint1/joint5/claw ≥984, joint4 ≥756, joint2/joint3 (tick-0 side)
+# ≥2009 ticks out, i.e. 66°+ past a designed limit. On the boot path
+# BOOT_POSITION_TOLERANCE_TICKS (400) already refuses every one of those, so
+# there the check is redundant, not additive; on the service re-torque path
+# (where no band runs) it refuses exactly the states in which the servo would
+# pull the joint 66°+ to its clamp edge. Meanwhile it is the ONLY thing covering
+# the readings that are IN-window and therefore invisible to the band:
+#   * joint2 and joint3 — their windows end AT tick 4095 (q = +π), so a wrapped
+#     or at-the-stop reading there is in-window: refused at tick ≥ 4056 ⇔
+#     q ≥ 3.0802 rad (sign +1; mirrored at tick ≤ 39 for sign −1), e.g. a limp
+#     arm lying on its +π stop. Bounded consequence: the shoulder/elbow are
+#     structurally interfered at +π, so a wrong-way command stalls against
+#     `Max_Torque 800` instead of completing a revolution. At BOOT a wrap lands
+#     ≈2048 ticks outside the window and the band catches it anyway — the
+#     genuinely exposed path is the service re-torque;
 #   * any future trimmed window, automatically.
 #
 # Sizing: the dither alone needs 1-2 ticks, so the margin exists to cover the
 # read→write window too — a hand still on the arm when „Beenden" is pressed can
-# move a free-spinning roll joint at several rad/s, i.e. ~16 ticks across a 5 ms
-# window. 40 ticks (3.5°) is ~20× the dither trigger and ~2× that hand case, and
-# costs only the outer 3.5° of a joint's travel AT THE TORQUE-ON TRANSITION ONLY
-# (jog, replay and hand-guide themselves keep the full range; refused readings are
-# tick <= 39 ⇔ <= −176.57° and tick >= 4056 ⇔ >= +176.48°). Measured against the
-# real solver: the closest any Edu6IKSolver solution comes to a register edge over
-# the operating envelope (target at or above the base plane) is 253 ticks — joint3
-# at −157.7493°, world r = 0.215519, z = 0 — 6.3× this margin, and joint3's
-# UNCONDITIONAL analytic floor is 247 ticks (q3 = γ + ALPHA0 − π/2 with γ ≥ 0),
-# 6.2× it. So autonomous grasping and boot-home can never trip this guard.
-# (DO NOT quote 256/−157.52° or 367 or 263 for that minimum: all three were
-# artifacts of grids uniform in ρ or xyz, which cannot resolve full extension
-# because ρ(γ) is square-root-singular there. The 253 above is bisected, and the
-# 247 is analytic — see _GOAL_EDGE_MARGIN_MAX_TICKS, whose ceiling is derived from
-# it, and test_edu6_goal_edge_ceiling.py, which measures both.) It
-# cannot collide with BOOT_POSITION_TOLERANCE_TICKS' innocent-excursion budget
-# (R9's worst was 107 ticks): that band measures distance OUTSIDE a designed
-# window, this one distance to the REGISTER edge, and R9's own evidence is that a
-# released limp arm settles within ~7° (~80 ticks) of tick 2048 — half a turn from
-# either edge. (Do NOT re-cite R9's "0 excursion on joint4/joint6" here: their
-# window IS the register, so 0 is definitional, not evidence.)
+# move a free joint at several rad/s, i.e. ~16 ticks across a 5 ms window. 40
+# ticks (3.5°) is ~20× the dither trigger and ~2× that hand case, and costs only
+# the outer 3.5° of a joint's travel AT THE TORQUE-ON TRANSITION ONLY (jog,
+# replay and hand-guide themselves keep the full range; refused readings are
+# tick <= 39 ⇔ <= −176.57° and tick >= 4056 ⇔ >= +176.48°). Measured against
+# the real solver: the closest any V1IKSolver solution comes to a register edge
+# is 131 ticks — joint3 at its UNCONDITIONAL analytic bound q3 ≤ _G_OFFSET =
+# 2.938642 rad (tick 3964), reached at full extension — 3.3× this margin. So
+# autonomous grasping and boot-home can never trip this guard. (See
+# _GOAL_EDGE_MARGIN_MAX_TICKS, whose ceiling is derived from that bound, and the
+# server's test_feetech_goal_edge_ceiling.py, which measures it.) It cannot
+# collide with BOOT_POSITION_TOLERANCE_TICKS' innocent-excursion budget: that
+# band measures distance OUTSIDE a designed window, this one distance to the
+# REGISTER edge.
 #
-# NOT to be confused with EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS further down: this
-# one is a REFUSAL RADIUS around a joint's measured PARK position, that one is a
-# CLAMP on the commanded Goal_Position. Same seam and same polarity, but a
-# deliberately different (larger) default, because this guard judges an arm AT REST
-# — where sensor dither is the whole threat — while the clamp judges a MOVING joint
-# arriving at a pinned goal, which must also survive overshoot. Each has its own
-# one-variable rollback; see the sizing note at that knob.
+# NOT to be confused with EDUBOTICS_FEETECH_GOAL_EDGE_MARGIN_TICKS further down:
+# this one is a REFUSAL RADIUS around a joint's measured PARK position, that one
+# is a CLAMP on the commanded Goal_Position. Same seam and same polarity, but a
+# deliberately different (larger) default, because this guard judges an arm AT
+# REST — where sensor dither is the whole threat — while the clamp judges a
+# MOVING joint arriving at a pinned goal, which must also survive overshoot.
+# Each has its own one-variable rollback; see the sizing note at that knob.
 #
 # Env-overridable per rig without an image rebuild (compose-forwarded); 0
 # disables the guard entirely — the one-variable rollback.
@@ -433,7 +368,7 @@ def _parse_edge_margin(raw: str | None) -> int:
     # path) rather than silently running a band nobody chose.
     #
     # POLARITY — stated explicitly because it is the OPPOSITE of this file's
-    # other tick knob: EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS is a TOLERANCE (large =
+    # other tick knob: EDUBOTICS_FEETECH_BOOT_POS_TOL_TICKS is a TOLERANCE (large =
     # permissive, ">= 4096 disables"), while this one is a REFUSAL RADIUS
     # (0 = disabled, larger = refuses MORE poses). An operator carrying the
     # ">= 4096 disables" habit over would brick the arm — 4096, 4000 and 2048
@@ -444,17 +379,17 @@ def _parse_edge_margin(raw: str | None) -> int:
     try:
         value = int(raw.strip())
     except (TypeError, ValueError):
-        print(f'[WARN] EDUBOTICS_EDU6_EDGE_MARGIN_TICKS={raw!r} is not an '
+        print(f'[WARN] EDUBOTICS_FEETECH_EDGE_MARGIN_TICKS={raw!r} is not an '
               f'integer — using the default '
               f'{_DEFAULT_EDGE_REFUSE_MARGIN_TICKS}.', flush=True)
         return _DEFAULT_EDGE_REFUSE_MARGIN_TICKS
     if value < 0:
-        print(f'[WARN] EDUBOTICS_EDU6_EDGE_MARGIN_TICKS={raw!r} must be >= 0 '
+        print(f'[WARN] EDUBOTICS_FEETECH_EDGE_MARGIN_TICKS={raw!r} must be >= 0 '
               f'(0 disables the guard) — using the default '
               f'{_DEFAULT_EDGE_REFUSE_MARGIN_TICKS}.', flush=True)
         return _DEFAULT_EDGE_REFUSE_MARGIN_TICKS
     if value >= _EDGE_MARGIN_MAX_TICKS:
-        print(f'[WARN] EDUBOTICS_EDU6_EDGE_MARGIN_TICKS={raw!r} would refuse '
+        print(f'[WARN] EDUBOTICS_FEETECH_EDGE_MARGIN_TICKS={raw!r} would refuse '
               f'EVERY position, so the arm could never switch its torque on '
               f'(use 0 to DISABLE this guard — a large value does not) — using '
               f'the default {_DEFAULT_EDGE_REFUSE_MARGIN_TICKS}.', flush=True)
@@ -463,7 +398,7 @@ def _parse_edge_margin(raw: str | None) -> int:
 
 
 EDGE_REFUSE_MARGIN_TICKS = _parse_edge_margin(
-    os.environ.get('EDUBOTICS_EDU6_EDGE_MARGIN_TICKS'))
+    os.environ.get('EDUBOTICS_FEETECH_EDGE_MARGIN_TICKS'))
 
 
 def edge_parked_joints(present_ticks, margin=None):
@@ -516,14 +451,14 @@ def edge_refusal_message(offenders, self_healing: bool) -> str:
 # The edge guard above NARROWS the race; it cannot close it. The wrapped error
 # only forms if `present` crosses the 4095/0 boundary BETWEEN the goal-seed read
 # and the moment the servo applies `Torque_Enable`. Pure wire time for that
-# window, re-derived from build_packet byte counts at 1 Mbit/s 8N1, is 1.570 ms
-# (sync_read request 15 B + 7 × 8 B status + seed sync_write 64 B + torque
-# sync_write 22 B = 157 B × 10 bits): covering EDGE_REFUSE_MARGIN_TICKS then
-# needs 39.1 rad/s, which nothing can produce. But that figure EXCLUDES per-servo
+# window, re-derived from build_packet byte counts at 1 Mbit/s 8N1, is 1.380 ms
+# (sync_read request 14 B + 6 × 8 B status + seed sync_write 56 B + torque
+# sync_write 20 B = 138 B × 10 bits): covering EDGE_REFUSE_MARGIN_TICKS then
+# needs 44.5 rad/s, which nothing can produce. But that figure EXCLUDES per-servo
 # Return_Delay_Time, pyserial's byte-at-a-time header hunt, 1 ms CDC-ACM USB
 # frames through usbipd/vhci_hcd, and GIL/container scheduling — all unbounded.
 # At 20 ms the same margin only needs 3.1 rad/s, i.e. one WSL2 stall plus a hand
-# on a free-spinning roll joint. So the margin is a probability argument, not a
+# on a free joint. So the margin is a probability argument, not a
 # proof.
 #
 # This check needs no such argument: immediately AFTER writing Torque_Enable = 1
@@ -540,11 +475,11 @@ def edge_refusal_message(offenders, self_healing: bool) -> str:
 #     Min/Max_Position_Limit window, so a limp joint resting OUTSIDE its window
 #     is genuinely pulled to the window edge (the documented gentle pull-in at
 #     SEED_SPEED_STEPS). Enumerated over every reading the edge guard permits
-#     (tick 40…4055) the worst such distance is 2008 ticks (joint2 or the gripper
-#     at tick 40); with the edge guard DISABLED (margin 0, the rollback) the
-#     supremum is exactly 2048, at tick 0/4095. At BOOT it is far smaller still —
-#     BOOT_POSITION_TOLERANCE_TICKS (400) refuses anything further out, and R9
-#     measured the worst innocent excursion at 107 ticks.
+#     (tick 40…4055) the worst such distance is 2008 ticks (joint2, joint3 or
+#     the claw at tick 40); with the edge guard DISABLED (margin 0, the
+#     rollback) the supremum is exactly 2048, at tick 0. At BOOT it is far
+#     smaller still — BOOT_POSITION_TOLERANCE_TICKS (400) refuses anything
+#     further out.
 #   * WRAPPED — goal and present straddle the seam. |error| = 4095 − (ticks the
 #     joint travelled inside the read→write window). Even at an absurd 20 rad/s
 #     held for 50 ms that is ≥ 3443.
@@ -573,7 +508,7 @@ _DEFAULT_TORQUE_ABORT_ERROR_TICKS = TICKS_PER_REV // 2
 _TORQUE_ABORT_MIN_TICKS = _DEFAULT_BOOT_POSITION_TOLERANCE_TICKS + 1
 # Ceiling: |goal − present| over a 12-bit register can never exceed 4095, so any
 # threshold at or above TICKS_PER_REV silently makes the check dead. That is the
-# sibling knob's footgun again (EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS documents
+# sibling knob's footgun again (EDUBOTICS_FEETECH_BOOT_POS_TOL_TICKS documents
 # ">= 4096 disables"), so it is refused by name rather than obeyed.
 _TORQUE_ABORT_MAX_TICKS = TICKS_PER_REV - 1
 
@@ -592,24 +527,24 @@ def _parse_torque_abort_ticks(raw: str | None) -> int:
     try:
         value = int(raw.strip())
     except (TypeError, ValueError):
-        print(f'[WARN] EDUBOTICS_EDU6_TORQUE_ABORT_TICKS={raw!r} is not an '
+        print(f'[WARN] EDUBOTICS_FEETECH_TORQUE_ABORT_TICKS={raw!r} is not an '
               f'integer — using the default {default}.', flush=True)
         return default
     if value == 0:
         return 0                       # explicit rollback: check disabled
     if value < 0:
-        print(f'[WARN] EDUBOTICS_EDU6_TORQUE_ABORT_TICKS={raw!r} must be >= 0 '
+        print(f'[WARN] EDUBOTICS_FEETECH_TORQUE_ABORT_TICKS={raw!r} must be >= 0 '
               f'(0 disables the check) — using the default {default}.',
               flush=True)
         return default
     if value < _TORQUE_ABORT_MIN_TICKS:
-        print(f'[WARN] EDUBOTICS_EDU6_TORQUE_ABORT_TICKS={raw!r} is below the '
+        print(f'[WARN] EDUBOTICS_FEETECH_TORQUE_ABORT_TICKS={raw!r} is below the '
               f'boot plausibility band ({_TORQUE_ABORT_MIN_TICKS - 1} ticks) and '
               f'therefore outside the range this check is designed for (use 0 to '
               f'DISABLE it) — using the default {default}.', flush=True)
         return default
     if value > _TORQUE_ABORT_MAX_TICKS:
-        print(f'[WARN] EDUBOTICS_EDU6_TORQUE_ABORT_TICKS={raw!r} exceeds the '
+        print(f'[WARN] EDUBOTICS_FEETECH_TORQUE_ABORT_TICKS={raw!r} exceeds the '
               f'largest error a 12-bit register can show '
               f'({_TORQUE_ABORT_MAX_TICKS}), so the check could never fire (use '
               f'0 to DISABLE it — a large value does not) — using the default '
@@ -619,14 +554,14 @@ def _parse_torque_abort_ticks(raw: str | None) -> int:
 
 
 TORQUE_ABORT_ERROR_TICKS = _parse_torque_abort_ticks(
-    os.environ.get('EDUBOTICS_EDU6_TORQUE_ABORT_TICKS'))
+    os.environ.get('EDUBOTICS_FEETECH_TORQUE_ABORT_TICKS'))
 
 # How many times the post-energise position read may be attempted before the
 # abort gives up and reports a bus problem. Exactly ONE read runs on a healthy
-# arm (~0.71 ms of wire time — 15 B request + 7 × 8 B replies); the second exists
+# arm (~0.62 ms of wire time — 14 B request + 6 × 8 B replies); the second exists
 # only so a single dropped CDC-ACM reply cannot de-energise a healthy arm, which
 # on a backdriving arm means it collapses. A genuinely silent servo is not a
-# runaway, so paying 0.71 ms more before reporting it costs nothing.
+# runaway, so paying 0.62 ms more before reporting it costs nothing.
 POST_ENERGISE_READ_ATTEMPTS = 2
 # Pre-built so the abort path allocates nothing between the verdict and the
 # torque-off write.
@@ -743,8 +678,7 @@ def firmware_fingerprint_notes(versions) -> list[str]:
     * a NON-UNIFORM bus. Well-sourced: upstream LeRobot hard-raises on it
       (``_assert_same_firmware``). On this arm it means one servo was swapped
       (RMA, a spare from a different batch) and its behaviour may differ from the
-      six it shares a bus with. EDU6-0001 is 3.10 on all seven, so this can never
-      fire on the reference arm.
+      five it shares a bus with.
     * a version in :data:`FIRMWARE_SUSPECT_VERSIONS`. Deliberately hedged
       wording: the line must not send a student flashing firmware for what is
       more likely a load-dependent bus fault (see the constant's comment)."""
@@ -780,7 +714,7 @@ def angular_resolution_note(offenders) -> str:
     30) is not the single-turn factory value 1. ``offenders`` is
     ``[(servo_id, value)]``; returns '' when empty. Pure.
 
-    A WARNING AND NOT A REFUSAL — deliberately, see Edu6ArmNode.probe_bus."""
+    A WARNING AND NOT A REFUSAL — deliberately, see FeetechArmNode.probe_bus."""
     if not offenders:
         return ''
     which = ', '.join(f'Servo {sid}: {value}' for sid, value in offenders)
@@ -788,7 +722,7 @@ def angular_resolution_note(offenders) -> str:
         f'[WARNUNG] Winkelauflösung (Register 30) ist nicht 1 ({which}). '
         f'Erwartet ist {fb.ANGULAR_RESOLUTION_SINGLE_TURN}. Damit können alle '
         'Winkel des Arms falsch skaliert sein. Der Arm startet trotzdem — bitte '
-        'tools/edu6_provision.py auf der Werkbank erneut ausführen und die '
+        'tools/feetech_provision.py auf der Werkbank erneut ausführen und die '
         'Bewegungen danach genau beobachten.')
 
 
@@ -815,11 +749,10 @@ PHYSICAL_TORQUE_REFUSALS = tuple(BOOT_PHYSICAL_REMEDY_DE)
 #
 # THE HAZARD IT CLOSES — seam PARKING, which is NOT the same thing as the parked
 # READING the torque-on edge guard above refuses, and which neither shipped guard
-# can see. Six of the twelve ARM-joint limit bounds (14 counting the gripper) map
+# can see. Two of the ten ARM-joint limit bounds (twelve counting the claw) map
 # EXACTLY onto a register end at the shipped signs:
 #
-#     joint2 hi (+3.1416 → 4095)      joint3 lo (−3.1416 → 0)
-#     joint4 lo AND hi (0 / 4095)     joint6 lo AND hi (0 / 4095)
+#     joint2 hi (+3.1416 → 4095)      joint3 hi (+3.1416 → 4095)
 #
 # _write_targets clamps in RADIANS to JOINT_LIMITS_RAD and then converts, so a
 # command AT one of those bounds pins Goal_Position on the seam itself, and the
@@ -828,38 +761,29 @@ PHYSICAL_TORQUE_REFUSALS = tuple(BOOT_PHYSICAL_REMEDY_DE)
 # (2840 steps/s = 4.357 rad/s = 1.44 s/rev) installed, not the gentle seed speed.
 # One encoder sample on the far side of the boundary then makes the servo's naive
 # `goal − present` ≈ 4095, and because its first step moves AWAY from the boundary
-# every later sample keeps the error large: it commits to a FULL REVOLUTION. The
-# edge guard is OFF→ON-gated and the post-energise abort only runs at torque-on,
-# so neither fires. Reachable with NO external force: hand-guide joint6 past +180°
-# (hand-guide is torque-off by design) → the reading wraps to tick ≈0 → a
-# „Bewegung aufnehmen" recording stores ≈ −3.14 rad → replaying it commands tick 1.
-# R6 measured joint6 hand-swept −178.1° → +179.7°, so that path is proven
-# reachable, and WorkshopJog accepts exactly `hi` (`if new < lo or new > hi`)
-# while `drive_to` takes an absolute target.
+# every later sample keeps the error large. The edge guard is OFF→ON-gated and the
+# post-energise abort only runs at torque-on, so neither fires. Reachable from
+# the student UI: WorkshopJog accepts exactly `hi` (`if new < lo or new > hi`),
+# `drive_to` takes an absolute target, and a „Bewegung aufnehmen" recording made
+# by hand-guiding a joint onto its +π stop replays that stop as a command.
 #
 # WHICH JOINTS: a BLANKET clamp on every commanded tick, deliberately NOT a
-# derived "full-circle joint" subset. Such a subset would MISS joint2's hi and
-# joint3's lo — which are exactly as pinned as joint4/joint6 — and that is the
-# same false premise the deleted full_circle_joint_indexes() predicate died of.
-# The blanket form is a NO-OP on the other joints by ARITHMETIC rather than by
-# predicate: at the shipped signs joint1 spans ticks 1024…3072, joint5 1024…3300
-# and the gripper 2048…3215, i.e. ≥795 ticks from either register end, so nothing
-# they can command is ever touched. It also survives a sign flip for free —
-# EDUBOTICS_EDU6_JOINT_SIGNS=−1 on joint2 mirrors its window to (0, 2048), moving
-# the pinned bound from hi to lo, which a per-joint predicate would have to
-# re-derive.
+# derived per-joint subset. The blanket form is a NO-OP on the other joints by
+# ARITHMETIC rather than by predicate: at the shipped signs joint1 and joint5
+# span ticks 1024…3072, joint4 796…3300 and the claw 2048…3072, i.e. ≥795 ticks
+# from either register end, so nothing they can command is ever touched. It also
+# survives a sign flip for free — EDUBOTICS_FEETECH_JOINT_SIGNS=−1 on joint2
+# mirrors its window to (0, 2048), moving the pinned bound from hi to lo, which a
+# per-joint predicate would have to re-derive.
 #
-# WHAT IT COSTS: the outer `margin` ticks of commanded travel at those six bounds
-# only — 11.25° at the default, i.e. joint4/joint6 command to ±168.66° instead of
-# ±180°. Nothing autonomous reaches them: HOME sits 483 ticks from the nearest
-# register end (joint3 at −2.40 rad → tick 483) and the closest any real
-# Edu6IKSolver solution comes over the OPERATING ENVELOPE (target at or above the
-# base plane, z ≥ 0) is 253 ticks — joint3 at −157.7493°, world r = 0.215519,
-# z = 0, where the table plane meets joint5's +110° relief limit — with joint4 ≡ 0
-# and joint6 folded into ±90° (ticks 1024…3072). Both sit STRICTLY ABOVE the
-# fenced maximum margin (246, itself one tick under joint3's unconditional
-# ANALYTIC floor of 247 — see _GOAL_EDGE_MARGIN_MAX_TICKS), so no default and no
-# legal override can move them.
+# WHAT IT COSTS: the outer `margin` ticks of commanded travel at those two bounds
+# only — 11.25° at the default, i.e. joint2/joint3 command to at most +168.75°
+# instead of +180°. Nothing autonomous reaches them: HOME sits ≥1082 ticks from
+# the nearest register end (joint3 at 1.48 rad → tick 3013), and the closest any
+# real V1IKSolver solution comes is 131 ticks — joint3 at its unconditional
+# analytic bound q3 ≤ _G_OFFSET = 2.938642 rad (tick 3964), reached at full
+# extension. That sits STRICTLY ABOVE the fenced maximum margin (130 — see
+# _GOAL_EDGE_MARGIN_MAX_TICKS), so no default and no legal override can move it.
 # (The boot-home glide's HOME endpoint is likewise untouched; its FIRST points are
 # not necessarily — see the "wider than the edge guard" note.)
 #
@@ -880,7 +804,7 @@ PHYSICAL_TORQUE_REFUSALS = tuple(BOOT_PHYSICAL_REMEDY_DE)
 #
 # Overshoot on this arm is UNMEASURED and cannot be derived here: the position
 # P/I/D gains have never been read or written (they are not even in the
-# feetech_bus register map — reading them is an R5 item), the STS gear train
+# feetech_bus register map — reading them is a VR14 item), the STS gear train
 # backdrives freely (hand-guide depends on that), and GOAL_SPEED_CAP_STEPS is
 # 249.6 °/s. It is not a step response in the normal case — trajectories arrive
 # quintic with zero terminal velocity and the write loop advances the goal ≤56.8
@@ -889,24 +813,21 @@ PHYSICAL_TORQUE_REFUSALS = tuple(BOOT_PHYSICAL_REMEDY_DE)
 # travelling at the cap, whose planned decel ramp alone is v²/2a ≈ 807 ticks. So
 # tens of ticks is plausible and hundreds is not excluded by anything we know.
 #
-# What makes a generous margin the obvious choice is that it is FREE up to 246:
-# below that, NOTHING autonomous is touched (see the cost note above — the
-# tightest real solver solution over the operating envelope sits at tick 253 and
-# joint3's unconditional analytic floor at 247), and the only thing that loses
-# range is the J4/J6 extremes plus joint2's hi / joint3's lo, which nothing
-# legitimate needs (q4 ≡ 0 for all grasping, joint6 is folded into ±90°,
-# hand-guide keeps the full physical range because torque is OFF, and a REPLAY
-# holding joint6 at 179° can only have come from hand-guiding past the wrap —
-# exactly the corrupted artifact this clamp exists to neutralise). Being stingy
-# buys nothing and risks the guard being defeated. 128 is 64× the measured dither
-# trigger and 11.25° of headroom against the unmeasured one.
+# What makes a generous margin the obvious choice is that it is FREE up to 130:
+# up to there NOTHING autonomous is touched (see the cost note above — joint3's
+# unconditional analytic bound sits 131 ticks from the register end), and the
+# only thing that loses range is joint2's / joint3's +π extreme, which nothing
+# legitimate needs (hand-guide keeps the full physical range because torque is
+# OFF, and a command at +π drives a structurally interfered joint into its stop).
+# Being stingy buys nothing and risks the guard being defeated. 128 is 64× the
+# measured dither trigger and 11.25° of headroom against the unmeasured one.
 #
-# THE DEFAULT IS PROVISIONAL pending R5, which measures the loop rate, the gains
-# and — add it there — the actual overshoot when a trajectory is truncated at the
-# cap. If overshoot measures under ~20 ticks, 40-80 would do; if it measures over
-# ~100, revisit whether 246 is enough and whether GOAL_SPEED_CAP_STEPS should come
-# down instead (open item Q6) — the ceiling itself cannot simply be raised, it is
-# pinned one tick under the solver's analytic floor.
+# THE DEFAULT IS PROVISIONAL pending rig gate VR14, which measures the actual
+# overshoot when a trajectory is truncated at the cap. If overshoot measures under
+# ~20 ticks, 40-80 would do; if it measures over ~100, revisit whether 130 is
+# enough and whether GOAL_SPEED_CAP_STEPS should come down instead — the ceiling
+# itself cannot simply be raised, it is pinned one tick under the solver's
+# analytic bound.
 #
 # CONSEQUENCE OF BEING WIDER THAN THE EDGE GUARD, recorded rather than hidden: a
 # joint can legally be TORQUED and holding INSIDE this clamp band (the edge guard
@@ -916,7 +837,7 @@ PHYSICAL_TORQUE_REFUSALS = tuple(BOOT_PHYSICAL_REMEDY_DE)
 # earlier single "88 ticks more than the student asked for" conflated them:
 #
 #   * TRAVEL, i.e. how far the joint physically jerks: 128 − 40 = 88 ticks
-#     (7.73°). That figure is CONDITIONAL on EDUBOTICS_EDU6_EDGE_MARGIN_TICKS
+#     (7.73°). That figure is CONDITIONAL on EDUBOTICS_FEETECH_EDGE_MARGIN_TICKS
 #     being at its default 40. Set it to 0 — the documented one-variable rollback
 #     FOR THAT GUARD — and the permitted park reaches tick 0, so the travel is the
 #     full 128 ticks (11.25°). Same after an EXTERNAL displacement of an
@@ -932,7 +853,7 @@ PHYSICAL_TORQUE_REFUSALS = tuple(BOOT_PHYSICAL_REMEDY_DE)
 # (toward CENTER_TICK), so it can never itself produce a wrapped error, it is
 # bounded by the margin, and it is only reachable after someone hand-parked a
 # joint within 11.25° of ±180°. An operator who wants the two bands to coincide
-# again can set EDUBOTICS_EDU6_EDGE_MARGIN_TICKS=128 — that trades the jerk for a
+# again can set EDUBOTICS_FEETECH_EDGE_MARGIN_TICKS=128 — that trades the jerk for a
 # wider torque-on refusal band, and it is an .env decision, not a code change.
 #
 # RESIDUAL, stated honestly: this does not make a wrapped error impossible, it
@@ -963,20 +884,19 @@ PHYSICAL_TORQUE_REFUSALS = tuple(BOOT_PHYSICAL_REMEDY_DE)
 # JOINT_SIGNS conventions (the sign only decides which radian maps to which tick,
 # and every tick is covered): the clamp NEVER turns a non-wrapped position error
 # into a wrapped one — ZERO counterexamples — and it grows |goal − present| by at
-# most exactly `m` (≤ 246 ≪ 2048). Structurally so: the clamp only ever moves a
+# most exactly `m` (≤ 130 ≪ 2048 at any legal margin). Structurally so: the clamp only ever moves a
 # tick TOWARD CENTER_TICK, and by at most `m`. The clamp is therefore
 # mathematically INCAPABLE of producing the runaway it exists to prevent, whatever
-# EDUBOTICS_EDU6_EDGE_MARGIN_TICKS is set to. It is also net-positive in the other
+# EDUBOTICS_FEETECH_EDGE_MARGIN_TICKS is set to. It is also net-positive in the other
 # direction: at the default it turns 16,512 (park, requested) pairs from wrapped
 # into non-wrapped.
 #
 # AND NO, THE SERVO'S OWN EEPROM WINDOW DOES NOT HELP. `Min/Max_Position_Limit`
 # clamps the GOAL register, never the physical PATH — the same lesson the deleted
 # full_circle_joint_indexes() predicate was killed for. Even taken at face value
-# it would be useless exactly where it is needed: the windows of all four joints
-# carrying the six seam bounds TOUCH a register end (joint2 (2048, 4095), joint3
-# (0, 2048), joint4 and joint6 (0, 4095)), so there is no headroom left to clamp
-# into.
+# it would be useless exactly where it is needed: the windows of both joints
+# carrying the two seam bounds TOUCH a register end (joint2 and joint3, both
+# (2048, 4095)), so there is no headroom left to clamp into.
 #
 # Env-overridable per rig without an image rebuild (compose-forwarded); 0 disables
 # the clamp entirely — the one-variable rollback.
@@ -984,64 +904,47 @@ _DEFAULT_GOAL_EDGE_MARGIN_TICKS = 128
 # Upper bound for the env override. It is DERIVED FROM AN ANALYTIC BOUND, not
 # from a sweep, and that is the whole point:
 #
-# Edu6IKSolver.solve() computes q3 = γ + ALPHA0 − π/2, where γ ≥ 0 on the
-# elbow-up branch (the only branch it ever returns — the elbow-down fall-through
-# is not in-limit anywhere in the reach annulus) and ALPHA0 = −68.33167° is
-# derived at import from the URDF chain. So q3 ≥ ALPHA0 − π/2 = −158.33167°
-# UNCONDITIONALLY ⇒ its tick is ≥ 247, for EVERY solution, at every target,
-# regardless of z. The ceiling is set one tick BELOW that floor: at 246 every
+# V1IKSolver.solve() computes q3 = _G_OFFSET − g, where g ≥ 0 on the elbow-up
+# branch (the only branch it ever returns: elbow-down is in limits for a few
+# targets but dominated by elbow-up, which is tried first) and _G_OFFSET =
+# BETA0 − ALPHA0 = 2.938642 rad is derived at import from the URDF chain. So
+# q3 ≤ 2.938642 UNCONDITIONALLY ⇒ its tick is ≤ 3964, i.e. ≥ 131 ticks from the
+# 4095 end (132 from tick 0 at sign −1), for EVERY solution, at every target,
+# regardless of z. The ceiling is set one tick BELOW that bound: at 130 every
 # commandable solver tick lies STRICTLY inside [m, 4095 − m], so the fence does
-# not even depend on the clamp's boundary being inclusive.
+# not even depend on the clamp's boundary being inclusive. (Owner decision b1:
+# the inherited 246 was a number of an earlier arm and would let a legal override
+# shift real V1 solutions; an override of 131–246 now falls back to the default.)
 #
-# The densest MEASURED value agrees and is slightly looser: 253 ticks over the
-# operating envelope (target at or above the base plane, z ≥ 0) — joint3 at
-# −157.7493°, world r = 0.215519, z = 0, the corner where the table plane meets
-# joint5's +110° relief limit. Found by BISECTING the reach boundary with solve()
-# itself; joint2 gets no closer than 480 there and joint5 no closer than 795.
+# The densest MEASURED value agrees: full extension (g = 0) is reachable at z = 0,
+# so the minimum over the operating envelope (target at or above the base plane)
+# IS the bound — 131 ticks, joint3. Found by BISECTING the reach boundary with
+# solve() itself, never by a grid: ρ(γ) is SQUARE-ROOT-singular at full extension
+# (ρmax − ρ ≈ L2·L3·γ²/2ρmax), so a grid uniform in ρ or xyz resolves γ only as
+# O(√Δρ) and reports a number that is too far from the edge.
 #
-# WHY NOT A SWEEP: this exact quantity has been wrong THREE times (367 → 263 →
-# 256; the repo's own record attributes 367 to a 16,136-point sweep and 256 to a
-# 977,808-point one), every time from a grid uniform in ρ or in xyz. The reason is
-# structural, not laziness: ρ(γ) is SQUARE-ROOT-singular at full extension
-# (ρmax − ρ ≈ L2·L3·γ²/2ρmax), so a grid uniform in ρ resolves γ only as
-# O(√Δρ) — the corner sits at γ = 0.0102 rad, and a 6001-point ρ grid across the
-# whole annulus lands no nearer than γ = 0.0346 and duly reports 269, while
-# MORE points buy improvement only as the square root. An analytic bound cannot
-# become the fourth artifact.
-#
-# WHAT THIS CORRECTION DOES *NOT* CHANGE — say it plainly, because the two ratios
-# in this file are easy to swap: the headroom of the shipped DEFAULT is ~2×
-# (253/128), and it was 2.0× (256/128) before, i.e. materially unchanged. The
-# "6.4×" quoted up at EDGE_REFUSE_MARGIN_TICKS is 256/40 — the OTHER guard's
-# margin — and it becomes 6.3× (253/40). So neither DEFAULT was ever mis-justified
-# by the wrong number. What was mis-justified is this FENCE, which was set equal to
-# the wrong measurement and therefore sat ABOVE the true floor.
-#
-# WHAT THE OLD 256 COST: an operator who took the previous comment at its word
-# and set EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS=256 silently shifted solutions in
-# the band [247, 255] onto 256 — up to 9 ticks (0.79°); within the operating
-# envelope the reachable part of that band starts at 253, so up to 3 ticks (0.26°)
-# of real outer-ring grasp motion. Exactly the autonomous motion the fence exists
-# to leave alone.
+# The shipped DEFAULT 128 clamps at tick 3967 ⇔ (3967 − 2048)·2π/4096 =
+# 2.94371 rad > 2.938642, i.e. 3.3 ticks of headroom above the bound: the default
+# and normal motion are unchanged.
 #
 # SCOPE, recorded so it cannot quietly stop being true: "no legal margin shifts a
-# real solution" is a claim about the OPERATING ENVELOPE. joint2's upper limit is
-# +π, which maps EXACTLY onto tick 4095, and solve() WILL return it — but only for
-# targets ≥ 16.4 cm below the arm's base plane (it first enters the 246-tick band
-# at 7.96 cm below), and the workspace floor refuses those long before IK is
-# consulted.
+# real solution" holds for every target. joint2's upper limit is +π, which maps
+# EXACTLY onto tick 4095, and solve() WILL return joint2 there — but only for
+# targets about 25 cm below the arm's base plane (it first enters the 130-tick
+# band about 12 cm below), and the workspace floor refuses those long before IK
+# is consulted.
 #
 # (The ARITHMETIC collapse bound is far higher and would be a useless fence: not
 # until TICKS_PER_REV // 2 does the band [m, 4095−m] invert — see
 # rad_to_command_tick for what happens above it. There is deliberately no lower
 # fence beyond 0 either: a small margin only WEAKENS this clamp, it can never
-# invent motion — unlike EDUBOTICS_EDU6_TORQUE_ABORT_TICKS, where a low value
+# invent motion — unlike EDUBOTICS_FEETECH_TORQUE_ABORT_TICKS, where a low value
 # causes false aborts and therefore needs a floor.)
 #
-# Guarded by test_edu6_goal_edge_ceiling.py on the SERVER side (it needs numpy for
-# the real solver, which the deps-free driver suite has not got); the deps-free
-# test_feetech_bus.py pins the literal and the clamp behaviour only.
-_GOAL_EDGE_MARGIN_MAX_TICKS = 246
+# Guarded by test_feetech_goal_edge_ceiling.py on the SERVER side (it needs numpy
+# for the real solver, which the deps-free driver suite has not got); the
+# deps-free test_feetech_bus.py pins the literal and the clamp behaviour only.
+_GOAL_EDGE_MARGIN_MAX_TICKS = 130
 
 
 def _parse_goal_edge_margin(raw: str | None) -> int:
@@ -1050,8 +953,8 @@ def _parse_goal_edge_margin(raw: str | None) -> int:
     # path) rather than silently clamping commands by an amount nobody chose.
     #
     # POLARITY — this is a CLAMP DISTANCE, the same direction as
-    # EDUBOTICS_EDU6_EDGE_MARGIN_TICKS (0 = disabled, larger = clamps HARDER) and
-    # the OPPOSITE of EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS (a tolerance, where large
+    # EDUBOTICS_FEETECH_EDGE_MARGIN_TICKS (0 = disabled, larger = clamps HARDER) and
+    # the OPPOSITE of EDUBOTICS_FEETECH_BOOT_POS_TOL_TICKS (a tolerance, where large
     # = permissive and ">= 4096 disables"). An operator carrying that habit over
     # would wreck the arm's reach: past _GOAL_EDGE_MARGIN_MAX_TICKS the clamp
     # starts moving real solver solutions, and at TICKS_PER_REV // 2 every command
@@ -1062,20 +965,20 @@ def _parse_goal_edge_margin(raw: str | None) -> int:
     try:
         value = int(raw.strip())
     except (TypeError, ValueError):
-        print(f'[WARN] EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS={raw!r} is not an '
+        print(f'[WARN] EDUBOTICS_FEETECH_GOAL_EDGE_MARGIN_TICKS={raw!r} is not an '
               f'integer — using the default '
               f'{_DEFAULT_GOAL_EDGE_MARGIN_TICKS}.', flush=True)
         return _DEFAULT_GOAL_EDGE_MARGIN_TICKS
     if value < 0:
-        print(f'[WARN] EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS={raw!r} must be '
+        print(f'[WARN] EDUBOTICS_FEETECH_GOAL_EDGE_MARGIN_TICKS={raw!r} must be '
               f'>= 0 (0 disables the clamp) — using the default '
               f'{_DEFAULT_GOAL_EDGE_MARGIN_TICKS}.', flush=True)
         return _DEFAULT_GOAL_EDGE_MARGIN_TICKS
     if value > _GOAL_EDGE_MARGIN_MAX_TICKS:
-        print(f'[WARN] EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS={raw!r} exceeds '
+        print(f'[WARN] EDUBOTICS_FEETECH_GOAL_EDGE_MARGIN_TICKS={raw!r} exceeds '
               f'{_GOAL_EDGE_MARGIN_MAX_TICKS} ticks, which is one tick under the '
               f'{_GOAL_EDGE_MARGIN_MAX_TICKS + 1}-tick ANALYTIC floor of the '
-              f'closest a real Edu6IKSolver solution can come to a register end '
+              f'closest a real V1IKSolver solution can come to a register end '
               f'— past that floor the clamp stops trimming only the jog/replay '
               f'extremes and starts shifting real grasp solutions '
               f'(use 0 to DISABLE this clamp — a large value does not) '
@@ -1086,7 +989,7 @@ def _parse_goal_edge_margin(raw: str | None) -> int:
 
 
 GOAL_EDGE_MARGIN_TICKS = _parse_goal_edge_margin(
-    os.environ.get('EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS'))
+    os.environ.get('EDUBOTICS_FEETECH_GOAL_EDGE_MARGIN_TICKS'))
 
 
 def rad_to_tick(rad: float, sign: int) -> int:
@@ -1121,7 +1024,7 @@ def rad_to_command_tick(rad: float, sign: int, margin=None) -> int:
     sign flip or a window re-trim.
 
     THE ONE PLACE that must use this is every Goal_Position writer.
-    :meth:`Edu6ArmNode._seed_goal_from_present_locked` is deliberately EXEMPT and
+    :meth:`FeetechArmNode._seed_goal_from_present_locked` is deliberately EXEMPT and
     must stay so: it writes ``Goal = Present`` from a MEASURED tick to hold the
     arm still, so clamping it would command a real move (up to ``margin`` ticks)
     at the exact moment torque arrives — a software guard creating motion, and
@@ -1174,23 +1077,23 @@ def interpolate_trajectory(points: list[tuple[list[float], float]],
 # ── boot-home table-floor pre-check (Rule §2 sign-off, Sven 2026-07-27) ──────
 # How far BELOW the mounting plane the whole-link BOX MODEL may read before the
 # boot-home glide is REFUSED. z = 0 is the table for this arm — base_link's own
-# mesh spans z ∈ [0.0000, 0.0625] m — so this needs no calibration, which is the
-# only reason a check like this can live in the driver at all.
+# mesh spans z ∈ [0.0000, 0.0521] m (the shipped base frame is re-origined to the
+# base bottom) — so this needs no calibration, which is the only reason a check
+# like this can live in the driver at all.
 #
 # THE HAZARD. start_boot_home runs on EVERY container boot, from whatever pose a
 # LIMP arm collapsed into, and glides a straight joint-space line to HOME with
-# nothing judging it. Measured on the collision meshes: that line drives a link
-# up to 167.9 mm BELOW the table from about 1 in 100 attainable start poses, and
-# the failing family — elbow essentially straight, shoulder rotated back,
-# gripper already near the table — is exactly what a limp arm collapses into.
-# So this is the highest-exposure home path in the system, not the Blockly block.
+# nothing judging it. From a small fraction of attainable start poses that line
+# drives a link far BELOW the table (shoulder folded right back, elbow nearly
+# straight — exactly what a limp arm collapses into; test_feetech_geometry.py
+# pins such a witness on the box model). So this is the highest-exposure home
+# path in the system, not the Blockly block.
 #
-# WHY 20 mm: the box model is SOUND but conservative by a median 0.0 mm / mean
-# 10.1 mm / p95 45.9 mm. Measured over 800 attainable starts, a 20 mm allowance
-# catches 12/12 real table presses with four false positives; 50 mm starts
-# MISSING real presses (11/12). Same number and same derivation as the server's
-# EDUBOTICS_HOME_FLOOR_TOL_M — deliberately ONE knob for ONE concept, forwarded
-# on BOTH the open_manipulator and physical_ai_server services.
+# WHY 20 mm: the box model is SOUND but conservative, and the allowance absorbs
+# that conservatism without letting a real table press through. Same number and
+# same derivation as the server's EDUBOTICS_HOME_FLOOR_TOL_M — deliberately ONE
+# knob for ONE concept, forwarded on BOTH the open_manipulator and
+# physical_ai_server services.
 #
 # WHAT A REFUSAL DOES, and the part that must never change: it SKIPS THE GLIDE
 # AND LEAVES THE ARM TORQUED at its measured pose (set_torque already seeded
@@ -1260,7 +1163,7 @@ def boot_home_floor_decision(current, tol: float = None):
         tol = BOOT_HOME_FLOOR_TOL_M
     if tol <= 0.0:
         return True, None
-    depth = eg.swept_lowest_z(list(current)[:N_ARM_JOINTS],
+    depth = fg.swept_lowest_z(list(current)[:N_ARM_JOINTS],
                               list(HOME_JOINTS_RAD), GEOMETRY_SPEC)
     if depth is None:
         return True, None
@@ -1304,9 +1207,9 @@ def boot_home_verify_decision(cur, target, tol, attempt, max_sends):
     return 'give_up', off
 
 
-class Edu6ArmNode(Node):
+class FeetechArmNode(Node):
     def __init__(self, bus: fb.FeetechBus) -> None:
-        super().__init__('edu6_arm_node')
+        super().__init__('feetech_arm_node')
         self._bus = bus
         self._bus_lock = threading.Lock()
         self._stop = threading.Event()
@@ -1366,15 +1269,15 @@ class Edu6ArmNode(Node):
         self.create_service(Trigger, HOME_SERVICE_ALIAS, self._home_cb)
 
         self._read_thread = threading.Thread(
-            target=self._read_loop, name='edu6-read', daemon=True)
+            target=self._read_loop, name='feetech-read', daemon=True)
         self._write_thread = threading.Thread(
-            target=self._write_loop, name='edu6-write', daemon=True)
+            target=self._write_loop, name='feetech-write', daemon=True)
 
     # ── bus bring-up (called BEFORE the node is constructed) ─────────────────
     @staticmethod
     def probe_bus(bus: fb.FeetechBus, logger=None) -> tuple[bool, str]:
         """Ping every id in ``SERVO_IDS`` + verify each is an accepted STS
-        model (777 STS3215, 2825 STS3250 — both arms mix the two by design, the
+        model (777 STS3215, 2825 STS3250 — the arm mixes the two by design, the
         high-load shoulder + elbow being the 3250s).
         Returns ``(ok, german_message)`` — the message distinguishes the
         single most likely student error (USB enumerated but 12 V supply off:
@@ -1416,7 +1319,7 @@ class Edu6ArmNode(Node):
         if wrong:
             return False, (
                 f'[FEHLER] Unerwartetes Servomodell am Bus: {wrong} — dieser '
-                'Arm ist kein EduBotics 6-Achs.')
+                'Arm ist kein V1.')
         # Provisioned-state gate (audit H1+H2). Ping + model alone would let a
         # factory-fresh or RMA-swapped servo boot-home in a WRONG coordinate
         # frame at factory torque (1000, not the provisioned 800/150), and a
@@ -1449,11 +1352,11 @@ class Edu6ArmNode(Node):
             firmware[sid] = (fw[0], fw[1])
             # Angular_Resolution (register 30) rescales the whole tick↔angle map.
             # WARN, DO NOT REFUSE — three reasons, in order of weight:
-            #  1. The reference arm EDU6-0001 was provisioned BEFORE this register
-            #     was known about, so its stored record does not carry it and its
-            #     live value has never been read. A hard gate on a value we cannot
-            #     predict would brick „Umgebung starten" on the only arm in
-            #     existence, and this guard has no env rollback to escape with.
+            #  1. An arm provisioned before this register was known about carries
+            #     no record of it, and its live value has never been read. A hard
+            #     gate on a value we cannot predict would brick „Umgebung starten"
+            #     on such an arm, and this guard has no env rollback to escape
+            #     with.
             #  2. The expected value IS the factory default (1), so "gate on the
             #     expected value" and "gate but also accept the factory default"
             #     are the SAME check — the usual compatibility escape hatch does
@@ -1464,7 +1367,7 @@ class Edu6ArmNode(Node):
             #     unproven either way, which is an argument for reporting rather
             #     than refusing.
             # Promotion to a hard refusal is a one-line change (return False with
-            # this text) and wants: a live reading from EDU6-0001, plus one bench
+            # this text) and wants: a live reading from a provisioned arm, plus one bench
             # measurement of what a resolution of 2 actually does to
             # Present_Position with Phase bit 4 clear.
             if resolution != fb.ANGULAR_RESOLUTION_SINGLE_TURN:
@@ -1473,7 +1376,7 @@ class Edu6ArmNode(Node):
                 return False, (
                     f'[FEHLER] Servo {sid}: Betriebsmodus {mode} statt '
                     'Positionsmodus — dieser Arm ist nicht provisioniert. '
-                    'Bitte tools/edu6_provision.py auf der Werkbank '
+                    'Bitte tools/feetech_provision.py auf der Werkbank '
                     'ausführen.')
             # Multi-turn feedback (Phase bit 4) makes Present_Position wrap past
             # the single-turn range, feeding overflowed angles into the fixed
@@ -1484,7 +1387,7 @@ class Edu6ArmNode(Node):
                 return False, (
                     f'[FEHLER] Servo {sid}: Multi-Turn-Modus aktiv '
                     '(Phase-Bit 4) — Positionswerte laufen über und '
-                    'verfälschen die Kinematik. Bitte tools/edu6_provision.py '
+                    'verfälschen die Kinematik. Bitte tools/feetech_provision.py '
                     'auf der Werkbank erneut ausführen.')
             lo_exp, hi_exp = fb.position_limit_window(
                 *JOINT_LIMITS_RAD[i], JOINT_SIGNS[i])
@@ -1493,9 +1396,9 @@ class Edu6ArmNode(Node):
                     f'[FEHLER] Servo {sid}: EEPROM-Positionsgrenzen '
                     f'[{lo}, {hi}] passen nicht zur erwarteten '
                     f'Provisionierung [{lo_exp}, {hi_exp}] — Arm nicht '
-                    'provisioniert oder EDUBOTICS_EDU6_JOINT_SIGNS weicht '
+                    'provisioniert oder EDUBOTICS_FEETECH_JOINT_SIGNS weicht '
                     'von der Provisionierung ab? Bitte '
-                    'tools/edu6_provision.py mit den aktuellen Vorzeichen '
+                    'tools/feetech_provision.py mit den aktuellen Vorzeichen '
                     'ausführen.')
             # Boot plausibility (2026-07-25). Hand-guiding is torque-OFF, so a
             # student can push a joint past ±180° of its designed zero; the
@@ -1508,16 +1411,13 @@ class Edu6ArmNode(Node):
             # The band is deliberately wide: a joint resting AGAINST its hard
             # stop must never nuisance-refuse a healthy boot, whereas a wrapped
             # reading misses by hundreds to thousands of ticks — so tolerance
-            # costs no detection power. (R9 validates the width against where a
-            # limp arm actually collapses to.)
+            # costs no detection power. (Rig gate VR6 validates the width against
+            # where a limp arm actually collapses to.)
             #
-            # DELIBERATE NO-OP on any joint whose window is the full register
-            # range — joint4/joint6 today, per the keep-±180° decision: nothing
-            # can read out of range there. Trimming those windows is what would
-            # make this check effective on them. Also blind to the register-end
-            # side of joint2 (hi = 4095) and joint3 (lo = 0), whose windows touch
-            # it. All three gaps are covered by the edge guard below, which asks
-            # a different question (distance to the REGISTER edge).
+            # Blind to the register-end side of joint2 and joint3 (hi = 4095),
+            # whose windows touch it: a reading there is in-window. That gap is
+            # covered by the edge guard below, which asks a different question
+            # (distance to the REGISTER edge).
             if not (lo_exp - BOOT_POSITION_TOLERANCE_TICKS <= present
                     <= hi_exp + BOOT_POSITION_TOLERANCE_TICKS):
                 return False, (
@@ -1531,8 +1431,7 @@ class Edu6ArmNode(Node):
             # of both register ends the band has already refused any near-edge
             # reading (they land 756+ ticks outside), so the value added here is
             # exactly the IN-WINDOW near-edge readings the band is blind to —
-            # joint4/joint6 anywhere (full-circle windows), joint2 at the 4095 end
-            # and joint3 at the 0 end (their windows touch a register end). The
+            # joint2 and joint3 at the 4095 end (their windows touch it). The
             # authoritative copy runs in set_torque (the single choke point, which
             # also covers the re-torque after hand-guide); this one exists because
             # it fails BEFORE any ROS entity is created, prints straight into the
@@ -1632,7 +1531,7 @@ class Edu6ArmNode(Node):
         ``Torque_Enable = 1`` BY ITSELF on the next PID tick, regardless of the
         host having disabled torque. The seed below writes the measured tick
         clamped only into the REGISTER range, not into the EEPROM window, so on a
-        joint resting outside its window (R9 measured up to 107 ticks) this IS an
+        joint resting outside its window (rig gate VR6 measures how far) this IS an
         out-of-window goal write issued while torque is off. The pull-in itself is
         already expected and budgeted for (see TORQUE_ABORT_ERROR_TICKS), and the
         gentle ``SEED_SPEED_STEPS`` rides in the same packet, so the consequence
@@ -1671,7 +1570,7 @@ class Edu6ArmNode(Node):
         # a held joint cannot travel 40 ticks (3.5°) inside a ~ms read→write
         # window. Judging it anyway BROKE JOGGING: the server asserts torque ON
         # defensively on EVERY WorkshopJog call, so an arm already parked beyond
-        # ±176.5° on joint4/joint6 — inside the URDF window the jog accepts —
+        # +176.5° on joint2/joint3 — inside the URDF window the jog accepts —
         # refused, and three of those in a row produce „Arm konnte wiederholt
         # nicht verriegelt werden … Umgebung neu starten": a misdiagnosis (the
         # arm IS locked) whose remedy probe_bus then refuses at the same tick.
@@ -1743,7 +1642,7 @@ class Edu6ArmNode(Node):
         torqued, with no torque-on anywhere near it — there is no event for this
         to hang off. Only a continuous watchdog in the 50 Hz read loop could see
         that, which can stop motion mid-trajectory and is a larger Rule §2 step
-        (assessed in docs §11.13, not implemented). Also not covered: a seed
+        (assessed, not implemented). Also not covered: a seed
         ``sync_write`` LOST on the wire, since SYNC_WRITE is fire-and-forget and
         the goals handed in here are computed rather than read back. Note that
         reading ``Goal_Position`` (42) back is NOT the fix for the goals used
@@ -1773,7 +1672,7 @@ class Edu6ArmNode(Node):
             except Exception:  # noqa: BLE001
                 pass
             if len(present) == len(SERVO_IDS):
-                break                  # healthy arm: exactly ONE read, ~0.71 ms
+                break                  # healthy arm: exactly ONE read, ~0.62 ms
         offenders = wrong_way_joints(goal_ticks, present)
         missing = [sid for sid in SERVO_IDS if sid not in present]
         if not offenders and not missing:
@@ -2057,7 +1956,7 @@ class Edu6ArmNode(Node):
         """Quintic-glide to HOME from the measured pose. ``(ok, german)``.
 
         Called at boot ONLY when EDUBOTICS_REQUIRE_ACTIVATION=0 (the rollback);
-        otherwise it is the /edu6/home + /edubotics/home_arm service body, i.e.
+        otherwise it is the /v1/home + /edubotics/home_arm service body, i.e.
         what the Startseite's „Roboter aktivieren" button ultimately runs.
 
         Re-torques first when the arm is limp — hand-guide's „Beenden" is not
@@ -2103,11 +2002,11 @@ class Edu6ArmNode(Node):
         # Phase-3 verifier (mirror OMX, NOT a lift-then-fold). Daemon thread so
         # it never blocks spin/shutdown.
         threading.Thread(target=self._boot_home_verify, args=(gen,),
-                         name='edu6-boothome-verify', daemon=True).start()
+                         name='feetech-boothome-verify', daemon=True).start()
         return True, ''
 
     def _home_cb(self, _request, response):
-        """/edu6/home + /edubotics/home_arm — Trigger, one callback for both.
+        """/v1/home + /edubotics/home_arm — Trigger, one callback for both.
 
         Returns as soon as the glide is ON the rail; the verifier runs on its
         own thread exactly as at boot, and the caller (activation_agent.py)
@@ -2334,8 +2233,8 @@ class Edu6ArmNode(Node):
             lo, hi = JOINT_LIMITS_RAD[i]
             rad = max(lo, min(hi, float(q[i])))
             # rad_to_COMMAND_tick, never the bare rad_to_tick: the radian clamp
-            # above lands six of the twelve arm-joint bounds EXACTLY on tick
-            # 0/4095, and the write loop then PINS the goal there once the
+            # above lands two of the ten arm-joint bounds EXACTLY on tick
+            # 4095, and the write loop then PINS the goal there once the
             # trajectory ends. See GOAL_EDGE_MARGIN_TICKS / rad_to_command_tick.
             tick = rad_to_command_tick(rad, JOINT_SIGNS[i])
             payload[sid] = (bytes([WRITE_ACCELERATION])
@@ -2378,7 +2277,7 @@ class Edu6ArmNode(Node):
 
 def main() -> int:
     port = os.environ.get('FOLLOWER_PORT', '/dev/ttyACM0')
-    print(f'[INIT] Feetech-Treiber ({ROBOT_TYPE or "edu6_studio"}, '
+    print(f'[INIT] Feetech-Treiber (v1_studio, '
           f'{len(SERVO_IDS)} Servos): Bus auf {port} (1 Mbit/s) …', flush=True)
     try:
         bus = fb.FeetechBus(port)
@@ -2392,9 +2291,9 @@ def main() -> int:
     # over a dead bus. Retry forever (the container stays unhealthy; the GUI
     # shows the German reason from this log).
     while True:
-        ok, message = Edu6ArmNode.probe_bus(bus)
+        ok, message = FeetechArmNode.probe_bus(bus)
         if ok:
-            # Model-neutral wording on purpose: both arms mix STS3215 and
+            # Model-neutral wording on purpose: the arm mixes STS3215 and
             # STS3250 (the high-load shoulder + elbow) by design, so naming one
             # model here reads as a fault on a healthy arm.
             print(f'[INIT] Alle {len(SERVO_IDS)} Servos gefunden '
@@ -2404,7 +2303,7 @@ def main() -> int:
         time.sleep(5.0)
 
     rclpy.init()
-    node = Edu6ArmNode(bus)
+    node = FeetechArmNode(bus)
 
     def _sigterm(_signum, _frame):
         raise KeyboardInterrupt

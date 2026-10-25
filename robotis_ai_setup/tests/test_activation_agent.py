@@ -2,7 +2,7 @@
 
 WHAT THIS PROTECTS. Before 2026-09-07 „Umgebung starten" was itself a powered
 motion — Phase 3 of entrypoint_omx.sh homed the follower or glided it onto the
-leader, edu6_arm_node.py homed itself, and the leader's trajectory broadcaster
+leader, feetech_arm_node.py homed itself, and the leader's trajectory broadcaster
 spawned at boot so a both-arms rig began teleoperating before a browser was
 even open. The gate moves all of that behind one student-pressed button.
 
@@ -30,7 +30,7 @@ _DOCKER = os.path.join(_ROOT, 'robotis_ai_setup', 'docker', 'open_manipulator')
 _AGENT = os.path.join(_DOCKER, 'activation_agent.py')
 _ENTRYPOINT = os.path.join(_DOCKER, 'entrypoint_omx.sh')
 _LEADER_LAUNCH = os.path.join(_DOCKER, 'overlays', 'omx_l_leader_ai.launch.py')
-_DRIVER = os.path.join(_DOCKER, 'edu6_arm_node.py')
+_DRIVER = os.path.join(_DOCKER, 'feetech_arm_node.py')
 _DOCKERFILE = os.path.join(_DOCKER, 'Dockerfile')
 _MOTION = os.path.join(_ROOT, 'physical_ai_tools', 'physical_ai_server',
                        'physical_ai_server', 'workflow', 'handlers', 'motion.py')
@@ -91,15 +91,15 @@ class TestEnvFlag(unittest.TestCase):
 class TestSequenceShape(unittest.TestCase):
 
     def test_feetech_families_are_the_case_split_the_entrypoint_makes(self):
-        self.assertTrue(_N['is_feetech']('edu6_studio'))
-        self.assertTrue(_N['is_feetech']('edu1_studio'))
+        self.assertTrue(_N['is_feetech']('v1_studio'))
+        self.assertEqual(_N['FEETECH_ROBOT_TYPES'], ('v1_studio',))
         self.assertFalse(_N['is_feetech']('omx_full'))
         self.assertFalse(_N['is_feetech']('omx_follower'))
         self.assertFalse(_N['is_feetech'](None))
 
     def test_every_configuration_homes(self):
         """The whole point of the feature: no rig activates without homing."""
-        for robot_type in ('omx_full', 'omx_follower', 'edu6_studio', 'edu1_studio'):
+        for robot_type in ('omx_full', 'omx_follower', 'v1_studio'):
             for follower_only in (True, False):
                 steps = _N['activation_steps'](robot_type, follower_only)
                 self.assertEqual(steps[0], 'home', (robot_type, follower_only))
@@ -110,7 +110,7 @@ class TestSequenceShape(unittest.TestCase):
         self.assertEqual(_N['activation_steps']('omx_full', True), ('home',))
         self.assertEqual(_N['activation_steps']('omx_follower', True), ('home',))
         # A Feetech arm has no leader even if someone mis-sets the flag.
-        self.assertEqual(_N['activation_steps']('edu6_studio', False), ('home',))
+        self.assertEqual(_N['activation_steps']('v1_studio', False), ('home',))
 
     def test_the_helper_is_load_bearing_not_decorative(self):
         """The sequence must be DRIVEN by activation_steps(), not merely
@@ -131,7 +131,7 @@ class TestSequenceShape(unittest.TestCase):
         self.assertNotIn('if self._leader:', body)
         # every id the helper can emit has a branch, and nothing else does
         emitted = set()
-        for robot_type in ('omx_full', 'omx_follower', 'edu6_studio', 'edu1_studio'):
+        for robot_type in ('omx_full', 'omx_follower', 'v1_studio'):
             for follower_only in (True, False):
                 emitted |= set(_N['activation_steps'](robot_type, follower_only))
         for step in emitted:
@@ -152,7 +152,7 @@ class TestSequenceShape(unittest.TestCase):
     def test_has_leader_matches_the_steps(self):
         self.assertTrue(_N['has_leader']('omx_full', False))
         self.assertFalse(_N['has_leader']('omx_full', True))
-        self.assertFalse(_N['has_leader']('edu6_studio', False))
+        self.assertFalse(_N['has_leader']('v1_studio', False))
 
 
 class TestQuintic(unittest.TestCase):
@@ -660,12 +660,11 @@ class TestStructuralGate(unittest.TestCase):
         self.assertLess(gate, legacy)
 
     def test_the_driver_exposes_the_family_neutral_home_alias(self):
-        """activation_agent.py calls ONE name on either Feetech arm; the family
-        branch stays in the driver."""
+        """activation_agent.py calls ONE family-neutral name on a Feetech arm;
+        the family branch stays in the driver."""
         source = _read(_DRIVER)
         self.assertIn("HOME_SERVICE_ALIAS = '/edubotics/home_arm'", source)
-        self.assertIn("HOME_SERVICE = '/edu6/home'", source)
-        self.assertIn("_EDU1_HOME_SERVICE = '/edu1/home'", source)
+        self.assertIn("HOME_SERVICE = '/v1/home'", source)
         self.assertIn('self.create_service(Trigger, HOME_SERVICE, self._home_cb)',
                       source)
         self.assertIn(

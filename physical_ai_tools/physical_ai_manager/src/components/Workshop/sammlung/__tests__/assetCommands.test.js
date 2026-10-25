@@ -455,7 +455,7 @@ describe('recording rows: delete and restore', () => {
   it('restoreRecordingRows re-creates the oldest first, with robot_profile', async () => {
     const api = makeApi();
     const deleted = [
-      { name: 'Winken', fps: 25, points: [[1]], duration_s: 1.2, robot_profile: 'edu6_studio', created_at: '2026-09-13T10:30:00Z' },
+      { name: 'Winken', fps: 25, points: [[1]], duration_s: 1.2, robot_profile: 'v1_studio', created_at: '2026-09-13T10:30:00Z' },
       { name: 'Winken', fps: 25, points: [[2], [3]], duration_s: 0.5, robot_profile: null, created_at: '2026-09-13T10:00:00Z' },
     ];
     const result = await restoreRecordingRows({ api, accessToken: 'tok', workflowId: 'wf1', deleted });
@@ -463,7 +463,7 @@ describe('recording rows: delete and restore', () => {
     expect(api.createTrajectory.mock.calls.map((c) => c[2])).toEqual([
       { name: 'Winken', fps: 25, points: [[2], [3]], point_count: 2, duration_s: 0.5 },
       {
-        name: 'Winken', fps: 25, points: [[1]], point_count: 1, duration_s: 1.2, robot_profile: 'edu6_studio',
+        name: 'Winken', fps: 25, points: [[1]], point_count: 1, duration_s: 1.2, robot_profile: 'v1_studio',
       },
     ]);
   });

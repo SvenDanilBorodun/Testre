@@ -40,6 +40,7 @@ import {
   formatRecordedAtDe,
   formatSecondsDe,
   formatVersionDateDe,
+  LEGACY_ROBOT_TYPES,
   robotLongLabelDe,
 } from './format';
 import {
@@ -79,6 +80,9 @@ function latestVersionResult(lastPreviewResult, versions) {
 
 function robotLabel(profile) {
   if (!profile) return DE.DRAWER_ROBOT_LEGACY;
+  // A retired arm's tag is shown by its shared German label alone: the raw id
+  // would name a robot this product no longer has.
+  if (LEGACY_ROBOT_TYPES.includes(profile)) return robotLongLabelDe(profile);
   const long = robotLongLabelDe(profile);
   return long ? `${long} (${profile})` : profile;
 }

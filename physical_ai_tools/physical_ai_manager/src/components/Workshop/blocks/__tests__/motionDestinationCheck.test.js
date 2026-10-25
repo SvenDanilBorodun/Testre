@@ -7,19 +7,16 @@
  * The underlying defect is real. `find_object` outputs 'Greifziel';
  * „bewege zu" / „aufnehmen" / „ablegen bei" carry no check, so a „finde <Typ>"
  * block plugs straight in with one drag and the block then does the wrong thing
- * silently. Re-measured 2026-09-08 with the real solvers, tag yaw 1.1 rad, the
- * object on each arm's +x axis, against the split blocks' correct answer for the
- * SAME detection — quoting the ROLL JOINT, so the three rows are one quantity:
+ * silently. Measured 2026-09-08 with the real solver, tag yaw 1.1 rad, the
+ * object on the arm's +x axis, against the split blocks' correct answer for the
+ * SAME detection — quoting the ROLL JOINT:
  *
  *   omx_full     correct z 0.0150 q_roll +0.4708 -> pickup z 0.0270 q_roll +1.5708
- *   edu6_studio  correct z 0.0150 q_roll -0.4708 -> pickup z 0.0270 q_roll +1.5708
- *   edu1_studio  correct z 0.0150 q_roll -0.4708 -> pickup z 0.0270 q_roll -1.5708
  *
  * i.e. +12.0 mm of descend height (GRASP_CLEARANCE_M added on top of a z that IS
  * already the grasp band) and — pickup(Greifziel) never seeing the tag yaw — a
- * wrist error of exactly that yaw, 1.1 rad = 63.03 degrees, on all three arms,
- * reported as success. (An earlier revision of this comment gave the edu6 cell as
- * roll -2.6708 and the error as 56-57 degrees; see motion._refuse_greifziel.)
+ * wrist error of exactly that yaw, 1.1 rad = 63.03 degrees, reported as success
+ * (the same yaw error on every shipped arm; see motion._refuse_greifziel).
  *
  * A `check: 'String'` on these three sockets was shipped and then REVERTED
  * 2026-09-08, because it is not a safe way to fix it. Blockly enforces a check

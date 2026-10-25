@@ -28,6 +28,7 @@ import { registerDestinationBlocks } from '../../blocks/destinations';
 import { DE, formatDe } from '../../blocks/messages_de';
 import { getDestinationStore, registerDestinationSerializer } from '../destinationStore';
 import { createSammlungProvider } from '../provider';
+import { LEGACY_ROBOT_TYPES } from '../format';
 import SammlungDrawer from '../SammlungDrawer';
 import { CODE_DE } from '../../code/codeMessagesDe';
 import { jumpToBlock } from '../blockUsage';
@@ -80,7 +81,7 @@ const replay = (name, id) => ({ type: 'edubotics_replay_trajectory', id, fields:
 const ref = (name, id) => ({ type: 'edubotics_destination_ref', id, fields: { NAME: name } });
 
 function setup({
-  blocks = [], variables, drawer = {}, toolboxWidth = 118, pins = [], capabilities = {},
+  blocks = [], variables, drawer = {}, toolboxWidth = 118, pins = [], capabilities = {}, items = ITEMS,
 } = {}) {
   ws = new Blockly.Workspace();
   Blockly.serialization.workspaces.load({
@@ -97,7 +98,7 @@ function setup({
   const provider = createSammlungProvider({
     capabilities: { hardware: true, drawer: true, ...capabilities },
     robotType: 'omx_f',
-    trajectories: { status: 'ready', items: ITEMS },
+    trajectories: { status: 'ready', items },
   });
   const redux = configureStore({ reducer: { studioAssets: studioAssetsReducer } });
   redux.dispatch(openDrawer({ tab: 'aufnahmen', focusId: null, ...drawer }));
@@ -160,6 +161,18 @@ describe('SammlungDrawer', () => {
     expect(screen.getByText(DE.DRAWER_OLDER_VERSIONS)).toBeInTheDocument();
     expect(screen.getByText(/3,1 s · wird nicht abgespielt$/)).toBeInTheDocument();
     expect(screen.getByText(DE.DRAWER_USED_NOWHERE_RECORDING)).toBeInTheDocument();
+  });
+
+  it.each(LEGACY_ROBOT_TYPES)('a recording of a retired arm (%s) names it by the shared German label, never by its raw id', (tag) => {
+    setup({ items: [{ ...ITEMS[2], robot_profile: tag }], drawer: { focusId: 'Tanz' } });
+    expect(screen.getByText(DE.ROBOT_LABEL_RETIRED)).toBeInTheDocument();
+    expect(DE.ROBOT_LABEL_RETIRED).toBe('Früherer EduBotics-Arm');
+    expect(screen.queryByText(new RegExp(tag))).toBeNull();
+  });
+
+  it('a V1 recording names the arm and its id', () => {
+    setup({ items: [{ ...ITEMS[2], robot_profile: 'v1_studio' }], drawer: { focusId: 'Tanz' } });
+    expect(screen.getByText('V1 (v1_studio)')).toBeInTheDocument();
   });
 
   it('a usage row click jumps to the block', () => {

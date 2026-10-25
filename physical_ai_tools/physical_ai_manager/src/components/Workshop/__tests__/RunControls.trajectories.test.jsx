@@ -18,6 +18,7 @@ import React from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import RunControls from '../RunControls';
+import { LEGACY_ROBOT_TYPES } from '../sammlung/format';
 
 const POINTS = [
   [0, 0, 0, 0, 0, 0, 0.0],
@@ -153,10 +154,12 @@ describe('RunControls — CONTRACT C trajectories injection', () => {
 });
 
 describe('RunControls — cross-profile replay refusal', () => {
-  test('refuses an edu6-tagged recording on an OMX rig with a clean German toast', async () => {
-    mockState.tasks = { taskStatus: { robotType: 'omx_f' } };
+  // A stored row of a RETIRED arm keeps its tag (cloud migration 051 keeps the
+  // ids), so it reaches a V1 rig; the tag differs and the run is refused.
+  test.each(LEGACY_ROBOT_TYPES)('refuses a recording of a retired arm (%s) on a V1 rig with a clean German toast', async (tag) => {
+    mockState.tasks = { taskStatus: { robotType: 'v1_studio' } };
     mockGetTrajectory.mockResolvedValue({
-      fps: 25, points: POINTS, robot_profile: 'edu6_studio',
+      fps: 25, points: POINTS, robot_profile: tag,
     });
     render(<RunControls workflowId="wf-1" blocklyJson={REPLAY_JSON} simMode={false} simScene={null} />);
     await userEvent.click(screen.getByRole('button', { name: /Start/ }));
@@ -170,34 +173,16 @@ describe('RunControls — cross-profile replay refusal', () => {
     expect(mockRos.callService).not.toHaveBeenCalled();
   });
 
-  test('refuses an untagged (legacy = OMX) recording on an edu6 rig', async () => {
-    mockState.tasks = { taskStatus: { robotType: 'edu6_studio' } };
-    // No robot_profile → legacy recording, treated as omx_f → mismatch on edu6.
-    mockGetTrajectory.mockResolvedValue({ fps: 25, points: POINTS });
-    render(<RunControls workflowId="wf-1" blocklyJson={REPLAY_JSON} simMode={false} simScene={null} />);
-    await userEvent.click(screen.getByRole('button', { name: /Start/ }));
-
-    await waitFor(() =>
-      expect(mockToast.error).toHaveBeenCalledWith(
-        expect.stringContaining('mit einem anderen Robotertyp aufgenommen'),
-      ),
-    );
-    expect(mockRos.callService).not.toHaveBeenCalled();
-  });
-
-  // ── migration 039: the pair the width check CANNOT catch ─────────────────
+  // ── the pair the width check CANNOT catch ────────────────────────────────
   //
-  // Every test above uses tags whose Contract-B WIDTHS differ (omx_f 7,
-  // edu6_studio 8), so they would still pass with `trajectoryMatchesRig`
-  // deleted — the runtime's own width check would refuse the payload, just
-  // later and with the misleading „Aufnahme ist beschädigt.". The Edu:1 has 5
-  // arm joints, so its width is 5 + 2 = 7, the SAME as omx_f: for THIS pair the
-  // tag is the only separator, and a deleted gate means an OMX recording drives
-  // an Edu:1 (or the reverse) all the way to the servos.
-  test('refuses an edu1-tagged recording on an OMX rig — SAME width, tag only', async () => {
+  // The V1 has 5 arm joints, so its Contract-B width is 5 + 2 = 7, the SAME as
+  // omx_f: for THIS pair the tag is the only separator, and a deleted
+  // `trajectoryMatchesRig` gate means an OMX recording drives a V1 (or the
+  // reverse) all the way to the servos.
+  test('refuses a v1-tagged recording on an OMX rig — SAME width, tag only', async () => {
     mockState.tasks = { taskStatus: { robotType: 'omx_f' } };
     mockGetTrajectory.mockResolvedValue({
-      fps: 25, points: POINTS, robot_profile: 'edu1_studio',
+      fps: 25, points: POINTS, robot_profile: 'v1_studio',
     });
     render(<RunControls workflowId="wf-1" blocklyJson={REPLAY_JSON} simMode={false} simScene={null} />);
     await userEvent.click(screen.getByRole('button', { name: /Start/ }));
@@ -210,8 +195,8 @@ describe('RunControls — cross-profile replay refusal', () => {
     expect(mockRos.callService).not.toHaveBeenCalled();
   });
 
-  test('refuses an OMX-tagged recording on an Edu:1 rig — SAME width, tag only', async () => {
-    mockState.tasks = { taskStatus: { robotType: 'edu1_studio' } };
+  test('refuses an OMX-tagged recording on a V1 rig — SAME width, tag only', async () => {
+    mockState.tasks = { taskStatus: { robotType: 'v1_studio' } };
     mockGetTrajectory.mockResolvedValue({
       fps: 25, points: POINTS, robot_profile: 'omx_f',
     });
@@ -226,11 +211,11 @@ describe('RunControls — cross-profile replay refusal', () => {
     expect(mockRos.callService).not.toHaveBeenCalled();
   });
 
-  test('refuses an UNTAGGED (legacy = OMX) recording on an Edu:1 rig', async () => {
+  test('refuses an UNTAGGED (legacy = OMX) recording on a V1 rig', async () => {
     // The most dangerous shape of all: a legacy row carries no tag, is 7-wide,
-    // and an Edu:1 recording is 7-wide too — nothing but the legacy→omx_f
-    // reading stops it.
-    mockState.tasks = { taskStatus: { robotType: 'edu1_studio' } };
+    // and a V1 recording is 7-wide too — nothing but the legacy→omx_f reading
+    // stops it.
+    mockState.tasks = { taskStatus: { robotType: 'v1_studio' } };
     mockGetTrajectory.mockResolvedValue({ fps: 25, points: POINTS });
     render(<RunControls workflowId="wf-1" blocklyJson={REPLAY_JSON} simMode={false} simScene={null} />);
     await userEvent.click(screen.getByRole('button', { name: /Start/ }));
@@ -243,10 +228,10 @@ describe('RunControls — cross-profile replay refusal', () => {
     expect(mockRos.callService).not.toHaveBeenCalled();
   });
 
-  test('allows a matching edu1 recording on an Edu:1 rig', async () => {
-    mockState.tasks = { taskStatus: { robotType: 'edu1_studio' } };
+  test('allows a matching V1 recording on a V1 rig', async () => {
+    mockState.tasks = { taskStatus: { robotType: 'v1_studio' } };
     mockGetTrajectory.mockResolvedValue({
-      fps: 25, points: POINTS, robot_profile: 'edu1_studio',
+      fps: 25, points: POINTS, robot_profile: 'v1_studio',
     });
     render(<RunControls workflowId="wf-1" blocklyJson={REPLAY_JSON} simMode={false} simScene={null} />);
     await userEvent.click(screen.getByRole('button', { name: /Start/ }));
@@ -257,9 +242,9 @@ describe('RunControls — cross-profile replay refusal', () => {
   });
 
   test('allows a matching-profile recording and injects only { fps, points }', async () => {
-    mockState.tasks = { taskStatus: { robotType: 'edu6_studio' } };
+    mockState.tasks = { taskStatus: { robotType: 'omx_f' } };
     mockGetTrajectory.mockResolvedValue({
-      fps: 25, points: POINTS, robot_profile: 'edu6_studio',
+      fps: 25, points: POINTS, robot_profile: 'omx_f',
     });
     render(<RunControls workflowId="wf-1" blocklyJson={REPLAY_JSON} simMode={false} simScene={null} />);
     await userEvent.click(screen.getByRole('button', { name: /Start/ }));

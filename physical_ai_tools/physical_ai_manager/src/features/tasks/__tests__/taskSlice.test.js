@@ -142,22 +142,29 @@ describe('isValidCapabilities — the shared manifest validator', () => {
   it('accepts the complete six-boolean manifest (extra keys tolerated)', () => {
     expect(isValidCapabilities(CAPS_FULL)).toBe(true);
     expect(isValidCapabilities({ ...CAPS_FULL, future_cap: true })).toBe(true);
-    // NON-boolean extras (the edu6 geometry keys: arm_joints, joint_names,
-    // reach_*, gripper_*) must also be tolerated — the six-boolean contract
-    // only constrains ITS OWN keys (edu6 §4.5/§9).
+    // NON-boolean extras (the geometry keys: arm_joints, joint_names,
+    // reach_*, gripper_*, …) must also be tolerated — the six-boolean contract
+    // only constrains ITS OWN keys. The V1's whole manifest (robot_profiles
+    // ._V1_STUDIO) is one such set.
     expect(isValidCapabilities({
       ...CAPS_FULL,
-      arm_joints: 6,
-      joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6',
-        'end_gear_joint'],
-      urdf_asset_id: 'edu6',
-      reach_inner_m: 0.09,
-      reach_outer_m: 0.21,
-      gripper_open_rad: 1.75,
+      arm_joints: 5,
+      joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'RL_joint'],
+      urdf_asset_id: 'v1',
+      reach_inner_m: 0.1,
+      reach_outer_m: 0.34,
+      reach_sector_deg: [-90, 90],
+      gripper_open_rad: 0.9,
       gripper_closed_rad: 0.0,
-      gripper_mm_per_rad: 25.2,
-      sim_close_threshold_rad: 1.5,
+      sim_close_threshold_rad: 0.5,
+      tool_tip_tracks_gripper: true,
+      display_de: 'V1 – Roboter Studio',
+      camera_roles: ['scene'],
+      code_languages: ['python', 'java'],
+      cloud_inference: false,
     })).toBe(true);
+    // …and so is a millimetre gripper key (no shipped profile sends one today).
+    expect(isValidCapabilities({ ...CAPS_FULL, gripper_mm_per_rad: 25.2 })).toBe(true);
   });
 
   it('rejects null / non-objects / arrays / partial / non-boolean', () => {

@@ -210,7 +210,7 @@ describe('RunControls — a code run carries the recordings its replay calls nam
   });
 
   test('a recording of another rig is refused in German, and nothing is sent', async () => {
-    workflowApi.getTrajectoryByName.mockResolvedValue({ ...ROW, robot_profile: 'edu6_studio' });
+    workflowApi.getTrajectoryByName.mockResolvedValue({ ...ROW, robot_profile: 'v1_studio' });
     await clickStart({ codeFiles: REPLAY_FILES });
     await waitFor(() => expect(mockToast.error).toHaveBeenCalled());
     expect(mockToast.error.mock.calls[0][0]).toMatch(/anderen Robotertyp/);

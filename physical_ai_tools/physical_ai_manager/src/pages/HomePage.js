@@ -26,7 +26,7 @@
 // THE ONE RULE EVERYTHING ELSE FOLLOWS: every value shown traces to a real
 // source, or is not shown. What this replaced claimed three things it could
 // not back up — a hardcoded „LIVE" pill that rendered identically while the
-// bridge was down, a drawn SVG arm matching none of the four shipped robots,
+// bridge was down, a drawn SVG arm matching none of the shipped robots,
 // and `packageJson.version` (0.9.0) labelled as the EduBotics version when the
 // product was at 2.17.0. Unknown now renders „—", never 0 and never a guess.
 //

@@ -107,7 +107,7 @@ describe('ModeBadge', () => {
   });
 
   test.each([
-    ['omx_full', 'omx_f'], ['omx_follower', 'omx_f'], ['edu6_studio', 'edu6'], ['edu1_studio', 'edu1'],
+    ['omx_full', 'omx_f'], ['omx_follower', 'omx_f'], ['v1_studio', 'v1'],
   ])('the real-mode badge of %s draws the real %s arm', (profile, glyph) => {
     render(<ModeBadge simMode={false} withRunState={false} profile={profile} />);
     // eslint-disable-next-line testing-library/no-node-access

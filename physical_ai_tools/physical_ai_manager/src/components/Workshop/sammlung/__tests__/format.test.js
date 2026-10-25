@@ -14,6 +14,7 @@ import {
   formatSecondsDe,
   formatRecordedAtDe,
   formatVersionDateDe,
+  LEGACY_ROBOT_TYPES,
   robotLongLabelDe,
   robotShortLabelDe,
 } from '../format';
@@ -41,14 +42,19 @@ describe('Sammlung German formatting', () => {
     expect(formatSecondsDe(12)).toBe('12,0');
   });
 
-  it('robot labels map the three arm ids and nothing else', () => {
+  it('robot labels map the two arm ids, the legacy ids, and nothing else', () => {
     expect(robotLongLabelDe('omx_f')).toBe('OpenMANIPULATOR-X');
-    expect(robotLongLabelDe('edu6_studio')).toBe('EduBotics 6-Achs');
-    expect(robotLongLabelDe('edu1_studio')).toBe('Edu:1');
+    expect(robotLongLabelDe('v1_studio')).toBe('V1');
     expect(robotShortLabelDe('omx_f')).toBe('OMX');
-    expect(robotShortLabelDe('edu6_studio')).toBe('6-Achs');
-    expect(robotShortLabelDe('edu1_studio')).toBe('Edu:1');
-    for (const unknown of ['', 'omx_full', 'constructor', null, undefined]) {
+    expect(robotShortLabelDe('v1_studio')).toBe('V1');
+    // The two retired arms keep their stored tag and share ONE label, never
+    // their raw id or their old product name.
+    expect(LEGACY_ROBOT_TYPES).toEqual(['edu6_studio', 'edu1_studio']);
+    expect(robotLongLabelDe('edu6_studio')).toBe('Früherer EduBotics-Arm');
+    expect(robotLongLabelDe('edu1_studio')).toBe('Früherer EduBotics-Arm');
+    expect(robotShortLabelDe('edu6_studio')).toBe('früherer Arm');
+    expect(robotShortLabelDe('edu1_studio')).toBe('früherer Arm');
+    for (const unknown of ['', 'omx_full', 'v1', 'constructor', null, undefined]) {
       expect(robotLongLabelDe(unknown)).toBeNull();
       expect(robotShortLabelDe(unknown)).toBeNull();
     }

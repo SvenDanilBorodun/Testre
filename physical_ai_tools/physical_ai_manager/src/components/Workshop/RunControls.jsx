@@ -201,9 +201,9 @@ function RunControls({
   const runState = useSelector((s) => s.workshop.runState);
   const accessToken = useSelector((s) => s.auth?.session?.access_token);
   // The rig's data-robot-type identity (taskStatus.robotType: 'omx_f' /
-  // 'edu6_studio' / 'edu1_studio'), used to refuse replaying a recording made on
-  // a different arm family. NOT a width proxy: 'edu1_studio' and 'omx_f' are
-  // both 7-wide, so for that pair this tag is the ONLY separator there is.
+  // 'v1_studio'), used to refuse replaying a recording made on a different arm
+  // family. NOT a width proxy: 'v1_studio' and 'omx_f' are both 7-wide, so for
+  // that pair this tag is the ONLY separator there is.
   const robotType = useSelector((s) => (s.tasks && s.tasks.taskStatus
     ? s.tasks.taskStatus.robotType : ''));
   // The rig's capability manifest (null until the server has said anything):
@@ -498,7 +498,7 @@ function RunControls({
             // Cross-profile replay refusal: a recording's arm family must match
             // the current rig. On a width-differing pair the alternative is
             // the misleading „Aufnahme ist beschädigt." later; on the SAME-width
-            // pair (omx_f / edu1_studio) there is no later failure at all — the
+            // pair (omx_f / v1_studio) there is no later failure at all — the
             // wrong arm just moves. A clean German refusal here (outside the
             // load-failure catch so it isn't prefixed) aborts the run.
             if (!trajectoryMatchesRig(norm.robotProfile, robotType)) {

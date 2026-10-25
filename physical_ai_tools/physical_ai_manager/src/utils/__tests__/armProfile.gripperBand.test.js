@@ -21,7 +21,12 @@ describe('gripperBand', () => {
       .toEqual({ close: 0.2, open: 0.5 });
   });
 
-  it('derives the edu6 band from the profile threshold and open command', () => {
+  it('derives the V1 band from the profile threshold and open command (0.5 / 0.70)', () => {
+    const band = gripperBand({ sim_close_threshold_rad: 0.5, gripper_open_rad: 0.9 });
+    expect(band).toEqual({ close: 0.5, open: 0.7 });
+  });
+
+  it('derives any profile band the same way (threshold, halfway to open)', () => {
     const band = gripperBand({ sim_close_threshold_rad: 1.5, gripper_open_rad: 1.75 });
     expect(band).toEqual({ close: 1.5, open: 1.625 });
   });
@@ -56,10 +61,13 @@ describe('classifyGripper', () => {
     expect(classifyGripper(0.1, null)).toBeNull();
   });
 
-  it('classifies against the edu6 band', () => {
-    const edu6 = gripperBand({ sim_close_threshold_rad: 1.5, gripper_open_rad: 1.75 });
-    expect(classifyGripper(1.0, edu6)).toBe('closed');
-    expect(classifyGripper(1.55, edu6)).toBeNull();
-    expect(classifyGripper(1.75, edu6)).toBe('open');
+  it('classifies against the V1 band', () => {
+    const v1 = gripperBand({ sim_close_threshold_rad: 0.5, gripper_open_rad: 0.9 });
+    expect(classifyGripper(0.05, v1)).toBe('closed'); // the catalog close
+    expect(classifyGripper(0.2, v1)).toBe('closed'); // jaws blocked by the 30 mm cube
+    expect(classifyGripper(0.5, v1)).toBeNull();
+    expect(classifyGripper(0.6, v1)).toBeNull();
+    expect(classifyGripper(0.7, v1)).toBeNull();
+    expect(classifyGripper(0.9, v1)).toBe('open');
   });
 });

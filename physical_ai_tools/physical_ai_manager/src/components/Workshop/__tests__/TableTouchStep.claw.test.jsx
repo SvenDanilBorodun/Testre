@@ -7,9 +7,9 @@
 
 // The touch-off defines z_table by FK'ing the arm to the point the student
 // presses on the desk, and the FK model puts the TCP at the CLOSED fingertip.
-// On a ROTATING claw that point swings BACK as the jaws open (86.25 mm below
-// the tool frame closed, 68.8 mm at 0.9 rad open on the Edu:1), so a touch-off
-// taught with the claw open measures the table ~17 mm too low and every later
+// On a ROTATING claw that point swings BACK as the jaws open (108.6 mm below
+// the tool frame closed, 82.6 mm at the 0.90 rad open command on the V1), so a
+// touch-off taught with the claw open measures the table ~26 mm too low and every later
 // grasp inherits it. Nothing can GUARD that — the readback is a legal pose — so
 // it is an instruction, and it must appear ONLY on an arm it is true for.
 
@@ -52,7 +52,7 @@ const CLAW_LINE = /Greifer ganz schließen/;
 
 describe('TableTouchStep — close-the-claw instruction', () => {
   it('is shown on a rotating-claw manifest', () => {
-    setCaps({ urdf_asset_id: 'edu1', tool_tip_tracks_gripper: true });
+    setCaps({ urdf_asset_id: 'v1', tool_tip_tracks_gripper: true });
     render(<TableTouchStep />);
     expect(screen.getByText(CLAW_LINE)).toBeTruthy();
   });
@@ -63,7 +63,7 @@ describe('TableTouchStep — close-the-claw instruction', () => {
       undefined,
       {},                                     // an OLD server: no such key
       { urdf_asset_id: 'omx_f' },
-      { urdf_asset_id: 'edu6', tool_tip_tracks_gripper: false },
+      { urdf_asset_id: 'synthetic', tool_tip_tracks_gripper: false },
     ]) {
       setCaps(caps);
       const { unmount } = render(<TableTouchStep />);
@@ -73,7 +73,7 @@ describe('TableTouchStep — close-the-claw instruction', () => {
   });
 
   it('does not replace the shared instructions, it adds to them', () => {
-    setCaps({ urdf_asset_id: 'edu1', tool_tip_tracks_gripper: true });
+    setCaps({ urdf_asset_id: 'v1', tool_tip_tracks_gripper: true });
     render(<TableTouchStep />);
     expect(screen.getByText(/mindestens .* verschiedenen Stellen/)).toBeTruthy();
     expect(screen.getByText(/senkrecht nach/)).toBeTruthy();

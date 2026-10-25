@@ -25,6 +25,7 @@ import {
   DESTINATIONS_SERIALIZER_NAME,
   DESTINATIONS_SERIALIZER_PRIORITY,
   DESTINATIONS_CHANGE_EVENT,
+  DESTINATION_ROBOT_TYPES,
   MAX_DESTINATION_ENTRIES,
   getDestinationStore,
   registerDestinationSerializer,
@@ -34,6 +35,7 @@ import {
   takenDestinationNames,
   sanitizeDestinationNameInput,
 } from '../destinationStore';
+import { ghostJointsFromEntry } from '../../../../utils/armProfile';
 
 // Blockly dispatches events via requestAnimationFrame(() => setTimeout(fireNow,
 // 0)); a bare setTimeout(0) delivers nothing (measured: 0 events). Same helper
@@ -190,6 +192,30 @@ describe('save / load', () => {
     expect('joints' in third).toBe(false);
     expect('joint_names' in third).toBe(false);
     expect(got.filter((e) => e.name === 'Ablage')).toHaveLength(1);
+  });
+
+  it('keeps the V1 tag and both legacy tags, so a retired arm\'s Position never ghosts on a V1', () => {
+    // The V1 shares its joint names with one retired arm: a legacy tag dropped
+    // here would turn that Position into an untagged one, and an untagged
+    // snapshot whose names fit draws its ghost on the V1.
+    const v1Names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'RL_joint'];
+    const pose = { ...POSE, joints: [0, 0.64, 1.48, 0.9, 0, 0.9], joint_names: v1Names };
+    const got = readDestinationEntries({
+      [DESTINATIONS_SERIALIZER_NAME]: {
+        version: 1,
+        entries: [
+          { ...pose, id: 'd_00000011', name: 'Neu', robot_type: 'v1_studio' },
+          { ...pose, id: 'd_00000012', name: 'Alt6', robot_type: 'edu6_studio' },
+          { ...pose, id: 'd_00000013', name: 'Alt1', robot_type: 'edu1_studio' },
+        ],
+      },
+    });
+    expect(DESTINATION_ROBOT_TYPES).toEqual(['omx_f', 'v1_studio', 'edu6_studio', 'edu1_studio']);
+    expect(got.map((e) => e.robot_type)).toEqual(['v1_studio', 'edu6_studio', 'edu1_studio']);
+    const caps = { arm_joints: 5, joint_names: v1Names };
+    expect(ghostJointsFromEntry(got[0], caps, 'v1_studio')).not.toBeNull();
+    expect(ghostJointsFromEntry(got[1], caps, 'v1_studio')).toBeNull();
+    expect(ghostJointsFromEntry(got[2], caps, 'v1_studio')).toBeNull();
   });
 
   it('two headless workspaces keep isolated stores', () => {

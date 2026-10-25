@@ -180,7 +180,7 @@ describe('WorkshopPage — the mode frame', () => {
   });
 
   test.each([
-    ['omx_follower', 'omx_f'], ['edu6_studio', 'edu6'], ['edu1_studio', 'edu1'],
+    ['omx_follower', 'omx_f'], ['v1_studio', 'v1'],
   ])('the badge follows the robot: %s draws the %s arm', async (profile, glyph) => {
     mockState = baseState({}, profile);
     render(<WorkshopPage isActive />);
@@ -217,8 +217,8 @@ describe('WorkshopPage — the switch toast', () => {
     expect(modeToasts()[1][1].icon).toBe(toastIcon('arm', { profile: 'omx_full' }));
   });
 
-  test('the real-mode toast of an Edu:1 draws the Edu:1 arm, never an OMX', async () => {
-    mockState = baseState({}, 'edu1_studio');
+  test('the real-mode toast of a V1 draws the V1 arm, never an OMX', async () => {
+    mockState = baseState({}, 'v1_studio');
     render(<WorkshopPage isActive />);
     await screen.findByTestId('blockly-workspace');
     await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
@@ -226,7 +226,7 @@ describe('WorkshopPage — the switch toast', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Simulator beenden' }));
     await screen.findByTestId('right-dock');
     const icon = modeToasts()[1][1].icon;
-    expect(icon).toBe(toastIcon('arm', { profile: 'edu1_studio' }));
+    expect(icon).toBe(toastIcon('arm', { profile: 'v1_studio' }));
     expect(icon).not.toBe(toastIcon('arm', { profile: 'omx_full' }));
   });
 

@@ -65,7 +65,11 @@ export const MAX_DESTINATION_ENTRIES = 64;
 export const DESTINATION_NAME_MAX_LEN = 24;
 export const DESTINATION_KINDS = Object.freeze(['pin', 'pose']);
 export const DESTINATION_SOURCES = Object.freeze(['camera', 'capture', 'sim']);
-export const DESTINATION_ROBOT_TYPES = Object.freeze(['omx_f', 'edu6_studio', 'edu1_studio']);
+// The two legacy tags (retired arms) stay on purpose: V1 shares its joint names
+// with one of them, so a stored Position whose tag were dropped here would read
+// as untagged and draw its ghost on a V1 (ghostJointsFromEntry). Kept, the tag
+// never matches the rig's and the ghost never draws.
+export const DESTINATION_ROBOT_TYPES = Object.freeze(['omx_f', 'v1_studio', 'edu6_studio', 'edu1_studio']);
 export const DESTINATIONS_CHANGE_EVENT = 'edubotics_destinations_change';
 
 // The server's destination-name alphabet (handlers/destinations.py), capped at

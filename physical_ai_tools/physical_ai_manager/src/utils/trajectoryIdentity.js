@@ -17,10 +17,10 @@
 // small cloud-shape difference doesn't wedge a replay run. `robot_profile` (the
 // migration-035 arm-family tag, widened by 039) is carried through so the caller
 // can refuse a cross-profile replay BEFORE it reaches the runtime. Two different
-// failures, and only the first is about width: an OMX recording on an Edu:1
+// failures, and only the first is about width: an OMX recording on a V1
 // (5 arm joints -> the SAME 7-wide points) passes every width check there is and
-// simply drives the wrong arm, while an OMX 7-wide recording on an
-// edu6 rig otherwise dies later with the misleading „Aufnahme ist beschädigt.").
+// simply drives the wrong arm, while a recording of a different width otherwise
+// dies later with the misleading „Aufnahme ist beschädigt.").
 //
 // A third shape: `services/workflowApi.js::getTrajectory` returns the row with
 // the Contract-B object under `samples` ({ fps, points }). Its `points` win when
@@ -51,11 +51,11 @@ export function normalizeTrajectory(t) {
 // Canonical arm-family id for a recording tag / rig identity. An absent/NULL tag
 // is a LEGACY (pre-035) recording — always OMX by construction — so it maps to
 // 'omx_f', and an unknown rig identity likewise falls back to 'omx_f' (the
-// pre-edu6 default). A recording is replayable here only when its family matches
+// OMX default). A recording is replayable here only when its family matches
 // the current rig's.
 //
-// Compare IDS, never widths. Since the Edu:1 (migration 039) two genuinely
-// different arms share a Contract-B point width of 7, so a length-based shortcut
+// Compare IDS, never widths. The V1 and the OMX are two genuinely different
+// arms that share a Contract-B point width of 7, so a length-based shortcut
 // here would silently re-open cross-arm replay for exactly that pair.
 export function trajectoryMatchesRig(trajProfile, rigRobotType) {
   const traj = (typeof trajProfile === 'string' && trajProfile.trim()) || 'omx_f';

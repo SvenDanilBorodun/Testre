@@ -9,7 +9,7 @@
 // A robot icon (Sucher §4.10, D17): a 24-frame sprite rendered from the real
 // URDF (public/robots/*.webp, 3456 × 144). Frame 0 is the still icon;
 // `animate` sways it (steps(24), 2.4 s), never under reduced motion. Loaded
-// lazily — the images are 86–107 KB each. `reducedMotion` (boolean) lets a
+// lazily — the images are 82–107 KB each. `reducedMotion` (boolean) lets a
 // caller that already follows the media query hand its answer in: the icon
 // then opens no matchMedia subscription of its own.
 //
@@ -29,8 +29,7 @@ const SPRITES = Object.freeze({
   omx_full: 'omx_full',
   omx_follower: 'omx_f',
   omx_f: 'omx_f',
-  edu6_studio: 'edu6',
-  edu1_studio: 'edu1',
+  v1_studio: 'v1',
 });
 
 /** The sprite name for a robot profile id, or null for an unknown one; `light` is the cream variant for dark screens. */

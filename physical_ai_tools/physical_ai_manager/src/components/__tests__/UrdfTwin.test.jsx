@@ -245,7 +245,7 @@ const mockCameraPositionSet = vi.fn();
 // student grabbed the camera).
 const mockControlListeners = {};
 // How many <mesh> elements the fake URDF declares. The real assets have 8 (OMX)
-// and 10 (edu6). TWO is the minimum that separates the two invalidation paths:
+// and 9 (V1) visual meshes. TWO is the minimum that separates the two invalidation paths:
 // with one mesh, finishing it also closes the last LoadingManager item, so
 // `manager.onLoad` alone satisfied every assertion and the per-mesh
 // `needsRender` could be deleted with the whole suite still green (measured).
@@ -985,21 +985,24 @@ describe('UrdfTwin — held-object release snap/recolor', () => {
   });
 });
 
-// edu6 profile (§4.5 / plan §9). The capability manifest's urdf_asset_id selects
-// the edu6 URDF row; edu6's software WORLD frame is URDF·rotZ(π) (front = +x like
-// the OMX, per edu6_ik.py), so the URDF-native model is yawed π to render in the
-// world frame the sim objects live in — OMX gets NO yaw. With the yaw baked into
-// getWorldPosition, emitEndEffector surfaces WORLD coords by construction: a URDF
-// TCP (x, y) reads back as (−x, −y).
-describe('UrdfTwin — edu6 profile asset + world-frame yaw', () => {
-  const EDU6_CAPS = {
-    urdf_asset_id: 'edu6',
-    arm_joints: 6,
-    joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'end_gear_joint'],
+// V1 profile (the 5-DOF Feetech claw arm). The capability manifest's
+// urdf_asset_id selects the V1 URDF row; the V1's software WORLD frame is
+// URDF·rotZ(π) (front = +x like the OMX, per v1_ik.py), so the URDF-native model
+// is yawed π to render in the world frame the sim objects live in — OMX gets NO
+// yaw. With the yaw baked into getWorldPosition, emitEndEffector surfaces WORLD
+// coords by construction: a URDF TCP (x, y) reads back as (−x, −y). It is also
+// the case that proves the seam is keyed on the ASSET ID and not on the joint
+// COUNT: the V1 has 5 arm joints exactly like the OMX, so a count-based selector
+// would silently load the OMX meshes for it.
+describe('UrdfTwin — V1 profile asset + world-frame yaw', () => {
+  const V1_CAPS = {
+    urdf_asset_id: 'v1',
+    arm_joints: 5,
+    joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'RL_joint'],
   };
-  const edu6State = () => ({
+  const v1State = () => ({
     ros: { rosbridgeUrl: 'ws://student-pc:9090', rosHost: 'student-pc' },
-    tasks: { taskStatus: { capabilities: EDU6_CAPS } },
+    tasks: { taskStatus: { capabilities: V1_CAPS } },
   });
 
   test('an OMX manifest loads the omx URDF and applies NO yaw (byte-identical)', async () => {
@@ -1010,18 +1013,19 @@ describe('UrdfTwin — edu6 profile asset + world-frame yaw', () => {
     expect(mockRobot.rotation.x).toBeCloseTo(-Math.PI / 2, 12);
   });
 
-  test('an edu6 manifest selects the edu6 URDF asset and yaws the robot π', async () => {
-    mockState = edu6State();
+  test('a V1 manifest selects the V1 URDF asset and yaws the robot π', async () => {
+    mockState = v1State();
     render(<UrdfTwin />);
     await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
-    expect(mockLoadUrls.some((u) => u.includes('/edu6-urdf/edu6.urdf'))).toBe(true);
+    expect(mockLoadUrls.some((u) => u.includes('/v1-urdf/v1.urdf'))).toBe(true);
+    expect(mockLoadUrls.some((u) => u.includes('/omx-urdf/'))).toBe(false);
     expect(mockRobot.rotation.z).toBeCloseTo(Math.PI, 12);
     // The up-axis fix is unchanged; the yaw is ADDITIVE to it.
     expect(mockRobot.rotation.x).toBeCloseTo(-Math.PI / 2, 12);
   });
 
-  test('emitEndEffector reports WORLD-frame coords on the yawed edu6 asset (URDF (x,y) → (−x,−y))', async () => {
-    mockState = edu6State();
+  test('emitEndEffector reports WORLD-frame coords on the yawed V1 asset (URDF (x,y) → (−x,−y))', async () => {
+    mockState = v1State();
     // A known URDF-frame TCP; getWorldPosition models matrixWorld from the live rotation.
     mockTcpUrdf = { x: 0.15, y: 0.05, z: 0.20 };
     const onEE = vi.fn();
@@ -1030,8 +1034,8 @@ describe('UrdfTwin — edu6 profile asset + world-frame yaw', () => {
 
     const onMsg = mockSubscribe.mock.calls[0][0];
     act(() => onMsg({
-      name: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'end_gear_joint'],
-      position: [0, 0, 0, 0, 0, 0, 1.0],
+      name: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'RL_joint'],
+      position: [0, 0, 0, 0, 0, 0.5],
     }));
 
     expect(onEE).toHaveBeenCalled();
@@ -1040,56 +1044,15 @@ describe('UrdfTwin — edu6 profile asset + world-frame yaw', () => {
     expect(arg.x).toBeCloseTo(-0.15, 6);
     expect(arg.y).toBeCloseTo(-0.05, 6);
     expect(arg.z).toBeCloseTo(0.20, 6);
-    // The gripper channel is read from the edu6 end_gear_joint index (mimic driver).
-    expect(arg.gripper).toBeCloseTo(1.0, 6);
-    expect(mockSetJointValue).toHaveBeenCalledWith('end_gear_joint', 1.0);
-    expect(mockSetJointValue).toHaveBeenCalledWith('joint6', 0);
-  });
-
-  test('an un-yawed OMX asset emits the URDF/base frame unchanged (control)', async () => {
-    mockTcpUrdf = { x: 0.15, y: 0.05, z: 0.20 };
-    const onEE = vi.fn();
-    render(<UrdfTwin onEndEffector={onEE} />);
-    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
-
-    const onMsg = mockSubscribe.mock.calls[0][0];
-    act(() => onMsg({ name: ['joint1'], position: [0.1] }));
-
-    const arg = onEE.mock.calls[onEE.mock.calls.length - 1][0];
-    // No yaw → world == URDF: coords pass through unchanged.
-    expect(arg.x).toBeCloseTo(0.15, 6);
-    expect(arg.y).toBeCloseTo(0.05, 6);
-    expect(arg.z).toBeCloseTo(0.20, 6);
-  });
-});
-
-// edu1 profile ("Edu:1", the 5-DOF Feetech claw arm). Same seam as edu6, but it
-// is the case that proves the seam is keyed on the ASSET ID and not on the joint
-// COUNT: edu1 has 5 arm joints exactly like the OMX, so a count-based selector
-// would silently load the OMX meshes for it.
-describe('UrdfTwin — edu1 profile asset', () => {
-  const EDU1_CAPS = {
-    urdf_asset_id: 'edu1',
-    arm_joints: 5,
-    joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'RL_joint'],
-  };
-  const edu1State = () => ({
-    ros: { rosbridgeUrl: 'ws://student-pc:9090', rosHost: 'student-pc' },
-    tasks: { taskStatus: { capabilities: EDU1_CAPS } },
-  });
-
-  test('an edu1 manifest selects the edu1 URDF asset and yaws the robot π', async () => {
-    mockState = edu1State();
-    render(<UrdfTwin />);
-    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
-    expect(mockLoadUrls.some((u) => u.includes('/edu1-urdf/edu1.urdf'))).toBe(true);
-    // Its reachable half-disc is on URDF −x too, so it is yawed like the edu6.
-    expect(mockRobot.rotation.z).toBeCloseTo(Math.PI, 12);
-    expect(mockRobot.rotation.x).toBeCloseTo(-Math.PI / 2, 12);
+    // The gripper channel is read from the V1's RL_joint (the second blade,
+    // LF_joint, is a URDF <mimic> urdf-loader drives itself).
+    expect(arg.gripper).toBeCloseTo(0.5, 6);
+    expect(mockSetJointValue).toHaveBeenCalledWith('RL_joint', 0.5);
+    expect(mockSetJointValue).toHaveBeenCalledWith('joint5', 0);
   });
 
   test('the claw channel is read from RL_joint, not from a hardcoded name', async () => {
-    mockState = edu1State();
+    mockState = v1State();
     const onEE = vi.fn();
     render(<UrdfTwin onEndEffector={onEE} />);
     await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
@@ -1106,6 +1069,22 @@ describe('UrdfTwin — edu1 profile asset', () => {
     expect(mockSetJointValue).toHaveBeenCalledWith('joint4', 0.90);
     // …and never the OMX gripper name, which the count-shaped bug would use.
     expect(mockSetJointValue).not.toHaveBeenCalledWith('gripper_joint_1', 0.9);
+  });
+
+  test('an un-yawed OMX asset emits the URDF/base frame unchanged (control)', async () => {
+    mockTcpUrdf = { x: 0.15, y: 0.05, z: 0.20 };
+    const onEE = vi.fn();
+    render(<UrdfTwin onEndEffector={onEE} />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+
+    const onMsg = mockSubscribe.mock.calls[0][0];
+    act(() => onMsg({ name: ['joint1'], position: [0.1] }));
+
+    const arg = onEE.mock.calls[onEE.mock.calls.length - 1][0];
+    // No yaw → world == URDF: coords pass through unchanged.
+    expect(arg.x).toBeCloseTo(0.15, 6);
+    expect(arg.y).toBeCloseTo(0.05, 6);
+    expect(arg.z).toBeCloseTo(0.20, 6);
   });
 });
 
@@ -1601,14 +1580,14 @@ describe('UrdfTwin — the joint stream is blended, not snapped', () => {
     expect(mockRobots).toHaveLength(1);
     expect(mockRobots[0].applied).toEqual([['joint1', 0.25], ['joint2', -0.4]]);
 
-    // The manifest switches to the edu6 asset → a new URDF, a new model. Same
+    // The manifest switches to the V1 asset → a new URDF, a new model. Same
     // joint VALUES on the wire (joint1/joint2 exist on both arms), no new message.
     mockState = {
       ...mockState,
       tasks: { taskStatus: { capabilities: {
-        urdf_asset_id: 'edu6',
-        arm_joints: 6,
-        joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'end_gear_joint'],
+        urdf_asset_id: 'v1',
+        arm_joints: 5,
+        joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'RL_joint'],
       } } },
     };
     rerender(<UrdfTwin />);

@@ -122,9 +122,9 @@ const SIM_JOINT_THROTTLE_MS = 20;
 
 // Strict-vertical reach shape SHOWN TO THE STUDENT (the graspable table-top
 // ring, or the sector of an arm that reaches only part of the circle).
-// PROFILE-DRIVEN (edu6 §4.5; N6/N11) via reachAnnulus(caps): OMX 0.10–0.25 m
-// (fallback without a manifest 0.10–0.28 m), edu6 0.09–0.21 m, Edu:1
-// 0.07–0.35 m within ±90°. Objects must sit inside it to be graspable.
+// PROFILE-DRIVEN (N6/N11) via reachAnnulus(caps): OMX 0.10–0.25 m (fallback
+// without a manifest 0.10–0.28 m), V1 0.10–0.34 m within ±90°. Objects must sit
+// inside it to be graspable.
 // The radii come from ./simConstants so the 2D SVG ring and the 3D twin's ring
 // never desync — and so this is NOT the solver's wrist-centre span (module note).
 
@@ -239,8 +239,8 @@ function svgToBase(px, py) {
 }
 // Clamp a base point into the reach shape so every placement is reachable:
 // the radius SNAPS onto the ring and — for an arm that reaches only a sector,
-// the Edu:1's ±90° (N6/N11 of the 2026-10-18 semantics round) — the bearing
-// onto the nearest sector edge. The shape is PROFILE-DRIVEN (edu6 §4.5):
+// the V1's ±90° (N6/N11 of the 2026-10-18 semantics round) — the bearing
+// onto the nearest sector edge. The shape is PROFILE-DRIVEN:
 // callers pass reachAnnulus(caps); without one the OMX constants apply.
 function clampToAnnulus(x, y, annulus) {
   return clampIntoReach(x, y, annulus);
@@ -315,8 +315,8 @@ function SimScene({
     () => (scene && Array.isArray(scene.objects) ? scene.objects : []),
     [scene],
   );
-  // Profile geometry (edu6 §4.5): annulus radii + the grasp-classifier band.
-  // caps==null / an OMX manifest resolve to the pre-edu6 literals exactly.
+  // Profile geometry: annulus radii + the grasp-classifier band.
+  // caps==null / an OMX manifest resolve to the OMX literals exactly.
   const caps = useSelector((st) => (st.tasks && st.tasks.taskStatus ? st.tasks.taskStatus.capabilities : null));
   // Defensive like the caps selector above: several tests mount SimScene with a
   // partial store, and an absent slice must degrade to "no subscription", not throw.
@@ -1039,7 +1039,7 @@ function SimScene({
         aria-label="Simulator-Tisch — Objekte, Sperrzonen und Ziele platzieren"
       >
         {/* Reach shape (graspable ring, or the sector of an arm that
-            reaches only part of the circle — the Edu:1's ±90°) */}
+            reaches only part of the circle — the V1's ±90°) */}
         {annulus.sector ? (
           <path
             data-testid="reach-sector"

@@ -1072,8 +1072,8 @@ describe('TeachOverlay — Ziel by touch: too high asks „Als Position speicher
     expect(screen.queryByRole('alertdialog')).toBeNull();
     expect(mockStore.add.mock.calls[0][0]).toMatchObject({ kind: 'pin', z: 0.07 });
     unmount();
-    // Edu:6: the TCP is the fingertip, so the same 0.07 m is 70 mm up.
-    render(<TeachOverlay {...baseProps({ kind: 'ziel', caps: { urdf_asset_id: 'edu6', arm_joints: 6 } })} />);
+    // V1: the TCP is the fingertip, so the same 0.07 m is 70 mm up.
+    render(<TeachOverlay {...baseProps({ kind: 'ziel', caps: { urdf_asset_id: 'v1', arm_joints: 5 } })} />);
     act(() => { mockHook.props.onCapture({ kind: 'ziel', name: 'Ziel 2', response: { ...HIGH, world_z: 0.07 } }); });
     expect(within(screen.getByRole('alertdialog')).getByText(formatDe(DE.TEACH_ZIEL_TOO_HIGH, '7,0'))).toBeInTheDocument();
   });
@@ -1456,7 +1456,7 @@ describe('TeachOverlay — leader status unknown (R7)', () => {
     expect(mockHook.props.leaderStatusUnknown).toBe(false);
   });
 
-  test.each(['omx_follower', 'edu6_studio', 'edu1_studio'])('%s (has_leader false): never blocked, no notice', () => {
+  test.each(['omx_follower', 'v1_studio'])('%s (has_leader false): never blocked, no notice', () => {
     withSnapshot({ state: 'fest' });
     const { unmount: unmountRec } = render(<TeachOverlay {...baseProps({ caps: { has_leader: false }, rsBridge: PENDING })} />);
     expect(notice()).toBeNull();

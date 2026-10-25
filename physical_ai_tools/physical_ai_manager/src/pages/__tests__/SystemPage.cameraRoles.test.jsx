@@ -5,7 +5,7 @@
 //
 // The camera-role seam: which roles Schritt C OFFERS, and which it SENDS.
 //
-// The defect this fences: `edu6_studio` declares exactly ONE camera topic
+// The defect this fences: `v1_studio` declares exactly ONE camera topic
 // server-side (`scene:/scene/image_raw/compressed`), but this page rendered a
 // hardcoded gripper/scene pair on every profile, so a student could name the
 // only camera „Greifer". That publishes /gripper/image_raw/compressed, which
@@ -64,21 +64,15 @@ const PROFILES = [
     camera_roles: ['scene', 'gripper'],
   },
   {
-    id: 'edu6_studio',
-    display_de: 'EduBotics 6-Achs – Roboter Studio',
-    scan_requires_leader: false,
-    camera_roles: ['scene'],
-  },
-  {
-    id: 'edu1_studio',
-    display_de: 'Edu:1 – Roboter Studio',
+    id: 'v1_studio',
+    display_de: 'V1 – Roboter Studio',
     scan_requires_leader: false,
     camera_roles: ['scene'],
   },
 ];
 
-// Derived, never restated: the degrade sweep below was a hardcoded triple and
-// stopped covering `edu1_studio` the day it was added, silently.
+// Derived, never restated: the degrade sweep below was once a hardcoded list
+// and stopped covering a new profile the day it was added, silently.
 const ALL_PROFILE_IDS = PROFILES.map((p) => [p.id]);
 
 const CAM = { path: '/dev/video0', name: 'Innomaker' };
@@ -154,10 +148,10 @@ function roleOptions(camName = CAM.name) {
     .map((o) => o.textContent);
 }
 
-// ── the behavioural delta: BOTH Feetech arms ────────────────────────────────
+// ── the behavioural delta: the Feetech arm ──────────────────────────────────
 
 describe('Schritt C offers only the roles the profile declares', () => {
-  it.each([['edu6_studio'], ['edu1_studio']])(
+  it.each([['v1_studio']])(
     'offers „Szene" alone on %s — never „Greifer"',
     async (id) => {
       await renderWithCameras(statusFixture({ robot_type: id }));
@@ -165,14 +159,14 @@ describe('Schritt C offers only the roles the profile declares', () => {
     }
   );
 
-  it('cannot POST „gripper" on edu6_studio even if the state still holds it', async () => {
+  it('cannot POST „gripper" on v1_studio even if the state still holds it', async () => {
     // The reachable sequence: assign Greifer on omx_full, THEN switch type.
     // `roles` is component state and survives the switch; the filter is what
     // stops the stale value reaching the agent.
     await renderWithCameras(statusFixture());
     await userEvent.selectOptions(screen.getByLabelText(`Rolle für ${CAM.name}`), 'gripper');
 
-    mockPi.agentStatus = statusFixture({ robot_type: 'edu6_studio' });
+    mockPi.agentStatus = statusFixture({ robot_type: 'v1_studio' });
     await scanCameras();
 
     await userEvent.click(screen.getByRole('button', { name: 'Zuordnung speichern' }));
@@ -191,7 +185,7 @@ describe('Schritt C offers only the roles the profile declares', () => {
     await userEvent.selectOptions(screen.getByLabelText(`Rolle für ${CAM.name}`), 'gripper');
     expect(screen.getByLabelText(`Rolle für ${CAM.name}`)).toHaveValue('gripper');
 
-    mockPi.agentStatus = statusFixture({ robot_type: 'edu6_studio' });
+    mockPi.agentStatus = statusFixture({ robot_type: 'v1_studio' });
     await scanCameras();
     const sel = screen.getByLabelText(`Rolle für ${CAM.name}`);
     await waitFor(() => expect(sel).toHaveValue(''));
@@ -281,9 +275,9 @@ describe('an agent that sends no camera_roles degrades to both roles', () => {
   ])('never renders an empty <select> — %s', async (_label, roles) => {
     await renderWithCameras(
       statusFixture({
-        robot_type: 'edu6_studio',
+        robot_type: 'v1_studio',
         robot_profiles: PROFILES.map((p) =>
-          p.id === 'edu6_studio' ? { ...p, camera_roles: roles } : p
+          p.id === 'v1_studio' ? { ...p, camera_roles: roles } : p
         ),
       })
     );
@@ -293,9 +287,9 @@ describe('an agent that sends no camera_roles degrades to both roles', () => {
   it('honours a PARTIALLY valid list — the known roles only', async () => {
     await renderWithCameras(
       statusFixture({
-        robot_type: 'edu6_studio',
+        robot_type: 'v1_studio',
         robot_profiles: PROFILES.map((p) =>
-          p.id === 'edu6_studio' ? { ...p, camera_roles: ['scene', 'phone', 7] } : p
+          p.id === 'v1_studio' ? { ...p, camera_roles: ['scene', 'phone', 7] } : p
         ),
       })
     );

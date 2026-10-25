@@ -36,10 +36,10 @@ const STEP_PRESETS = [
 ];
 
 // WorkshopJog contract: index 0..n-1 = the arm joints, index n = the gripper
-// channel. The rows are PROFILE-DRIVEN (edu6 §4.5): n from the capability
-// manifest (OMX 5 → the exact pre-edu6 list incl. the 'Greifer-Drehung'
-// degree row; edu6 6 → 'Gelenk 1..6' + a millimetre 'Greifer öffnen/
-// schließen' row via gripper_mm_per_rad).
+// channel. The rows are PROFILE-DRIVEN: n from the capability manifest
+// (OMX and V1 5 → 'Gelenk 1..5' + the 'Greifer-Drehung' degree row); a profile
+// that sends gripper_mm_per_rad gets a millimetre 'Greifer öffnen/schließen'
+// row instead (no shipped profile does today).
 function buildJointRows(geo) {
   const rows = [];
   for (let i = 0; i < geo.armJoints; i += 1) {

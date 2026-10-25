@@ -157,7 +157,7 @@ export const TEACH_MIN_POINTS = 2;
 // A /workshop/replay drive = lead-in + the take. The lead-in is build_segment
 // stretched to maxΔq × 15/8 / (0.6 × v_limit) over a 1.5 s floor:
 // ≤ 2π × 1.875 / (0.6 × 4.72) = 4.16 s on every shipped profile
-// (v_limit 4.8 OMX, 5.45 edu6, 4.72 edu1).
+// (v_limit 4.8 OMX, 4.72 V1).
 export const TEACH_ROBOT_PREVIEW_LEAD_IN_MAX_MS = 4500;
 // The SLOWEST shipped v_limit. A lower number only makes the estimate longer
 // (the floor only ever extends), so it must be ≤ every profile's

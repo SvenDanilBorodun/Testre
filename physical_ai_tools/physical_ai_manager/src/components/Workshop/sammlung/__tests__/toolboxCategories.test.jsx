@@ -477,7 +477,7 @@ describe('refreshIfOpen', () => {
     expect(refreshIfOpen(ws)).toBe(true);
     expect(refresh).toHaveBeenCalledTimes(1);
     // Provider changes refresh the open group, coalesced into one rebuild.
-    provider.setSnapshot({ robotType: 'edu6_studio' });
+    provider.setSnapshot({ robotType: 'v1_studio' });
     provider.setSnapshot({ robotType: 'omx_f' });
     expect(refresh).toHaveBeenCalledTimes(1);
     // Wait on the spy, never on a fixed sleep: under full-suite load a 200 ms

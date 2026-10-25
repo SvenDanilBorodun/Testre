@@ -9,11 +9,12 @@
  */
 
 // Roboter Studio — Blockly → real-Python code generator (read-only "Code"
-// preview). Maps every `edubotics_*` block to an English `robot.*` API call;
-// the built-in Blockly blocks (controls_*, logic_*, math_*, lists_*, text*,
-// variables_*, procedures_*) are handled for free by Blockly's own
-// `pythonGenerator.forBlock` entries, which register themselves as a side
-// effect of importing `blockly/python`.
+// preview). Renders every `edubotics_*` block that has a robot_api row as the
+// text API's own `robot.*` call, from that row (see registerForBlocks), so the
+// preview is a program the robot would run. The built-in Blockly blocks
+// (controls_*, logic_*, math_*, lists_*, text*, variables_*, procedures_*) are
+// handled for free by Blockly's own `pythonGenerator.forBlock` entries, which
+// register themselves as a side effect of importing `blockly/python`.
 //
 // LAZY CHUNK: `blockly/python` (the Python generator + the full standard-block
 // generator set, ~hundreds of KB) is pulled in via a DYNAMIC `import()` so it
@@ -24,9 +25,14 @@
 // Docs: https://docs.blockly.com/guides/create-custom-blocks/code-generation/block-code/)
 //
 // NOTE: this module is a PURE DISPLAY path — the produced Python is never
-// executed. The real program runs server-side through the Blockly-JSON
-// interpreter (workflow/interpreter.py); this is only a human-readable mirror
-// of the block tree, keyed on the SAME block type ids + field/input NAMEs.
+// executed by the editor (test_preview_matches_api.py checks every robot call
+// in it against the server's table, test_blockly_conformance.py runs the
+// built-in blocks' preview with CPython). The real program runs server-side
+// through the Blockly-JSON interpreter (workflow/interpreter.py); this is a
+// human-readable mirror of the block tree, keyed on the SAME block type ids +
+// field/input NAMEs.
+
+import robotApi from './code/robot_api.json';
 
 // ── Python-literal + identifier helpers ──────────────────────────────────────
 
@@ -51,16 +57,6 @@ function num(value, fallback = '0') {
   return Number.isFinite(n) ? String(n) : fallback;
 }
 
-// A pin coordinate label is either a formatted number (e.g. "0.123") or the
-// "—" un-pinned sentinel; emit the number when present, else `None`.
-function coord(value) {
-  if (value == null) return 'None';
-  const s = String(value).trim();
-  if (s === '') return 'None';
-  const n = Number(s);
-  return Number.isFinite(n) ? String(n) : 'None';
-}
-
 // Slugify any label/name to a safe Python identifier fragment for the
 // `def when_…():` hat wrappers (lower-case, umlauts transliterated, every other
 // non-word run → `_`, never empty, never leading-digit).
@@ -77,6 +73,12 @@ function slug(value) {
   return t;
 }
 
+// The only fields (and the pin's one dummy input) of a row block that carry
+// no robot_api parameter: the per-move „Tempo" dropdown (rendered as a German
+// comment), the pin's „fahre dorthin" row and button, and the reference
+// block's „Ziel"/„Position" label. pythonCodeGen.api.cases.test.js holds it.
+export const BLOCK_ONLY_FIELDS = new Set(['GESCHWINDIGKEIT', 'DRIVE_TO_ROW', 'DRIVE_BTN', 'KIND']);
+
 // Hat (top-only "wenn …") blocks. Their body is the NEXT-connection chain, not
 // a statement INPUT, so they're wrapped in a `def when_…():` at the top level
 // (see generateHat) — NOT via a forBlock entry. They can only ever be
@@ -88,67 +90,103 @@ export const HAT_TYPES = new Set([
 ]);
 
 // ── Per-block Python generators (the block → robot.* map) ────────────────────
+// ONE row-driven generator for every block that has a robot_api row (F8 of the
+// 2026-10-18 semantics round; robot_api.py is the only source for robot
+// blocks): the call is `robot.<row.name>(…)`, and each argument is the input or
+// field named `arg_key.upper()`, emitted by the PARAMETER'S KIND — a number
+// unquoted, a name or a text quoted, an empty input `None`. A hand-written
+// map drifted from the API (`tempo=` keywords the API does not take,
+// `robot.broadcast`, a pin's coordinates as text). The fields that carry no
+// parameter are BLOCK_ONLY_FIELDS; pythonCodeGen.api.cases.test.js holds that
+// set and test_preview_matches_api.py judges every rendered call with the
+// server's own validator.
+//
 // Registered ONCE onto the shared pythonGenerator singleton after the dynamic
 // import resolves. Statement entries return a string ending in "\n"; value
 // entries return `[code, Order]`.
+
+const ROWS = (robotApi.methods || []).filter((m) => typeof m.block_type === 'string');
+
+// The comment a pin gets when one of its coordinates is not set yet. It goes
+// at the END of the line: a comment inside the argument list would comment out
+// the rest of the call.
+const UNPINNED_COMMENT = 'nicht gepinnt';
+
+// A field's value as the literal of a parameter of `kind`.
+function fieldLiteral(kind, value) {
+  if (kind === 'float' || kind === 'int') {
+    if (typeof value === 'number') return Number.isFinite(value) ? String(value) : 'None';
+    const s = String(value == null ? '' : value).trim();
+    if (s === '') return 'None';
+    const n = Number(s);
+    return Number.isFinite(n) ? String(n) : 'None';
+  }
+  return pyStr(value);
+}
+
+// One line of German comment, never a line break a name could smuggle in.
+function commentText(value) {
+  return String(value == null ? '' : value).replace(/[\r\n]+/g, ' ');
+}
+
+function rowGenerator(row, generator, Order) {
+  return (block) => {
+    const args = [];
+    const notes = [];
+    let positional = true;
+    let unpinned = false;
+    for (const p of row.params) {
+      const key = String(p.arg_key || p.name).toUpperCase();
+      const input = block.getInput(key);
+      let code;
+      if (input && input.connection) {
+        code = generator.valueToCode(block, key, Order.NONE) || 'None';
+      } else if (block.getField(key)) {
+        code = fieldLiteral(p.kind, block.getFieldValue(key));
+        if (code === 'None' && (p.kind === 'float' || p.kind === 'int')) unpinned = true;
+      } else if (p.required) {
+        code = 'None';
+      } else {
+        // An optional parameter the block has no field for keeps the API's
+        // default; every later argument then goes by its name.
+        positional = false;
+        continue;
+      }
+      args.push(positional ? code : `${p.name}=${code}`);
+    }
+    if (unpinned && row.block_type === 'edubotics_destination_pin') notes.push(UNPINNED_COMMENT);
+    const tempo = block.getField('GESCHWINDIGKEIT');
+    if (tempo && block.getFieldValue('GESCHWINDIGKEIT') !== 'global') {
+      const label = typeof tempo.getText === 'function' ? tempo.getText() : block.getFieldValue('GESCHWINDIGKEIT');
+      notes.push(`mit Tempo „${commentText(label)}“`);
+    }
+    const call = `robot.${row.name}(${args.join(', ')})`;
+    if (row.table === 'value') return [call, Order.FUNCTION_CALL];
+    return `${call}${notes.length ? `  # ${notes.join(', ')}` : ''}\n`;
+  };
+}
+
+// The hats of the workspace being generated (generateWorkspace sets it before
+// any block is generated): the function names per broadcast message, so a
+// „sende Nachricht" calls the hats that wait for it.
+let currentHats = { byEvent: new Map() };
+
 function registerForBlocks(generator, Order) {
   const F = generator.forBlock;
-  const val = (block, name, fallback = 'None') =>
-    generator.valueToCode(block, name, Order.NONE) || fallback;
-  // Render a non-default per-move „mit Tempo" field as a Python kwarg so the
-  // preview matches the run (the runtime honours `geschwindigkeit`).
-  const tempoOf = (block) => {
-    const t = block.getFieldValue('GESCHWINDIGKEIT');
-    return t && t !== 'global' ? t : null;
+  for (const row of ROWS) F[row.block_type] = rowGenerator(row, generator, Order);
+
+  // ── Events (Ereignisse) ────────────────────────────────────────────────
+  // A broadcast has no text-API row: a text program uses functions. In the
+  // preview it CALLS the hats that wait for its message (defined above it as
+  // `def when_…():`); on the robot they run in their own thread.
+  F.edubotics_broadcast = (b) => {
+    const name = String(b.getFieldValue('EVENT_NAME') == null ? '' : b.getFieldValue('EVENT_NAME')).trim();
+    const fns = currentHats.byEvent.get(name) || [];
+    if (!fns.length) return `pass  # Nachricht „${commentText(name)}“ — kein „wenn“-Block wartet darauf\n`;
+    return fns.map((fn) => `${fn}()  # Nachricht „${commentText(name)}“\n`).join('');
   };
-  const kw = (t) => (t ? `, tempo='${t}'` : '');
 
-  // ── Motion (the „Arm“ category) ─────────────────────────────────────────
-  F.edubotics_home = () => 'robot.home()\n';
-  F.edubotics_open_gripper = () => 'robot.open_gripper()\n';
-  F.edubotics_close_gripper = () => 'robot.close_gripper()\n';
-  F.edubotics_move_to = (b) => `robot.move_to(${val(b, 'DESTINATION')}${kw(tempoOf(b))})\n`;
-  F.edubotics_pickup = (b) => `robot.pickup(${val(b, 'TARGET')}${kw(tempoOf(b))})\n`;
-  F.edubotics_drop_at = (b) => `robot.drop_at(${val(b, 'DESTINATION')}${kw(tempoOf(b))})\n`;
-  F.edubotics_wait_seconds = (b) => `robot.wait(${val(b, 'SECONDS', '0')})\n`;
-  // Grasp-split primitives (act on a Greifziel value, except lift()).
-  F.edubotics_move_above = (b) => `robot.move_above(${val(b, 'ZIEL')}${kw(tempoOf(b))})\n`;
-  F.edubotics_descend_to = (b) => `robot.descend_to(${val(b, 'ZIEL')})\n`;
-  F.edubotics_close_on_object = (b) => `robot.close_on_object(${val(b, 'ZIEL')})\n`;
-  F.edubotics_lift = (b) => `robot.lift(${tempoOf(b) ? `tempo='${tempoOf(b)}'` : ''})\n`;
-  // Batch 2b — replay a recorded hand-guided motion by name.
-  F.edubotics_replay_trajectory = (b) => `robot.replay(${pyStr(b.getFieldValue('NAME'))})\n`;
-
-  // ── Perception (Wahrnehmung) ───────────────────────────────────────────
-  F.edubotics_grasp_object = (b) =>
-    `robot.grasp(${pyStr(b.getFieldValue('OBJECT_TYPE'))})\n`;
-  F.edubotics_see_object = (b) => [
-    `robot.sees(${pyStr(b.getFieldValue('OBJECT_TYPE'))})`,
-    Order.FUNCTION_CALL,
-  ];
-  F.edubotics_count_object = (b) => [
-    `robot.count(${pyStr(b.getFieldValue('OBJECT_TYPE'))})`,
-    Order.FUNCTION_CALL,
-  ];
-  F.edubotics_wait_until_object_seen = (b) => [
-    `robot.wait_until_seen(${pyStr(b.getFieldValue('OBJECT_TYPE'))}, `
-      + `${num(b.getFieldValue('TIMEOUT'), '10')})`,
-    Order.FUNCTION_CALL,
-  ];
-  F.edubotics_wait_until_held = (b) => [
-    `robot.wait_until_held(${num(b.getFieldValue('TIMEOUT'), '10')})`,
-    Order.FUNCTION_CALL,
-  ];
-  F.edubotics_find_object = (b) => [
-    `robot.find(${pyStr(b.getFieldValue('OBJECT_TYPE'))})`,
-    Order.FUNCTION_CALL,
-  ];
-  F.edubotics_object_position = (b) => [
-    `robot.object_position(${val(b, 'ZIEL')})`,
-    Order.FUNCTION_CALL,
-  ];
-  F.edubotics_grasp_held = () => ['robot.is_holding()', Order.FUNCTION_CALL];
-  F.edubotics_mark_done = (b) => `robot.mark_done(${val(b, 'ZIEL')})\n`;
+  // ── Control (Logik) ────────────────────────────────────────────────────
   // C-block: repeat the body while the object stays visible. (The optional
   // „höchstens N Mal" MAX_REPS cap is a runtime backstop and is not rendered
   // in this preview.)
@@ -156,48 +194,6 @@ function registerForBlocks(generator, Order) {
     const body = g.statementToCode(b, 'DO') || g.PASS;
     return `while robot.sees(${pyStr(b.getFieldValue('OBJECT_TYPE'))}):\n${body}`;
   };
-
-  // ── Destinations (Ziele) ───────────────────────────────────────────────
-  F.edubotics_destination_pin = (b) =>
-    `robot.pin(${pyStr(b.getFieldValue('NAME'))}, ${coord(b.getFieldValue('X'))}, `
-      + `${coord(b.getFieldValue('Y'))}, ${coord(b.getFieldValue('Z'))})\n`;
-  F.edubotics_destination_current = (b) =>
-    `robot.pin_current(${pyStr(b.getFieldValue('NAME'))})\n`;
-  // VALUE reference to a pinned destination → the pinned NAME as a string
-  // literal, so it slots into move_to(...) / drop_at(...).
-  F.edubotics_destination_ref = (b) => [
-    pyStr(b.getFieldValue('NAME')),
-    Order.ATOMIC,
-  ];
-
-  // ── Output (Ausgabe) ───────────────────────────────────────────────────
-  F.edubotics_log = (b) => `robot.log(${val(b, 'MESSAGE', '""')})\n`;
-  F.edubotics_play_sound = () => 'robot.beep()\n';
-  F.edubotics_speak_de = (b) => `robot.speak(${val(b, 'TEXT', '""')})\n`;
-  F.edubotics_play_tone = (b) =>
-    `robot.tone(${num(b.getFieldValue('FREQ'), '880')}, `
-      + `${num(b.getFieldValue('SECONDS'), '0.25')})\n`;
-  F.edubotics_toast = (b) =>
-    `robot.toast(${val(b, 'TEXT', '""')}, level=${pyStr(b.getFieldValue('LEVEL'))}, `
-      + `seconds=${num(b.getFieldValue('SECONDS'), '3')})\n`;
-
-  // ── Counters (Zähler) ──────────────────────────────────────────────────
-  F.edubotics_counter_reset = (b) =>
-    `robot.counter_reset(${pyStr(b.getFieldValue('NAME'))})\n`;
-  F.edubotics_counter_add = (b) =>
-    `robot.counter_add(${pyStr(b.getFieldValue('NAME'))})\n`;
-  F.edubotics_counter_get = (b) => [
-    `robot.counter_get(${pyStr(b.getFieldValue('NAME'))})`,
-    Order.FUNCTION_CALL,
-  ];
-
-  // ── Events (Ereignisse) ────────────────────────────────────────────────
-  // broadcast is a plain statement; the matching when_* hats are wrapped at
-  // the top level (generateHat) into `def when_…():`.
-  F.edubotics_broadcast = (b) =>
-    `robot.broadcast(${pyStr(b.getFieldValue('EVENT_NAME'))})\n`;
-
-  // ── Control (Logik) ────────────────────────────────────────────────────
   F.edubotics_forever = (b, g) => {
     const body = g.statementToCode(b, 'DO') || g.PASS;
     return `while True:\n${body}`;
@@ -208,25 +204,45 @@ function registerForBlocks(generator, Order) {
   };
 }
 
-// Header line for a `when …` hat, derived from its fields.
-function hatHeader(block) {
+// The function name a hat gets (today's naming): `when_<message>`,
+// `when_<type>_seen`, `when_<counter>_over_<n>`.
+function hatBaseName(block) {
   switch (block.type) {
     case 'edubotics_when_broadcast':
-      return `def when_${slug(block.getFieldValue('EVENT_NAME'))}():`;
+      return `when_${slug(block.getFieldValue('EVENT_NAME'))}`;
     case 'edubotics_when_object_seen':
-      return `def when_${slug(block.getFieldValue('OBJECT_TYPE'))}_seen():`;
+      return `when_${slug(block.getFieldValue('OBJECT_TYPE'))}_seen`;
     case 'edubotics_when_counter_gt':
-      return `def when_${slug(block.getFieldValue('NAME'))}_over_`
-        + `${num(block.getFieldValue('N'), '0')}():`;
+      return `when_${slug(block.getFieldValue('NAME'))}_over_${num(block.getFieldValue('N'), '0')}`;
     default:
-      return 'def when_handler():';
+      return 'when_handler';
+  }
+}
+
+function fieldText(block, name) {
+  const field = block.getField(name);
+  if (field && typeof field.getText === 'function') return field.getText();
+  return block.getFieldValue(name);
+}
+
+// The German line above a hat's `def`: it is not called by the program, it
+// runs by itself.
+function hatComment(block) {
+  switch (block.type) {
+    case 'edubotics_when_broadcast':
+      return `# Läuft von selbst, sobald die Nachricht „${commentText(String(block.getFieldValue('EVENT_NAME') || '').trim())}“ gesendet wird.`;
+    case 'edubotics_when_object_seen':
+      return `# Läuft von selbst, sobald ein neues Objekt „${commentText(fieldText(block, 'OBJECT_TYPE'))}“ zu sehen ist.`;
+    case 'edubotics_when_counter_gt':
+      return `# Läuft von selbst, sobald der Zähler „${commentText(block.getFieldValue('NAME'))}“ größer als ${num(block.getFieldValue('N'), '0')} ist.`;
+    default:
+      return '# Läuft von selbst.';
   }
 }
 
 // Emit a hat block as a `def when_…():` whose body is its NEXT-connection
 // chain, indented one level. Empty body → `pass`.
-function generateHat(block, generator) {
-  if (typeof block.isEnabled === 'function' && !block.isEnabled()) return '';
+function generateHat(block, fnName, generator) {
   const next = typeof block.getNextBlock === 'function' ? block.getNextBlock() : null;
   let body = next ? generator.blockToCode(next) : '';
   if (Array.isArray(body)) body = body[0];
@@ -235,13 +251,14 @@ function generateHat(block, generator) {
   } else {
     body = `${generator.prefixLines(body.replace(/\n+$/, ''), generator.INDENT)}\n`;
   }
-  return `${hatHeader(block)}\n${body}`;
+  return `${hatComment(block)}\ndef ${fnName}():\n${body}`;
 }
 
 // Replicates pythonGenerator.workspaceToCode (init → top-block loop → finish →
 // whitespace cleanup) but routes hat blocks through generateHat so their
 // next-chain body is wrapped in a function instead of emitted flat. Hats are
-// rendered FIRST (as defs), then the remaining top-level statements.
+// rendered FIRST (as defs), then the remaining top-level statements. The
+// preview starts with `import robot`, like a text program.
 //
 // ORDER: `getTopBlocks(false)` — CREATION order, deliberately NOT the spatial
 // `true`. Execution order is the SERVER's contract and it follows the
@@ -261,23 +278,46 @@ function generateHat(block, generator) {
 // already-saved workflow, so the preview is the side that moves.
 function generateWorkspace(workspace, generator) {
   generator.init(workspace);
+  // An import definition: `finish` puts every import first, this one before
+  // any Blockly adds (`from numbers import Number`, `import math`).
+  generator.definitions_.import_robot = 'import robot';
   const top = typeof workspace.getTopBlocks === 'function'
     ? workspace.getTopBlocks(false)
     : [];
+  // Name every enabled hat first, so a broadcast anywhere can call it.
+  const hats = [];
+  const used = new Set();
+  const byEvent = new Map();
+  for (const block of top) {
+    if (!HAT_TYPES.has(block.type)) continue;
+    if (typeof block.isEnabled === 'function' && !block.isEnabled()) continue;
+    const base = hatBaseName(block);
+    let fn = base;
+    for (let k = 2; used.has(fn); k += 1) fn = `${base}_${k}`;
+    used.add(fn);
+    hats.push([block, fn]);
+    if (block.type === 'edubotics_when_broadcast') {
+      const name = String(block.getFieldValue('EVENT_NAME') == null ? '' : block.getFieldValue('EVENT_NAME')).trim();
+      if (!byEvent.has(name)) byEvent.set(name, []);
+      byEvent.get(name).push(fn);
+    }
+  }
+  currentHats = { byEvent };
   const defs = [];
   const main = [];
-  for (const block of top) {
-    if (HAT_TYPES.has(block.type)) {
-      const hat = generateHat(block, generator);
-      if (hat) defs.push(hat);
-      continue;
+  try {
+    for (const [block, fn] of hats) defs.push(generateHat(block, fn, generator));
+    for (const block of top) {
+      if (HAT_TYPES.has(block.type)) continue;
+      let code = generator.blockToCode(block);
+      if (Array.isArray(code)) {
+        // A naked value block left at the top level — turn it into a statement.
+        code = generator.scrubNakedValue(code[0]);
+      }
+      if (code) main.push(code);
     }
-    let code = generator.blockToCode(block);
-    if (Array.isArray(code)) {
-      // A naked value block left at the top level — turn it into a statement.
-      code = generator.scrubNakedValue(code[0]);
-    }
-    if (code) main.push(code);
+  } finally {
+    currentHats = { byEvent: new Map() };
   }
   let code = [...defs, ...main].join('\n');
   code = generator.finish(code);

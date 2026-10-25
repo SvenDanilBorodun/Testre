@@ -356,6 +356,39 @@ describe('WorkshopPage — sim toggle swaps only the right region', () => {
   });
 });
 
+describe('WorkshopPage — Lernpfade are real-rig only (N1, owner decision Q5)', () => {
+  // Fix round 2 (owner decision): the sentence lives in the simulator's own
+  // „Test im Simulator." notice (SimScene, pinned in SimScene.test.jsx), and
+  // the studio header looks exactly as it did before this round — no note and
+  // no disabled „Lernpfad" key there, in either mode (the header measured
+  // against main at 900–1920 px, with and without the leader bridge).
+  test('the header carries no Lernpfad note and no Lernpfad key, in either mode', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    const header = screen.getByRole('banner');
+    const assertClean = () => {
+      expect(within(header).queryByText(DE.TUTORIAL_REAL_ONLY)).toBeNull();
+      expect(within(header).queryByRole('button', { name: DE.DOCK_TAB_TUTORIAL })).toBeNull();
+      expect(within(header).queryByTitle(DE.TUTORIAL_REAL_ONLY)).toBeNull();
+    };
+    assertClean();
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-stage');
+    assertClean();
+    // Nowhere else on the page either: SimStage (stubbed here) carries it.
+    expect(screen.queryByText(DE.TUTORIAL_REAL_ONLY)).toBeNull();
+    expect(screen.queryByRole('button', { name: DE.DOCK_TAB_TUTORIAL })).toBeNull();
+    expect(screen.queryByTestId('tutorial-real-only')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Simulator beenden' }));
+    await screen.findByTestId('right-dock');
+    assertClean();
+  });
+
+  test('the note is German and names the real robot', () => {
+    expect(DE.TUTORIAL_REAL_ONLY).toBe('Lernpfade gibt es nur am echten Roboter.');
+  });
+});
+
 describe('WorkshopPage — an uncalibrated rig cannot START outside the simulator (§3.49)', () => {
   // A simulator „Ziel setzen" pin is stored at z = 0 (the virtual table). On a
   // real rig with no touch-off the server keeps that stored 0 and has no floor
@@ -541,6 +574,24 @@ describe('WorkshopPage — Vormachen wiring', () => {
     await handler({ name: 'A', x: 0.2, y: 0, z: 0.05 });
     expect(toast.error).toHaveBeenCalledWith(DE.TEACH_DRIVE_BLOCKED);
     expect(mockRos.jogArm).not.toHaveBeenCalled();
+  });
+
+  // M4 / Q11 (semantics round 2026-10-18): „fahre dorthin" stops ABOVE the
+  // Ziel at the program's hover height, over the table measured this lesson —
+  // the pin's stored z is not where the arm goes, so the question names none.
+  test('the „fahre dorthin" question names x and y only', async () => {
+    setDriveToHandler.mockClear();
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    const handler = setDriveToHandler.mock.calls.map((c) => c[0]).filter(Boolean).pop();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    try {
+      await handler({ name: 'Ablage', x: 0.2, y: -0.05, z: 0.012 });
+      expect(confirm).toHaveBeenCalledWith('Arm über das Ziel „Ablage" fahren (x=0.200, y=-0.050)?');
+      expect(mockRos.jogArm).not.toHaveBeenCalled();
+    } finally {
+      confirm.mockRestore();
+    }
   });
 
   test('with Vormachen closed the LeaderToggle carries no lock reason', async () => {

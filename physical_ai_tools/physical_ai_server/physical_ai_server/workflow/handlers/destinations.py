@@ -25,6 +25,7 @@ from typing import Any
 from physical_ai_server.workflow.handlers.motion import (
     WorkflowError,
     resolve_destination_z,
+    unknown_destination_de,
 )
 
 
@@ -159,6 +160,12 @@ def destination_pin(ctx, args: dict[str, Any]) -> None:
         or raw_y == UNPINNED_SENTINEL
         or raw_z == UNPINNED_SENTINEL
     ):
+        # N5: the simulator has no scene camera to click.
+        if getattr(ctx, 'simulated', False):
+            raise WorkflowError(
+                f'Ziel "{name}" wurde nicht gepinnt — im Simulator bitte das Ziel '
+                'in der Sammlung unter „Ziele" anlegen (auf den Tisch tippen).'
+            )
         raise WorkflowError(
             f'Ziel "{name}" wurde nicht gepinnt — bitte den Block '
             'auswählen und in die Szenen-Kamera klicken.'
@@ -201,10 +208,9 @@ def destination_ref(ctx, args: dict[str, Any]) -> str:
         raise WorkflowError('Kein Ziel ausgewählt — bitte im Block ein Ziel wählen.')
     _validate_destination_name(name)
     if name not in ctx.destinations:
-        raise WorkflowError(
-            f'Unbekanntes Ziel: „{name}". Bitte das Ziel zuerst in der '
-            'Szenen-Kamera anklicken (pinnen).'
-        )
+        # F22: the one sentence motion._resolve_target says too (N5: worded for
+        # the simulator when the run is simulated).
+        raise WorkflowError(unknown_destination_de(ctx, name))
     return name
 
 

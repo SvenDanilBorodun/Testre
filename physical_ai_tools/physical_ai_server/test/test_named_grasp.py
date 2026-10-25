@@ -294,17 +294,47 @@ def test_wait_until_object_seen_true_when_visible():
 
 
 def test_grasp_object_none_visible_raises_german():
-    ctx = _Ctx([])
+    """Intent kept: nothing in view is said in German, naming the object.
+    Since Q8 the RIG waits — one German line, until Stop — and only the
+    simulator refuses at once."""
+    sim = _Ctx([])
+    sim.simulated = True
     with pytest.raises(WorkflowError, match='Banane'):
-        pb.grasp_object(ctx, {'object_type': 'banane'})
+        pb.grasp_object(sim, {'object_type': 'banane'})
+    rig = _Ctx([])
+    stop = threading.Event()
+    rig.should_stop = stop.is_set
+    result = {}
+
+    def _grasp():
+        try:
+            pb.grasp_object(rig, {'object_type': 'banane'})
+        except WorkflowError as e:
+            result['error'] = str(e)
+
+    t = threading.Thread(target=_grasp)
+    t.start()
+    t.join(0.6)
+    assert t.is_alive(), 'the rig did not wait'
+    assert rig.logs == ['Warte auf „Banane" — bitte ein Objekt in den Greifbereich legen.']
+    stop.set()
+    t.join(5)
+    assert result['error'] == 'Workflow wurde gestoppt.'
+    assert not rig.published
 
 
 def test_grasp_object_none_visible_is_recoverable_graspskip():
-    # Nothing in view → GraspSkip (recoverable: the loop re-detects next pass),
-    # which IS a WorkflowError so a standalone „greife" still fails loud.
-    ctx = _Ctx([])
+    """Intent kept: where „Greife" does not wait — the simulator, and inside a
+    „Solange sichtbar" loop (``no_grasp_wait``) — nothing in view is a
+    recoverable GraspSkip, which IS a WorkflowError so a standalone „greife"
+    still fails loud."""
+    sim = _Ctx([])
+    sim.simulated = True
     with pytest.raises(GraspSkip):
-        pb.grasp_object(ctx, {'object_type': 'banane'})
+        pb.grasp_object(sim, {'object_type': 'banane'})
+    with pb.no_grasp_wait():
+        with pytest.raises(GraspSkip):
+            pb.grasp_object(_Ctx([]), {'object_type': 'banane'})
 
 
 def test_grasp_object_orientation_unreadable_skips_instead_of_blind_grasp():

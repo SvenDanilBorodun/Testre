@@ -71,6 +71,18 @@ from typing import Optional
 
 import numpy as np
 
+from physical_ai_server.workflow.handlers.motion import WorkflowError as _WorkflowError
+
+
+class FloorRefusal(_WorkflowError):
+    """The planners' FLOOR refusal („… durch die Tischebene …"), and only it.
+
+    A subclass, so every existing ``except WorkflowError`` is unchanged. It
+    exists for ``motion._pose_route`` (a Position's joint-space ladder), which
+    tries the next rung ONLY when a rung is refused by the floor: a Sperrzone
+    refusal or a limit must reach the student verbatim, never be turned into
+    the floor sentence by a broader ``except`` (spec D1, r4-M2)."""
+
 
 _logger = logging.getLogger(__name__)
 
@@ -275,13 +287,18 @@ def _via_candidates(ctx, q_start, home_arm, geom, floor_fn,
     return out
 
 
-def _warn_self_collision(ctx, geom, legs) -> None:
+def _warn_self_collision(ctx, geom, legs, log=None) -> None:
     """Emit ONE German [WARNUNG] if the route brings two non-adjacent links
     close. WARN-ONLY BY DESIGN — it never changes the route and never blocks a
-    rung. Promoting it to a refusal is a Rule §2 change (see the module note)."""
+    rung. Promoting it to a refusal is a Rule §2 change (see the module note).
+
+    ``log`` is the caller's sink (None → ``ctx.log``); a Position's quiet route
+    planning passes its own, so a „Grundstellung" sentence never describes a
+    Position route."""
     if SELFCOLL_WARN_M <= 0.0:
         return
-    log = getattr(ctx, 'log', None)
+    if log is None:
+        log = getattr(ctx, 'log', None)
     if not callable(log):
         return
     worst = None
@@ -297,9 +314,15 @@ def _warn_self_collision(ctx, geom, legs) -> None:
             'trotzdem ausgeführt — bitte den Arm dabei beobachten.')
 
 
-def plan_home_route(ctx, q_start, q_home_full, duration_s: float) -> list:
+def plan_home_route(ctx, q_start, q_home_full, duration_s: float, log=None) -> list:
     """Legs ``[(q_from, q_to, duration), …]`` that reach the Grundstellung
-    without driving a link through the table, or raise ``WorkflowError``.
+    without driving a link through the table, or raise ``WorkflowError``
+    (:class:`FloorRefusal` for the floor refusal).
+
+    ``log`` is where the route's notes go; ``None`` (every existing caller) is
+    ``ctx.log``. ``motion._pose_route`` plans a Position's rungs QUIETLY with a
+    collecting sink — the notes describe the Grundstellung, and a reversed rung
+    would describe the reversed direction — and says its own one line instead.
 
     Backward-safe: an arm with no box table (every OMX profile, every
     profile-less ctx, every test double) gets exactly ``[(q_start, q_home_full,
@@ -321,7 +344,7 @@ def plan_home_route(ctx, q_start, q_home_full, duration_s: float) -> list:
     floor_direct = _floor_ok(geom, q_start, q_home_full, floor_fn, allowance)
     zone_direct = _zone_ok(ctx, q_start, q_home_full)
     if floor_direct and zone_direct:
-        _warn_self_collision(ctx, geom, direct)
+        _warn_self_collision(ctx, geom, direct, log=log)
         return direct
 
     # L0b — the direct line is fine over the TABLE and blocked only by a
@@ -376,10 +399,10 @@ def plan_home_route(ctx, q_start, q_home_full, duration_s: float) -> list:
             # table is provably not the obstacle here.
             raise zone_refusal
         if all(_floor_ok(geom, a, b, floor_fn, allowance) for a, b, _d in legs):
-            _warn_self_collision(ctx, geom, legs)
-            log = getattr(ctx, 'log', None)
-            if callable(log):
-                log('[WARNUNG] Sperrzone auf dem Weg in die Grundstellung — '
+            _warn_self_collision(ctx, geom, legs, log=log)
+            sink = log if log is not None else getattr(ctx, 'log', None)
+            if callable(sink):
+                sink('[WARNUNG] Sperrzone auf dem Weg in die Grundstellung — '
                     'der Arm fährt eine Ausweichroute.')
             return legs
         # The reroute would press the table: fall through to the via search,
@@ -408,11 +431,11 @@ def plan_home_route(ctx, q_start, q_home_full, duration_s: float) -> list:
             continue
         legs = [(list(q_start), via, _ESCAPE_DURATION_S),
                 (via, list(q_home_full), duration_s)]
-        _warn_self_collision(ctx, geom, legs)
-        log = getattr(ctx, 'log', None)
-        if callable(log):
-            log('[WARNUNG] Der direkte Weg in die Grundstellung würde durch die '
-                'Tischebene führen — der Arm wird zuerst angehoben.')
+        _warn_self_collision(ctx, geom, legs, log=log)
+        sink = log if log is not None else getattr(ctx, 'log', None)
+        if callable(sink):
+            sink('[WARNUNG] Der direkte Weg in die Grundstellung würde durch die '
+                 'Tischebene führen — der Arm wird zuerst angehoben.')
         return legs
 
     # L3 — refuse, naming the remedy that actually works. When the DIRECT line
@@ -423,7 +446,7 @@ def plan_home_route(ctx, q_start, q_home_full, duration_s: float) -> list:
         from physical_ai_server.workflow import path_guard as _pg
         raise _m.WorkflowError(_pg._refusal_message(
             getattr(ctx, 'zones', None), _pg.ZONE_MARGIN_M, _pg.LINK_RADIUS_M))
-    raise _m.WorkflowError(_FLOOR_REFUSAL_DE)
+    raise FloorRefusal(_FLOOR_REFUSAL_DE)
 
 
 # ── Floor-checked home route: the manual glide AND the Blockly `home` block ──
@@ -466,17 +489,20 @@ def _base_plane_floor(_x: float, _y: float) -> float:
     return 0.0
 
 
-def _moving_point_start(ik) -> Optional[int]:
+def _moving_point_start(ik, samples_per_link: int = 5) -> Optional[int]:
     """Index of the first link sample whose HEIGHT depends on the joints.
 
     The leading samples are the base column up to the shoulder, whose z no joint
     changes (joint1 only yaws them); judging them against the table would refuse
     every route, since the base is bolted to it. Derived from the solver itself
-    so a different chain cannot silently shift the cut."""
+    so a different chain cannot silently shift the cut. ``samples_per_link`` is
+    the sampling of the list the index is for (the solvers' default, 5, for the
+    ladder; 1 for :func:`pose_floor_clearance`)."""
     try:
         n = int(ik.num_joints())
-        a = ik.link_points([0.0] * n)
-        b = ik.link_points([0.0] + [0.7 * (-1) ** i for i in range(n - 1)])
+        a = ik.link_points([0.0] * n, samples_per_link=samples_per_link)
+        b = ik.link_points([0.0] + [0.7 * (-1) ** i for i in range(n - 1)],
+                           samples_per_link=samples_per_link)
     except Exception:  # noqa: BLE001 — unjudgeable geometry is handled by the caller
         return None
     if not a or not b:
@@ -510,7 +536,83 @@ def _point_line_ok(ik, a_arm, b_arm, floor_fn, start_idx, allowance) -> bool:
     return True
 
 
-def plan_floor_checked_home_route(ctx, q_start, q_home_full, duration_s: float) -> list:
+def _table_surface_fn(ctx):
+    """``(x, y) -> the table SURFACE height under that point``, for judging
+    where the arm's OWN parts are (``pose_floor_clearance``).
+
+    The touch-off plane where one exists (``motion._floor_z_at``, the
+    plane-aware refusal helper — never the ``GRASP_Z_FROM_PLANE`` knob) minus
+    the solver's ``tool_tip_below_ee_m``: on the OMX the touch-off's
+    ``z_table`` is the END-EFFECTOR frame's height with the fingertips on the
+    table (0.04 m above the surface), on the Feetech arms the EE frame IS the
+    fingertip (0). With no table measurement, the base plane z = 0. So a kit
+    whose arm stands on a riser is judged by its own measurement, and on a
+    Feetech arm this is exactly :func:`_floor_fn`."""
+    from physical_ai_server.workflow.handlers import motion as _m
+
+    tip = float(getattr(getattr(ctx, 'ik', None), 'tool_tip_below_ee_m', 0.0) or 0.0)
+
+    def _at(x: float, y: float) -> float:
+        value = _m._floor_z_at(ctx, x, y)
+        return 0.0 if value is None else float(value) - tip
+
+    return _at
+
+
+def pose_floor_clearance(ctx, q_full) -> Optional[float]:
+    """How far the LOWEST judged point of the arm at the ONE pose ``q_full``
+    (arm joints, then optionally the gripper value) sits above this rig's table
+    surface (:func:`_table_surface_fn`); negative = below it. ``None`` when the
+    pose cannot be judged — never an approval.
+
+    The POINT model, on every arm (owner decision, fix round 2): the arm's
+    joint points — ``ik.link_points`` at ONE sample per link, from
+    :func:`_moving_point_start`; against the (planar) table a straight link's
+    lowest point is one of its two ends, so samples between them add nothing —
+    and its FINGERTIP. The solver's own last point is the CLOSED fingertip
+    (``fk`` plus ``tool_tip_below_ee_m`` along the tool's world approach axis,
+    checked here, else ``None``); it is replaced by the tip at the claw opening
+    in ``q_full[n]``, set back along that axis by ``motion.tool_tip_rise_m``
+    (0 on the OMX; on the Edu:1 an open claw's tips ride up, slightly down near
+    0.14 rad). Never the box model: it reads a tilted Edu:1 claw tens of
+    millimetres below where its meshes are. Not judged: the link and housing
+    surfaces around the centreline (the OMX gripper housing included) and the
+    claw's outer blade edges. Used by ``motion._move_to_position`` to refuse a
+    Position taught below the table before any route is planned."""
+    from physical_ai_server.workflow.handlers import motion as _m
+
+    ik = getattr(ctx, 'ik', None)
+    if ik is None:
+        return None
+    try:
+        n = int(ik.num_joints())
+        q = [float(v) for v in q_full]
+        arm = q[:n]
+        if len(arm) != n or not all(np.isfinite(v) for v in q):
+            return None
+        start = _moving_point_start(ik, samples_per_link=1)
+        pts = [np.asarray(p, dtype=float) for p in ik.link_points(arm, samples_per_link=1)]
+        rot, tcp = ik.fk(arm)
+        axis = np.asarray(rot, dtype=float) @ np.asarray(ik.approach_axis_local, dtype=float)
+        axis = axis / np.linalg.norm(axis)
+        closed_tip = (np.asarray(tcp, dtype=float)
+                      + float(getattr(ik, 'tool_tip_below_ee_m', 0.0) or 0.0) * axis)
+        if (start is None or len(pts) <= start + 1
+                or not np.linalg.norm(pts[-1] - closed_tip) < 1e-6):
+            return None
+        tip = closed_tip - _m.tool_tip_rise_m(ik, q, n) * axis
+        surface = _table_surface_fn(ctx)
+        value = min(float(p[2]) - surface(float(p[0]), float(p[1]))
+                    for p in pts[start:-1] + [tip])
+    except Exception:  # noqa: BLE001 — an unjudgeable pose is refused by the caller
+        return None
+    if not np.isfinite(value):
+        return None
+    return float(value)
+
+
+def plan_floor_checked_home_route(ctx, q_start, q_home_full, duration_s: float,
+                                  log=None) -> list:
     """Legs to HOME for the manual glide and the `home` block, or raise
     ``WorkflowError`` (German).
 
@@ -518,16 +620,20 @@ def plan_floor_checked_home_route(ctx, q_start, q_home_full, duration_s: float) 
     ``link_points`` → exactly :func:`plan_home_route`. Otherwise (the OMX) the
     point-model ladder described above."""
     from physical_ai_server.workflow import arm_geometry as _ag
-    from physical_ai_server.workflow.handlers import motion as _m
 
     ik = getattr(ctx, 'ik', None)
     if (_ag.resolve_geometry(ctx) is not None or FLOOR_TOL_M <= 0.0 or ik is None
             or not callable(getattr(ik, 'link_points', None))):
-        return plan_home_route(ctx, q_start, q_home_full, duration_s)
+        # ``log`` is forwarded ONLY when given: a test stubs plan_home_route
+        # with a four-positional lambda (r5-m2), and every existing caller
+        # passes none.
+        if log is None:
+            return plan_home_route(ctx, q_start, q_home_full, duration_s)
+        return plan_home_route(ctx, q_start, q_home_full, duration_s, log=log)
 
     start_idx = _moving_point_start(ik)
     if start_idx is None:
-        raise _m.WorkflowError(_FLOOR_REFUSAL_DE)
+        raise FloorRefusal(_FLOOR_REFUSAL_DE)
     n = int(ik.num_joints())
     # The point model is judged against z = 0 — the surface the base is bolted to —
     # NOT the touch-off. On these solvers the touch-off's z_table/plane is the
@@ -545,7 +651,7 @@ def plan_floor_checked_home_route(ctx, q_start, q_home_full, duration_s: float) 
 
     start_clear = _point_clearance(ik, start_arm, floor_fn, start_idx)
     if start_clear is None:
-        raise _m.WorkflowError(_FLOOR_REFUSAL_DE)
+        raise FloorRefusal(_FLOOR_REFUSAL_DE)
     # Never below the table, and never deeper than the arm already is.
     allowance = min(0.0, start_clear) - 1e-9
 
@@ -592,10 +698,10 @@ def plan_floor_checked_home_route(ctx, q_start, q_home_full, duration_s: float) 
                               min(0.0, via_clear) - 1e-9):
             continue
         via = via_arm + [gripper]
-        log = getattr(ctx, 'log', None)
-        if callable(log):
-            log('[WARNUNG] Der direkte Weg in die Grundstellung würde durch die '
-                'Tischebene führen — der Arm wird zuerst angehoben.')
+        sink = log if log is not None else getattr(ctx, 'log', None)
+        if callable(sink):
+            sink('[WARNUNG] Der direkte Weg in die Grundstellung würde durch die '
+                 'Tischebene führen — der Arm wird zuerst angehoben.')
         return [(list(q_start), via, _POINT_LIFT_DURATION_S),
                 (via, list(q_home_full), duration_s)]
-    raise _m.WorkflowError(_FLOOR_REFUSAL_DE)
+    raise FloorRefusal(_FLOOR_REFUSAL_DE)

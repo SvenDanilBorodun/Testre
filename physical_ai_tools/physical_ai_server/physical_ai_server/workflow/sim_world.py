@@ -52,7 +52,7 @@ from __future__ import annotations
 
 import math
 import threading
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 
 # Defense-in-depth cap on placed sim objects (the cloud validator already bounds the
@@ -110,28 +110,44 @@ class SimWorld:
                     'key': i,               # index in the list the editor sent
                     'type': obj.get('type'),
                     'tag_id': None,         # filled in by SimPerception.bind_tag
+                    'height_m': None,       # ditto: the resolved object's height
                     'x': x, 'y': y, 'yaw': yaw,
                     'placed_x': x, 'placed_y': y,
                 })
             self._held_key = None
             self._epoch += 1
 
-    def bind_tag(self, key: int, tag_id: int) -> None:
+    def bind_tag(self, key: int, tag_id: int, height_m: Optional[float] = None) -> None:
         """Record the catalog tag id ``SimPerception`` assigned to a placement slot.
 
         The front end's own ``tag_id`` is ignored by the runtime, so this is the only
         place the two id spaces are ever joined — and it is what lets the
         ``/sim/objects`` snapshot name an object the way the student's program does.
+
+        ``height_m`` is the resolved object's own height (the recipe's
+        ``object_height_m``). The sim arm judges a close against it (N3: the
+        fingertips must be at or below the object's top), so the height rides the
+        binding and no catalog lookup is needed per run. :meth:`reset` clears it
+        with the rest of the placement.
         """
         try:
             key = int(key)
             tag_id = int(tag_id)
         except (TypeError, ValueError):
             return
+        h = None
+        if height_m is not None:
+            try:
+                h = float(height_m)
+            except (TypeError, ValueError):
+                h = None
+            if h is not None and not math.isfinite(h):
+                h = None
         with self._lock:
             for o in self._objects:
                 if o['key'] == key:
                     o['tag_id'] = tag_id
+                    o['height_m'] = h
                     return
 
     def objects(self) -> list[dict[str, Any]]:
@@ -150,7 +166,9 @@ class SimWorld:
     # ------------------------------------------------------------------
     # Grasp
     # ------------------------------------------------------------------
-    def capture_nearest(self, x: float, y: float, radius_m: float) -> Optional[int]:
+    def capture_nearest(self, x: float, y: float, radius_m: float,
+                        accept: Optional[Callable[[dict[str, Any]], bool]] = None,
+                        ) -> Optional[int]:
         """A gripper close at ``(x, y)``: grab the NEAREST object within ``radius_m``.
 
         Nearest-wins rather than any-match, so two adjacent cubes are never confused.
@@ -166,6 +184,11 @@ class SimWorld:
         cube stayed detectable at its original position. It also matches what the
         overflow warning already promises the student — „die zuletzt platzierten
         werden nicht erkannt … sonst bleiben sie einfach liegen".
+
+        ``accept`` (the sim arm's height judgement, N3) is asked about the
+        NEAREST candidate only, with a copy of its entry (``height_m``
+        included): a close above the cube's top captures nothing, it never
+        falls through to a farther object.
         """
         try:
             x = float(x)
@@ -180,6 +203,7 @@ class SimWorld:
                 return self._held_key
             best: Optional[int] = None
             best_d = radius_m
+            best_obj: Optional[dict[str, Any]] = None
             for o in self._objects:
                 if o['tag_id'] is None:
                     continue        # not resolved by perception => not graspable
@@ -187,6 +211,14 @@ class SimWorld:
                 if d <= best_d:
                     best_d = d
                     best = o['key']
+                    best_obj = o
+            if best is not None and accept is not None:
+                try:
+                    ok = bool(accept(dict(best_obj)))
+                except Exception:  # noqa: BLE001 — a judgement failure grabs nothing
+                    ok = False
+                if not ok:
+                    best = None
             self._held_key = best
             return best
 

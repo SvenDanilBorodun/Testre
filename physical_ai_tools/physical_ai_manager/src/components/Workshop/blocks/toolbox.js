@@ -44,8 +44,10 @@ export const SAMMLUNG_TOOLBOX_IDS = Object.freeze({
   POSITIONEN: 'sammlung-positionen',
 });
 
-// The blocks that left the static toolbox. The dynamic flyouts always emit
-// each of them (generic or prefilled), so coverage tests union this list.
+// The blocks that left the static toolbox. The dynamic flyouts emit each of
+// them (generic or prefilled) — on the rig every one; in the simulator the
+// camera pin `edubotics_destination_pin` is left out (N5, newActions'
+// cameraPinOffered) — so coverage tests union this list.
 export const SAMMLUNG_BASE_BLOCKS = Object.freeze([
   { kind: 'block', type: 'edubotics_destination_pin' },
   { kind: 'block', type: 'edubotics_destination_ref' },
@@ -191,8 +193,10 @@ export function buildToolbox(restrictedBlocks = null) {
     { kind: 'block', type: 'lists_length' },
     { kind: 'block', type: 'lists_isEmpty' },
     { kind: 'block', type: 'lists_indexOf' },
-    { kind: 'block', type: 'lists_getIndex' },
-    { kind: 'block', type: 'lists_setIndex' },
+    // F13: the element number is visible and editable, like every other
+    // number socket here (an empty AT is element 1 at run time anyway).
+    { kind: 'block', type: 'lists_getIndex', inputs: { AT: numberShadow(1) } },
+    { kind: 'block', type: 'lists_setIndex', inputs: { AT: numberShadow(1) } },
     { kind: 'block', type: 'lists_getSublist' },
   ], restricted);
 

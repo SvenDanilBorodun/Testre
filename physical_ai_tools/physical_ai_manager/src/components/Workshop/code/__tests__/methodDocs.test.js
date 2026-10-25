@@ -63,10 +63,42 @@ describe('renderExample — the lockstep with the generator', () => {
     expect(renderExample(byName('wait_until_held'), 'java')).toBe('boolean gehalten = Robot.waitUntilHeld(3.0);');
   });
 
-  it('a variable argument is its name, and a value row declares its variable', () => {
-    expect(renderExample(byName('object_position'), 'python')).toBe('position = robot.object_position(ziel)');
-    expect(renderExample(byName('object_position'), 'java')).toBe('double[] position = Robot.objectPosition(ziel);');
+  it('a Greifziel argument is the nested find call (never an undefined variable, N9), and a value row declares its variable', () => {
+    // The example used to name a variable `ziel` the student's program does
+    // not have; it now carries the call that produces the Greifziel.
+    expect(renderExample(byName('object_position'), 'python'))
+      .toBe('position = robot.object_position(robot.find("wuerfel"))');
+    expect(renderExample(byName('object_position'), 'java'))
+      .toBe('double[] position = Robot.objectPosition(Robot.find("wuerfel"));');
+    expect(renderExample(byName('move_above'), 'python')).toBe('robot.move_above(robot.find("wuerfel"))');
+    expect(renderExample(byName('move_above'), 'java')).toBe('Robot.moveAbove(Robot.find("wuerfel"));');
+    // No public row's example names a variable any more.
+    for (const m of METHOD_DOCS.methods) {
+      for (const a of (m.example && m.example.args) || []) {
+        expect(!!a && typeof a === 'object' && !Array.isArray(a) && 'ref' in a).toBe(false);
+      }
+    }
     expect(renderExample(byName('find'), 'java')).toBe('Robot.Greifziel ziel = Robot.find("wuerfel");');
+  });
+
+  it('a nested call argument ({"call": …}) is that row’s own call, rendered by its own kinds (N9)', () => {
+    // The shape robot_api.py's docs json uses for an insertable example that
+    // needs a Greifziel: `robot.move_above(robot.find("wuerfel"))`, never an
+    // undefined variable. Both shapes ({ref} and {call}) render, so the docs
+    // json can move from one to the other without this file going red.
+    const moveAbove = { ...byName('move_above'), example: { args: [{ call: 'find', args: ['wuerfel'] }], var: null } };
+    expect(renderExample(moveAbove, 'python')).toBe('robot.move_above(robot.find("wuerfel"))');
+    expect(renderExample(moveAbove, 'java')).toBe('Robot.moveAbove(Robot.find("wuerfel"));');
+    const position = { ...byName('object_position'), example: { args: [{ call: 'find', args: ['wuerfel'] }], var: 'position' } };
+    expect(renderExample(position, 'python')).toBe('position = robot.object_position(robot.find("wuerfel"))');
+    expect(renderExample(position, 'java')).toBe('double[] position = Robot.objectPosition(Robot.find("wuerfel"));');
+    // A float argument of the nested row keeps its kind's spelling.
+    const nestedFloat = { ...byName('move_above'), example: { args: [{ call: 'wait_until_seen', args: ['wuerfel', 5] }], var: null } };
+    expect(renderExample(nestedFloat, 'python')).toBe('robot.move_above(robot.wait_until_seen("wuerfel", 5.0))');
+    // The old {ref} shape still renders its name.
+    const legacy = { ...byName('move_above'), example: { args: [{ ref: 'ziel' }], var: null } };
+    expect(renderExample(legacy, 'python')).toBe('robot.move_above(ziel)');
+    expect(renderExample(legacy, 'java')).toBe('Robot.moveAbove(ziel);');
   });
 
   it('renders substituted arguments', () => {

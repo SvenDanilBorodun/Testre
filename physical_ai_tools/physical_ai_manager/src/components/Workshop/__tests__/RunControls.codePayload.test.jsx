@@ -391,13 +391,14 @@ describe('RunControls — a code run sends the document’s Ziele (041)', () => 
   ];
   const store = { getEntries: () => ENTRIES };
 
-  test('the store’s entries ride the destinations sibling as {name, kind, x, y, z}', async () => {
+  // Changed on purpose (D1): a Position also sends its taught pose.
+  test('the store’s entries ride the destinations sibling as {name, kind, x, y, z} (+ the pose of a Position)', async () => {
     await clickStart({ destinationStore: store });
     await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
     const parsed = JSON.parse(mockRos.callService.mock.calls[0][2].workflow_json);
     expect(parsed.destinations).toEqual([
       { name: 'Ablage', kind: 'pin', x: 0.2, y: -0.05, z: 0 },
-      { name: 'Hoch', kind: 'pose', x: 0.1, y: 0.1, z: 0.15 },
+      { name: 'Hoch', kind: 'pose', x: 0.1, y: 0.1, z: 0.15, joints: [0, 1], joint_names: ['a', 'b'] },
     ]);
   });
 

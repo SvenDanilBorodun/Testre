@@ -28,7 +28,7 @@ _EXPECTED_FILES = {
     'lib/robot.py', 'lib/edubotics_debug.py',
     'java/edubotics/EduJson.java', 'java/edubotics/RpcClient.java',
     'java/edubotics/Robot.java', 'java/edubotics/Greifobjekt.java',
-    'java/edubotics/SmokeMain.java',
+    'java/edubotics/SmokeMain.java', 'java/edubotics/Launcher.java',
 }
 
 # gitleaks' `generic-api-key` rule fires on a long word-ish literal bound to a

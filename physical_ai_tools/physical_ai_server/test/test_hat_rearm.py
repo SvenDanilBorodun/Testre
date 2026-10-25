@@ -101,8 +101,11 @@ def _logs(status):
             if isinstance(e, dict) and 'log_message' in e]
 
 
-def _hat_program(seconds='14'):
+def _hat_program(seconds=14):
     """Main stack: pin a destination and idle. Hat: grasp + place, once per cube.
+
+    ``seconds`` is a NUMBER: since F14 „warte" refuses a text (these fixtures
+    used to send the strings '14' / '6', which the block never produces).
 
     The hat body rides the `next` chain — edubotics_when_object_seen is declared with
     setNextStatement, not a DO input.
@@ -133,7 +136,8 @@ def _hat_program(seconds='14'):
 
 
 def test_when_object_seen_grasps_every_placed_cube_in_sim():
-    """The direct regression guard. Before the fix this grasped 1 of 2."""
+    """The direct regression guard. Before the fix this grasped 1 of 2.
+    (Intent kept; the idle wait is sent as a number since F14.)"""
     status = []
     mgr, world = _sim([dict(c) for c in CUBES], status)
     assert _run(mgr, _hat_program(), status) == 'finished'
@@ -143,7 +147,8 @@ def test_when_object_seen_grasps_every_placed_cube_in_sim():
 
 
 def test_the_hat_does_not_refire_on_an_already_claimed_tag():
-    """Re-arming must not become a spin: each tag is grasped exactly once."""
+    """Re-arming must not become a spin: each tag is grasped exactly once.
+    (Intent kept; the idle wait is sent as a number since F14.)"""
     status = []
     mgr, _world = _sim([dict(c) for c in CUBES], status)
     _run(mgr, _hat_program(), status)
@@ -159,7 +164,7 @@ def test_a_hat_body_error_reaches_the_protokoll_in_german():
     # One cube, but a long enough idle that the hat is polled again after the
     # grasp -- the second firing finds nothing unclaimed and raises GraspSkip.
     mgr, _world = _sim([dict(CUBES[0])], status)
-    _run(mgr, _hat_program(seconds='14'), status)
+    _run(mgr, _hat_program(seconds=14), status)
     logs = _logs(status)
     assert any('gegriffen' in m for m in logs), logs
     hat_errors = [m for m in logs if m.startswith('Ereignis-Block')]
@@ -188,7 +193,7 @@ def test_a_static_object_with_a_non_consuming_body_still_fires_exactly_ONCE():
                 'type': 'text', 'fields': {'TEXT': 'GESEHEN'}}}},
         }},
     }
-    main = {'type': 'edubotics_wait_seconds', 'fields': {'SECONDS': '6'}}
+    main = {'type': 'edubotics_wait_seconds', 'fields': {'SECONDS': 6}}   # a number (F14)
     _run(mgr, {'blocks': {'languageVersion': 0, 'blocks': [main, hat]}}, status)
     hits = [m for m in _logs(status) if 'GESEHEN' in m]
     assert len(hits) == 1, f'expected exactly one firing, got {len(hits)}'
@@ -432,3 +437,124 @@ def test_a_ctx_without_claim_sets_still_triggers():
         should_stop=lambda: False,
     )
     assert mgr._wait_object_visible('wuerfel', ctx)
+
+
+# ── N14: the object hat re-arms when a claim EVENT of its type happened ────
+# On the calibrated-rig emulation (``rig_emulation.Rig``): a person puts a cube
+# back, and only on a rig can the reclaim see it. The put-back happens INSIDE
+# the body, from ``note_object_released`` (r6-m1: a put-back AFTER the body
+# passes on main with grace 0, so it proves nothing).
+
+import copy  # noqa: E402
+
+from physical_ai_server.workflow import object_catalog as oc  # noqa: E402
+from physical_ai_server.workflow.handlers import motion as M  # noqa: E402
+
+from rig_emulation import (ABLAGE, ABLAGE2, PICK, B, Rig, chain, cube, drop,  # noqa: E402
+                           forever, grasp, hat, log, num, program, sees, var,
+                           vget, vset, wait)
+
+
+def _put_back_on_release(monkeypatch, rig, times, key=0, xy=None):
+    """The student puts world object ``key`` back at ``xy`` the moment the robot
+    lets it go, ``times`` times — inside the body, before it ends."""
+    left = [times]
+    original = M.note_object_released
+    bx, by = xy if xy is not None else PICK[key]
+
+    def _released(ctx, where):
+        original(ctx, where)
+        if left[0] > 0 and rig.put_back(key, bx, by):
+            left[0] -= 1
+
+    monkeypatch.setattr(M, 'note_object_released', _released)
+
+
+def _fired(rig, tag='FIRED'):
+    return sum(1 for m in rig.logs() if m == tag)
+
+
+def test_reclaimed_object_fires_the_hat_again(monkeypatch):
+    """One cube, put back twice inside the body, default absence grace: the hat
+    grasps it three times (main: once, then never again)."""
+    rig = Rig(monkeypatch, 'omx_full', objects=[cube(*PICK[0])])
+    _put_back_on_release(monkeypatch, rig, 2)
+    payload = program(wait(1), hat(chain(grasp(), drop(), log('FIRED'))), destinations=[ABLAGE])
+    rig.run(payload, timeout=60)
+    assert rig.grasps() == 3, rig.logs()
+
+
+def test_two_cubes_with_a_body_longer_than_the_absence_grace_are_both_grasped(monkeypatch):
+    """Grace 0 emulates a real grasp+drop outlasting ``_HAT_ABSENT_GRACE_S``:
+    both cubes are grasped (main: 2/2; the revision-5 subtraction: 1/2)."""
+    monkeypatch.setattr(WM, '_HAT_ABSENT_GRACE_S', 0.0)
+    rig = Rig(monkeypatch, 'omx_full', objects=[cube(*PICK[0]), cube(*PICK[1])])
+    rig.run(program(wait(1), hat(chain(grasp(), drop(), log('FIRED'))), destinations=[ABLAGE]),
+            timeout=60)
+    assert rig.grasps() == 2, rig.logs()
+
+
+def test_a_fast_claiming_body_fires_once_per_object(monkeypatch):
+    """„finde → merke als erledigt" fires once for one cube, with the DEFAULT
+    grace — no errored ghost runs on the claimed tag's absence debounce (the
+    revision-5 subtraction logged one FIRED plus three failing runs)."""
+    rig = Rig(monkeypatch, 'omx_full', objects=[cube(*PICK[0])])
+    body = chain(vset('Z', B('edubotics_find_object', fields={'OBJECT_TYPE': 'wuerfel'})),
+                 B('edubotics_mark_done', inputs={'ZIEL': vget('Z')}), log('FIRED'))
+    rig.run(program(wait(1), hat(body), variables=[var('Z')]), timeout=60)
+    runs = _fired(rig) + sum(1 for m in rig.logs() if m.startswith('„Wenn Objekt erkannt"'))
+    assert _fired(rig) == 1 and runs == 1, rig.logs()
+
+
+def test_a_cube_put_back_and_seen_inside_the_body_fires_the_hat_again(monkeypatch):
+    """r7-M1: the cube is put back AND seen again by a look later in the same
+    body („falls sehe ich …"), which un-claims it: a set compared after the body
+    no longer contains it, the claim EVENT still counts (main 1, revision 7 1,
+    the counter 3)."""
+    rig = Rig(monkeypatch, 'omx_full', objects=[cube(*PICK[0])])
+    _put_back_on_release(monkeypatch, rig, 2)
+    body = chain(grasp(), drop(),
+                 B('controls_if', inputs={'IF0': sees(), 'DO0': log('SEEN')}), log('FIRED'))
+    rig.run(program(wait(1), hat(body), destinations=[ABLAGE]), timeout=60)
+    assert rig.grasps() == 3, rig.logs()
+
+
+def test_a_main_stack_look_never_hides_the_hats_claim(monkeypatch):
+    """C5: the main stack looks („falls sehe ich …") while the hat body waits
+    after „ablegen" (its „warte" releases the lock), un-claiming the put-back
+    cube under the hat's feet: the hat still re-arms (main 1, revision 7 1,
+    the counter 3)."""
+    rig = Rig(monkeypatch, 'omx_full', objects=[cube(*PICK[0])])
+    _put_back_on_release(monkeypatch, rig, 2)
+    main = forever(B('controls_if', extra={'hasElse': True}, inputs={
+        'IF0': sees(), 'DO0': wait(0.2), 'ELSE': wait(0.2)}))
+    body = chain(grasp(), drop(), wait(1), log('FIRED'))
+    rig.run(program(main, hat(body), destinations=[ABLAGE]), timeout=60, stop_after=12)
+    assert rig.grasps() == 3, rig.logs()
+
+
+def test_a_counter_hat_with_a_claiming_body_fires_once(monkeypatch):
+    """r6-M1: „wenn Zähler P > 3: Greife; ablegen" keeps its plain edge — a
+    claim in its body never re-arms it (revision 6 fired it twice, then waited
+    forever)."""
+    rig = Rig(monkeypatch, 'omx_full', objects=[cube(*PICK[0]), cube(*PICK[1])])
+    adds = [B('edubotics_counter_add', fields={'NAME': 'P'}) for _ in range(4)]
+    counter_hat = B('edubotics_when_counter_gt', fields={'NAME': 'P', 'N': 3},
+                    nxt=chain(grasp(), drop(), log('FIRED')))
+    rig.run(program(chain(*adds, wait(2)), counter_hat, destinations=[ABLAGE]), timeout=60)
+    assert _fired(rig) == 1, rig.logs()
+
+
+def test_another_types_claim_never_refires_a_non_claiming_hat(monkeypatch):
+    """r6-M1: a claim of ANOTHER type (the main stack marks the Würfel done)
+    during a non-claiming „wenn Ball gesehen" body never re-fires it."""
+    cat = copy.deepcopy(oc._FIXED_CATALOG)
+    cat['types']['ball'] = dict(cat['types']['wuerfel'], label_de='Ball', tag_ids=[22, 23])
+    two = oc.parse_catalog(cat)
+    rig = Rig(monkeypatch, 'omx_full', catalog=two,
+              objects=[cube(*PICK[0]), cube(*PICK[1], typ='ball')])
+    main = chain(wait(0.5), vset('Z', B('edubotics_find_object', fields={'OBJECT_TYPE': 'wuerfel'})),
+                 B('edubotics_mark_done', inputs={'ZIEL': vget('Z')}), wait(3))
+    ball_hat = hat(chain(log('FIRED_B'), wait(2)), t='ball')
+    rig.run(program(main, ball_hat, variables=[var('Z')]), timeout=60)
+    assert _fired(rig, 'FIRED_B') == 1, rig.logs()

@@ -6,6 +6,84 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### v2.34.0, 2026-10-25 — Roboter Studio semantics: every block and method does what it says
+
+**Why.** An audit ran every Blockly block and every Python/Java robot method against what its preview, tooltip,
+docstring and refusal sentences promise, on both `omx_full` and `edu1_studio`, and found the gaps F1–F23 and
+N1–N14: count-down loops that ran zero times, every Java fault reading „Zeile 0 in : … (Code 1)", Positions that
+lost their pose (Edu:1: 30 of 30 refused), „bewege zu" pressing a held cube about 15 mm into the table, a
+simulator that grasped from any height and reached further than the rig, an open gripper reading „hält", and a
+hat that never fired again for a cube put back during its body. The owner decided Q1–Q14 (spec
+`docs/plans/2026-10-18-studio-semantics/10-spec.md`, revision 9, after seven fresh reviews).
+
+**How it was built.** Three agents on their own worktrees, files not overlapping: Agent 1 the Blockly side and
+the editor (the interpreter following Blockly's own generator, measured over 213 programs: 53 disagreements
+before, 12 after, every one INTENTIONAL; the row-driven preview, tooltips and ranges from `robot_api.json`, the
+sim reach sector), Agent 2 the text API, the runner and these docs (the `doc_de_block`/`arg_key` contract first,
+then the Java `Launcher` twin of `student_main.py`, the language-aware refusals, `RunSession.over`, the Q7
+two-container smoke), Agent 3 motion and simulator truth (Positions in joint space through a three-rung floor
+ladder, the table-Ziel hover, the Q8 grasp wait, the N14 claim-event counter, the fingertip table).
+
+**Measured.** The fault matrix (35 cases) and every Methoden example (70 runs) in a rebuilt runner image against
+the branch's server: all per spec; the same smoke against the pre-branch runner fails 26 matrix cases. A
+maximal `robot.log` frame costs about 1.8 ms (a maximal `zeige` ~2 ms, the Rule §2 ceiling). The Q8 put-back
+rows: 3 grasps for one cube put back twice (1 before). Positions on the floor ladder: grasp-like 0 % refused,
+arbitrary near-table OMX poses 26–38 %.
+
+**Fix round, 2026-10-19 (owner decisions on three verifier findings).** (1) A Position taught BELOW the table was
+driven to: the reversed rung of `_pose_route` let the target set its own floor allowance (OMX EE z −0.031 with a
+link at −0.067 and Edu:1 EE z −0.032 both „finished", saying only „über einen Zwischenpunkt"; the same point as a
+Ziel refuses). `motion._refuse_position_below_table` now judges the taught pose's own clearance first, against this
+rig's table (the touch-off plane minus `tool_tip_below_ee_m`, else z = 0): both cases refuse with „Die Position „P"
+liegt unter der Tischebene — bitte die Position an diesem Roboter neu vormachen." and nothing moves; the probe's
+0/−1/−3 mm fingertip cases still run. This first version used the ladder's own models (the box model on the Edu:1,
+the point model on the OMX, 20 mm allowance), and its cost was quoted wrongly: „11 of 400 random clear poses
+(2.8 %)" counted a population dominated by poses whose lowest point is the fixed link1 at 43.7 mm. The next verifier
+measured the poses that matter, tilted Positions that touch the table, and the box model refused 11–86 % of them per
+tilt band from 10° to 90° (see fix round 2). (2) One reversed leg was labelled `'via'`; both rungs now label by leg
+count. (3) Q14: the wait judged the frame's age, then its look read the age again and raised the camera sentence
+when it had crossed 1.0 s in between (5 of 24 seeds with a 30 ms frame fetch on this host; the verifier measured 1
+in 24); the wait's look now uses the frame `_wait_frame_usable` judged and returns — 24 of 24 wait until Stopp —
+while the look right before the motion stays strict.
+
+**Fix round 2, 2026-10-19 (owner decisions on the next verifier's finding).** The box model reads a tilted Edu:1
+claw far below its meshes: of the poses the mesh oracle of `test_arm_geometry_edu1.py` proves clear of the table for
+every claw opening with their lowest point 0–5 mm up, it refused 0/229 at 0–10° claw tilt, 30/265 at 10–20°, 155/238
+at 20–30°, 220/273 at 30–45°, 120/139 at 45–60° and 111/170 at 60–90°, and all twelve sampled tilted touching
+Positions (0.6–19.9 mm up) in the simulator; the OMX's 20 mm allowance drove to a fingertip 19 mm under the table.
+`home_planner.pose_floor_clearance` is now the point model on both arms: the joint points (`ik.link_points` at one
+sample per link) and the fingertip at the CARRIED claw opening, the solver's closed fingertip set back along the
+world approach axis by `motion.tool_tip_rise_m` (an open Edu:1 claw's tips ride up 17 mm at 0.9 rad); the margin is
+a Ziel's 1 cm (`motion.WORKSPACE_FLOOR_MARGIN_M`), `FLOOR_TOL_M <= 0` stays the rollback. Measured with the same
+oracle and seeds: 0 refusals in every one of those bands, at the closed claw and at each of nine openings, and 0 in
+every cell of the verifier's height × tilt table (before: up to 945/1261); the twelve Positions are reached; the OMX
+refuses from 11 mm under the table. The price, stated: what the points do not see. Over 10⁶ uniform Edu:1 poses at
+random openings, a passing pose can put a mesh up to 83.3 mm below the table (box model: 19.3 mm), worst 16 mm at
+0–10° tilt rising to 80 mm at 60–90°, and in the commanded claw band the deepest parts are the claw housing (77 mm),
+the blades (64 mm) and link4 (44 mm), not only the blade edges; on the OMX a scratch oracle from the twin URDF puts
+the gripper housing up to 75 mm under (86 mm before). A claw opened by hand past 1.0 rad was, until fix round 3, credited only the
+rise table's last band (30 of 14,689 clear near-table poses refused). The property is a test now
+(`test_arm_geometry_edu1.py::test_the_position_floor_check_never_refuses_a_pose_the_meshes_clear`: 6000 draws in the
+commanded band, 3953 clear, 0 refused, ~2 s; 200,000 draws in a scratch run, 132,248 clear, 0 refused).
+
+**Fix round (header rows), 2026-10-19.** The Q5 sentence „Lernpfade gibt es nur am echten Roboter." plus a disabled
+„Lernpfad" key in the studio header cost the simulator header a row (Sucher: 2 rows / 105 px at 1366–1680 px, main
+1 / 59) and a shrinking note did not cure it, so (owner decision) the sentence moved into the simulator's dismissible
+„Test im Simulator." notice (`SimScene`'s `noticeEl`, inline; closed, it goes too) and the header is main's again:
+32 setups (8 window widths from 900 to 1920 px × real/simulator × leader bridge on/off), each measured on main and
+on the branch, give main's rows and height.
+
+**Fix round 3, 2026-10-19 (owner decision: the tip-rise table over the claw's full range).** A claw opened by hand
+stays open after the re-lock, but `edu1_ik._TIP_RISE_TABLE` stopped at 0.9 rad, so wide-open touching Positions
+were refused (up to 9.1 % per 0.1 rad bucket); it now runs to 1.5708 rad (the housing's 43.74 mm plateau from
+1.40 rad): 0 refused in every bucket. The replay floor checks now credit the rise along the tool axis
+(`motion.tool_tip_rise_world_z_m`), because straight up the larger rows let a tilted open claw replay into the table.
+In the commanded band a tilted claw's take is judged more strictly too (13 of 300 random near-table takes newly
+refused, each with claw mesh below the table). Accepted residual (owner decision): each check still judges one
+point on the tool axis, so a tilted wide-open claw's blades can lie under the table; over 200,000 poses at
+0.9–1.5708 rad 11,592 deep takes pass (12,992 before the round, worst 91 mm against 122) and no touching take is
+refused (8,535 before), but under 60° of tilt slightly more pass than before (0–30°: 386 against 134 per 100,000).
+
 ### v2.33.0 (unreleased), 2026-10-20 — RunPod only, cheapest first; the cap and the wall publish and continue
 
 Why. v2.32.0 shipped the RunPod ladder but measured, in production on 2026-10-20, that RunPod's v2 catalog reports Community availability WITHOUT data centres and answers the EEA-scoped Community query with an EMPTY list (50/50 entries), so `_try_runpod`'s „needs a non-empty data-centre list" meant the Community rung had NEVER placed a pod; production's EU Community stock was empty all day too. Owner decisions E29–E52 then: run RunPod only by default and keep Modal behind one Railway switch (`MANAGED_MODAL_RUNG`, no spend and no 4th-attempt surprise, E29–E31); place cheapest first — Community WORLDWIDE, then Secure in the EU GDPR data centres, then Secure worldwide (E42), so most trainings run on third-party hardware outside the EU; cap training time at 3.5 h per credit and, at the cap OR the 12 h wall, publish the newest checkpoint and let the student continue from a 7-day kept copy with a second credit (E32–E37, E43–E47); charge a lost attempt only up to its last saved checkpoint, in SQL (E45/E50).

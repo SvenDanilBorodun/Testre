@@ -140,7 +140,9 @@ def _grasp_held_env_override_set() -> bool:
 # the angle where the jaws meet the body.
 GRASP_HELD_MARGIN_RAD = 0.15
 # Second half of the HELD test: how far the jaws must have MOVED away from the
-# open command, as a fraction of the commanded open→close travel.
+# open command, as a fraction of the open→close travel. The close is the one
+# commanded this run, else (owner decision Q10) the arm's own closed angle — so
+# an OPEN gripper never reads „hält", whether or not a close was commanded.
 #
 # ``check_grasp_held`` was position-only and one-sided — ``gripper > threshold``
 # — and an OPEN gripper is above that threshold by construction. So a close that
@@ -697,6 +699,36 @@ def tool_tip_rise_m(ik, q_full, num_arm_joints: int) -> float:
     return max(-0.005, min(0.06, rise))
 
 
+def tool_tip_rise_world_z_m(ik, q_full, num_arm_joints: int, rot) -> float:
+    """The WORLD-z share of :func:`tool_tip_rise_m` at the tool orientation
+    ``rot`` (the ``fk`` rotation of the same arm joints): the tip is set back
+    ALONG the tool's world approach axis (``rot @ ik.approach_axis_local``),
+    the very point ``home_planner.pose_floor_clearance`` judges, so a claw
+    tilted by θ is credited ``rise · cos θ`` and never the whole rise straight
+    up (a tool pointing up is credited a negative share of a positive rise:
+    stricter; in the dip band near 0.14 rad, where the rise is negative, a
+    tilted or upturned tool is penalised less than one pointing straight down,
+    by at most about 1.3 mm, the true geometry of the judged point).
+
+    For the replay floor checks, which judge the TCP's z: crediting the full
+    rise vertically let a tilted, hand-opened claw pass with its blades and
+    housing tens of millimetres under the table. 0.0 on every arm that models
+    no rise (OMX, edu6) without reading ``rot``; any failure answers 0.0, the
+    uncredited check. Never raises."""
+    rise = tool_tip_rise_m(ik, q_full, num_arm_joints)
+    if rise == 0.0:
+        return 0.0
+    try:
+        local = [float(v) for v in ik.approach_axis_local]
+        norm = math.sqrt(sum(v * v for v in local))
+        down = -sum(float(r) * v for r, v in zip(rot[2], local)) / norm
+    except Exception:  # noqa: BLE001
+        return 0.0
+    if not math.isfinite(down):
+        return 0.0
+    return rise * max(-1.0, min(1.0, down))
+
+
 class WorkflowError(Exception):
     """Raised by handlers with a German message ready for the editor's
     log strip and toast."""
@@ -922,8 +954,10 @@ def _hold_motion_lock(ctx, *, notice_s: float | None = None,
         return False
     if notice_s is None:
         notice_s = MOTION_LOCK_NOTICE_S
-    # Snapshotted once, deliberately: in production ``ctx.should_stop`` is the
-    # stable bound ``_stop_event.is_set``.
+    # Snapshotted once per call, deliberately: in production ``ctx.should_stop``
+    # is the bound ``_stop_event.is_set`` for a Blockly run, and for a code run
+    # the wrapper ``code_rpc.RunSession`` installs before the first call and
+    # removes only after its worker has joined — stable for any call's life.
     should_stop = getattr(ctx, 'should_stop', None)
     is_paused = getattr(ctx, 'is_paused', None)
     deadline = time.monotonic() + max(0.0, float(notice_s))
@@ -1697,10 +1731,14 @@ _GREIFZIEL_IN_DESTINATION_DE = {
         'gefundenes Objekt bitte „Greife <Typ>" benutzen oder „fahre über" → '
         '„senke auf" → „schließe um" → „hebe an".'
     ),
+    # F5: „Position von <Ziel>" is NOT recommended here any more — it slips
+    # past this very refusal (a plain {x, y, z}) and drives sideways to the
+    # cube's mid-height with the fixed jaw roll, the blind move this refusal
+    # exists to prevent.
     'bewege zu': (
         'Ein Greifziel gehört nicht in „bewege zu" — dieser Block fährt zu '
         'einem gepinnten Ziel. Für ein gefundenes Objekt bitte „fahre über" '
-        'benutzen, oder „Position von <Ziel>" hier einsetzen.'
+        'benutzen.'
     ),
     'ablegen bei': (
         'Ein Greifziel gehört nicht in „ablegen bei" — dieser Block legt an '
@@ -1751,6 +1789,40 @@ def _refuse_greifziel(value: Any, block_de: str) -> None:
         raise WorkflowError(_GREIFZIEL_IN_DESTINATION_DE[block_de])
 
 
+# F22 / N5: ONE sentence for a Ziel name this run does not know, whichever path
+# met it — the Blockly reference block (``destinations.destination_ref``) and a
+# text program's ``robot.move_to("X")`` (this module's ``_resolve_target``) used
+# to say two different things, neither of them where a Ziel is made. The
+# simulator has no scene camera, so there the remedy is the Sim-Tisch.
+_UNKNOWN_DESTINATION_DE = ('Das Ziel „{name}" gibt es in diesem Programm nicht — '
+                           'lege es in der Sammlung unter „Ziele" an ({how}).')
+_UNKNOWN_DESTINATION_HOW_RIG_DE = 'Vormachen oder Klick in die Szenen-Kamera'
+_UNKNOWN_DESTINATION_HOW_SIM_DE = 'im Simulator: auf den Tisch tippen'
+
+
+def unknown_destination_de(ctx, name: Any) -> str:
+    """The German refusal for an unknown Ziel ``name``, worded for the mode."""
+    how = (_UNKNOWN_DESTINATION_HOW_SIM_DE if getattr(ctx, 'simulated', False)
+           else _UNKNOWN_DESTINATION_HOW_RIG_DE)
+    return _UNKNOWN_DESTINATION_DE.format(name=name, how=how)
+
+
+# N10: in the simulator the find-failure wording of a move that got no
+# Greifziel says WHERE the Greifbereich is — on the Sim-Tisch; there is no
+# „markierten" area drawn on a real mat there.
+_MARKED_GREIFBEREICH_DE = 'in den markierten Greifbereich'
+_SIM_GREIFBEREICH_DE = 'in den Greifbereich auf dem Sim-Tisch'
+
+
+def sim_greifbereich_de(ctx, text: Any) -> Any:
+    """``text`` with the rig's „markierten Greifbereich" worded for the
+    simulator when the run is simulated; unchanged otherwise (and for a
+    non-string)."""
+    if not isinstance(text, str) or not getattr(ctx, 'simulated', False):
+        return text
+    return text.replace(_MARKED_GREIFBEREICH_DE, _SIM_GREIFBEREICH_DE)
+
+
 def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
     """Turn an evaluated input value into a base-frame (x, y, z) point.
 
@@ -1761,7 +1833,7 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
         raise WorkflowError('Block hat kein Ziel erhalten.')
     if isinstance(value, str):
         if value not in ctx.destinations:
-            raise WorkflowError(f'Unbekanntes Ziel: {value}')
+            raise WorkflowError(unknown_destination_de(ctx, value))
         d = ctx.destinations[value]
         # The pin's height is re-asked here rather than trusted from storage —
         # see resolve_destination_z. This is the ONE run-time read of a named
@@ -1997,11 +2069,329 @@ def close_gripper(ctx, args: dict[str, Any]) -> None:
     ctx.last_commanded_close_rad = _gripper_closed(ctx)
 
 
+# ── Positions: the taught ARM pose (owner decisions Q2, Q9, Q12) ────────────
+# A Position is what „Position vormachen" teaches: the arm's own joint angles,
+# not only a point. „bewege zu <Position>" drives there in JOINT space — the
+# old path re-solved the stored point with the fixed jaw roll, which refused
+# all 30 of 30 taught Positions on the Edu:1 (its HOME and many taught poses
+# are outside the strict-vertical image) and picked another wrist on the OMX.
+#
+# THE ONE PREDICATE is ``is_position`` (spec principle 8): a payload entry
+# whose ``kind`` is 'pose', on the entry IN FORCE for that name this run. Only
+# the payload parser keeps ``kind``; a program's own pin/current statement
+# replaces the entry with one that has none, so its result is a Ziel — and so
+# is everything the robot writes by itself (``destination_current``, the
+# capture service, ``_persisted_destinations``). Q12: „setze X = aktuelle
+# Position" stays a Ziel.
+#
+# The joint route is GATED twice. By profile: Positions on edu6 are a non-goal
+# this round (m12), it keeps the point path without a word. By robot: the
+# joints are used only for a pose taught on THIS arm (``robot_type`` equals the
+# profile's ``data_robot_type`` AND ``joint_names`` equals its joint names,
+# gripper included — the strict form of ``armProfile.ghostJointsFromEntry``).
+# Anything else takes the point path with one German [WARNUNG] per name and
+# run. A Position without joints (taught before they were captured) takes the
+# point path silently.
+#
+# Rule §2 (owner-signed, Q2): the joint-space line is judged by the SAME floor
+# ladder as the Grundstellung (``home_planner``), planned and published under
+# ONE hold of the motion lock (M2), each leg through ``safe_move`` for the
+# Sperrzonen. The gripper is CARRIED like on every „bewege zu" (C1).
+_POSITION_JOINT_PROFILES = ('omx_full', 'omx_follower', 'edu1_studio')
+# A taught joint value may sit this far outside the arm's limit (servo readback
+# noise at a hard stop) and is then clamped; beyond it the Position is refused.
+_POSITION_LIMIT_TOL_RAD = 0.005
+_POSITION_OTHER_ROBOT_DE = (
+    '[WARNUNG] Die Position „{name}" wurde an einem anderen Roboter vorgemacht — '
+    'der Arm fährt nur zu ihrem Punkt, nicht in ihre Armstellung.'
+)
+_POSITION_OUT_OF_LIMITS_DE = (
+    'Die Position „{name}" liegt außerhalb der Gelenkgrenzen dieses Arms.'
+)
+_POSITION_FLOOR_DE = (
+    'Der Weg zur Position „{name}" würde durch die Tischebene führen — '
+    'bitte die Position etwas höher neu vormachen.'
+)
+# Fix round (owner): a Position whose taught pose ITSELF lies below this rig's
+# table is refused before any route is planned — the reversed rung would
+# otherwise let the target set its own floor allowance and drive there.
+_POSITION_BELOW_TABLE_DE = (
+    'Die Position „{name}" liegt unter der Tischebene — '
+    'bitte die Position an diesem Roboter neu vormachen.'
+)
+_POSITION_VIA_DE = 'Fahre zur Position „{name}" über einen Zwischenpunkt.'
+_POSITION_VIA_HOME_DE = 'Fahre zur Position „{name}" über die Grundstellung.'
+
+
+def is_position(entry: Any) -> bool:
+    """True when ``entry`` (a stored destination) is a taught Position."""
+    return isinstance(entry, dict) and entry.get('kind') == 'pose'
+
+
+def position_joint_route(entry: Any, profile: Any) -> str | None:
+    """Which route a stored destination takes on ``profile``, purely.
+
+    ``'joints'`` — a Position with joints taught on this arm, on a profile in
+    ``_POSITION_JOINT_PROFILES``: the joint route. ``'other_robot'`` — a
+    Position with joints taught on ANOTHER arm: the point path, with the
+    warning. ``None`` — everything else (a Ziel, a Position without joints, an
+    edu6 or unknown profile): the point path, silently. Shared with the
+    start-time pre-check, which skips exactly the ``'joints'`` entries."""
+    if not is_position(entry) or entry.get('joints') is None:
+        return None
+    if profile is None or getattr(profile, 'profile_id', None) not in _POSITION_JOINT_PROFILES:
+        return None
+    joints = entry.get('joints')
+    names = entry.get('joint_names')
+    try:
+        same_robot = (
+            entry.get('robot_type') == profile.data_robot_type
+            and isinstance(names, (list, tuple))
+            and tuple(names) == tuple(profile.joint_names)
+            and isinstance(joints, (list, tuple)) and len(joints) == len(names)
+        )
+    except Exception:  # noqa: BLE001 — an odd entry is simply not this robot's
+        same_robot = False
+    return 'joints' if same_robot else 'other_robot'
+
+
+def _stored_pose_joints(ctx, name: Any) -> list[float] | None:
+    """The taught ARM joints of the Position ``name`` for the joint route, or
+    ``None`` for the point path (see :func:`position_joint_route`)."""
+    if not isinstance(name, str):
+        return None
+    entry = (getattr(ctx, 'destinations', None) or {}).get(name)
+    route = position_joint_route(entry, _profile_for_ctx(ctx))
+    if route is None:
+        return None
+    if route == 'other_robot':
+        warned = getattr(ctx, 'position_warned', None)
+        if warned is None:
+            warned = set()
+            try:
+                ctx.position_warned = warned
+            except Exception:  # noqa: BLE001
+                pass
+        if name not in warned:
+            warned.add(name)
+            ctx.log(_POSITION_OTHER_ROBOT_DE.format(name=name))
+        return None
+    n = _n(ctx)
+    try:
+        arm = [float(v) for v in entry['joints'][:n]]
+    except (TypeError, ValueError):
+        return None
+    if len(arm) != n or not all(math.isfinite(v) for v in arm):
+        return None
+    limits = getattr(getattr(ctx, 'ik', None), 'joint_limits', None)
+    if limits:
+        clamped = []
+        for q, (lo, hi) in zip(arm, limits):
+            if q < lo - _POSITION_LIMIT_TOL_RAD or q > hi + _POSITION_LIMIT_TOL_RAD:
+                raise WorkflowError(_POSITION_OUT_OF_LIMITS_DE.format(name=name))
+            clamped.append(min(max(q, float(lo)), float(hi)))
+        arm = clamped + arm[len(clamped):]
+    return arm
+
+
+def _pose_route(ctx, q_start, q_end, name) -> tuple[list, str]:
+    """Plan the joint route to a Position: ``(legs, rung)``, rung ``'direct'``
+    / ``'via'`` / ``'home'``. A PURE planner: the caller holds the motion lock.
+
+    1. forward: ``plan_floor_checked_home_route(start → target)``;
+    2. reversed: plan target → start and reverse the legs (a target near the
+       table judges its lift from ITS end);
+    3. via the Grundstellung: start → HOME forward, HOME → target as the
+       reversed target → HOME plan;
+    4. else the German refusal naming the Position.
+
+    A rung falls through ONLY on :class:`home_planner.FloorRefusal`; a
+    Sperrzone refusal or any other ``WorkflowError`` reaches the student
+    verbatim (r4-M2). The rungs are planned QUIETLY: their notes describe the
+    Grundstellung (and the reversed rung the reversed direction), so they go to
+    a sink that is thrown away; ``move_to`` says its own one line."""
+    from physical_ai_server.workflow import home_planner
+    quiet: list[str] = []
+    sink = quiet.append
+    try:
+        legs = home_planner.plan_floor_checked_home_route(
+            ctx, q_start, q_end, DEFAULT_MOVE_DURATION_S, log=sink)
+        return list(legs), ('direct' if len(legs) == 1 else 'via')
+    except home_planner.FloorRefusal:
+        pass
+    try:
+        legs = home_planner.plan_floor_checked_home_route(
+            ctx, q_end, q_start, DEFAULT_MOVE_DURATION_S, log=sink)
+        # Labelled by leg count like the forward rung: ONE reversed leg is a
+        # straight move and never says „über einen Zwischenpunkt".
+        return ([(list(b), list(a), d) for (a, b, d) in reversed(legs)],
+                ('direct' if len(legs) == 1 else 'via'))
+    except home_planner.FloorRefusal:
+        pass
+    home = _home_joints(ctx) + [q_end[_n(ctx)]]
+    try:
+        up = home_planner.plan_floor_checked_home_route(
+            ctx, q_start, home, DEFAULT_HOME_DURATION_S, log=sink)
+        down = home_planner.plan_floor_checked_home_route(
+            ctx, q_end, home, DEFAULT_MOVE_DURATION_S, log=sink)
+    except home_planner.FloorRefusal:
+        raise WorkflowError(_POSITION_FLOOR_DE.format(name=name)) from None
+    return (list(up) + [(list(b), list(a), d) for (a, b, d) in reversed(down)],
+            'home')
+
+
+def _refuse_position_below_table(ctx, q_end, name) -> None:
+    """Refuse a Position whose taught pose lies below THIS rig's table.
+
+    Judged by ``home_planner.pose_floor_clearance``: the point model on every
+    joint-route arm — the arm's joint points and its fingertip at the CARRIED
+    claw opening ``q_end[n]`` — against the touch-off plane minus the solver's
+    ``tool_tip_below_ee_m``, else the base plane z = 0. A judged point more
+    than ``WORKSPACE_FLOOR_MARGIN_M`` (1 cm, exactly a Ziel's margin) below the
+    surface refuses, so a pose taught with the fingertips on the table passes.
+    Geometry the model cannot judge is refused too — never an approval.
+    ``home_planner.FLOOR_TOL_M <= 0`` (the rollback
+    ``EDUBOTICS_HOME_FLOOR_TOL_M=0``) switches the check off, like the ladder;
+    read at call time, so a test or the rollback sees the live value."""
+    from physical_ai_server.workflow import home_planner
+    if float(home_planner.FLOOR_TOL_M) <= 0.0:
+        return
+    clearance = home_planner.pose_floor_clearance(ctx, q_end)
+    if clearance is None or clearance < -WORKSPACE_FLOOR_MARGIN_M:
+        raise WorkflowError(_POSITION_BELOW_TABLE_DE.format(name=name))
+
+
+def _move_to_position(ctx, name: str, pose: list[float], tempo) -> None:
+    """Drive to a Position's taught arm pose (see the block comment above).
+
+    ONE hold of the motion lock FIRST; only inside it is ``q_start`` read and
+    the route planned (M2: a hat moving the arm between this call and the lock
+    would otherwise leave a first leg the floor ladder never judged). Before the
+    route, the taught pose itself must lie above the table
+    (:func:`_refuse_position_below_table`); nothing moves on a refusal."""
+    acquired = _hold_motion_lock(ctx)
+    try:
+        q_start = list(ctx.last_full_joints)
+        n = _n(ctx)
+        q_end = list(pose) + [q_start[n]]
+        _refuse_position_below_table(ctx, q_end, name)
+        legs, rung = _pose_route(ctx, q_start, q_end, name)
+        if rung == 'via':
+            ctx.log(_POSITION_VIA_DE.format(name=name))
+        elif rung == 'home':
+            ctx.log(_POSITION_VIA_HOME_DE.format(name=name))
+        for leg_start, leg_end, leg_dur in legs:
+            safe_move(ctx, leg_start, leg_end, leg_dur, tempo=tempo)
+            ctx.last_full_joints = list(leg_end)
+            ctx.last_arm_joints = list(leg_end[:n])
+    finally:
+        _release_motion_lock(ctx, acquired)
+
+
+_POSITION_NOT_HERE_DE = (
+    '„{name}" ist eine Position — dieser Block braucht ein Ziel auf dem Tisch. '
+    'Für eine Position bitte „bewege zu" und dann „öffne Greifer" bzw. '
+    '„schließe Greifer" benutzen.'
+)
+_POSITION_NOT_HERE_CODE_DE = (
+    '„{name}" ist eine Position — {method} braucht ein Ziel auf dem Tisch. '
+    'Für eine Position bitte {move} und dann {open_} bzw. {close} benutzen.'
+)
+
+
+def _method_name(ctx, row: str) -> str:
+    """The text-API spelling of ``row`` in the run's language (Python name, or
+    the Java spelling for a Java run), from the ONE table, ``robot_api``."""
+    from physical_ai_server.workflow import robot_api as _api
+    call = _api.ROBOT_API_BY_NAME.get(row)
+    if call is None:
+        return row
+    return call.java_name if getattr(ctx, 'code_language', None) == 'java' else call.name
+
+
+def _refuse_position(ctx, value: Any, row: str) -> None:
+    """Q9: a Position in „ablegen bei" / „aufnehmen" (``drop_at`` / ``pickup``)
+    is refused — they place and pick at a table point, and joint-space
+    place/pick is a non-goal. Keyed on :func:`is_position` with or without
+    joints, on EVERY profile. A „setze X = aktuelle Position" entry is a Ziel and
+    never refused (Q12)."""
+    if not isinstance(value, str):
+        return
+    entry = (getattr(ctx, 'destinations', None) or {}).get(value)
+    if not is_position(entry):
+        return
+    if getattr(ctx, 'code_language', None) in ('python', 'java'):
+        raise WorkflowError(_POSITION_NOT_HERE_CODE_DE.format(
+            name=value, method=_method_name(ctx, row),
+            move=_method_name(ctx, 'move_to'),
+            open_=_method_name(ctx, 'open_gripper'),
+            close=_method_name(ctx, 'close_gripper')))
+    raise WorkflowError(_POSITION_NOT_HERE_DE.format(name=value))
+
+
+# ── a table Ziel is approached from above (owner decisions Q3, Q11) ─────────
+# „bewege zu <Tisch-Ziel>" used to drive the end effector ONTO the table point:
+# with a cube in the jaws that pressed its bottom ~15 mm into the table, while
+# the API text said „über". Every plane-tracked destination (a camera or
+# Sim-Tisch pin, whose height IS the table) is now approached at the release
+# height „ablegen bei" uses, so „bewege zu Ablage; öffne Greifer" releases where
+# „ablegen bei Ablage" does. Accepted cost (Q3): saved programs that drive to a
+# table Ziel stop about 5 cm higher. The pin block's „fahre dorthin" (the jog's
+# drive_to) uses the same helper, over the table in force (Q11).
+_HOVER_REDUCED_DE = ('[WARNUNG] Anfahrhöhe über „{name}" auf {mm:.0f} mm reduziert — '
+                     'höher ist hier nicht erreichbar.')
+_HOVER_REDUCED_NAMELESS_DE = ('[WARNUNG] Anfahrhöhe über dem Ziel auf {mm:.0f} mm '
+                              'reduziert — höher ist hier nicht erreichbar.')
+
+
+def table_ziel_hover(ctx, target_xyz, roll, name: str | None = None):
+    """``(x, y, z + clearance)`` over a TABLE Ziel at ``target_xyz``.
+
+    ``clearance`` is the largest rise up to ``DROP_HEIGHT_M`` that solves
+    straight above the point FOR THE ROLL ACTUALLY USED (``_max_reachable_rise``,
+    the bisect every „as high as this arm can" caller shares). Warns only when
+    it fell below ``_APPROACH_WARN_FRAC`` of the request — the rule
+    ``_reachable_release_clearance`` applies — with the Ziel's name, or
+    nameless for the jog's drive_to (``WorkshopJog.srv`` carries no name).
+    ``drop_at`` is NOT a user: it keeps ``_reachable_release_clearance`` and its
+    own sentence."""
+    x, y, z = (float(v) for v in target_xyz)
+    clearance, _q = _max_reachable_rise(ctx, (x, y, z), DROP_HEIGHT_M, roll=roll)
+    if clearance < _APPROACH_WARN_FRAC * DROP_HEIGHT_M:
+        mm = clearance * 1000.0
+        try:
+            ctx.log(_HOVER_REDUCED_DE.format(name=name, mm=mm) if name is not None
+                    else _HOVER_REDUCED_NAMELESS_DE.format(mm=mm))
+        except Exception:  # noqa: BLE001 — a diagnostic never breaks the move
+            pass
+    return (x, y, z + clearance)
+
+
+def _is_table_ziel(ctx, value: Any) -> bool:
+    """True when ``value`` names a plane-tracked (table) destination in force."""
+    if not isinstance(value, str):
+        return False
+    entry = (getattr(ctx, 'destinations', None) or {}).get(value)
+    return isinstance(entry, dict) and bool(entry.get('plane_tracked'))
+
+
 def move_to(ctx, args: dict[str, Any]) -> None:
     _require_seeded_start_pose(ctx)
     _refuse_greifziel(args.get('destination'), 'bewege zu')
-    target = _resolve_target(args.get('destination'), ctx)
+    pose = _stored_pose_joints(ctx, args.get('destination'))
+    if pose is not None:
+        _move_to_position(ctx, args.get('destination'), pose, _move_tempo(args))
+        return
+    dest = args.get('destination')
+    target = _resolve_target(dest, ctx)
     roll = _carry_roll(ctx)
+    if _is_table_ziel(ctx, dest):
+        # The roll is decided FIRST (the drop_at rule: the carry roll when it
+        # solves at the point, else the fixed jaw roll), so the hover is
+        # bisected for the roll this move really uses.
+        if roll != GRASP_ROLL_RAD and _try_solve(ctx, target, roll=roll) is None:
+            roll = GRASP_ROLL_RAD
+        target = table_ziel_hover(ctx, target, roll, dest)
     arm_q = _solve_with_carry_roll(ctx, target, roll)
     if arm_q is None:
         roll = GRASP_ROLL_RAD
@@ -2209,9 +2599,9 @@ def _held_threshold_rad(ctx) -> float:
     ``EDUBOTICS_GRASP_HELD_MAX_RAD`` to a non-empty value (rig override /
     rollback wins everywhere), and otherwise to the PROFILE-AWARE
     :func:`_grasp_held_max` when no gripper close has been commanded this run
-    (``last_commanded_close_rad`` is None / malformed / outside the band) —
-    which also keeps the documented open-gripper behaviour of
-    ``grasp_held``/``wait_until_held`` on a fresh run. That fallback used to be
+    (``last_commanded_close_rad`` is None / malformed / outside the band). An
+    OPEN gripper is judged by :func:`_jaws_left_the_open_position`, not here: it
+    never „hält" (Q10). That fallback used to be
     the bare OMX constant, which sits BELOW the whole Feetech gripper band and
     therefore reported HELD for every reading on edu6/edu1 (see
     :func:`_grasp_held_max` for the measurement)."""
@@ -2300,15 +2690,22 @@ def check_grasp_held(ctx) -> bool | None:
 def _jaws_left_the_open_position(ctx, gripper: float) -> bool:
     """Second half of the HELD test — see ``GRASP_HELD_MIN_TRAVEL_FRAC``.
 
-    ``True`` unless a close WAS commanded this run and the achieved angle is
-    still essentially at the OPEN command, which means the close never executed.
-    With no close commanded this run the documented open-gripper behaviour of
-    ``grasp_held`` / ``wait_until_held`` is preserved exactly (``True``)."""
+    ``True`` unless the achieved angle is still essentially at the OPEN command
+    — within ``GRASP_HELD_MIN_TRAVEL_FRAC`` of the travel from open to the
+    reference close. „Ein offener Greifer hält nie etwas" (owner decision Q10,
+    Rule §2 sign-off): with no close commanded this run the reference is the
+    arm's own closed angle (``_gripper_closed``), so an OPEN gripper reads
+    „hält nicht" — it used to read „hält" through ``grasp_held`` and
+    ``wait_until_held`` on every arm, the simulator included. There is NO
+    close-command requirement: a replayed grasp (whose close the run never
+    commanded) still reads „hält" because its jaws really left the open
+    position. ``EDUBOTICS_GRASP_HELD_MIN_TRAVEL_FRAC=0`` stays the one-variable
+    rollback."""
     if GRASP_HELD_MIN_TRAVEL_FRAC <= 0.0:
         return True
     commanded = getattr(ctx, 'last_commanded_close_rad', None)
     if commanded is None:
-        return True
+        commanded = _gripper_closed(ctx)
     try:
         commanded = float(commanded)
     except (TypeError, ValueError):
@@ -2443,6 +2840,7 @@ def note_object_released(ctx, xy) -> None:
 def pickup(ctx, args: dict[str, Any]) -> None:
     _require_seeded_start_pose(ctx)
     _refuse_greifziel(args.get('target'), 'aufnehmen')
+    _refuse_position(ctx, args.get('target'), 'pickup')
     target = _resolve_target(args.get('target'), ctx)
     # Conservative descend: grasp at the measured table plane + clearance so the
     # fingertips straddle the lower part of a low object, not the table itself.
@@ -2463,6 +2861,7 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
     way in. The bounded-quintic approach is consistent with pickup."""
     _require_seeded_start_pose(ctx)
     _refuse_greifziel(args.get('destination'), 'ablegen bei')
+    _refuse_position(ctx, args.get('destination'), 'drop_at')
     target = _resolve_target(args.get('destination'), ctx)
     # Optional per-move „mit Tempo" override; None → workflow-global tempo. Scales
     # every sub-motion of the place uniformly.
@@ -2626,6 +3025,7 @@ def _no_greifziel_error(ctx) -> WorkflowError:
     reason = getattr(ctx, 'last_find_failure', None)
     if not isinstance(reason, str) or not reason.strip():
         return WorkflowError(_NO_GREIFZIEL_MSG)
+    reason = sim_greifbereich_de(ctx, reason)
     return GraspSkip(
         f'{reason.strip()} (Der Block hat deshalb kein Greifziel bekommen — '
         'mit „falls Ziel" prüfen, bevor der Arm bewegt wird.)'
@@ -2765,17 +3165,33 @@ def descend_to(ctx, args: dict[str, Any]) -> None:
     transit half through ``safe_move`` fixes both: the arm never enters the box,
     so it is never trapped in it."""
     _require_seeded_start_pose(ctx)
-    x, y, z, roll = _greifziel_xyz_roll(ctx, args.get('ziel'), 'senke auf')
+    ziel = args.get('ziel')
+    x, y, z, roll = _greifziel_xyz_roll(ctx, ziel, 'senke auf')
     arm_q = _solve_or_raise(ctx, (x, y, z), roll=roll)
-    q_end = arm_q + [ctx.last_full_joints[_n(ctx)]]
-    if _is_straight_down(ctx, x, y):
-        # Grasp corridor — EXEMPT (raw), same rule as _execute_pickup's descend.
-        _publish_motion(ctx, ctx.last_full_joints, q_end, DEFAULT_GRASP_DURATION_S)
-    else:
-        safe_move(ctx, ctx.last_full_joints, q_end, DEFAULT_GRASP_DURATION_S,
-                  roll=roll)
-    ctx.last_arm_joints = arm_q
-    ctx.last_full_joints = q_end
+    # F21 (owner decision Q3): from anywhere but straight above, the block
+    # first runs „fahre über" for the same Greifziel and only then descends — a
+    # descend that started elsewhere used to swing in LOW, sideways at grasp
+    # height. ONE hold of the motion lock FIRST, and only inside it is the
+    # current pose judged (M2: a hat moving the arm in between would otherwise
+    # make the „straight down" verdict describe a pose the arm has left). The
+    # lock is re-entrant, so the hover's own publishes nest inside it.
+    acquired = _hold_motion_lock(ctx)
+    try:
+        if not _is_straight_down(ctx, x, y):
+            move_above(ctx, {'ziel': ziel})
+        q_end = arm_q + [ctx.last_full_joints[_n(ctx)]]
+        if _is_straight_down(ctx, x, y):
+            # Grasp corridor — EXEMPT (raw), same rule as _execute_pickup's descend.
+            _publish_motion(ctx, ctx.last_full_joints, q_end, DEFAULT_GRASP_DURATION_S)
+        else:
+            # The hover could not be reached straight above (a clamped edge):
+            # still a transit, still zone-checked.
+            safe_move(ctx, ctx.last_full_joints, q_end, DEFAULT_GRASP_DURATION_S,
+                      roll=roll)
+        ctx.last_arm_joints = arm_q
+        ctx.last_full_joints = q_end
+    finally:
+        _release_motion_lock(ctx, acquired)
 
 
 def _is_straight_down(ctx, x: float, y: float) -> bool:
@@ -2883,6 +3299,34 @@ def close_on_object(ctx, args: dict[str, Any]) -> None:
     note_object_picked_up(ctx, getattr(ziel, 'aruco_id', None))
 
 
+_LIFT_NOT_SOLVABLE_DE = (
+    '[WARNUNG] „hebe an" hat den Arm nicht bewegt — aus dieser Stellung '
+    'kann der Arm nicht senkrecht nach oben fahren.'
+)
+_LIFT_NOT_SOLVABLE_HOME_DE = (
+    _LIFT_NOT_SOLVABLE_DE + ' „hebe an" gehört hinter „Greife" oder „schließe '
+    'um"; aus der Grundstellung heraus gibt es nichts anzuheben.'
+)
+# „In the Grundstellung" for N8's wording: every arm joint within this of HOME
+# (the same 0.01 rad the manual home glide calls „steht bereits in der
+# Grundstellung").
+_HOME_POSE_TOL_RAD = 0.01
+
+
+def _is_home_pose(ctx) -> bool:
+    """True when every arm joint of ``ctx.last_full_joints`` is within
+    ``_HOME_POSE_TOL_RAD`` of the profile's HOME. Never raises."""
+    try:
+        n = _n(ctx)
+        pose = [float(v) for v in list(getattr(ctx, 'last_full_joints', None) or [])[:n]]
+        home = _home_joints(ctx)
+        if len(pose) != n or len(home) != n:
+            return False
+        return all(abs(a - b) <= _HOME_POSE_TOL_RAD for a, b in zip(pose, home))
+    except Exception:  # noqa: BLE001 — wording only
+        return False
+
+
 def lift(ctx, args: dict[str, Any]) -> None:
     """„hebe an" — raise the end-effector straight up by the default approach
     height from its CURRENT position, preserving the wrist roll (j5) so a held
@@ -2939,12 +3383,10 @@ def lift(ctx, args: dict[str, Any]) -> None:
         raise WorkflowError('Zielpunkt liegt unter der Tischebene.')
     cur_arm_q = _try_solve(ctx, (x, y, z))
     if cur_arm_q is None:
-        ctx.log(
-            '[WARNUNG] „hebe an" hat den Arm nicht bewegt — aus dieser Stellung '
-            'kann der Arm nicht senkrecht nach oben fahren. „hebe an" gehört '
-            'hinter „Greife" oder „schließe um"; aus der Grundstellung heraus '
-            'gibt es nichts anzuheben.'
-        )
+        # N8: the Grundstellung half of the sentence is said only when the arm
+        # IS there — anywhere else it would describe a pose the arm is not in.
+        ctx.log(_LIFT_NOT_SOLVABLE_HOME_DE if _is_home_pose(ctx)
+                else _LIFT_NOT_SOLVABLE_DE)
         ctx.last_arm_joints = list(cur[:_n(ctx)])
         return
     # Clamp the lift to the reachable envelope so an outer-ring grasp is never
@@ -2990,26 +3432,33 @@ def lift(ctx, args: dict[str, Any]) -> None:
 WAIT_SECONDS_MAX = 300.0  # 5 minutes — anything longer is almost certainly a mistake
 
 
+_WAIT_NEEDS_A_NUMBER_DE = '„warte" braucht eine Zahl (Sekunden).'
+
+
 def wait_seconds(ctx, args: dict[str, Any]) -> None:
+    # F14: a text value or an EMPTY socket used to wait a silent 1 s (and a
+    # digit text like "2" was coerced). Reachable without a crafted payload:
+    # `variables_get` has no Blockly output type, so any variable connects to
+    # the check:'Number' SECONDS socket. Refused in German now, like every
+    # other number socket of the interpreter (area A's _as_number); a bool is
+    # not a number of seconds either.
+    raw = args.get('seconds')
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise WorkflowError(_WAIT_NEEDS_A_NUMBER_DE)
     try:
-        duration = float(args.get('seconds', 1.0))
-    except (TypeError, ValueError):
-        duration = 1.0
+        duration = float(raw)
+    except (OverflowError, ValueError):
+        raise WorkflowError(_WAIT_NEEDS_A_NUMBER_DE) from None
     # NaN falls through EVERY comparison below (`nan < 0`, `nan > MAX` and
     # `monotonic() < nan` are all False), so „warte N Sekunden" silently waited
-    # 0.000 s and logged nothing — measured 2026-09-07 with seconds='nan'.
-    # Reachable without a crafted payload: `variables_get` has no Blockly output
-    # type, so any variable connects to the check:'Number' SECONDS socket.
-    # Treated exactly like the non-numeric 'abc' case (which already falls back
-    # to 1.0 silently), so the two malformed inputs behave the same way.
+    # 0.000 s and logged nothing — measured 2026-09-07. It is refused like any
+    # other value that is not a number of seconds.
     #
     # NaN ONLY — `inf` is deliberately left to the WAIT_SECONDS_MAX branch
-    # below, which already handles it correctly: measured 2026-09-07,
-    # seconds='inf' waited to the cap and logged the German [WARNUNG], while
-    # seconds='nan' waited 0.000 s and logged nothing. Using isfinite() here
-    # would have swallowed the inf warning too.
+    # below, which handles it correctly: it waits to the cap and logs the
+    # German [WARNUNG]. Using isfinite() here would swallow that warning.
     if math.isnan(duration):
-        duration = 1.0
+        raise WorkflowError(_WAIT_NEEDS_A_NUMBER_DE)
     if duration < 0:
         duration = 0.0
     if duration > WAIT_SECONDS_MAX:

@@ -1096,7 +1096,10 @@ def test_the_blockly_replay_refuses_a_seam_crossing_before_moving(monkeypatch):
 def _edu1_true_claw_rise(g):
     """The claw's LOWEST point above the closed-tip TCP, recomputed from the
     SHIPPED finger meshes through RL_joint / LF_joint (URDF origins, flipped axes,
-    mimic) — the ground truth tool_tip_rise_m must never exceed."""
+    mimic) and the claw housing (link5 + end_effector, rigid in the end_effector
+    frame, which ``end_joint`` puts at link5's origin) — the ground truth
+    tool_tip_rise_m must never exceed. Past ≈1.38 rad the housing, not a blade,
+    is the lowest part."""
     import struct
     meshes = (Path(__file__).resolve().parents[2] / 'physical_ai_manager' / 'public'
               / 'edu1-urdf' / 'meshes')
@@ -1120,31 +1123,56 @@ def _edu1_true_claw_rise(g):
     if cache is None:
         cache = {
             'right': _stl('right_finger.STL'), 'left': _stl('left_finger.STL'),
-            'R0': _rpy(-1.5708, 0, -1.5708)}
+            'R0': _rpy(-1.5708, 0, -1.5708),
+            'housing': max(float(_stl(name)[:, 2].max())
+                           for name in ('link5.STL', 'end_effector.STL'))}
         _edu1_true_claw_rise._cache = cache
     lowest = max(
         ((cache['R0'] @ _rotz(g * sign) @ cache[key].T).T + np.array(origin))[:, 2].max()
         for key, origin, sign in (('right', (0.0202, -0.00925, 0.02125), +1),
                                   ('left', (0.0195, 0.00925, 0.02125), -1)))
-    return 0.08625 - lowest
+    return 0.08625 - max(lowest, cache['housing'])
 
 
 def test_edu1_claw_tip_rise_never_over_credits_the_mesh_derived_truth():
-    from physical_ai_server.workflow.edu1_ik import Edu1IKSolver
-    ik = Edu1IKSolver()
+    """Over the claw's WHOLE window (0–1.5708 rad, where a claw opened by hand
+    while the arm is limp can stand) and past it, the table never credits more
+    than the meshes allow; inside the window it is pessimistic only by its own
+    rounding and the rise within one 0.05 rad band, and every row is exactly
+    its band's minimum, rounded DOWN to 0.01 mm."""
+    from physical_ai_server.workflow import edu1_ik as E
+    ik = E.Edu1IKSolver()
     worst_over = -1.0
+    worst_under_band = 0.0
     worst_under = 0.0
     for g in np.linspace(0.0, 1.5708, 400):
         truth = _edu1_true_claw_rise(float(g))
         model = ik.tool_tip_rise_m(float(g))
         worst_over = max(worst_over, model - truth)
+        worst_under = max(worst_under, truth - model)
         if g <= 0.9:
-            worst_under = max(worst_under, truth - model)
+            worst_under_band = max(worst_under_band, truth - model)
+    for g in np.linspace(1.5708, math.pi, 60):          # past the window: the plateau
+        worst_over = max(worst_over, ik.tool_tip_rise_m(float(g)) - _edu1_true_claw_rise(float(g)))
     assert worst_over <= 1e-6, f'over-credits by {worst_over * 1000:.3f} mm'
-    assert worst_under < 0.0025, f'needlessly pessimistic by {worst_under * 1000:.2f} mm'
+    assert worst_under_band < 0.0025, f'needlessly pessimistic by {worst_under_band * 1000:.2f} mm'
+    # 0.05 rad bands on a curve rising ~6 mm per 0.1 rad: ≤ 3.05 mm (measured 3.04).
+    assert worst_under < 0.0031, f'needlessly pessimistic by {worst_under * 1000:.2f} mm'
+    # Each row IS its band's minimum, floored to 1e-5 (sampled every 0.5 mrad).
+    starts = [row[0] for row in E._TIP_RISE_TABLE]
+    assert starts == pytest.approx([round(0.05 * k, 2) for k in range(29)])
+    for i, (start, rise) in enumerate(E._TIP_RISE_TABLE):
+        end = starts[i + 1] if i + 1 < len(starts) else 1.5708
+        band_min = min(_edu1_true_claw_rise(float(g))
+                       for g in np.arange(start, end + 1e-12, 0.0005) if g < end or end == 1.5708)
+        assert band_min - 1.2e-5 <= rise <= band_min + 1e-9, (start, rise, band_min)
     # The dip is real and reported as a NEGATIVE rise (stricter, never looser).
     assert ik.tool_tip_rise_m(0.14) < 0.0
     assert ik.tool_tip_rise_m(0.9) == pytest.approx(0.01742)
+    # A claw opened by hand past the commanded band: the blades, then the housing.
+    assert ik.tool_tip_rise_m(1.2) == pytest.approx(0.03291)
+    assert ik.tool_tip_rise_m(1.5708) == pytest.approx(0.04374)
+    assert ik.tool_tip_rise_m(3.0) == pytest.approx(0.04374)
     assert ik.tool_tip_rise_m(float('nan')) == 0.0
     from physical_ai_server.workflow.handlers import motion as m
     from physical_ai_server.workflow.ik_solver import IKSolver
@@ -1167,8 +1195,8 @@ def test_an_edu1_take_whose_OPEN_claw_touches_the_table_is_replayable():
     ctx = types.SimpleNamespace(z_table=0.0, table_plane=None)
 
     def floor(q_full):
-        _R, t = ik.fk(q_full[:5])
-        return (float(t[2]) + m.tool_tip_rise_m(ik, q_full, 5)
+        rot, t = ik.fk(q_full[:5])
+        return (float(t[2]) + m.tool_tip_rise_world_z_m(ik, q_full, 5, rot)
                 < m._floor_z_at(ctx, t[0], t[1]) - m.WORKSPACE_FLOOR_MARGIN_M)
     open_rows = [list(q) + [0.9, 0.0], list(q) + [0.9, 0.04]]
     tr.resegment_trajectory(open_rows, point_floor_check=floor, num_arm_joints=5)
@@ -1177,12 +1205,84 @@ def test_an_edu1_take_whose_OPEN_claw_touches_the_table_is_replayable():
         tr.resegment_trajectory(closed_rows, point_floor_check=floor, num_arm_joints=5)
 
 
-def test_both_replay_floor_checks_credit_the_claw_rise():
+def test_both_replay_floor_checks_credit_the_claw_rise_along_the_tool_axis():
+    """Both replay floor checks credit the rise through the ONE along-axis
+    helper, never the bare rise added to the TCP's z."""
     handler = Path(__import__('physical_ai_server.workflow.handlers.trajectory',
                               fromlist=['x']).__file__).read_text(encoding='utf-8')
-    assert 'tool_tip_rise_m(ik, q6, n)' in handler
-    assert '_motion.tool_tip_rise_m(ik, q6, _n_fk)' in _server_fn_source(
-        '_build_replay_lead_floor_check')
+    server = _server_fn_source('_build_replay_lead_floor_check')
+    assert 'tool_tip_rise_world_z_m(ik, q6, n, rot)' in handler
+    assert '_motion.tool_tip_rise_world_z_m(ik, q6, _n_fk, rot)' in server
+    assert 'tool_tip_rise_m(ik, q6' not in handler
+    assert 'tool_tip_rise_m(ik, q6' not in server
+
+
+def test_the_world_z_credit_is_the_tip_set_back_along_the_tool_axis():
+    """``tool_tip_rise_world_z_m`` is the z of exactly the point
+    ``home_planner.pose_floor_clearance`` judges (the closed tip minus the rise
+    along the world approach axis): ``rise · cos(tilt)``, negative for a tool
+    pointing up. 0.0 on the OMX (no rise) and when the axis cannot be read."""
+    from physical_ai_server.workflow.edu1_ik import Edu1IKSolver
+    from physical_ai_server.workflow.handlers import motion as m
+    from physical_ai_server.workflow.ik_solver import IKSolver
+    ik = Edu1IKSolver()
+    rng = np.random.default_rng(1021)
+    signs = set()
+    for _ in range(300):
+        q = [float(rng.uniform(lo, hi)) for lo, hi in ik.joint_limits]
+        g = float(rng.uniform(0.0, 1.5708))
+        rot, t = ik.fk(q)
+        axis = np.asarray(rot) @ np.asarray(ik.approach_axis_local, dtype=float)
+        tip = np.asarray(t) - m.tool_tip_rise_m(ik, q + [g], 5) * axis
+        credit = m.tool_tip_rise_world_z_m(ik, q + [g], 5, rot)
+        assert float(t[2]) + credit == pytest.approx(float(tip[2]), abs=1e-12)
+        assert abs(credit) <= abs(m.tool_tip_rise_m(ik, q + [g], 5)) + 1e-12
+        signs.add(credit > 0)
+    assert signs == {True, False}
+    omx = IKSolver()
+    assert m.tool_tip_rise_world_z_m(omx, [0.0, -1.0, 1.0, 0.0, 0.0, 0.8], 5, None) == 0.0
+    blind = types.SimpleNamespace(tool_tip_rise_m=lambda g: 0.03, approach_axis_local=None)
+    assert m.tool_tip_rise_world_z_m(blind, [0.0] * 5 + [1.2], 5, np.eye(3)) == 0.0
+
+
+# A tilted (53°), hand-opened (1.5 rad) Edu:1 pose whose claw meshes lie 35 mm
+# under z = 0 (test_arm_geometry_edu1 proves it on the meshes): the TCP 47.7 mm
+# under the table, the rise 43.7 mm. Credited straight up the check judged
+# -3.9 mm and passed; along the tool axis it judges -21.2 mm.
+_TILTED_OPEN_CLAW_BELOW = ([-0.027, 2.237, 1.491, 0.096, -0.103], 1.5)
+
+
+def test_a_tilted_open_claw_under_the_table_is_refused_by_both_replay_checks(monkeypatch):
+    from physical_ai_server.workflow.edu1_ik import Edu1IKSolver
+    from physical_ai_server.workflow.handlers import motion as m
+    from physical_ai_server.workflow.handlers import trajectory as tr
+    ik = Edu1IKSolver()
+    q, g = _TILTED_OPEN_CLAW_BELOW
+    check = _load(['_build_replay_lead_floor_check'], {})['_build_replay_lead_floor_check'](
+        types.SimpleNamespace(_build_ik_solver=lambda: ik,
+                              _load_workflow_calibration=lambda: {'z_table': 0.0},
+                              _profile_n=lambda: 5))
+    assert check(q + [g]) is True
+    assert check(q + [0.0]) is True
+
+    def replay():
+        chunks = []
+        ctx = types.SimpleNamespace(
+            trajectories={'B': {'fps': 25, 'points': [q + [g, 0.0], q + [g, 0.04]]}},
+            last_full_joints=q + [g], last_arm_joints=list(q), num_arm_joints=5, ik=ik,
+            z_table=0.0, table_plane=None, zones=None, motion_lock=threading.RLock(),
+            should_stop=lambda: False, tempo=1.0,
+            publisher=lambda c: chunks.append(c), log=lambda *a, **k: None)
+        tr.replay_trajectory(ctx, {'name': 'B'})
+        return chunks
+    with pytest.raises(m.WorkflowError):
+        replay()
+    # Credited straight up, as both checks did before, the same take was
+    # replayed into the table.
+    monkeypatch.setattr(m, 'tool_tip_rise_world_z_m',
+                        lambda ik_, q_full, n, rot: m.tool_tip_rise_m(ik_, q_full, n))
+    assert check(q + [g]) is False
+    assert replay()
 
 
 def test_sub_millisecond_recorded_steps_stay_strictly_increasing_on_the_wire():

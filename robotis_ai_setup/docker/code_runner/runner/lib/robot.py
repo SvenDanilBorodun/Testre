@@ -20,11 +20,13 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import re
 import socket
 import struct
 import sys
 import threading
 import time
+import unicodedata
 
 # The call budget the robot enforces. This floor is a courtesy — the server
 # sleeps on the same numbers, and that is the boundary, never this.
@@ -54,7 +56,7 @@ _NO_CONNECTION_DE = ('Keine Verbindung zum Roboter — das Programm muss über '
 _CONNECTION_LOST_DE = 'Die Verbindung zum Roboter ist abgebrochen.'
 _FRAME_TOO_BIG_DE = 'Der Aufruf ist zu groß für den Roboter.'
 _BAD_REPLY_DE = 'Der Roboter hat unverständlich geantwortet.'
-_NOT_A_GREIFZIEL_DE = 'Hier wird ein Greifziel von robot.find erwartet.'
+_NOT_A_GREIFZIEL_DE = 'Hier wird ein Greifziel erwartet — das Ergebnis von find, wenn es etwas gefunden hat.'
 _NOT_AN_OBJECT_DE = ('Hier wird ein Objekt-Name (z. B. "wuerfel") oder eine '
                      'Greifobjekt-Klasse erwartet.')
 
@@ -250,7 +252,7 @@ def _type_name(value):
     if isinstance(value, str):
         return value
     if isinstance(value, type) and issubclass(value, Greifobjekt):
-        return value.name or value.__name__.lower()
+        return value.name or _type_name_for(value.__name__)
     raise RobotError(_NOT_AN_OBJECT_DE)
 
 
@@ -277,7 +279,11 @@ _SHOWN_BIG_INT = 2 ** 53
 _SHOWN_TOO_BIG_DE = 'sehr große Zahl'
 
 
-def _shown(value):
+def _shown(value, text_max=None):
+    # robot.log passes its text whole, up to text_max characters (the robot
+    # writes at most that many); every other value is rendered like zeige's.
+    if text_max is not None and isinstance(value, str):
+        return value[:text_max]
     return _shown_part(value, 0, [_SHOWN_BUDGET_CHARS])
 
 
@@ -323,6 +329,28 @@ def _shown_part(value, depth, budget):
     return text
 
 
+# A Greifobjekt registered without a name is named from its class name
+# (robot_api.type_name_for, rendered from its source).
+_TYPE_NAME_MAX_CHARS = 24
+_TYPE_NAME_FALLBACK = 'objekt'
+_GERMAN_PAIRS = (('ä', 'ae'), ('ö', 'oe'), ('ü', 'ue'), ('Ä', 'Ae'),
+                 ('Ö', 'Oe'), ('Ü', 'Ue'), ('ß', 'ss'), ('ẞ', 'SS'))
+
+
+def _type_name_for(label):
+    """The type name a Greifobjekt is registered under when it names none
+    (F17): NFC, the German letter pairs, lowercase, every run of anything but
+    a–z/0–9 one ``_``, no ``_`` at either end, at most _TYPE_NAME_MAX_CHARS.
+    "Rote Banane" → "rote_banane", "Würfel" → "wuerfel". Rendered into the
+    Python stub verbatim and spelled once more in Java
+    (Greifobjekt.typeNameFor, asserted equal by SmokeMain)."""
+    text = unicodedata.normalize('NFC', str(label))
+    for umlaut, pair in _GERMAN_PAIRS:
+        text = text.replace(umlaut, pair)
+    text = re.sub(r'[^a-z0-9]+', '_', text.lower()).strip('_')
+    return text[:_TYPE_NAME_MAX_CHARS].rstrip('_') or _TYPE_NAME_FALLBACK
+
+
 def home():
     """Fährt den Arm in die Grundstellung; der Greifer bleibt, wie er ist."""
     _rpc.call('home', [], 'call')
@@ -336,7 +364,7 @@ def close_gripper():
     _rpc.call('close_gripper', [], 'call')
 
 def move_to(target):
-    """Fährt über das Ziel: ein Punkt [x, y, z] in Metern oder der Name eines gemerkten Ziels."""
+    """Fährt zum Ziel: ein Punkt [x, y, z] in Metern oder der Name eines gemerkten Ziels; bei einem Ziel auf dem Tisch hält der Greifer darüber an (Ablagehöhe)."""
     _rpc.call('move_to', [target], 'call')
 
 def pickup(target):
@@ -360,7 +388,7 @@ def move_above(ziel):
     _rpc.call('move_above', [_handle(ziel)], 'call')
 
 def descend_to(ziel):
-    """Senkt den geöffneten Greifer auf das gefundene Objekt ab."""
+    """Senkt den geöffneten Greifer auf das gefundene Objekt ab; steht er nicht schon darüber, fährt er zuerst darüber."""
     _rpc.call('descend_to', [_handle(ziel)], 'call')
 
 def close_on_object(ziel):
@@ -372,7 +400,7 @@ def lift():
     _rpc.call('lift', [], 'call')
 
 def grasp(obj):
-    """Greift das nächste sichtbare Objekt dieses Typs: finden, anfahren, schließen, prüfen."""
+    """Greift das nächste sichtbare Objekt dieses Typs: finden, anfahren, schließen, prüfen. Ist keines zu sehen, wird gewartet, bis eines zu sehen ist — so lange geht das Programm hier nicht weiter; Stopp beendet das Warten (im Simulator wird nicht gewartet)."""
     _rpc.call('grasp', [_type_name(obj)], 'call')
 
 def mark_done(ziel):
@@ -380,16 +408,16 @@ def mark_done(ziel):
     _rpc.call('mark_done', [_handle(ziel)], 'call')
 
 def pin(name, x, y, z):
-    """Merkt den Punkt [x, y, z] in Metern unter diesem Namen als Ziel für move_to und drop_at."""
+    """Merkt den Tischpunkt (x, y) in Metern unter diesem Namen als Ziel für move_to und drop_at; z gilt nur, wenn der Tisch nicht vermessen ist (im Simulator nie)."""
     _rpc.call('pin', [name, x, y, z], 'call')
 
 def pin_current(name):
-    """Merkt die Stelle, an der der Greifer gerade steht, unter diesem Namen als Ziel."""
+    """Merkt die Stelle, an der der Greifer gerade steht, als Ziel (nur den Punkt, nicht die Armstellung)."""
     _rpc.call('pin_current', [name], 'call')
 
 def log(message):
-    """Schreibt eine Zeile ins Protokoll — Zahlen und Texte, höchstens 2000 Zeichen."""
-    _rpc.call('log', [message], 'call')
+    """Schreibt eine Zeile ins Protokoll — Zahlen, Texte und Listen, höchstens 2000 Zeichen."""
+    _rpc.call('log', [_shown(message, 2000)], 'call')
 
 def beep():
     """Spielt einen kurzen Signalton ab — hörbar im Browser."""
@@ -432,7 +460,7 @@ def wait_until_seen(obj, timeout=10.0):
     return _rpc.call('wait_until_seen', [_type_name(obj), timeout], 'perception')
 
 def wait_until_held(timeout=10.0):
-    """Wartet, bis der Greifer etwas hält; False, wenn er nach timeout Sekunden noch leer ist."""
+    """Wartet, bis der Greifer etwas hält; False, wenn er nach timeout Sekunden noch leer ist. Ein offener Greifer hält nie etwas."""
     return _rpc.call('wait_until_held', [timeout], 'call')
 
 def find(obj):
@@ -446,7 +474,7 @@ def object_position(ziel):
     return _point(r)
 
 def is_holding():
-    """Prüft, ob der Greifer etwas hält."""
+    """Prüft, ob der Greifer etwas hält. Ein offener Greifer hält nie etwas."""
     return _rpc.call('is_holding', [], 'call')
 
 def counter_get(name):
@@ -465,10 +493,11 @@ class Greifobjekt:
             hoehe_m = 0.040
             greiftiefe_m = 0.015
 
-    Optional: name (sonst der Klassenname in Kleinbuchstaben), label (sonst
-    der Klassenname), greifer_schliessen_rad, anfahrhoehe_m. Die Klasse wird
-    beim Anlegen für diesen Lauf beim Roboter angemeldet; robot.grasp(Banane)
-    und robot.sees(Banane) nehmen die Klasse oder ihren Namen.
+    Optional: name (sonst aus dem Klassennamen: Kleinbuchstaben, ä wird ae, ß
+    wird ss, alles andere _), label (sonst der Klassenname),
+    greifer_schliessen_rad, anfahrhoehe_m. Die Klasse wird beim Anlegen für
+    diesen Lauf beim Roboter angemeldet; robot.grasp(Banane) und
+    robot.sees(Banane) nehmen die Klasse oder ihren Namen.
     """
 
     name = None
@@ -481,6 +510,6 @@ class Greifobjekt:
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        name = cls.name or cls.__name__.lower()
+        name = cls.name or _type_name_for(cls.__name__)
         label = cls.label or cls.__name__
         _rpc.call('register_object', [name, label, list(cls.tag_ids), cls.hoehe_m, cls.greiftiefe_m, cls.greifer_schliessen_rad, cls.anfahrhoehe_m], 'perception')

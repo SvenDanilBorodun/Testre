@@ -68,8 +68,12 @@ def test_caps_json_exact_full():
     assert obj['urdf_asset_id'] == 'omx_f'
     assert obj['gripper_open_rad'] == 0.8
     assert obj['gripper_closed_rad'] == -0.5
-    # None-valued optionals are OMITTED, never sent as null.
-    assert 'reach_inner_m' not in obj and 'gripper_mm_per_rad' not in obj
+    # None-valued optionals are OMITTED, never sent as null. Intent kept; since
+    # the semantics round (D6, N11) the OMX carries its measured reach shape
+    # (0.10 / 0.25 m, no sector), so the omitted example is gripper_mm_per_rad.
+    assert obj['reach_inner_m'] == 0.10 and obj['reach_outer_m'] == 0.25
+    assert 'reach_sector_deg' not in obj
+    assert 'gripper_mm_per_rad' not in obj
 
 
 def test_caps_json_exact_follower():
@@ -527,5 +531,18 @@ def test_cloud_inference_equals_inferable(pid):
     assert set(_CAP_KEYS) <= set(keys)
     # main @ a135bdde already sends 15 keys (OMX) / 19 (edu6/edu1, help_de included) since
     # code_languages; spec §5.8's „15 / 19" counted before it. With cloud_inference: 16 / 20.
-    expected_count = 16 if pid in ('omx_full', 'omx_follower') else 20
+    # The semantics round (D6) adds the reach shape: OMX reach_inner_m + reach_outer_m
+    # (16 → 18), edu1 reach_sector_deg (20 → 21); edu6 is unchanged (20).
+    expected_count = {'omx_full': 18, 'omx_follower': 18, 'edu6_studio': 20,
+                      'edu1_studio': 21}[pid]
     assert len(keys) == expected_count, keys
+
+
+def test_the_edu1_manifest_carries_its_reach_sector():
+    """N6: the Edu:1 turns ±90° only; the editor draws that sector. A list on
+    the wire (JSON), the inner/outer radii unchanged."""
+    obj = json.loads(rp.capabilities_json(rp.resolve('edu1_studio')))
+    assert obj['reach_sector_deg'] == [-90, 90]
+    assert obj['reach_inner_m'] == 0.07 and obj['reach_outer_m'] == 0.35
+    edu6 = json.loads(rp.capabilities_json(rp.resolve('edu6_studio')))
+    assert 'reach_sector_deg' not in edu6

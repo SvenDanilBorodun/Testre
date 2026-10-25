@@ -10,13 +10,16 @@
 
 import * as Blockly from 'blockly/core';
 import { DE } from './messages_de';
+import { apiRange, apiTooltip } from './apiDocs';
 
 const PERCEPTION_COLOR = '#22c55e';
 
-// Timeout bounds for the wait_until_object_seen block. Above 120 s a
-// student is almost certainly blocking a workshop session by accident.
-const TIMEOUT_MIN_S = 1;
-const TIMEOUT_MAX_S = 120;
+// Timeout bounds of the two „warte bis" blocks: exactly what the robot takes
+// (robot_api.py's `timeout` parameter, 0 to 300 s; F15 — the editor allowed
+// 1–120). Widening never changes a saved value: a field validator guards an
+// edit, not a load.
+const SEEN_TIMEOUT = apiRange('edubotics_wait_until_object_seen', 'timeout', { min: 0, max: 300 });
+const HELD_TIMEOUT = apiRange('edubotics_wait_until_held', 'timeout', { min: 0, max: 300 });
 
 // ── Named-object dynamic dropdown (Roboter Studio AprilTag grasping) ─────────
 // The object-type list comes from the RUNTIME catalog (GetObjectCatalog over
@@ -50,16 +53,14 @@ const PERCEPTION_JSON_BLOCKS = [
     // same „bewege zu" / „ablegen bei" sockets (which carry no check today).
     output: 'String',
     colour: PERCEPTION_COLOR,
-    tooltip:
-      'Liefert die Position eines erkannten Greifziels als Ziel-Wert, der '
-      + 'in „bewege zu" oder „ablegen bei" gesteckt werden kann.',
+    tooltip: apiTooltip('edubotics_object_position'),
   },
   {
     type: 'edubotics_grasp_held',
     message0: DE.GRASP_HELD,
     output: 'Boolean',
     colour: PERCEPTION_COLOR,
-    tooltip: 'Wahr, wenn der Greifer gerade ein Objekt hält.',
+    tooltip: apiTooltip('edubotics_grasp_held'),
   },
   {
     type: 'edubotics_mark_done',
@@ -68,9 +69,7 @@ const PERCEPTION_JSON_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: PERCEPTION_COLOR,
-    tooltip:
-      'Merkt sich dieses Greifziel als erledigt, damit es nicht erneut '
-      + 'gegriffen wird.',
+    tooltip: apiTooltip('edubotics_mark_done'),
   },
 ];
 
@@ -199,24 +198,18 @@ export function registerPerceptionBlocks() {
   // thing about them and is why „Anzahl" can shrink as a program runs.
   defineObjectTypeBlock(
     'edubotics_grasp_object', DE.GRASP_OBJECT_PREFIX, 'statement',
-    'Sucht ein Objekt dieses Typs, fährt darüber, greift es von oben und '
-    + 'prüft, ob es wirklich hält. Klappt es nicht, wird es noch einmal '
-    + 'versucht. Jedes Objekt wird nur einmal gegriffen.');
+    apiTooltip('edubotics_grasp_object'));
   defineObjectTypeBlock(
     'edubotics_see_object', DE.SEE_OBJECT_PREFIX, 'Boolean',
-    'Wahr, wenn gerade mindestens ein Objekt dieses Typs zu sehen ist. '
-    + 'Bereits gegriffene Objekte zählen nicht mit.');
+    apiTooltip('edubotics_see_object'));
   defineObjectTypeBlock(
     'edubotics_count_object', DE.COUNT_OBJECT_PREFIX, 'Number',
-    'Zählt, wie viele Objekte dieses Typs gerade zu sehen sind. Bereits '
-    + 'gegriffene Objekte zählen nicht mit.');
+    apiTooltip('edubotics_count_object'));
   // Grasp split (Phase 1): „finde <Typ>" outputs a Greifziel value (the helper
   // calls setOutput(true, kind) for any non-'statement' kind).
   defineObjectTypeBlock(
     'edubotics_find_object', DE.FIND_OBJECT_PREFIX, 'Greifziel',
-    'Sucht ein Objekt dieses Typs und gibt es als Greifziel zurück — oder '
-    + '„nichts", wenn keines zu sehen ist. Merke dir das Ergebnis in einer '
-    + 'Variablen, statt „finde" mehrmals hintereinander zu verwenden.');
+    apiTooltip('edubotics_find_object'));
 
   // Static JSON perception blocks (no runtime dropdown). HMR/Jest-guarded.
   const toDefine = PERCEPTION_JSON_BLOCKS.filter(
@@ -262,16 +255,14 @@ export function registerPerceptionBlocks() {
           .appendField(makeObjectTypeField(), 'OBJECT_TYPE')
           .appendField(DE.WAIT_UNTIL_OBJECT_SEEN_MID)
           .appendField(
-            new Blockly.FieldNumber(10, TIMEOUT_MIN_S, TIMEOUT_MAX_S, 1), 'TIMEOUT')
+            new Blockly.FieldNumber(10, SEEN_TIMEOUT.min, SEEN_TIMEOUT.max, 1), 'TIMEOUT')
           .appendField(DE.WAIT_UNTIL_OBJECT_SEEN_SUFFIX);
         this.setOutput(true, 'Boolean');
         this.setColour(PERCEPTION_COLOR);
-        // perception_blocks.wait_until_object_seen polls and RAISES a German
-        // timeout — it does not quietly return false, so say so.
-        this.setTooltip(
-          'Wartet, bis ein Objekt dieses Typs zu sehen ist. Taucht in der '
-          + 'eingestellten Zeit keines auf, bricht das Programm mit einer '
-          + 'Meldung ab.');
+        // perception_blocks.wait_until_object_seen answers falsch with a
+        // German [WARNUNG] when the time runs out; the program goes on (F9a:
+        // the old text here said it aborts).
+        this.setTooltip(apiTooltip('edubotics_wait_until_object_seen'));
       },
     };
   }
@@ -285,14 +276,11 @@ export function registerPerceptionBlocks() {
         this.appendDummyInput()
           .appendField(DE.WAIT_UNTIL_HELD_PREFIX)
           .appendField(
-            new Blockly.FieldNumber(10, TIMEOUT_MIN_S, TIMEOUT_MAX_S, 1), 'TIMEOUT')
+            new Blockly.FieldNumber(10, HELD_TIMEOUT.min, HELD_TIMEOUT.max, 1), 'TIMEOUT')
           .appendField(DE.WAIT_UNTIL_HELD_SUFFIX);
         this.setOutput(true, 'Boolean');
         this.setColour(PERCEPTION_COLOR);
-        this.setTooltip(
-          'Wartet, bis der Greifer ein Objekt hält (oder die Zeit abläuft). ' +
-          'Verwende ihn direkt nach „Greifer schließen" — bei geöffnetem ' +
-          'Greifer kann fälschlich „hält" gemeldet werden.');
+        this.setTooltip(apiTooltip('edubotics_wait_until_held'));
       },
     };
   }

@@ -686,7 +686,9 @@ jobs:
     # Native per-arch runners so each image is exercised on real silicon —
     # we now actually test arm64 images instead of trusting "build succeeded".
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    # 30: the text-program smoke (two containers, ~2 min measured on an
+    # Apple M-series host, more on a shared runner) joined the steps above.
+    timeout-minutes: 30
     # Smoke-test the GHCR images (the STUDENT-FACING primary) — not the Docker
     # Hub copies. This both validates the registry students actually pull AND
     # removes 6 anonymous Docker Hub pulls/release (the strictest rate-limit
@@ -1084,6 +1086,48 @@ jobs:
             exit 1
           fi
           echo "OK: code-runner is within its size ceiling (${SIZE} uncompressed bytes)."
+      - name: Text-program smoke with the runner and the server side by side (owner decision Q7)
+        # The two containers wired as the student compose wires them: the
+        # runner with its sandbox keys (no network, read-only, the three
+        # capabilities, its tmpfs and limits) and the server sharing ONE ipc
+        # volume at /run/edubotics/code. Runs only what needs BOTH
+        # (.github/scripts/code_e2e_smoke.py, spec m13): the Java/Python fault
+        # matrix (German sentence, file and line), every Methoden / type
+        # example in the simulator in both languages, the Python put-back
+        # case. The rig-emulation fixture comes from the checkout (the image
+        # excludes test/), mounted next to the script. After both revision
+        # checks, so it never runs a stale retag; amd64 + opi (the Jetson leg
+        # has no runner), opi inheriting the job's continue-on-error. Image
+        # names go through env: (no expression inside run:).
+        if: matrix.runner_repo != ''
+        timeout-minutes: 12
+        env:
+          SERVER_IMAGE: ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest
+          RUNNER_IMAGE: ghcr.io/svendanilborodun/${{ matrix.runner_repo }}:latest
+        run: |
+          set -e
+          docker volume create code-e2e-ipc
+          docker run -d --name code-e2e-runner --init --user 0:0 \
+            --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add KILL \
+            --security-opt no-new-privileges:true --read-only --network none \
+            --tmpfs /work:size=64m,mode=1777 --tmpfs /tmp:size=16m,mode=1777 \
+            --memory 768m --pids-limit 128 --cpus 1.0 \
+            -v code-e2e-ipc:/run/edubotics/code "$RUNNER_IMAGE"
+          rc=0
+          docker run --rm --network none --entrypoint bash \
+            -v code-e2e-ipc:/run/edubotics/code \
+            -v "$GITHUB_WORKSPACE/.github/scripts/code_e2e_smoke.py:/tmp/smoke/code_e2e_smoke.py:ro" \
+            -v "$GITHUB_WORKSPACE/physical_ai_tools/physical_ai_server/test/rig_emulation.py:/tmp/smoke/rig_emulation.py:ro" \
+            "$SERVER_IMAGE" \
+            -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && python3 /tmp/smoke/code_e2e_smoke.py' \
+            || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::the text-program smoke failed (rc=$rc); the runner's log follows"
+            docker logs code-e2e-runner 2>&1 | tail -n 40 || true
+          fi
+          docker rm -f code-e2e-runner >/dev/null 2>&1 || true
+          docker volume rm code-e2e-ipc >/dev/null 2>&1 || true
+          exit "$rc"
       - name: Pull + assert open-manipulator has Dynamixel SDK + pyserial
         # `serial` is asserted EXPLICITLY, not left to ride on dynamixel_sdk.
         # It is the edu6 driver's only third-party dependency: `feetech_bus.py`

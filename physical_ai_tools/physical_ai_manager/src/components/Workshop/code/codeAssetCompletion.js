@@ -23,6 +23,12 @@
 //     an object type NEVER (a student's own `Greifobjekt` class is not
 //     knowable here). The cursor's line is skipped — a half-typed name is on
 //     it by construction (parseMarkers.js's rule).
+//   * A WARNING for a `replay` whose name is NOT a whole literal (a variable,
+//     an f-string, a concatenation; F10 of the 2026-10-18 semantics round): a
+//     run sends only the recordings it can read out of the text
+//     (codeProject.collectCodeReplayNames), so that one never reaches the
+//     robot. Only the robot's own call (`robot.replay` / `Robot.replay`) is
+//     judged — a student's own `replay` function is none of this.
 //   * HOVER text in German: „Ziel „Ablage“ · x 12,3 cm · y 4,0 cm".
 //
 // The asset lint has its OWN ship switch, `ASSET_LINT_LANGUAGES`, separate
@@ -31,7 +37,7 @@
 // failure is not.
 
 import {
-  ASSET_CALLS, codeDefinedPlaceNames, findAssetCalls, scanCodeAssets,
+  ASSET_CALLS, codeDefinedPlaceNames, codeOnlyText, findAssetCalls, scanCodeAssets,
 } from './codeAssetUsage';
 import { CODE_DE, formatCode } from './codeMessagesDe';
 
@@ -131,11 +137,92 @@ function missingReason(asset, name, known) {
   return null;
 }
 
+// The robot's own `replay(` in CODE (strings and comments are blanked first),
+// bounded like an identifier on its left, exactly as codeAssetUsage's RECEIVER.
+const REPLAY_HEAD_RE = {
+  python: /(?<![\p{L}\p{N}_.])robot\s*\.\s*replay\s*\(/gu,
+  java: /(?<![\p{L}\p{N}_.])(?:edubotics\s*\.\s*)?Robot\s*\.\s*replay\s*\(/gu,
+};
+
+// The top-level arguments of the call whose `(` ends at `open` in blanked
+// code: `{args: [{start, end}], close}` (close -1 when the call never closes).
+function callArgs(code, open) {
+  const args = [];
+  let depth = 0;
+  let from = open;
+  for (let i = open; i < code.length; i += 1) {
+    const ch = code[i];
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+    else if (ch === ')' || ch === ']' || ch === '}') {
+      if (depth === 0) {
+        if (ch !== ')') return { args, close: -1 };
+        args.push({ start: from, end: i });
+        return { args, close: i };
+      }
+      depth -= 1;
+    } else if (ch === ',' && depth === 0) {
+      args.push({ start: from, end: i });
+      from = i + 1;
+    }
+  }
+  return { args, close: -1 };
+}
+
+function lineOfOffset(text, offset) {
+  let line = 1;
+  for (let i = 0; i < offset; i += 1) if (text[i] === '\n') line += 1;
+  return line;
+}
+
+// F10: every robot `replay` call whose name argument is not one whole
+// literal, as `{from, to, line}` over that argument (trimmed). The name is the
+// first positional argument or, in Python, the keyword the table gives it
+// (`name=`). A call with no name argument, or one still open, is not judged.
+function nonLiteralReplays(content, language) {
+  const re = REPLAY_HEAD_RE[language];
+  const hit = ASSET_CALLS[language] && ASSET_CALLS[language].get('replay');
+  if (!re || !hit) return [];
+  const code = codeOnlyText(content, language);
+  const literals = findAssetCalls(content, language)
+    .filter((c) => !c.inComment && c.method === 'replay')
+    .map((c) => c.valueStart);
+  const out = [];
+  re.lastIndex = 0;
+  for (let m = re.exec(code); m !== null; m = re.exec(code)) {
+    const { args, close } = callArgs(code, m.index + m[0].length);
+    if (close < 0) continue;
+    const kwRe = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)/;
+    let arg = null;
+    for (let k = 0; k < args.length; k += 1) {
+      const text = code.slice(args[k].start, args[k].end);
+      const kw = language === 'python' ? kwRe.exec(text) : null;
+      if (kw) {
+        if (kw[1] === hit.param) {
+          arg = args[k];
+          break;
+        }
+      } else if (k === 0) {
+        arg = args[k];
+        break;
+      }
+    }
+    if (!arg) continue;
+    const raw = content.slice(arg.start, arg.end);
+    if (!raw.trim()) continue;
+    if (literals.some((at) => at > arg.start && at <= arg.end)) continue;
+    const from = arg.start + (raw.length - raw.trimStart().length);
+    const to = arg.start + raw.trimEnd().length;
+    out.push({ from, to, line: lineOfOffset(content, from) });
+  }
+  return out;
+}
+
 /**
  * The warnings for ONE file: `[{from, to, severity: 'warning', message,
- * source: 'asset'}]` over the literal's content. Calls in comments and on the
- * cursor's line (1-based `cursorLine`) are skipped. Off for a language outside
- * ASSET_LINT_LANGUAGES.
+ * source: 'asset'}]` over the literal's content (a missing recording or
+ * place), and over the name argument of a `replay` that is not a literal
+ * (F10). Calls in comments and on the cursor's line (1-based `cursorLine`) are
+ * skipped. Off for a language outside ASSET_LINT_LANGUAGES.
  */
 export function assetDiagnostics(content, language, known, { cursorLine = 0 } = {}) {
   if (!ASSET_LINT_LANGUAGES.includes(language) || typeof content !== 'string') return [];
@@ -149,6 +236,13 @@ export function assetDiagnostics(content, language, known, { cursorLine = 0 } = 
       from: call.valueStart, to: call.valueEnd, severity: 'warning', message, source: 'asset',
     });
   }
+  for (const r of nonLiteralReplays(content, language)) {
+    if (r.line === cursorLine) continue;
+    out.push({
+      from: r.from, to: r.to, severity: 'warning', message: CODE_DE.REPLAY_NAME_NOT_LITERAL, source: 'asset',
+    });
+  }
+  out.sort((a, b) => a.from - b.from);
   return out;
 }
 

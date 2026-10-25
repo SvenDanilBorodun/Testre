@@ -142,10 +142,12 @@ def test_a_pinned_destination_resolves_once_the_sim_manager_has_it():
         return [e.get('error') or '' for e in status
                 if isinstance(e, dict) and e.get('phase') == 'error']
 
+    # The unknown-Ziel sentence is the one shared sentence since F22
+    # (motion.unknown_destination_de); the intent is unchanged.
     unseeded = _run(seed=False)
-    assert any('Unbekanntes Ziel' in e for e in unseeded), unseeded
+    assert any('gibt es in diesem Programm nicht' in e for e in unseeded), unseeded
     seeded = _run(seed=True)
-    assert not any('Unbekanntes Ziel' in e for e in seeded), seeded
+    assert not any('gibt es in diesem Programm nicht' in e for e in seeded), seeded
 
 
 # ── RS-07 — a pin stores the table height at its OWN (x, y) ────────────────

@@ -47,8 +47,10 @@ from physical_ai_server.workflow.handlers.motion import (
     _release_motion_lock,
     _TEMPO_MAX,
     _TEMPO_MIN,
+    position_joint_route,
     resolve_destination_z,
 )
+from physical_ai_server.workflow import claims as claims_mod
 from physical_ai_server.workflow.code_program import (
     CODE_LANGUAGES,
     CodeProgram,
@@ -87,6 +89,35 @@ _DESTINATION_SKIP_OVERFLOW_DE = 'Weitere ungültige Ziele werden nicht einzeln a
 _DESTINATION_KIND_PLANE_TRACKED = {'pin': True, 'pose': False}   # provenance -> flag, IN CODE
 
 
+# A Position's taught arm pose: 1–8 finite joint values (the widest arm has 7
+# servos), plus the joint names and the robot it was taught on. Kept only when
+# well-formed; a malformed set is dropped and the entry takes the point path.
+_POSE_JOINTS_MAX = 8
+
+
+def _pose_keys(item: dict) -> dict:
+    """``joints`` / ``joint_names`` / ``robot_type`` of a payload Position,
+    each kept only when it has the right shape. Never raises."""
+    out: dict = {}
+    joints = item.get('joints')
+    if (isinstance(joints, list) and 1 <= len(joints) <= _POSE_JOINTS_MAX
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in joints)):
+        try:
+            values = [float(v) for v in joints]
+        except (OverflowError, ValueError, TypeError):
+            values = None
+        if values is not None and all(math.isfinite(v) for v in values):
+            out['joints'] = values
+    names = item.get('joint_names')
+    if (isinstance(names, list) and len(names) <= _POSE_JOINTS_MAX
+            and all(isinstance(v, str) for v in names)):
+        out['joint_names'] = list(names)
+    robot = item.get('robot_type')
+    if isinstance(robot, str):
+        out['robot_type'] = robot
+    return out
+
+
 def _payload_coordinate_error_de(name: str) -> str:
     """Skip reason for a Sammlung entry whose x/y/z is not a usable number.
 
@@ -109,7 +140,7 @@ class WorkflowContext:
     # top-level ``trajectories`` sibling of the workflow_json (CONTRACT C) merged
     # with any server-persisted recordings, exactly like ``destinations``. Read by
     # handlers/trajectory.replay_trajectory. Empty {} → the „Aufnahme abspielen"
-    # block fails loud with a German "Unbekannte Aufnahme" (backward-safe: a
+    # block fails loud with a German "Unbekannte Bewegung" (backward-safe: a
     # workflow with no replay block never touches it).
     trajectories: dict[str, Any] = field(default_factory=dict)
     # DUAL Z-KEY (don't conflate):
@@ -337,6 +368,29 @@ class WorkflowContext:
     # teaching speed knob on the workflow runtime, NOT an inference safety
     # envelope (it never reshapes a recorded/replayed action).
     tempo: float = 1.0
+    # True only for the simulator's manager (physical_ai_server's
+    # _get_or_create_sim_workflow_manager builds it with
+    # ``WorkflowManager(simulated=True)``). The ONE source of mode-aware
+    # behaviour and wording: the grasp wait (it never waits in the sim, where no
+    # person can put an object back), the „Sim-Tisch" find wording and the
+    # unknown-Ziel advice („auf den Tisch tippen" instead of the camera). Set
+    # once per run in start(), never mutated.
+    simulated: bool = False
+    # The language of a text program for THIS run: 'python' / 'java', None for
+    # Blockly. Set by WorkflowManager.start when the payload builds a
+    # CodeProgram; the one source every German sentence that names a method
+    # (Q9's refusal, the unsent-recording sentence) reads its spelling from.
+    code_language: str | None = None
+    # Tag id → the number of claim or skip EVENTS this run (bumped by
+    # workflow.claims.claim_tag / skip_tag under claim_lock, never by the
+    # reclaim). The „Wenn <Typ> gesehen" hat compares a snapshot taken before
+    # its body with the counts after it, so a cube claimed during the body
+    # re-arms the edge even when a later look un-claimed it again (N14): a set
+    # read after the body cannot see a claim that was undone in between.
+    claim_events: dict[int, int] = field(default_factory=dict)
+    # Position names already warned THIS RUN that they were taught on another
+    # robot (motion._stored_pose_joints): the [WARNUNG] is said once per name.
+    position_warned: set = field(default_factory=set)
 
 
 MAX_WORKFLOW_JSON_BYTES = 256 * 1024  # 256 KiB; see plan §2.5
@@ -463,8 +517,14 @@ class WorkflowManager:
         load_object_catalog: Callable[[], Any] | None = None,
         arm_profile: Any | None = None,
         code_rpc: Any | None = None,
+        simulated: bool = False,
     ) -> None:
         self._publisher = publisher
+        # True ONLY for the simulator's manager (the node's
+        # _get_or_create_sim_workflow_manager passes it). Stamped onto every
+        # run's ctx.simulated: the one source of the mode-aware behaviour (no
+        # grasp wait in the sim) and wording (no camera, the Sim-Tisch).
+        self._simulated = bool(simulated)
         self._ik_factory = ik_factory
         self._perception_factory = perception_factory
         self._load_destinations = load_destinations or (lambda: {})
@@ -586,8 +646,9 @@ class WorkflowManager:
         ``acquire(timeout=10.0)`` sites alone can park one for 10 s
         (interpreter.py, handlers/trajectory.py, handlers/perception_blocks.py
         x2, handlers/motion.py), and ``perception.detect`` under the AprilTag
-        lock is the CPU-only-Pi case. ``ctx.should_stop is
-        self._stop_event.is_set``, so the next start's ``clear()`` UN-STOPS it.
+        lock is the CPU-only-Pi case. ``ctx.should_stop`` is (for a Blockly run)
+        or wraps (for a code run, see below) ``self._stop_event.is_set``, so the
+        next start's ``clear()`` UN-STOPS it.
 
         The MAIN thread is not optional here. Guarding only ``_hat_threads``
         left a stopped run publishing 104 further waypoints after a new run had
@@ -832,9 +893,11 @@ class WorkflowManager:
             # THE REFUSAL GUARDS RUN BEFORE ``_stop_event.clear()``, AND THAT
             # ORDERING IS LOAD-BEARING.
             #
-            # ``ctx.should_stop is self._stop_event.is_set``, so clearing the
-            # event un-stops EVERY thread that is still holding a reference to
-            # it — including a hat thread that survived the previous run. When
+            # ``ctx.should_stop is self._stop_event.is_set`` for a Blockly run;
+            # during a CODE run ``code_rpc.RunSession`` wraps it (``… or the
+            # program has ended``) until its ``close()``, and the wrapper still
+            # reads the same event. So clearing the event un-stops EVERY thread
+            # that is still holding a reference to it — including a hat thread that survived the previous run. When
             # the clear ran first and a guard below then refused the start, the
             # refusal returned without restoring the flag: measured 2/2, a
             # surviving hat published 90 further waypoints with NO workflow
@@ -1037,6 +1100,10 @@ class WorkflowManager:
 
                 ctx = WorkflowContext(
                     publisher=self._publisher,
+                    # Mode and language, the two sources every mode- or
+                    # language-aware sentence reads (spec principle 7).
+                    simulated=self._simulated,
+                    code_language=code_language if is_code else None,
                     ik=ik_instance,
                     perception=perception_instance,
                     destinations=destinations,
@@ -1592,8 +1659,15 @@ class WorkflowManager:
             if name in out:
                 skip(f'„{name}" gibt es doppelt.')
                 continue
-            out[name] = {'x': fx, 'y': fy, 'z': fz, 'label': name,
-                         'plane_tracked': _DESTINATION_KIND_PLANE_TRACKED[kind]}
+            entry = {'x': fx, 'y': fy, 'z': fz, 'label': name,
+                     'plane_tracked': _DESTINATION_KIND_PLANE_TRACKED[kind],
+                     # The kind is KEPT (spec D1): motion.is_position reads it.
+                     # Only payload entries ever carry it — pin/current
+                     # statements and the robot-local store never do.
+                     'kind': kind}
+            if kind == 'pose':
+                entry.update(_pose_keys(item))
+            out[name] = entry
         if overflowed:
             skipped.append(_DESTINATION_SKIP_OVERFLOW_DE)
         return out, skipped, True
@@ -1690,6 +1764,14 @@ class WorkflowManager:
         destinations: dict[str, dict[str, Any]] | None = None,
         calib: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        # A Position that takes the JOINT route is not a point the arm has to
+        # reach by a Cartesian solve (its HOME-like poses are often outside the
+        # strict-vertical image), so it is left out of the point pre-check; the
+        # route's own floor ladder judges it at run time (spec D1).
+        if destinations:
+            destinations = {
+                name: entry for name, entry in destinations.items()
+                if position_joint_route(entry, self._arm_profile) != 'joints'}
         extra = self._precheck_destination_points(destinations, calib)
         if ik is None or not hasattr(ik, 'solve'):
             # Even without an IK solver we can still flag concrete pins that sit
@@ -1894,6 +1976,12 @@ class WorkflowManager:
                 try:
                     if ctx.should_stop():
                         return
+                    # N14: the claim/skip EVENT counts as of right before the
+                    # body — read inside the motion lock (another hat's claim
+                    # landing between the gate and the lock must not count as
+                    # this body's).
+                    events_before = (claims_mod.claim_events_snapshot(ctx)
+                                     if btype == 'edubotics_when_object_seen' else None)
                     try:
                         interpreter.execute_chain(
                             hat,
@@ -1923,6 +2011,32 @@ class WorkflowManager:
                                 f'„{label}": Interner Fehler im Ereignis-Block.'
                             ),
                         })
+                    finally:
+                        # N14 — RE-ARM THE OBJECT HAT when a claim or skip EVENT
+                        # of ITS type happened during the body, by any thread.
+                        # The set edge alone missed it: a cube the body grasped
+                        # and the student put back is un-claimed again by the
+                        # next look of that type (a later „falls sehe ich" in
+                        # the body, the main stack, any thread's grasp wait), so
+                        # the trigger set after the body equals the one it fired
+                        # on and the edge never re-armed — the cube was left
+                        # lying. Counting EVENTS (claims.claim_tag / skip_tag;
+                        # the reclaim never counts) sees the claim even when it
+                        # was undone. Scoped to this hat's own type and to the
+                        # object hat: „wenn Zähler P > 3" keeps its plain
+                        # armed/disarmed edge, and another type's claim never
+                        # re-fires a non-claiming body (r6-M1).
+                        if events_before is not None:
+                            mine = self._claimed_during_body(
+                                hat, ctx, events_before)
+                            if mine:
+                                last_fired_ids = None
+                                edge_armed = True
+                                # Drop exactly these ids from the absence
+                                # debounce, so the claimed tag's ghost cannot
+                                # re-fire the body.
+                                for tag in mine:
+                                    _seen_at.pop(tag, None)
                 finally:
                     _release_motion_lock(ctx, acquired)
                 if consecutive_errors >= MAX_HAT_CONSECUTIVE_ERRORS:
@@ -1946,6 +2060,22 @@ class WorkflowManager:
                     self._sleep_until_stop(ctx, HAT_MIN_CYCLE_S - elapsed)
         except Exception:
             return
+
+    @staticmethod
+    def _claimed_during_body(hat: dict[str, Any], ctx, before: dict) -> frozenset:
+        """The tag ids of the object hat's OWN type with a claim or skip event
+        since ``before`` (a :func:`claims.claim_events_snapshot`). Never
+        raises — an unknown type re-arms nothing."""
+        try:
+            type_name = (hat.get('fields') or {}).get('OBJECT_TYPE')
+            catalog = getattr(ctx, 'object_catalog', None)
+            if catalog is None or not type_name:
+                return frozenset()
+            ids = {int(i) for i in catalog.recipe_for_type(type_name).tag_ids}
+            after = claims_mod.claim_events_snapshot(ctx)
+            return frozenset(t for t in ids if after.get(t, 0) > before.get(t, 0))
+        except Exception:  # noqa: BLE001 — the re-arm is best-effort
+            return frozenset()
 
     @staticmethod
     def _sleep_until_stop(ctx, seconds: float) -> None:

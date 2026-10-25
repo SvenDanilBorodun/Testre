@@ -44,6 +44,36 @@ Pure Python + stdlib — no ROS, no numpy.
 from __future__ import annotations
 
 
+def _bump_claim_event(ctx, tag_id: int) -> None:
+    """Count ONE claim or skip event of ``tag_id`` on ``ctx.claim_events``.
+
+    The caller holds ``claim_lock`` (when there is one). A ctx without the
+    counter (every ``SimpleNamespace`` test double that carries only the claim
+    sets) is a no-op. Only :func:`claim_tag` and :func:`skip_tag` call this —
+    the recycled-object reclaim, which UN-claims, never does — so a hat can
+    compare the counts before and after its body and see a claim of its type
+    even when a later look undid it (spec N14, r7-M1)."""
+    events = getattr(ctx, 'claim_events', None)
+    if events is None:
+        return
+    try:
+        events[tag_id] = int(events.get(tag_id, 0)) + 1
+    except Exception:  # noqa: BLE001 — bookkeeping never breaks a grasp
+        pass
+
+
+def claim_events_snapshot(ctx) -> dict:
+    """A copy of ``ctx.claim_events`` taken under ``claim_lock`` ({} when absent)."""
+    events = getattr(ctx, 'claim_events', None)
+    if events is None:
+        return {}
+    lock = getattr(ctx, 'claim_lock', None)
+    if lock is not None:
+        with lock:
+            return dict(events)
+    return dict(events)
+
+
 def excluded_ids(ctx) -> set:
     """The set of tag ids to skip in detection: CLAIMED (already grasped) ∪
     SKIPPED (confirmed-failed, future heuristic). Read under claim_lock so a
@@ -70,8 +100,10 @@ def claim_tag(ctx, tag_id) -> None:
     if lock is not None:
         with lock:
             claimed.add(int(tag_id))
+            _bump_claim_event(ctx, int(tag_id))
     else:
         claimed.add(int(tag_id))
+        _bump_claim_event(ctx, int(tag_id))
 
 
 def skip_tag(ctx, tag_id) -> None:
@@ -89,5 +121,7 @@ def skip_tag(ctx, tag_id) -> None:
     if lock is not None:
         with lock:
             skipped.add(int(tag_id))
+            _bump_claim_event(ctx, int(tag_id))
     else:
         skipped.add(int(tag_id))
+        _bump_claim_event(ctx, int(tag_id))

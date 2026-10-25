@@ -174,14 +174,17 @@ def test_an_empty_full_close_reads_MISS_on_every_profile(profile_id, monkeypatch
 
     i.e. an EMPTY FULL CLOSE read as a successful grasp on the only two profiles
     whose sole capability is Roboter Studio.
+
+    Intent kept (an empty close is a MISS on every arm, the threshold inside the
+    band); the OPEN row changed on purpose with Q10: an open gripper never holds.
     """
     monkeypatch.setattr(motion, 'GRASP_SETTLE_S', 0.0)
     ctx = Ctx(profile_id)
     ctx.last_commanded_close_rad = None            # fresh run
 
-    # OPEN jaws, nothing commanded → the documented open-gripper behaviour.
+    # OPEN jaws, nothing commanded → „hält nicht" (Q10: an open gripper never holds).
     ctx.gripper_readback = ctx.gripper_open_rad
-    assert motion.check_grasp_held(ctx) is True
+    assert motion.check_grasp_held(ctx) is False
 
     # An EMPTY close reaches the arm's own closed angle → MISS, on every arm.
     ctx.gripper_readback = ctx.gripper_closed_rad
@@ -621,12 +624,18 @@ def test_a_genuinely_missing_touch_off_still_says_tisch_vermessen():
 def test_wait_seconds_treats_nan_like_any_other_malformed_input():
     """Measured 2026-09-07: seconds='nan' → waited 0.000 s, logs=[]. Both guards
     are </> comparisons (False for NaN) and `monotonic() < nan` is False on the
-    first test. Reachable because variables_get carries no Blockly output type."""
-    ctx = Ctx('omx_full')
-    t0 = time.monotonic()
-    motion.wait_seconds(ctx, {'seconds': 'nan'})
-    waited = time.monotonic() - t0
-    assert 0.9 <= waited <= 1.5, f'NaN must fall back to the 1.0 s default, waited {waited}'
+    first test. Reachable because variables_get carries no Blockly output type.
+
+    Intent kept: NaN — the text 'nan' and the number alike — is handled like any
+    other malformed input, and since F14 a malformed input is REFUSED in German
+    (it used to wait a silent 1.0 s)."""
+    for bad in ('nan', float('nan'), 'abc', None):
+        ctx = Ctx('omx_full')
+        t0 = time.monotonic()
+        with pytest.raises(motion.WorkflowError) as e:
+            motion.wait_seconds(ctx, {'seconds': bad})
+        assert str(e.value) == '„warte" braucht eine Zahl (Sekunden).'
+        assert time.monotonic() - t0 < 0.5, 'a refusal must not wait first'
 
 
 def test_wait_seconds_releases_the_motion_lock_while_it_waits():
@@ -1271,26 +1280,51 @@ def test_warte_bis_greifer_haelt_returns_false_on_timeout(monkeypatch):
     assert any('WARNUNG' in m for m in ctx.logs)
 
 
+def _tag(tag_id):
+    from physical_ai_server.workflow.perception import Detection
+    return Detection(centroid_px=(4, 4), bbox_px=(0, 0, 8, 8), confidence=1.0,
+                     label=f'tag{tag_id}', aruco_id=tag_id)
+
+
 def test_all_instances_done_is_not_reported_as_nothing_visible():
     """Measured 2026-09-07 with two cubes in plain view, both grasped earlier:
     „Kein „Würfel" sichtbar — bitte das Objekt in den markierten Greifbereich
     legen." with the camera detect call count at ZERO. The objects ARE in the
-    Greifbereich, and putting them back would not help."""
-    ctx = _perception_ctx()
+    Greifbereich, and putting them back would not help.
+
+    Intent kept: claimed cubes in plain view are never „nicht sichtbar". Since
+    Q8 the sentence comes from ONE helper (_done_sentence_de) and names the
+    mode's remedy: the simulator's „Greife" refuses at once with it; on the rig
+    a cube claimed without a release point says „neu starten" (m4)."""
+    ctx = _perception_ctx(dets=[_tag(20), _tag(21)])
+    ctx.simulated = True
     ctx.claimed_tags.update({20, 21})
     recipe = ctx.object_catalog.recipe_for_type('wuerfel')
     with pytest.raises(GraspSkip) as exc:
         pb.grasp_object(ctx, {'object_type': 'wuerfel'})
-    assert 'schon erledigt' in str(exc.value)
-    assert 'in den markierten Greifbereich legen' not in str(exc.value)
+    assert str(exc.value) == ('Alle „Würfel" sind erledigt — im Simulator „Simulator '
+                              'zurücksetzen" oder das Programm neu starten.')
     assert pb._all_instances_done(ctx, recipe) is True
+    rig = _perception_ctx(dets=[_tag(20), _tag(21)])
+    rig.claimed_tags.update({20, 21})
+    said = pb._nothing_to_grasp_message(rig, recipe)
+    assert said == ('„Würfel" ist schon als erledigt markiert — zum erneuten Greifen '
+                    'das Programm neu starten.')
+    assert 'in den markierten Greifbereich legen' not in said
 
 
 def test_a_genuinely_empty_scene_still_says_nothing_visible():
+    """Intent kept: an empty scene says „nicht sichtbar" — at once in the
+    simulator (worded for the Sim-Tisch), as the rig's sentence elsewhere."""
     ctx = _perception_ctx()
+    ctx.simulated = True
     with pytest.raises(GraspSkip) as exc:
         pb.grasp_object(ctx, {'object_type': 'wuerfel'})
     assert 'sichtbar' in str(exc.value)
+    rig = _perception_ctx()
+    recipe = rig.object_catalog.recipe_for_type('wuerfel')
+    assert pb._nothing_to_grasp_message(rig, recipe) == (
+        'Kein „Würfel" sichtbar — bitte das Objekt in den markierten Greifbereich legen.')
 
 
 def test_see_and_count_do_not_un_claim_an_object_nobody_moved():

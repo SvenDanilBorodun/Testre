@@ -56,8 +56,16 @@ class FakeSupervisor:
     connection id that carried `start` vs `kill` vs `breakpoints`."""
 
     def __init__(self, path, *, ack_started=True, exited=None, ack_killed=True,
-                 die_after_start=False, applied=True):
+                 die_after_start=False, applied=True, after_start=None,
+                 kill_ack_delay_s=0.0):
         self.path = path
+        # Called on the start connection right after `started` (before the
+        # die / exited handling): (conn, start_frame) — a scripted run.
+        self.after_start = after_start
+        # A slow supervisor: the `killed` ack comes this late, so the
+        # server's request_stop really waits (area C, r4-m6).
+        self.kill_ack_delay_s = kill_ack_delay_s
+        self.kill_ack_at = None
         self.ack_started = ack_started
         self.exited = exited                  # None → hang; else e.g. {'code': 0}
         self.ack_killed = ack_killed
@@ -110,6 +118,8 @@ class FakeSupervisor:
                     if self.ack_started:
                         write_frame(conn, {'ev': 'started'}, CONTROL_MAX_FRAME_BYTES,
                                     timeout_s=1.0)
+                    if self.after_start is not None:
+                        self.after_start(conn, frame)
                     if self.die_after_start:
                         conn.close()
                         return
@@ -118,6 +128,9 @@ class FakeSupervisor:
                                     CONTROL_MAX_FRAME_BYTES, timeout_s=1.0)
                 elif ev == 'kill':
                     self.kill_cid = cid
+                    if self.kill_ack_delay_s:
+                        time.sleep(self.kill_ack_delay_s)
+                    self.kill_ack_at = time.monotonic()
                     if self.ack_killed:
                         write_frame(conn, {'ev': 'killed'}, CONTROL_MAX_FRAME_BYTES,
                                     timeout_s=1.0)
@@ -650,3 +663,224 @@ def test_the_ausgabe_kind_has_its_own_budget_and_notice():
     assert out._BURST_BY_KIND['ausgabe'] == out.OUTPUT_BURST_LOG
     notice = out._RATE_LIMIT_NOTICE_DE['ausgabe']
     assert 'Ausgabe' in notice and 'melde' not in notice
+
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# area C (M5, r3-m3): an ended code run stops every wait
+# ══════════════════════════════════════════════════════════════════════════
+#
+# `_stop_event` is set only in WorkflowManager._run's finally, after execute
+# returns — and on a deadline or a dead runner _drive first sends the kill
+# (up to CODE_CONTROL_TIMEOUT_S) and close_run joins the worker. Meanwhile a
+# waiting robot call could still move the arm for a program that has died.
+# RunSession wraps ctx.should_stop with its own `over` flag, CodeProgram
+# marks it the moment the control loop ends, and close() restores the flag
+# after the worker join so _run still judges finished / error / stopped from
+# the manager's own stop event. These cases run with a RIG context (a
+# perception that sees nothing, the catalog, a measured table), so the grasp
+# really waits instead of refusing at once (r4-m6), and with a supervisor
+# whose kill ack comes 1.5 s late, so request_stop really waits.
+
+class _SeesNothing:
+    def apriltag_available(self):
+        return True
+
+    def detect(self, *_a, **_k):
+        return []
+
+
+def _rig_manager(sock_dir, finished, statuses):
+    import numpy as np
+    from physical_ai_server.workflow.object_catalog import fixed_catalog
+    return WorkflowManager(
+        publisher=lambda pts: None,
+        emit_status=statuses.append,
+        on_finished=finished.append,
+        get_follower_joints=lambda: [0.0, -1.57, 1.57, 0.0, 0.0, 0.8],
+        perception_factory=lambda: _SeesNothing(),
+        load_object_catalog=lambda: fixed_catalog('omx_full'),
+        load_calibration=lambda: {'z_table': 0.04},
+        get_scene_frame=lambda: np.zeros((4, 4, 3), np.uint8),
+        get_scene_frame_age=lambda: 0.0,
+        code_rpc=CodeRpcServer(os.path.join(sock_dir, 'rpc.sock')),
+    )
+
+
+_KILL_ACK_DELAY_S = 1.5
+# How long the scripted run lets the student's call wait before the program
+# ends (the supervisor's verdict: deadline, eof or exited).
+_CALL_IN_FLIGHT_S = 0.8
+# What a robot call that a stop ended answers (motion._hold_motion_lock,
+# perception_blocks._poll_until).
+code_rpc_stop = 'Workflow wurde gestoppt.'
+
+
+def _student(sock_path, token, method, args, out, exit_info=None):
+    """The student process's half: greet, make ONE call, record the reply and
+    when it came (or that the connection closed with none)."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(sock_path)
+    write_frame(s, {'id': 0, 'm': '__hello', 'a': [token]}, 65536, timeout_s=2.0)
+    read_frame(s, 65536, timeout_s=2.0)
+    if exit_info is not None:
+        write_frame(s, {'id': 1, 'm': '__exit', 'a': [exit_info]}, 65536, timeout_s=2.0)
+        read_frame(s, 65536, timeout_s=2.0)
+    if method is None:
+        out['reply_at'] = time.monotonic()
+        return
+    write_frame(s, {'id': 2, 'm': method, 'a': list(args)}, 65536, timeout_s=2.0)
+    try:
+        out['reply'] = read_frame(s, 65536, timeout_s=20.0)
+    except Exception as exc:  # noqa: BLE001
+        out['reply'] = type(exc).__name__
+    out['reply_at'] = time.monotonic()
+
+
+def _scripted(sock_dir, out, verdict, method='grasp', args=('wuerfel',), exit_info=None):
+    """after_start: run the student, let its call wait, then end the program
+    the way ``verdict`` says (deadline: say nothing; eof: drop the control
+    connection; clean: `exited` 0; robot: `exited` 1 after a robot __exit)."""
+    def after(conn, frame):
+        threading.Thread(target=_student, daemon=True,
+                         args=(os.path.join(sock_dir, 'rpc.sock'), frame['token'],
+                               method, args, out, exit_info)).start()
+        time.sleep(_CALL_IN_FLIGHT_S)
+        out['ended_at'] = time.monotonic()
+        if verdict == 'eof':
+            conn.close()
+        elif verdict in ('clean', 'robot'):
+            write_frame(conn, {'ev': 'exited', 'code': 0 if verdict == 'clean' else 1},
+                        CONTROL_MAX_FRAME_BYTES, timeout_s=1.0)
+    return after
+
+
+def _run_scripted(monkeypatch, verdict, **kw):
+    if verdict == 'deadline':
+        monkeypatch.setattr(code_program, 'CODE_RUN_MAX_S', _CALL_IN_FLIGHT_S)
+    with tempfile.TemporaryDirectory(prefix='over-') as d:
+        finished, statuses, out = [], [], {}
+        mgr = _rig_manager(d, finished, statuses)
+        sup = FakeSupervisor(os.path.join(d, 'runner.sock'), ack_started=True,
+                             after_start=_scripted(d, out, verdict, **kw),
+                             kill_ack_delay_s=_KILL_ACK_DELAY_S)
+        try:
+            files = {'main.py': 'import robot\nrobot.grasp("wuerfel")\n'}
+            ok, msg, _ = mgr.start(_code_payload(files), f'over-{verdict}')
+            assert ok, msg
+            deadline = time.monotonic() + 15.0
+            while not finished and time.monotonic() < deadline:
+                time.sleep(0.02)
+            for _ in range(100):
+                if 'reply_at' in out:
+                    break
+                time.sleep(0.02)
+            out['kill_ack_at'] = sup.kill_ack_at
+            out['finished'] = finished
+            out['errors'] = [st.get('error') for st in statuses if st.get('phase') == 'error']
+            out['logs'] = [st.get('log_message') for st in statuses if st.get('log_message')]
+            out['ctx'] = getattr(mgr, '_ctx', None)
+            return out
+        finally:
+            sup.close()
+            mgr._code_rpc.close()
+
+
+@pytest.mark.parametrize('verdict', ['deadline', 'eof'])
+def test_a_waiting_grasp_ends_when_the_program_has_ended(monkeypatch, verdict):
+    out = _run_scripted(monkeypatch, verdict)
+    # The Q8 wait line, exactly as perception_blocks words every label
+    # sentence (an ASCII closing quote).
+    assert ('Warte auf „Würfel" — bitte ein Objekt in den Greifbereich legen.'
+            in out['logs']), out['logs']
+    assert isinstance(out.get('reply'), dict), out
+    assert out['reply']['ok'] is False and out['reply']['e'] == code_rpc_stop, out['reply']
+    # The non-vacuous part: the grasp ended BEFORE the out-of-band kill was
+    # even acknowledged (without `over` it ends only after the manager's
+    # finally, i.e. after the ack and the worker join).
+    assert out['kill_ack_at'] is not None
+    assert out['reply_at'] < out['kill_ack_at'], (out['reply_at'], out['kill_ack_at'])
+    assert out['reply_at'] - out['ended_at'] < 1.0
+    assert out['finished'] == ['error'], out['finished']
+    want = code_errors_de.sentence('timeout' if verdict == 'deadline' else 'runner_crashed')
+    assert out['errors'][-1] == want
+
+
+@pytest.mark.parametrize('verdict', ['deadline', 'eof'])
+def test_a_waiting_call_ends_when_the_program_has_ended(monkeypatch, verdict):
+    # The same with a wait that exists on every rig today: „warte bis …
+    # sichtbar" for 300 s (_poll_until).
+    out = _run_scripted(monkeypatch, verdict, method='wait_until_seen', args=('wuerfel', 300.0))
+    assert isinstance(out.get('reply'), dict) and out['reply']['e'] == code_rpc_stop, out
+    assert out['reply_at'] < out['kill_ack_at'], (out['reply_at'], out['kill_ack_at'])
+    assert out['finished'] == ['error'], out['finished']
+
+
+@pytest.mark.parametrize('in_flight', [False, True])
+def test_a_clean_exit_still_reports_finished(monkeypatch, in_flight):
+    """The wrapped flag answers True once the program has ended — and a clean
+    end must still read `finished`, never `stopped`: close() restores the
+    manager's own flag before _run judges the phase."""
+    out = _run_scripted(monkeypatch, 'clean',
+                        method='wait_until_seen' if in_flight else None,
+                        args=('wuerfel', 300.0))
+    # Non-vacuous: without the restore, _run read the still-wrapped flag
+    # (True once the program ended) and reported `stopped`.
+    assert out['finished'] == ['finished'], out
+    assert out['errors'] == []
+    if in_flight:
+        # The call was waiting when the program ended; its connection is gone
+        # with the run (the student process has exited: nobody reads a reply).
+        assert out['reply_at'] - out['ended_at'] < 1.5, out
+
+
+def test_a_timeout_still_reports_its_german_error(monkeypatch):
+    out = _run_scripted(monkeypatch, 'deadline', method=None)
+    assert out['finished'] == ['error'], out
+    assert out['errors'][-1] == code_errors_de.sentence('timeout')
+    # …and a robot refusal the program died of keeps its German sentence.
+    out = _run_scripted(monkeypatch, 'robot', method=None,
+                        exit_info={'kind': 'robot', 'file': 'main.py', 'line': 2,
+                                   'detail_line': 'Arm kaputt.'})
+    assert out['finished'] == ['error'], out
+    assert out['errors'][-1] == 'Zeile 2 in main.py: Arm kaputt.'
+
+
+def test_should_stop_is_restored_after_close():
+    """The wrap is installed by the session and removed by close() — AFTER the
+    worker join: a handler still finishing its wait when the run closes keeps
+    reading True, and only then does ctx.should_stop become the manager's own
+    flag again."""
+    from physical_ai_server.workflow.workflow_manager import WorkflowContext
+    stop_event = threading.Event()
+    base = stop_event.is_set
+    ctx = WorkflowContext(publisher=lambda pts: None, log=lambda m: None,
+                          var_lock=threading.RLock(), claim_lock=threading.RLock(),
+                          should_stop=base)
+    seen = {}
+
+    def waiting_handler(c, args):
+        while not c.should_stop():
+            time.sleep(0.01)
+        seen['saw_stop_at'] = time.monotonic()
+        time.sleep(0.3)                       # still inside the worker join
+        seen['still_wrapped'] = c.should_stop()
+
+    with tempfile.TemporaryDirectory(prefix='restore-') as d:
+        server = CodeRpcServer(os.path.join(d, 'rpc.sock'))
+        server.handlers = dict(server.handlers, edubotics_home=waiting_handler)
+        try:
+            session = server.open_run(ctx)
+            assert ctx.should_stop is not base and ctx.should_stop() is False
+            out = {}
+            threading.Thread(target=_student, daemon=True,
+                             args=(server.socket_path, session.token, 'home', (), out)).start()
+            time.sleep(0.3)
+            session.mark_over()
+            assert ctx.should_stop() is True and stop_event.is_set() is False
+            server.close_run(session)
+            assert seen.get('still_wrapped') is True, seen
+            assert ctx.should_stop is base
+            assert ctx.should_stop() is False
+        finally:
+            server.close()

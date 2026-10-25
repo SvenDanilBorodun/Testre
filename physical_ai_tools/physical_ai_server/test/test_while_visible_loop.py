@@ -273,16 +273,22 @@ def test_loop_should_stop_raises_mid_loop():
 
 
 def test_concurrent_grasp_does_not_double_grab():
-    # The §24.3 TOCTOU claim: a when_object_seen hat thread and the main loop both
-    # call grasp_object on the SAME single object — motion_lock must serialize
-    # detect→claim so the tag is grabbed/claimed EXACTLY once; the loser fails loud.
+    """The §24.3 TOCTOU claim, intent kept: two threads call grasp_object on the
+    SAME single object — motion_lock must serialize detect→claim so the tag is
+    grabbed/claimed EXACTLY once; the loser fails loud.
+
+    Rewritten for Q8: outside „Solange sichtbar" the loser would now WAIT for the
+    next object (forever, in this static scene), so both threads run inside the
+    loop's exemption (``no_grasp_wait``, thread-local: each thread is its own
+    loop), where a vanished object is still the immediate GraspSkip."""
     from physical_ai_server.workflow.handlers import perception_blocks as pb
     ctx = _Ctx(_StubPerception([_det(20, (0.18, 0.0))]))   # ONE banana
     results = []
 
     def worker():
         try:
-            pb.grasp_object(ctx, {'object_type': 'banane'})
+            with pb.no_grasp_wait():
+                pb.grasp_object(ctx, {'object_type': 'banane'})
             results.append('ok')
         except WorkflowError as e:
             results.append(('err', str(e)))
@@ -294,7 +300,9 @@ def test_concurrent_grasp_does_not_double_grab():
     oks = [r for r in results if r == 'ok']
     errs = [r for r in results if r != 'ok']
     assert len(oks) == 1 and len(errs) == 1               # one success, one fail-loud
-    assert 'sichtbar' in errs[0][1]                       # German "nicht sichtbar"
+    # German: the cube is in the winner's jaws, so it is neither „erledigt" nor
+    # graspable for the loser — „nicht sichtbar" (the carried tag is excluded).
+    assert 'sichtbar' in errs[0][1] and 'Banane' in errs[0][1]
 
 
 def test_loop_no_object_selected_raises_german():
@@ -633,23 +641,35 @@ def test_the_reclaim_message_names_the_tag_the_way_the_printed_sheet_does():
 
 
 def test_the_all_done_message_has_no_gendered_article():
-    """C-2 (a)+(b). „es ist KEINES mehr übrig, DAS gegriffen werden könnte" is
-    neuter — wrong for *der Würfel*, the only object in the shipped catalog — and
-    „bitte EIN „Würfel" kurz WEGNEHMEN" needs the accusative „einen". The label is
-    a per-type string a teacher will one day author, so nothing may inflect
-    around it: the countable noun is the neuter „Objekt", which the block
-    tooltips and this module's own sibling sentence already use."""
+    """C-2 (a)+(b), intent kept: no article, pronoun or relative pronoun agrees
+    with the label (a per-type string a teacher will one day author). „es ist
+    KEINES mehr übrig, DAS …" was neuter — wrong for *der Würfel* — and „bitte
+    EIN „Würfel" kurz WEGNEHMEN" needed the accusative „einen".
+
+    Since Q8 every „nothing to grasp" sentence comes from ONE helper,
+    ``_done_sentence_de``, in six cases (skipped / done with and without a
+    release point / nothing seen, rig and simulator): every one of them is held
+    to the rule, and each names the type exactly once."""
     from physical_ai_server.workflow.handlers import perception_blocks as pb
     ctx = _scripted_ctx([[]])
     ctx.claimed_tags = {20, 21, 22}
     recipe = ctx.object_catalog.recipe_for_type('banane')
-    msg = pb._nothing_to_grasp_message(ctx, recipe)
-    assert 'kein Objekt mehr übrig' in msg, msg
-    assert 'ein Objekt kurz wegnehmen' in msg, msg
-    assert 'keines' not in msg, 'neuter — the shipped object is *der* Würfel'
-    assert 'ein „Banane"' not in msg, '`wegnehmen` governs the accusative'
-    # The type is still NAMED, once, in topic position.
-    assert 'Alle „Banane" sind schon erledigt' in msg, msg
+    sentences = [pb._nothing_to_grasp_message(ctx, recipe)]
+    for simulated in (False, True):
+        ctx.simulated = simulated
+        ctx.claim_release_xy = {20: (0.1, 0.1)}
+        sentences += [pb._done_sentence_de(ctx, 'Banane', set(), {20}),
+                      pb._done_sentence_de(ctx, 'Banane', {20}, set()),
+                      pb._done_sentence_de(ctx, 'Banane', {21}, set()),
+                      pb._done_sentence_de(ctx, 'Banane', set(), set())]
+    # „Kein „…" sichtbar" is today's kept „nicht sichtbar" sentence (the spec
+    # keeps it verbatim); every other article, pronoun or relative is out.
+    import re
+    gendered = re.compile(r'\b(keines|eines|einen|einem|ein „|eine „|der „|die „|'
+                          r'das „|den „|dem „|das gegriffen|ihn|sie)\b')
+    for msg in sentences:
+        assert not gendered.findall(msg), msg
+        assert msg.count('„Banane"') == 1, msg
 
 
 def test_the_loop_pass_line_has_no_pronoun():
@@ -760,3 +780,22 @@ def test_loop_logs_per_pass_progress_and_completion():
     # one positive pass line naming the count, plus a friendly completion line
     assert any('noch 1 sichtbar' in m for m in ctx.logs)
     assert any('fertig' in m for m in ctx.logs)
+
+
+def test_a_clean_end_prints_no_put_back_note(monkeypatch):
+    """F19: „Solange sichtbar Würfel {Greife; ablegen}" with two cubes on the
+    calibrated-rig emulation ends cleanly with its completion line UNCHANGED and
+    NO line containing „erledigt" anywhere — neither the old „… wegnehmen …"
+    note (printed by the loop's own empty look, r3-m1) nor a
+    ``_done_sentence_de`` sentence (r6-m2: „no wegnehmen" alone could no longer
+    fail). The interpreter half (``count_unclaimed_visible(note=False)`` and the
+    clean completion marking the type notified) is area A's."""
+    from rig_emulation import ABLAGE, PICK, B, Rig, chain, cube, drop, grasp, program
+    rig = Rig(monkeypatch, 'omx_full', objects=[cube(*PICK[0]), cube(*PICK[1])])
+    loop = B('edubotics_while_visible', fields={'OBJECT_TYPE': 'wuerfel', 'MAX_REPS': 0},
+             inputs={'DO': chain(grasp(), drop())})
+    assert rig.run(program(loop, destinations=[ABLAGE]), timeout=120) == 'finished', rig.errors()
+    lines = rig.logs()
+    assert rig.grasps() == 2, lines
+    assert '„Würfel": nichts mehr sichtbar — fertig.' in lines, lines
+    assert not [m for m in lines if 'erledigt' in m], lines

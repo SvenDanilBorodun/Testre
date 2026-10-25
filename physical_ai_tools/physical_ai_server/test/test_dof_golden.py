@@ -347,6 +347,10 @@ def _jog_req(mode, index=0, delta=0.0, tx=0.0, ty=0.0, tz=0.0):
 
 
 def test_golden_jog():
+    """Intent kept: the jog's target math stays pinned bit for bit. The ONE
+    deliberate regeneration is ``drive_to`` (owner decision Q11): „fahre
+    dorthin" now stops at the program's hover over the table in force (z_table
+    0.01 + 0.05 m), so its vector and world z changed on purpose."""
     stub = _JogStub()
     live = [0.05, -1.45, 1.42, 0.03, 0.10, 0.35]
     results = {}

@@ -68,9 +68,33 @@ function isRef(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value) && typeof value.ref === 'string';
 }
 
-/** One argument as source text, by the parameter's kind. */
+// A nested call argument (N9): `{"call": "find", "args": ["wuerfel"]}` is the
+// call `robot.find("wuerfel")` / `Robot.find("wuerfel")`, so an insertable
+// example never names a variable the student's program does not have.
+function isCall(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value) && typeof value.call === 'string';
+}
+
+// The nested call's own arguments are spelled by the NESTED row's kinds (a
+// row this table does not know falls back to the value kind).
+function callLiteral(value, language) {
+  const row = BY_NAME.get(value.call) || null;
+  const params = (row && row.params) || [];
+  const args = (Array.isArray(value.args) ? value.args : [])
+    .map((v, i) => literalFor(params[i] ? params[i].kind : 'value', v, language))
+    .join(', ');
+  if (language === 'java') return `Robot.${(row && row.java_name) || value.call}(${args})`;
+  return `robot.${value.call}(${args})`;
+}
+
+/**
+ * One argument as source text, by the parameter's kind. Two argument shapes
+ * stand for something other than a literal: `{ref}` (a variable's name, the
+ * old docs json) and `{call, args}` (a nested robot call).
+ */
 export function literalFor(kind, value, language) {
   if (isRef(value)) return value.ref;
+  if (isCall(value)) return callLiteral(value, language);
   switch (kind) {
     case 'float':
       return floatLiteral(value);

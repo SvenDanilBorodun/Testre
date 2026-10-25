@@ -124,9 +124,11 @@ def test_open_gripper_after_a_close_now_reads_MISS_on_the_sim_and_the_rig(monkey
     behaviour change on hardware and it moves in the conservative direction only —
     it can convert HELD → MISS (→ retry → skip), never the reverse.
 
-    The behaviour CLAUDE.md documents for „Greifer hält etwas?" / „warte bis
-    Greifer hält" on a FRESH run — no close commanded, open gripper reads True —
-    is preserved exactly, and is asserted below."""
+    Q10 (owner decision, Rule §2 sign-off) finishes the reversal: „Ein offener
+    Greifer hält nie etwas". On a FRESH run — no close commanded — an open
+    gripper now reads MISS too (the reference close is the arm's own closed
+    angle); intent kept: the sim and the rig agree, and the rollback restores
+    the position-only test."""
     monkeypatch.setattr(motion, 'GRASP_SETTLE_S', 0.0)
     world = _resolved_world([_cube(0.20, 0.0)])
     arm = _omx_arm(world.objects(), world=world)
@@ -140,12 +142,12 @@ def test_open_gripper_after_a_close_now_reads_MISS_on_the_sim_and_the_rig(monkey
     arm.publish([([0.0] * 5 + [-0.2], 1.0)])
     assert motion.check_grasp_held(ctx) is True
 
-    # And with NO close commanded this run, an open gripper still reads True —
-    # the documented open-gripper behaviour of grasp_held / wait_until_held.
+    # And with NO close commanded this run, an open gripper reads MISS too (Q10:
+    # an open gripper never holds) — grasp_held / wait_until_held say falsch.
     arm.publish([([0.0] * 5 + [GRIPPER_OPEN_RAD], 1.0)])
     fresh = type('C', (), {'get_follower_joints': staticmethod(arm.get_joints),
                            'last_commanded_close_rad': None})()
-    assert motion.check_grasp_held(fresh) is True
+    assert motion.check_grasp_held(fresh) is False
 
     # One-variable rollback restores the position-only test.
     monkeypatch.setattr(motion, 'GRASP_HELD_MIN_TRAVEL_FRAC', 0.0)

@@ -247,3 +247,145 @@ def test_floor_clearance_is_a_sound_lower_bound_on_the_real_meshes():
     # same shape as the edu6 table's (median 0.0, mean 10.1, p95 45.9). The
     # bound below is the max with headroom, not a target.
     assert worst_slack < 0.09, worst_slack
+
+
+def test_the_position_floor_check_never_refuses_a_pose_the_meshes_clear():
+    """``motion._refuse_position_below_table`` judges a taught Position by the
+    POINT model (``home_planner.pose_floor_clearance``: the joint points and
+    the fingertip at the carried claw opening, never these boxes). Over a
+    seeded sample of in-limit poses at random claw openings in the band the
+    arm commands (``gripper_closed_rad`` … ``gripper_open_rad``), every pose
+    whose real meshes are clear of the table AT THAT OPENING passes. The box
+    model refused up to 86 % of the tilted ones that touch, per tilt band.
+    Measured 2026-10-19 (seed 1019, 6000 draws, ~2 s): 3953 clear, 150 of them
+    within 20 mm of the table, claw tilt 1–179°. A claw opened wider by hand
+    is the next test."""
+    from physical_ai_server import robot_profiles as rp
+    from physical_ai_server.workflow.handlers import motion as M
+
+    class _Ctx:
+        ik = Edu1IKSolver()
+        z_table = None
+        table_plane = None
+
+    prof = rp.ROBOT_PROFILES['edu1_studio']
+    claw_band = (float(prof.gripper_closed_rad), float(prof.gripper_open_rad))
+    urdf = _Urdf()
+    ik = _Ctx.ik
+    # Duplicates only (an STL repeats each vertex per triangle); the world z of
+    # a vertex is row 2 of its frame, since the solver's world is URDF rotZ(π).
+    verts = {link: np.unique(urdf.vertices(link), axis=0)
+             for link in _BOX_LINKS[1:] + _GRIPPER_CHILDREN}
+    rng = np.random.default_rng(1019)
+    clear = 0
+    near_tilts = []
+    for _ in range(6000):
+        q = [float(rng.uniform(lo, hi)) for (lo, hi) in ik.joint_limits]
+        claw = float(rng.uniform(*claw_band))
+        qmap = {f'joint{i + 1}': q[i] for i in range(5)}
+        qmap.update({'RL_joint': claw, 'LF_joint': claw})
+        frames = urdf.frames(qmap)
+        truth = min(float((v @ frames[link][2, :3]).min() + frames[link][2, 3])
+                    for link, v in verts.items())
+        if truth < 0.0:
+            continue
+        clear += 1
+        try:
+            M._refuse_position_below_table(_Ctx(), q + [claw], 'P')
+        except M.WorkflowError:
+            raise AssertionError(
+                f'refused a pose the meshes clear by {truth * 1000:.1f} mm: '
+                f'q={q}, claw={claw}') from None
+        if truth <= 0.02:
+            rot, _t = ik.fk(q)
+            axis = np.asarray(rot) @ np.asarray(ik.approach_axis_local)
+            near_tilts.append(float(np.degrees(np.arccos(np.clip(-axis[2], -1.0, 1.0)))))
+    assert clear > 3000, clear
+    assert len(near_tilts) > 100, len(near_tilts)
+    # The near-table poses span the tilts the box model refused (10–90°).
+    assert min(near_tilts) < 10.0 and max(near_tilts) > 90.0, (min(near_tilts), max(near_tilts))
+
+
+def test_the_position_floor_check_never_refuses_a_hand_opened_claw_the_meshes_clear():
+    """A claw opened by HAND while the arm is limp can stand anywhere up to its
+    window's 1.5708 rad and keeps that opening after the re-lock, so a Position
+    is judged at claw values past the commanded band too. ``tool_tip_rise_m``
+    covers the whole window (fix round 3; before, every opening past 0.9 rad
+    was credited only 17.4 mm and a pose whose wide tips touch was refused).
+    Over seeded in-limit poses at claw openings 0.9–1.5708 rad, judged by the
+    mesh oracle: no pose clear of the flat z = 0 table is refused, and no pose
+    is refused against a flat table moved up or down to its OWN lowest mesh
+    point (every draw touching). Measured 2026-10-19 (seed 1020, 3000 draws,
+    ~2 s): 2015 clear at z = 0, 0 refused; 3000 touching, 0 refused. The table
+    cut back to 0.9 rad refused 2 of the clear and 118 of the touching ones."""
+    from physical_ai_server.workflow.handlers import motion as M
+
+    class _Ctx:
+        def __init__(self, z_table=None):
+            self.ik = _IK
+            self.z_table = z_table
+            self.table_plane = None
+
+    _IK = Edu1IKSolver()
+    urdf = _Urdf()
+    verts = {link: np.unique(urdf.vertices(link), axis=0)
+             for link in _BOX_LINKS[1:] + _GRIPPER_CHILDREN}
+    rng = np.random.default_rng(1020)
+    clear = 0
+    for _ in range(3000):
+        q = [float(rng.uniform(lo, hi)) for (lo, hi) in _IK.joint_limits]
+        claw = float(rng.uniform(0.9, 1.5708))
+        qmap = {f'joint{i + 1}': q[i] for i in range(5)}
+        qmap.update({'RL_joint': claw, 'LF_joint': claw})
+        frames = urdf.frames(qmap)
+        truth = min(float((v @ frames[link][2, :3]).min() + frames[link][2, 3])
+                    for link, v in verts.items())
+        cases = [(_Ctx(truth), 'touching its own table')]
+        if truth >= 0.0:
+            cases.append((_Ctx(), 'clear of z = 0'))
+        for ctx, what in cases:
+            try:
+                M._refuse_position_below_table(ctx, q + [claw], 'P')
+            except M.WorkflowError:
+                raise AssertionError(f'refused a pose {what} (mesh {truth * 1000:.1f} mm '
+                                     f'above z = 0): q={q}, claw={claw}') from None
+        clear += truth >= 0.0
+    assert clear > 1500, clear
+
+
+def test_the_replay_floor_credit_never_refuses_a_pose_touching_its_table():
+    """The two replay floor checks judge the TCP's z plus
+    ``motion.tool_tip_rise_world_z_m``: the claw's rise set back ALONG the tool
+    axis, the very tip the Position check judges. Over seeded in-limit poses at
+    claw openings across the whole window (0–1.5708 rad), judged against a flat
+    table at each pose's OWN lowest mesh point, none is refused; and the tilted,
+    hand-opened pose ``test_manual_relock_home_glide`` pins really has its
+    claw under the table. Measured 2026-10-19 (seed 1022, 3000 draws, ~2 s):
+    0 refused. A scratch run (seed 22, 100,000 draws, 42,581 of them at
+    0.9–1.5708 rad): the table cut back to 0.9 rad refused 1657 of those
+    touching their table; credited straight up rather than along the axis, the
+    full table passed 3581 with the claw more than 10 mm under z = 0, worst
+    139 mm (along the axis 2471, worst 86 mm; cut back and straight up, 2788)."""
+    from physical_ai_server.workflow.handlers import motion as M
+
+    ik = Edu1IKSolver()
+    urdf = _Urdf()
+    verts = {link: np.unique(urdf.vertices(link), axis=0)
+             for link in _BOX_LINKS[1:] + _GRIPPER_CHILDREN}
+
+    def lowest(q, claw, links=None):
+        qmap = {f'joint{i + 1}': q[i] for i in range(5)}
+        qmap.update({'RL_joint': claw, 'LF_joint': claw})
+        frames = urdf.frames(qmap)
+        return min(float((v @ frames[link][2, :3]).min() + frames[link][2, 3])
+                   for link, v in verts.items() if links is None or link in links)
+
+    rng = np.random.default_rng(1022)
+    for _ in range(3000):
+        q = [float(rng.uniform(lo, hi)) for (lo, hi) in ik.joint_limits]
+        claw = float(rng.uniform(0.0, 1.5708))
+        rot, t = ik.fk(q)
+        judged = float(t[2]) + M.tool_tip_rise_world_z_m(ik, q + [claw], 5, rot)
+        assert judged >= lowest(q, claw) - M.WORKSPACE_FLOOR_MARGIN_M, (q, claw)
+    q, claw = [-0.027, 2.237, 1.491, 0.096, -0.103], 1.5
+    assert lowest(q, claw, ('link5', 'end_effector', 'right_finger', 'left_finger')) < -0.03

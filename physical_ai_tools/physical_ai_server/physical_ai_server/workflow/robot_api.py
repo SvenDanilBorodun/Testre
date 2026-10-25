@@ -24,7 +24,10 @@ fenced by ``test/test_robot_api_generated.py``):
   (``robotis_ai_setup/docker/code_runner/runner/lib/robot.py``),
 - the Java client (``Robot.java`` + ``Greifobjekt.java`` + ``RpcClient.java``
   under ``runner/java/edubotics/``),
-- the editor's ``robot_api.json`` (autocomplete, hover docs, the caps),
+- the editor's ``robot_api.json`` (autocomplete, hover docs, the caps, and
+  for the blocks: every parameter's ``arg_key`` — the block input the
+  row-driven preview reads — and every handler row's ``doc_de_block``, the
+  block tooltip in Blockly words, which no stub renders),
 - the Methoden column's ``robot_api_docs.json`` (``export_docs_json``):
   parameter docs, signatures, return docs, example lines and the two types.
   Its fields (``ApiParam.doc_de``, ``ApiCall.returns_de`` / ``doc_de_java`` /
@@ -62,6 +65,12 @@ student-facing name ``target`` but ``move_to``/``drop_at`` read
 ``args['destination']`` while ``pickup`` reads ``args['target']`` — the rows
 say so, the test proves it.
 
+Two rules both stubs carry are spelled here once: :data:`NOT_A_GREIFZIEL_DE`
+(the sentence a grasp step raises locally for anything that is not a
+Greifziel, a Java ``null`` included) and :func:`type_name_for` (the type name
+of a Greifobjekt that names none, rendered into the Python stub from its own
+source and spelled in Java, SmokeMain holding the two equal).
+
 The rate budget both ends enforce lives here as :data:`RPC_LIMITS` (the
 generated stubs embed the numbers; ``code_rpc.py`` imports them). The project
 caps of the code editor live beside it so the JSON carries both.
@@ -76,6 +85,8 @@ from __future__ import annotations
 import dataclasses
 import difflib
 import json
+import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -237,12 +248,18 @@ SHOWN_VAR_NAMES_MAX = 256
 
 
 @dataclass(frozen=True)
-class ExampleRef:
-    """An example argument that is a VARIABLE of the student's program (the
-    Greifziel `ziel`), not a literal. Rendered as its name; validated as
-    handle 0 (test_robot_api_docs.py)."""
+class ExampleCall:
+    """An example argument that is a nested robot CALL, not a literal: the
+    Greifziel a grasp step takes is ``robot.find("wuerfel")`` itself (N9), so
+    an inserted example never names a variable the student's program does
+    not have. ``name`` is the nested row's Python name; its ``args`` are
+    spelled by THAT row's parameter kinds. The docs json carries it as
+    ``{"call": name, "args": [...]}`` (code/methodDocs.js::literalFor renders
+    both languages from it); the validator sees the handle the call returns,
+    0 (test_robot_api_docs.py)."""
 
     name: str
+    args: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -281,8 +298,14 @@ class ApiCall:
     # artifacts read none of these, so they stay byte-identical):
     returns_de: str = ''             # value rows: what comes back, in German
     doc_de_java: str = ''            # only where doc_de names Python (None, [x, y, z], move_to …)
-    example: tuple = ()              # positional example args (ExampleRef = a variable)
+    example: tuple = ()              # positional example args (ExampleCall = a nested call)
     example_var: str = ''            # the variable a value row's example assigns
+    # The BLOCK's tooltip text (robot_api.json only; no stub renders it): the
+    # same promise as doc_de in the words a Blockly student reads — German, no
+    # Python spelling (no snake_case name, None/True/False, [x, y, z] or a
+    # parameter name such as timeout/speed/level). Every handler row has one;
+    # the code-only and internal rows have no block and none.
+    doc_de_block: str = ''
 
 
 @dataclass(frozen=True)
@@ -338,8 +361,8 @@ _DEST_DEF = _p('name', 'str', max_len=40, pattern=DESTINATION_NAME_RE, asset='pl
 _DEST_REF = _p('name', 'str', max_len=40, pattern=DESTINATION_NAME_RE, asset='place',
                doc_de='Der Name eines Ziels oder einer Position aus deiner Sammlung.')
 
-# The Greifziel variable a grasp-step example hands over (`ziel = robot.find(…)`).
-_EX_ZIEL = ExampleRef('ziel')
+# The Greifziel a grasp-step example hands over: the find call itself (N9).
+_EX_ZIEL = ExampleCall('find', ('wuerfel',))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -349,38 +372,55 @@ _EX_ZIEL = ExampleRef('ziel')
 ROBOT_API: tuple[ApiCall, ...] = (
     # ── Motion ────────────────────────────────────────────────────────────
     _stmt('home', 'home', 'edubotics_home', (),
-          'Fährt den Arm in die Grundstellung; der Greifer bleibt, wie er ist.'),
+          'Fährt den Arm in die Grundstellung; der Greifer bleibt, wie er ist.',
+          doc_de_block='Fährt den Arm in die Grundstellung; der Greifer bleibt, wie er ist.'),
     _stmt('open_gripper', 'openGripper', 'edubotics_open_gripper', (),
-          'Öffnet den Greifer.'),
+          'Öffnet den Greifer.',
+          doc_de_block='Öffnet den Greifer.'),
     _stmt('close_gripper', 'closeGripper', 'edubotics_close_gripper', (),
-          'Schließt den Greifer.'),
+          'Schließt den Greifer.',
+          doc_de_block='Schließt den Greifer.'),
     _stmt('move_to', 'moveTo', 'edubotics_move_to',
           (_p('target', 'target', 'destination', asset='place',
               doc_de='Wohin: der Name eines Ziels oder einer Position aus deiner Sammlung – '
                      'oder ein Punkt (x, y, z) in Metern.'),),
-          'Fährt über das Ziel: ein Punkt [x, y, z] in Metern oder der Name '
-          'eines gemerkten Ziels.',
-          doc_de_java='Fährt über das Ziel: ein Punkt new double[] {x, y, z} in Metern oder '
-                      'der Name eines gemerkten Ziels.',
-          example=('Ablage',)),
+          # Q3: a table (plane-tracked) Ziel is approached from above and the
+          # arm stops at the release height over it (motion.table_ziel_hover).
+          'Fährt zum Ziel: ein Punkt [x, y, z] in Metern oder der Name eines gemerkten '
+          'Ziels; bei einem Ziel auf dem Tisch hält der Greifer darüber an (Ablagehöhe).',
+          doc_de_java='Fährt zum Ziel: ein Punkt new double[] {x, y, z} in Metern oder der '
+                      'Name eines gemerkten Ziels; bei einem Ziel auf dem Tisch hält der '
+                      'Greifer darüber an (Ablagehöhe).',
+          example=('Ablage',),
+          doc_de_block='Fährt den Greifer zum Ziel; bei einem Ziel auf dem Tisch hält er '
+                       'darüber an (Ablagehöhe).'),
     _stmt('pickup', 'pickup', 'edubotics_pickup',
+          # Q9: a Position („Position vormachen") is refused here.
           (_p('target', 'target', 'target', asset='place',
-              doc_de='Wo: der Name eines Ziels oder einer Position aus deiner Sammlung – '
+              doc_de='Wo: der Name eines Ziels aus deiner Sammlung (keine Position) – '
                      'oder ein Punkt (x, y, z) in Metern.'),),
           'Nimmt an dieser Stelle etwas auf: hinfahren, absenken, Greifer '
           'schließen, anheben.',
-          example=('Start',)),
+          example=('Start',),
+          doc_de_block='Nimmt an diesem Ziel etwas auf: Greifer öffnen, darüber fahren, '
+                       'absenken, Greifer schließen, anheben. Eine Position lehnt der Block '
+                       'ab.'),
     _stmt('drop_at', 'dropAt', 'edubotics_drop_at',
           (_p('target', 'target', 'destination', asset='place',
-              doc_de='Wo abgelegt wird: der Name eines Ziels oder einer Position aus deiner '
-                     'Sammlung – oder ein Punkt (x, y, z) in Metern.'),),
+              doc_de='Wo abgelegt wird: der Name eines Ziels aus deiner Sammlung (keine '
+                     'Position) – oder ein Punkt (x, y, z) in Metern.'),),
           'Legt das Gehaltene über dem Ziel ab und öffnet den Greifer.',
-          example=('Ablage',)),
+          example=('Ablage',),
+          doc_de_block='Legt das Gehaltene an diesem Ziel ab: darüber fahren, bis auf '
+                       'Ablagehöhe absenken, Greifer öffnen, wieder hochfahren. Eine Position '
+                       'lehnt der Block ab.'),
     _stmt('wait', 'waitSeconds', 'edubotics_wait_seconds',
           (_p('seconds', 'float', lo=0.0, hi=300.0,
               doc_de='Wie lange gewartet wird, in Sekunden (höchstens 300).'),),
           'Wartet so viele Sekunden (höchstens 300).',
-          example=(1.5,)),
+          example=(1.5,),
+          doc_de_block='Wartet so viele Sekunden, bevor der nächste Block läuft (höchstens '
+                       '300).'),
     _stmt('replay', 'replay', 'edubotics_replay_trajectory',
           (_p('name', 'str', max_len=40, pattern=TRAJECTORY_NAME_RE, asset='recording',
               doc_de='Der Name einer Bewegung aus deiner Sammlung.'),
@@ -389,27 +429,47 @@ ROBOT_API: tuple[ApiCall, ...] = (
                      'höchstens 3.0.')),
           'Spielt eine aufgenommene Bewegung ab; speed 1.0 ist die Geschwindigkeit '
           'der Aufnahme, höchstens 3.0.',
-          example=('Winken',)),
+          example=('Winken',),
+          doc_de_block='Spielt eine Bewegung aus deiner Sammlung ab (gleicher Name wie unter '
+                       '„Bewegungen“). Mach sie zuerst mit „Bewegung vormachen“ vor.'),
     _stmt('move_above', 'moveAbove', 'edubotics_move_above', (_ZIEL,),
           'Fährt in Anfahrhöhe über das gefundene Objekt.',
-          example=(_EX_ZIEL,)),
+          example=(_EX_ZIEL,),
+          doc_de_block='Fährt den Greifer in Anfahrhöhe über das Greifziel, ohne abzusenken.'),
     _stmt('descend_to', 'descendTo', 'edubotics_descend_to', (_ZIEL,),
-          'Senkt den geöffneten Greifer auf das gefundene Objekt ab.',
-          example=(_EX_ZIEL,)),
+          # F21: not straight above yet → the move_above hover first.
+          'Senkt den geöffneten Greifer auf das gefundene Objekt ab; steht er nicht '
+          'schon darüber, fährt er zuerst darüber.',
+          example=(_EX_ZIEL,),
+          doc_de_block='Senkt den Greifer auf die Greifhöhe des Greifziels ab; steht er nicht '
+                       'schon darüber, fährt er zuerst darüber.'),
     _stmt('close_on_object', 'closeOnObject', 'edubotics_close_on_object', (_ZIEL,),
           'Schließt den Greifer um das gefundene Objekt.',
-          example=(_EX_ZIEL,)),
+          example=(_EX_ZIEL,),
+          doc_de_block='Schließt den Greifer um das Greifziel.'),
     _stmt('lift', 'lift', 'edubotics_lift', (),
-          'Hebt den Greifer gerade nach oben an, so weit der Arm kann.'),
+          'Hebt den Greifer gerade nach oben an, so weit der Arm kann.',
+          doc_de_block='Hebt den Greifer gerade nach oben an, so weit der Arm kann.'),
     # ── Named-object grasp ────────────────────────────────────────────────
     _stmt('grasp', 'grasp', 'edubotics_grasp_object', (_OBJ,),
+          # Q8: on the rig an empty scene is WAITED for, with no time limit;
+          # the sim (and the Blockly „Solange … sichtbar" body) never waits.
           'Greift das nächste sichtbare Objekt dieses Typs: finden, anfahren, '
-          'schließen, prüfen.',
-          example=('wuerfel',)),
+          'schließen, prüfen. Ist keines zu sehen, wird gewartet, bis eines zu sehen '
+          'ist — so lange geht das Programm hier nicht weiter; Stopp beendet das '
+          'Warten (im Simulator wird nicht gewartet).',
+          example=('wuerfel',),
+          doc_de_block='Sucht ein Objekt dieses Typs, fährt darüber, greift es von oben und '
+                       'prüft, ob es wirklich hält; klappt es nicht, wird es noch einmal '
+                       'versucht. Ist keines zu sehen, wartet der Block, bis eines zu sehen '
+                       'ist — so lange geht das Programm hier nicht weiter; Stopp beendet das '
+                       'Warten. Im Simulator und in „Solange … sichtbar“ wird nicht gewartet.'),
     _stmt('mark_done', 'markDone', 'edubotics_mark_done', (_ZIEL,),
           'Merkt dieses Objekt als erledigt, damit es nicht noch einmal '
           'gefunden wird.',
-          example=(_EX_ZIEL,)),
+          example=(_EX_ZIEL,),
+          doc_de_block='Merkt dieses Greifziel als erledigt, damit es nicht noch einmal '
+                       'gefunden wird.'),
     # ── Destinations ──────────────────────────────────────────────────────
     _stmt('pin', 'pin', 'edubotics_destination_pin',
           (_DEST_DEF,
@@ -420,31 +480,49 @@ ROBOT_API: tuple[ApiCall, ...] = (
            _p('z', 'float', lo=-1.0, hi=1.0,
               doc_de='Höhe in Metern. Auf dem vermessenen Tisch und im Simulator nimmt '
                      'der Roboter stattdessen die Tischhöhe an dieser Stelle.')),
-          'Merkt den Punkt [x, y, z] in Metern unter diesem Namen als Ziel '
-          'für move_to und drop_at.',
-          doc_de_java='Merkt den Punkt (x, y, z) in Metern unter diesem Namen als Ziel für '
-                      'moveTo und dropAt.',
-          example=('Ablage', 0.2, 0.0, 0.0)),
+          # F16: a pinned destination is plane-tracked, so wherever a table
+          # height is known (a calibrated rig, always the simulator) its z is
+          # never used (motion.resolve_destination_z).
+          'Merkt den Tischpunkt (x, y) in Metern unter diesem Namen als Ziel für '
+          'move_to und drop_at; z gilt nur, wenn der Tisch nicht vermessen ist (im '
+          'Simulator nie).',
+          doc_de_java='Merkt den Tischpunkt (x, y) in Metern unter diesem Namen als Ziel für '
+                      'moveTo und dropAt; z gilt nur, wenn der Tisch nicht vermessen ist (im '
+                      'Simulator nie).',
+          example=('Ablage', 0.2, 0.0, 0.0),
+          doc_de_block='Merkt einen Tischpunkt unter diesem Namen als Ziel: den Block '
+                       'auswählen und in die Szenen-Kamera klicken. „fahre dorthin“ fährt den '
+                       'Greifer über diesen Punkt (Ablagehöhe). Die Höhe gilt nur, wenn der '
+                       'Tisch nicht vermessen ist (im Simulator nie).'),
     _stmt('pin_current', 'pinCurrent', 'edubotics_destination_current',
           (_DEST_DEF,),
-          'Merkt die Stelle, an der der Greifer gerade steht, unter diesem '
-          'Namen als Ziel.',
-          example=('Hier',)),
+          # Q12: xyz only — a Ziel, never a Position.
+          'Merkt die Stelle, an der der Greifer gerade steht, als Ziel (nur den Punkt, '
+          'nicht die Armstellung).',
+          example=('Hier',),
+          doc_de_block='Merkt die Stelle, an der der Greifer gerade steht, als Ziel (nur den '
+                       'Punkt, nicht die Armstellung).'),
     # ── Output ────────────────────────────────────────────────────────────
+    # F11: the `value` kind zeige takes (bounded: Rule §2's cost ceiling of a
+    # maximal value frame covers it); max_len is where both stubs cut a TEXT
+    # (handlers/output.py caps the rendered line at the same 2000).
     _stmt('log', 'log', 'edubotics_log',
-          (_p('message', 'text', max_len=2000,
-              doc_de='Was ins Protokoll geschrieben wird: ein Text oder eine Zahl '
-                     '(höchstens 2000 Zeichen).'),),
-          'Schreibt eine Zeile ins Protokoll — Zahlen und Texte, höchstens '
+          (_p('message', 'value', max_len=2000,
+              doc_de='Was ins Protokoll geschrieben wird: ein Text, eine Zahl, ein '
+                     'Wahrheitswert oder eine Liste (höchstens 2000 Zeichen).'),),
+          'Schreibt eine Zeile ins Protokoll — Zahlen, Texte und Listen, höchstens '
           '2000 Zeichen.',
-          example=('Hallo!',)),
+          example=('Hallo!',),
+          doc_de_block='Schreibt eine Zeile ins Protokoll (höchstens 2000 Zeichen).'),
     _stmt('beep', 'beep', 'edubotics_play_sound', (),
-          'Spielt einen kurzen Signalton ab — hörbar im Browser.'),
+          'Spielt einen kurzen Signalton ab — hörbar im Browser.',
+          doc_de_block='Spielt einen kurzen Signalton ab — hörbar im Browser.'),
     _stmt('speak', 'speak', 'edubotics_speak_de',
           (_p('text', 'text', max_len=240,
               doc_de='Was vorgelesen wird (höchstens 240 Zeichen).'),),
           'Liest den Text mit deutscher Stimme vor (höchstens 240 Zeichen).',
-          example=('Fertig!',)),
+          example=('Fertig!',),
+          doc_de_block='Liest den Text mit deutscher Stimme vor (höchstens 240 Zeichen).'),
     _stmt('tone', 'tone', 'edubotics_play_tone',
           (_p('freq', 'float', lo=100.0, hi=4000.0, default=880.0,
               doc_de='Die Tonhöhe in Hertz (100 bis 4000).'),
@@ -452,7 +530,9 @@ ROBOT_API: tuple[ApiCall, ...] = (
               doc_de='Wie lange der Ton klingt, in Sekunden (höchstens 5).')),
           'Spielt einen Ton mit dieser Frequenz in Hertz für so viele Sekunden '
           '(höchstens 5).',
-          example=(440.0, 0.5)),
+          example=(440.0, 0.5),
+          doc_de_block='Spielt einen Ton: die erste Zahl ist die Höhe in Hertz (100 bis 4000), '
+                       'die zweite die Dauer in Sekunden (0,05 bis 5).'),
     _stmt('toast', 'toast', 'edubotics_toast',
           (_p('text', 'text', max_len=240,
               doc_de='Die Meldung, die auf dem Bildschirm erscheint (höchstens 240 Zeichen).'),
@@ -463,14 +543,18 @@ ROBOT_API: tuple[ApiCall, ...] = (
               doc_de='Wie lange die Meldung zu sehen ist, in Sekunden (höchstens 15).')),
           'Zeigt eine Meldung auf dem Bildschirm; level ist info, success, '
           'warning oder error, seconds höchstens 15.',
-          example=('Fertig!', 'success')),
+          example=('Fertig!', 'success'),
+          doc_de_block='Zeigt eine Meldung auf dem Bildschirm: als Info, Erfolg, Warnung oder '
+                       'Fehler, höchstens 15 Sekunden lang.'),
     # ── Counters ──────────────────────────────────────────────────────────
     _stmt('counter_reset', 'counterReset', 'edubotics_counter_reset', (_COUNTER,),
           'Setzt den Zähler mit diesem Namen auf 0.',
-          example=('Punkte',)),
+          example=('Punkte',),
+          doc_de_block='Setzt den Zähler mit diesem Namen auf 0.'),
     _stmt('counter_add', 'counterAdd', 'edubotics_counter_add', (_COUNTER,),
           'Erhöht den Zähler mit diesem Namen um 1.',
-          example=('Punkte',)),
+          example=('Punkte',),
+          doc_de_block='Erhöht den Zähler mit diesem Namen um 1.'),
     # ── Values ────────────────────────────────────────────────────────────
     _value('ziel', 'ziel', 'edubotics_destination_ref', (_DEST_REF,), 'name',
            'Gibt den Namen eines gemerkten Ziels für move_to und drop_at zurück; '
@@ -479,18 +563,24 @@ ROBOT_API: tuple[ApiCall, ...] = (
                       'abgelehnt.',
            doc_de_java='Gibt den Namen eines gemerkten Ziels für moveTo und dropAt zurück; ein '
                        'unbekannter Name wird abgelehnt.',
-           example=('Ablage',), example_var='name'),
+           example=('Ablage',), example_var='name',
+           doc_de_block='Verweist auf ein Ziel oder eine Position deiner Sammlung mit diesem '
+                        'Namen – für „bewege zu“, ein Ziel auch für „aufnehmen“ und „ablegen '
+                        'bei“. Einen unbekannten Namen lehnt der Roboter ab.'),
     _value('sees', 'sees', 'edubotics_see_object', (_OBJ,), 'bool',
            'Prüft, ob gerade ein noch nicht erledigtes Objekt dieses Typs zu '
            'sehen ist.', budget='perception',
            returns_de='Wahr, wenn so ein Objekt gerade zu sehen ist – sonst falsch.',
-           example=('wuerfel',), example_var='gesehen'),
+           example=('wuerfel',), example_var='gesehen',
+           doc_de_block='Wahr, wenn gerade ein noch nicht erledigtes Objekt dieses Typs zu '
+                        'sehen ist.'),
     _value('count', 'count', 'edubotics_count_object', (_OBJ,), 'int',
            'Zählt die sichtbaren, noch nicht erledigten Objekte dieses Typs.',
            budget='perception',
            returns_de='Die Anzahl der sichtbaren, noch nicht erledigten Objekte – eine ganze '
                       'Zahl.',
-           example=('wuerfel',), example_var='anzahl'),
+           example=('wuerfel',), example_var='anzahl',
+           doc_de_block='Zählt die sichtbaren, noch nicht erledigten Objekte dieses Typs.'),
     _value('wait_until_seen', 'waitUntilSeen', 'edubotics_wait_until_object_seen',
            (_OBJ, _TIMEOUT), 'bool',
            'Wartet, bis ein Objekt dieses Typs zu sehen ist; False, wenn es nach '
@@ -499,16 +589,24 @@ ROBOT_API: tuple[ApiCall, ...] = (
                       'abgelaufen ist.',
            doc_de_java='Wartet, bis ein Objekt dieses Typs zu sehen ist; false, wenn es nach '
                        'timeout Sekunden nicht da ist.',
-           example=('wuerfel', 5.0), example_var='gesehen'),
+           example=('wuerfel', 5.0), example_var='gesehen',
+           # F9a: a timeout answers falsch with a [WARNUNG]; it never aborts.
+           doc_de_block='Wartet, bis ein Objekt dieses Typs zu sehen ist: wahr, sobald eines '
+                        'auftaucht – falsch mit einer Warnung im Protokoll, wenn die '
+                        'eingestellte Zeit abläuft. Das Programm läuft danach weiter.'),
     _value('wait_until_held', 'waitUntilHeld', 'edubotics_wait_until_held',
            (_TIMEOUT,), 'bool',
+           # Q10: the measured gripper OPEN never holds.
            'Wartet, bis der Greifer etwas hält; False, wenn er nach timeout '
-           'Sekunden noch leer ist.',
+           'Sekunden noch leer ist. Ein offener Greifer hält nie etwas.',
            returns_de='Wahr, sobald der Greifer etwas hält – falsch, wenn die Wartezeit '
                       'abgelaufen ist.',
            doc_de_java='Wartet, bis der Greifer etwas hält; false, wenn er nach timeout '
-                       'Sekunden noch leer ist.',
-           example=(3.0,), example_var='gehalten'),
+                       'Sekunden noch leer ist. Ein offener Greifer hält nie etwas.',
+           example=(3.0,), example_var='gehalten',
+           doc_de_block='Wartet, bis der Greifer etwas hält: wahr, sobald er etwas hält – '
+                        'falsch mit einer Warnung im Protokoll, wenn die eingestellte Zeit '
+                        'abläuft. Ein offener Greifer hält nie etwas.'),
     _value('find', 'find', 'edubotics_find_object', (_OBJ,), 'ziel',
            'Findet das nächste greifbare Objekt dieses Typs und gibt ein '
            'Greifziel zurück, sonst None.', budget='perception',
@@ -516,7 +614,10 @@ ROBOT_API: tuple[ApiCall, ...] = (
                       'greifbar ist.',
            doc_de_java='Findet das nächste greifbare Objekt dieses Typs und gibt ein '
                        'Robot.Greifziel zurück, sonst null.',
-           example=('wuerfel',), example_var='ziel'),
+           example=('wuerfel',), example_var='ziel',
+           doc_de_block='Sucht das nächste greifbare Objekt dieses Typs und gibt es als '
+                        'Greifziel zurück – oder „nichts“, wenn keines greifbar ist. Merke '
+                        'dir das Ergebnis in einer Variablen.'),
     _value('object_position', 'objectPosition', 'edubotics_object_position',
            (_ZIEL,), 'point',
            'Gibt die Position [x, y, z] des Greifziels in Metern zurück.',
@@ -525,15 +626,20 @@ ROBOT_API: tuple[ApiCall, ...] = (
                       'über die Kamera.',
            doc_de_java='Gibt die Position {x, y, z} des Greifziels als double[] in Metern '
                        'zurück.',
-           example=(_EX_ZIEL,), example_var='position'),
+           example=(_EX_ZIEL,), example_var='position',
+           doc_de_block='Gibt die Position (x, y, z) des Greifziels in Metern zurück.'),
     _value('is_holding', 'isHolding', 'edubotics_grasp_held', (), 'bool',
-           'Prüft, ob der Greifer etwas hält.',
+           'Prüft, ob der Greifer etwas hält. Ein offener Greifer hält nie etwas.',
            returns_de='Wahr, wenn der Greifer etwas hält – sonst falsch.',
-           example_var='gehalten'),
+           example_var='gehalten',
+           doc_de_block='Wahr, wenn der Greifer gerade etwas hält. Ein offener Greifer hält '
+                        'nie etwas.'),
     _value('counter_get', 'counterGet', 'edubotics_counter_get', (_COUNTER,), 'int',
            'Gibt den Wert des Zählers zurück; 0, wenn er noch nie gesetzt wurde.',
            returns_de='Den Wert des Zählers – eine ganze Zahl, 0 für einen neuen Zähler.',
-           example=('Punkte',), example_var='punkte'),
+           example=('Punkte',), example_var='punkte',
+           doc_de_block='Gibt den Wert des Zählers zurück; 0, wenn er noch nie gesetzt '
+                        'wurde.'),
 )
 
 _FILE = _p('file', 'str', max_len=80, pattern=CODE_PATH_RE)
@@ -598,13 +704,15 @@ TYPE_DOCS: tuple[TypeDoc, ...] = (
         '    robot.move_above(ziel)\n'
         '    robot.descend_to(ziel)\n'
         '    robot.close_on_object(ziel)\n'
-        '    robot.lift()',
+        '    robot.lift()\n'
+        '    robot.mark_done(ziel)',
         'Robot.Greifziel ziel = Robot.find("wuerfel");\n'
         'if (ziel != null) {\n'
         '    Robot.moveAbove(ziel);\n'
         '    Robot.descendTo(ziel);\n'
         '    Robot.closeOnObject(ziel);\n'
         '    Robot.lift();\n'
+        '    Robot.markDone(ziel);\n'
         '}'),
     TypeDoc(
         'Greifobjekt', 'Greifobjekt',
@@ -636,6 +744,47 @@ def suggest(name: str) -> str | None:
         return None
     hits = difflib.get_close_matches(name, PYTHON_NAMES, n=1, cutoff=0.6)
     return hits[0] if hits else None
+
+
+# The sentence both stubs raise LOCALLY when a grasp step gets something that
+# is not a Greifziel (Python's `_handle`, Java's `RpcClient.handleOf` — a
+# `null` from a `find` that found nothing included). One constant, rendered
+# into both, in words that read right in both languages (m7).
+NOT_A_GREIFZIEL_DE = ('Hier wird ein Greifziel erwartet — das Ergebnis von find, wenn es '
+                      'etwas gefunden hat.')
+
+# The catalog's own field names (object_catalog.parse_catalog's refusals name
+# them) → the Greifobjekt attribute the student wrote (F17). Java spells each
+# as its constructor parameter (java_camel).
+REGISTER_OBJECT_STUDENT_FIELDS = {
+    'object_height_m': 'hoehe_m',
+    'grasp_depth_m': 'greiftiefe_m',
+    'gripper_close_rad': 'greifer_schliessen_rad',
+    'approach_clear_m': 'anfahrhoehe_m',
+    'label_de': 'label',
+    'tag_ids': 'tag_ids',
+}
+
+# A Greifobjekt type name is at most this long (TYPE_NAME_RE).
+TYPE_NAME_MAX_CHARS = 24
+# What a label with no usable letter becomes.
+TYPE_NAME_FALLBACK = 'objekt'
+_GERMAN_PAIRS = (('ä', 'ae'), ('ö', 'oe'), ('ü', 'ue'), ('Ä', 'Ae'), ('Ö', 'Oe'),
+                 ('Ü', 'Ue'), ('ß', 'ss'), ('ẞ', 'SS'))
+
+
+def type_name_for(label):
+    """The type name a Greifobjekt is registered under when it names none
+    (F17): NFC, the German letter pairs, lowercase, every run of anything but
+    a–z/0–9 one ``_``, no ``_`` at either end, at most TYPE_NAME_MAX_CHARS.
+    "Rote Banane" → "rote_banane", "Würfel" → "wuerfel". Rendered into the
+    Python stub verbatim and spelled once more in Java
+    (Greifobjekt.typeNameFor, asserted equal by SmokeMain)."""
+    text = unicodedata.normalize('NFC', str(label))
+    for umlaut, pair in _GERMAN_PAIRS:
+        text = text.replace(umlaut, pair)
+    text = re.sub(r'[^a-z0-9]+', '_', text.lower()).strip('_')
+    return text[:TYPE_NAME_MAX_CHARS].rstrip('_') or TYPE_NAME_FALLBACK
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -727,9 +876,17 @@ def _py_signature(call: ApiCall) -> str:
     return ', '.join(parts)
 
 
+def _py_marshal(p: ApiParam) -> str:
+    """How the Python stub hands one argument to the client. A `value`
+    parameter with a max_len (log, F11) passes a TEXT whole up to that many
+    characters; anything else is rendered like zeige's."""
+    if p.kind == 'value' and p.max_len is not None:
+        return f'_shown({p.name}, {p.max_len})'
+    return _PY_ARG_MARSHAL.get(p.kind, '{v}').format(v=p.name)
+
+
 def _py_method(call: ApiCall) -> str:
-    args = ', '.join(
-        _PY_ARG_MARSHAL.get(p.kind, '{v}').format(v=p.name) for p in call.params)
+    args = ', '.join(_py_marshal(p) for p in call.params)
     kind = _py_literal(call.budget)
     lines = [f'def {call.name}({_py_signature(call)}):']
     lines.append(f'    """{_comment_safe(call.doc_de)}"""')
@@ -764,11 +921,13 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import re
 import socket
 import struct
 import sys
 import threading
 import time
+import unicodedata
 
 # The call budget the robot enforces. This floor is a courtesy — the server
 # sleeps on the same numbers, and that is the boundary, never this.
@@ -793,7 +952,7 @@ _NO_CONNECTION_DE = ('Keine Verbindung zum Roboter — das Programm muss über '
 _CONNECTION_LOST_DE = 'Die Verbindung zum Roboter ist abgebrochen.'
 _FRAME_TOO_BIG_DE = 'Der Aufruf ist zu groß für den Roboter.'
 _BAD_REPLY_DE = 'Der Roboter hat unverständlich geantwortet.'
-_NOT_A_GREIFZIEL_DE = 'Hier wird ein Greifziel von robot.find erwartet.'
+_NOT_A_GREIFZIEL_DE = {NOT_A_GREIFZIEL_DE!r}
 _NOT_AN_OBJECT_DE = ('Hier wird ein Objekt-Name (z. B. "wuerfel") oder eine '
                      'Greifobjekt-Klasse erwartet.')
 
@@ -989,7 +1148,7 @@ def _type_name(value):
     if isinstance(value, str):
         return value
     if isinstance(value, type) and issubclass(value, Greifobjekt):
-        return value.name or value.__name__.lower()
+        return value.name or _type_name_for(value.__name__)
     raise RobotError(_NOT_AN_OBJECT_DE)
 
 
@@ -1016,7 +1175,11 @@ _SHOWN_BIG_INT = 2 ** 53
 _SHOWN_TOO_BIG_DE = {SHOWN_TOO_BIG_DE!r}
 
 
-def _shown(value):
+def _shown(value, text_max=None):
+    # robot.log passes its text whole, up to text_max characters (the robot
+    # writes at most that many); every other value is rendered like zeige's.
+    if text_max is not None and isinstance(value, str):
+        return value[:text_max]
     return _shown_part(value, 0, [_SHOWN_BUDGET_CHARS])
 
 
@@ -1073,10 +1236,11 @@ class Greifobjekt:
             hoehe_m = 0.040
             greiftiefe_m = 0.015
 
-    Optional: name (sonst der Klassenname in Kleinbuchstaben), label (sonst
-    der Klassenname), greifer_schliessen_rad, anfahrhoehe_m. Die Klasse wird
-    beim Anlegen für diesen Lauf beim Roboter angemeldet; robot.grasp(Banane)
-    und robot.sees(Banane) nehmen die Klasse oder ihren Namen.
+    Optional: name (sonst aus dem Klassennamen: Kleinbuchstaben, ä wird ae, ß
+    wird ss, alles andere _), label (sonst der Klassenname),
+    greifer_schliessen_rad, anfahrhoehe_m. Die Klasse wird beim Anlegen für
+    diesen Lauf beim Roboter angemeldet; robot.grasp(Banane) und
+    robot.sees(Banane) nehmen die Klasse oder ihren Namen.
     """
 
     name = None
@@ -1089,7 +1253,7 @@ class Greifobjekt:
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        name = cls.name or cls.__name__.lower()
+        name = cls.name or _type_name_for(cls.__name__)
         label = cls.label or cls.__name__
         _rpc.call({method!r}, [{args}], {kind!r})
 '''
@@ -1108,6 +1272,23 @@ def _py_name_block(names) -> str:
     return '\n'.join(lines)
 
 
+def _py_type_name_block() -> str:
+    """type_name_for and its constants, as private names of the stub — the
+    SOURCE of the server's own function, so the two can never differ."""
+    import inspect
+    source = inspect.getsource(type_name_for)
+    for public in ('TYPE_NAME_MAX_CHARS', 'TYPE_NAME_FALLBACK', 'type_name_for'):
+        source = re.sub(rf'\b{public}\b', f'_{public}', source)
+    return (
+        '# A Greifobjekt registered without a name is named from its class name\n'
+        '# (robot_api.type_name_for, rendered from its source).\n'
+        f'_TYPE_NAME_MAX_CHARS = {TYPE_NAME_MAX_CHARS!r}\n'
+        f'_TYPE_NAME_FALLBACK = {TYPE_NAME_FALLBACK!r}\n'
+        f'_GERMAN_PAIRS = ({", ".join(map(repr, _GERMAN_PAIRS[:4]))},\n'
+        f'                 {", ".join(map(repr, _GERMAN_PAIRS[4:]))})\n'
+        '\n\n' + source + '\n\n')
+
+
 def render_python_stub() -> str:
     limits = dataclasses.asdict(RPC_LIMITS)
     head = _PY_STUB_HEAD.format(
@@ -1123,7 +1304,9 @@ def render_python_stub() -> str:
         SHOWN_MAX_ITEMS=_SHOWN_MAX_ITEMS,
         SHOWN_TOO_BIG_DE=_SHOWN_TOO_BIG_DE,
         PUBLIC_METHODS=_py_name_block(c.name for c in ROBOT_API + CODE_ONLY_METHODS),
+        NOT_A_GREIFZIEL_DE=NOT_A_GREIFZIEL_DE,
     )
+    head += _py_type_name_block()
     methods = '\n'.join(_py_method(c) for c in ROBOT_API + CODE_ONLY_METHODS)
     row = INTERNAL_METHODS_BY_NAME['register_object']
     # The seven positionals, in the row's order: the first two come from the
@@ -1148,7 +1331,9 @@ _JAVA_ALTS = {
     'bool': (('boolean', '{v}'),),
     'point': (('double[]', '{v}'),),
     'target': (('double[]', '{v}'), ('String', '{v}')),
-    'ziel': (('Greifziel', '{v}.handle()'),),
+    # handleOf, not .handle(): a `null` Greifziel (find found nothing) is the
+    # German NOT_A_GREIFZIEL_DE, the sentence Python's _handle raises.
+    'ziel': (('Greifziel', 'RpcClient.handleOf({v})'),),
     'tagids': (('int[]', '{v}'),),
     'obj': (('String', '{v}'), ('Greifobjekt', '{v}.name()')),
     # zeige(): the primitives plus exactly ONE reference overload, Object,
@@ -1178,6 +1363,23 @@ def _java_camel(name: str) -> str:
     return head + ''.join(w[:1].upper() + w[1:] for w in rest)
 
 
+def java_camel(name: str) -> str:
+    """A Python parameter / attribute name as the Java stub spells it
+    (``hoehe_m`` → ``hoeheM``): how code_rpc names it to a Java student."""
+    return _java_camel(name)
+
+
+def _java_alts(p: ApiParam) -> tuple[tuple[str, str], ...]:
+    """The Java alternatives of one parameter (``_JAVA_ALTS`` by kind); a
+    `value` parameter with a max_len (log, F11) passes a String whole up to
+    that many characters, like the Python stub."""
+    alts = _JAVA_ALTS[p.kind]
+    if p.kind == 'value' and p.max_len is not None:
+        alts = tuple((jtype, f'RpcClient.shownObject({{v}}, {p.max_len})')
+                     if jtype == 'Object' else (jtype, expr) for jtype, expr in alts)
+    return alts
+
+
 @dataclass(frozen=True)
 class JavaOverload:
     """One Java overload of a row, as data: the stub renders its text from it
@@ -1205,7 +1407,7 @@ def _java_overload_specs(call: ApiCall) -> list[JavaOverload]:
     ret_type, unwrap = _JAVA_RETURN[call.returns]
     out: list[JavaOverload] = []
     for prefix in range(n, first_default - 1, -1):
-        alts = [_JAVA_ALTS[p.kind] for p in call.params[:prefix]]
+        alts = [_java_alts(p) for p in call.params[:prefix]]
         for combo in itertools.product(*alts):
             params = tuple(
                 (jtype, _java_camel(p.name))
@@ -1308,6 +1510,7 @@ def render_java_robot() -> str:
 
 _JAVA_GREIFOBJEKT = '''package edubotics;
 
+import java.text.Normalizer;
 import java.util.Locale;
 
 /**
@@ -1318,7 +1521,8 @@ import java.util.Locale;
  * Robot.grasp(banane);
  * </pre>
  *
- * Der Name ist das Label in Kleinbuchstaben; zwei optionale Zahlen am Ende
+ * Der Name kommt aus dem Label: Kleinbuchstaben, ä wird ae, ß wird ss, alles
+ * andere _ ("Rote Banane" wird rote_banane). Zwei optionale Zahlen am Ende
  * sind greiferSchliessenRad und anfahrhoeheM. Das Objekt wird beim Anlegen
  * für diesen Lauf beim Roboter angemeldet.
  *
@@ -1345,8 +1549,40 @@ public final class Greifobjekt {{
 
     private Greifobjekt(String label, int[] tagIds, double hoeheM, double greiftiefeM,
                         Double greiferSchliessenRad, Double anfahrhoeheM) {{
-        this.name = label.toLowerCase(Locale.ROOT);
+        this.name = typeNameFor(label);
         RpcClient.call({method}, new Object[] {{{args}}}, {kind});
+    }}
+
+    // robot_api.type_name_for, spelled in Java (SmokeMain asserts the two
+    // agree on the same table): NFC, the German letter pairs, lowercase, every
+    // run of anything but a-z/0-9 one "_", none at either end, at most
+    // TYPE_NAME_MAX_CHARS characters.
+    static final int TYPE_NAME_MAX_CHARS = {max_chars};
+    static final String TYPE_NAME_FALLBACK = "{fallback}";
+    private static final String[][] GERMAN_PAIRS = {{{pairs}}};
+
+    static String typeNameFor(String label) {{
+        String text = Normalizer.normalize(String.valueOf(label), Normalizer.Form.NFC);
+        for (String[] pair : GERMAN_PAIRS) {{
+            text = text.replace(pair[0], pair[1]);
+        }}
+        text = stripUnderscores(text.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "_"));
+        if (text.length() > TYPE_NAME_MAX_CHARS) {{
+            text = stripUnderscores(text.substring(0, TYPE_NAME_MAX_CHARS));
+        }}
+        return text.isEmpty() ? TYPE_NAME_FALLBACK : text;
+    }}
+
+    private static String stripUnderscores(String text) {{
+        int start = 0;
+        int end = text.length();
+        while (start < end && text.charAt(start) == '_') {{
+            start++;
+        }}
+        while (end > start && text.charAt(end - 1) == '_') {{
+            end--;
+        }}
+        return text.substring(start, end);
     }}
 
     /** Der Name, unter dem der Roboter diesen Typ kennt. */
@@ -1361,9 +1597,11 @@ def render_java_greifobjekt() -> str:
     row = INTERNAL_METHODS_BY_NAME['register_object']
     java_of = {'name': 'this.name', 'label': 'label'}
     args = ', '.join(java_of.get(p.name, _java_camel(p.name)) for p in row.params)
+    pairs = ', '.join(f'{{{_java_literal(a)}, {_java_literal(b)}}}' for a, b in _GERMAN_PAIRS)
     return _JAVA_GREIFOBJEKT.format(
         notice=_GENERATED_NOTICE.replace('\n', '\n * '),
-        method=_java_literal(row.name), args=args, kind=_java_literal(row.budget))
+        method=_java_literal(row.name), args=args, kind=_java_literal(row.budget),
+        max_chars=TYPE_NAME_MAX_CHARS, fallback=TYPE_NAME_FALLBACK, pairs=pairs)
 
 
 _JAVA_RPC_CLIENT = '''package edubotics;
@@ -1400,6 +1638,7 @@ public final class RpcClient {{
     static final String CONNECTION_LOST_DE = "Die Verbindung zum Roboter ist abgebrochen.";
     static final String FRAME_TOO_BIG_DE = "Der Aufruf ist zu groß für den Roboter.";
     static final String BAD_REPLY_DE = "Der Roboter hat unverständlich geantwortet.";
+    static final String NOT_A_GREIFZIEL_DE = {NOT_A_GREIFZIEL_DE};
 
     /** Der Roboter hat einen Aufruf abgelehnt; getMessage() ist die deutsche Meldung. */
     public static final class RobotError extends RuntimeException {{
@@ -1596,6 +1835,14 @@ public final class RpcClient {{
         return (int) asLong(r);
     }}
 
+    /** The wire handle of a Greifziel; a null one (find found nothing) is refused here, in German. */
+    static long handleOf(Robot.Greifziel ziel) {{
+        if (ziel == null) {{
+            throw new RobotError(NOT_A_GREIFZIEL_DE);
+        }}
+        return ziel.handle();
+    }}
+
     static String asString(Object r) {{
         if (r instanceof String) {{
             return (String) r;
@@ -1642,6 +1889,16 @@ public final class RpcClient {{
 
     static Object shownObject(Object o) {{
         return shownValue(o, 0, new int[] {{SHOWN_BUDGET_CHARS}});
+    }}
+
+    // Robot.log: a String passes whole up to textMax characters (the robot
+    // writes at most that many); any other value is rendered like zeige's.
+    static Object shownObject(Object o, int textMax) {{
+        if (o instanceof String) {{
+            String s = (String) o;
+            return s.length() > textMax ? s.substring(0, textMax) : s;
+        }}
+        return shownObject(o);
     }}
 
     // One node of a shown value, charged to the shared budget like the
@@ -1819,6 +2076,7 @@ def render_java_rpc_client() -> str:
         SHOWN_MAX_ITEMS=_java_literal(_SHOWN_MAX_ITEMS),
         SHOWN_BIG_BITS=_java_literal(_SHOWN_BIG_BITS),
         SHOWN_TOO_BIG_DE=_SHOWN_TOO_BIG_DE,
+        NOT_A_GREIFZIEL_DE=_java_literal(NOT_A_GREIFZIEL_DE),
     )
 
 
@@ -1833,7 +2091,8 @@ def render_java_files() -> dict[str, str]:
 # ── JSON ──────────────────────────────────────────────────────────────────
 
 def _param_json(p: ApiParam) -> dict[str, Any]:
-    out: dict[str, Any] = {'name': p.name, 'kind': p.kind, 'required': p.required}
+    out: dict[str, Any] = {'name': p.name, 'kind': p.kind, 'arg_key': p.arg_key,
+                           'required': p.required}
     if not p.required:
         out['default'] = p.default
     for key in ('lo', 'hi', 'max_len', 'pattern'):
@@ -1850,7 +2109,7 @@ def _param_json(p: ApiParam) -> dict[str, Any]:
 
 
 def _call_json(c: ApiCall) -> dict[str, Any]:
-    return {
+    out: dict[str, Any] = {
         'name': c.name,
         'java_name': c.java_name,
         'block_type': c.block_type,
@@ -1858,8 +2117,12 @@ def _call_json(c: ApiCall) -> dict[str, Any]:
         'budget': c.budget,
         'returns': c.returns,
         'doc_de': c.doc_de,
-        'params': [_param_json(p) for p in c.params],
     }
+    # The block's tooltip (blocks/*.js reads it): only rows that HAVE a block.
+    if c.doc_de_block:
+        out['doc_de_block'] = c.doc_de_block
+    out['params'] = [_param_json(p) for p in c.params]
+    return out
 
 
 def export_json() -> str:
@@ -1898,8 +2161,13 @@ def _example_literal(kind: str, value: Any, language: str) -> str:
     ``JSON.parse`` turns ``440.0`` into ``440``, so code/methodDocs.js renders
     by kind too, and test/test_robot_api_docs + methodDocs.test.js hold the two
     renderings equal)."""
-    if isinstance(value, ExampleRef):
-        return value.name
+    if isinstance(value, ExampleCall):
+        row = ROBOT_API_BY_NAME[value.name]
+        inner = ', '.join(
+            _example_literal(p.kind, v, language) for p, v in zip(row.params, value.args))
+        if language == 'python':
+            return f'robot.{row.name}({inner})'
+        return f'Robot.{row.java_name}({inner})'
     if kind == 'float':
         return repr(float(value))
     if kind == 'int':
@@ -1969,7 +2237,8 @@ def _method_doc_json(c: ApiCall) -> dict[str, Any]:
     out['signature_py'] = f'robot.{c.name}({_py_signature(c)})'
     out['signatures_java'] = [_java_signature(c, s) for s in _java_overload_specs(c)]
     out['example'] = {
-        'args': [{'ref': a.name} if isinstance(a, ExampleRef) else a for a in c.example],
+        'args': [{'call': a.name, 'args': list(a.args)} if isinstance(a, ExampleCall) else a
+                 for a in c.example],
         'var': c.example_var or None,
     }
     out['example_py'] = _example_line(c, 'python')

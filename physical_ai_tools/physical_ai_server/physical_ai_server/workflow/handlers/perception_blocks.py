@@ -18,9 +18,11 @@ motion handlers' ``_resolve_target`` knows how to read
 
 from __future__ import annotations
 
+import contextlib
 import math
+import threading
 import time
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 import numpy as np
 
@@ -656,17 +658,104 @@ def _nothing_to_grasp_message(ctx, recipe) -> str:
     order is load-bearing, and a declension table cannot be authored by a
     twelve-year-old naming their own object.
     """
-    if _all_instances_done(ctx, recipe):
-        return (
-            f'Alle „{recipe.label_de}" sind schon erledigt — es ist kein Objekt '
-            'mehr übrig, das gegriffen werden könnte. Zum Wiederholen bitte ein '
-            'Objekt kurz wegnehmen und neu hinlegen oder das Programm neu '
-            'starten.'
-        )
-    return (
-        f'Kein „{recipe.label_de}" sichtbar — bitte das Objekt in den '
-        'markierten Greifbereich legen.'
-    )
+    if not _all_instances_done(ctx, recipe):
+        return _done_sentence_de(ctx, recipe.label_de, set(), set())
+    done_ids, skipped_ids = _done_and_skipped_of_type(ctx, recipe)
+    return _done_sentence_de(ctx, recipe.label_de, done_ids, skipped_ids)
+
+
+def _carried_tag(ctx) -> int | None:
+    """The tag in the gripper (``ctx.carried_tag``) as an int, or ``None``."""
+    carried = getattr(ctx, 'carried_tag', None)
+    try:
+        return None if carried is None else int(carried)
+    except (TypeError, ValueError):
+        return None
+
+
+def _done_and_skipped_of_type(ctx, recipe) -> tuple[set, set]:
+    """This type's CLAIMED and SKIPPED tag ids, read under ``claim_lock``, the
+    tag in the gripper removed from both (it is neither done nor skipped while
+    it is in the jaws, r6-m3)."""
+    type_ids = {int(i) for i in recipe.tag_ids}
+
+    def _read():
+        claimed = {int(i) for i in (getattr(ctx, 'claimed_tags', None) or set())}
+        skipped = {int(i) for i in (getattr(ctx, 'skipped_tags', None) or set())}
+        return type_ids & claimed, type_ids & skipped
+
+    lock = getattr(ctx, 'claim_lock', None)
+    try:
+        if lock is not None:
+            with lock:
+                done, skipped = _read()
+        else:
+            done, skipped = _read()
+    except Exception:  # noqa: BLE001 — a diagnostic never breaks the run
+        return set(), set()
+    carried = _carried_tag(ctx)
+    if carried is not None:
+        done.discard(carried)
+        skipped.discard(carried)
+    return done, skipped
+
+
+def _done_sentence_de(ctx, label: str, done_ids, skipped_ids) -> str:
+    """THE sentence for „nothing of this type to grasp right now".
+
+    One helper for the „Greife" wait line (with the look's ``done_seen`` /
+    ``skipped_seen``) and for :func:`_nothing_to_grasp_message` (with the claim
+    sets), so the two can never disagree. The first case that applies wins, and
+    „skipped wins" so no sentence ever calls a skipped object done (r6-m4):
+
+    * skipped, rig — moving it brings it back (the SKIP rule of the reclaim,
+      measured from where it lay, ``_RECLAIM_MOVE_M``);
+    * skipped, simulator — move it in the editor (no reset helps there);
+    * done, rig, every done tag released at a commanded point — put it at least
+      ``_RELEASE_MOVE_M`` from that point (a put-back AT the release spot is
+      never reclaimed, hence the distance);
+    * done, rig, a done tag with no release point (claimed by „merke … als
+      erledigt" and never let go, which the reclaim never undoes) — restart;
+    * done, simulator — reset the simulator or restart;
+    * nothing of the type seen — today's „nicht sichtbar", worded for the
+      Sim-Tisch in the simulator.
+
+    NO ARTICLE, PRONOUN OR RELATIVE PRONOUN MAY AGREE WITH ``label`` (see
+    :func:`_nothing_to_grasp_message`). With the reclaim switched off
+    (``EDUBOTICS_RECLAIM_MOVE_M=0``) nothing a person moves comes back, so the
+    rig never promises that and says „neu starten" instead."""
+    simulated = bool(getattr(ctx, 'simulated', False))
+    reclaim_on = _RECLAIM_MOVE_M > 0.0
+    if skipped_ids:
+        if simulated:
+            return (f'„{label}" ist hier nicht greifbar — im Editor an eine '
+                    'erreichbare Stelle verschieben.')
+        if not reclaim_on:
+            return (f'„{label}" wurde übersprungen (hier nicht greifbar) — zum '
+                    'erneuten Versuch das Programm neu starten.')
+        return (f'„{label}" wurde übersprungen (hier nicht greifbar) — zum '
+                f'erneuten Versuch um mindestens {_RECLAIM_MOVE_M * 100:.0f} cm '
+                'verschieben.')
+    if done_ids:
+        if simulated:
+            return (f'Alle „{label}" sind erledigt — im Simulator „Simulator '
+                    'zurücksetzen" oder das Programm neu starten.')
+        release_xy = getattr(ctx, 'claim_release_xy', None) or {}
+        try:
+            released = all(release_xy.get(int(t)) is not None for t in done_ids)
+        except Exception:  # noqa: BLE001
+            released = False
+        if released and reclaim_on:
+            return (f'„{label}" ist schon erledigt — zum erneuten Greifen '
+                    f'mindestens {_RELEASE_MOVE_M * 100:.0f} cm vom Ablageort '
+                    'entfernt hinlegen.')
+        return (f'„{label}" ist schon als erledigt markiert — zum erneuten '
+                'Greifen das Programm neu starten.')
+    if simulated:
+        return (f'Kein „{label}" sichtbar — bitte das Objekt in den Greifbereich '
+                'auf dem Sim-Tisch legen.')
+    return (f'Kein „{label}" sichtbar — bitte das Objekt in den markierten '
+            'Greifbereich legen.')
 
 
 def _note_all_instances_done(ctx, recipe) -> None:
@@ -681,9 +770,15 @@ def _note_all_instances_done(ctx, recipe) -> None:
     Deduped through ``ctx.all_done_notified`` because every looking block now
     reaches here, including „warte bis"'s ~5 Hz poll: undeduped this would fill
     the Protokoll at the poll rate. Deliberately NOT a ``[WARNUNG]`` — a finished
-    table is not a fault — and deliberately NOT emitted on the non-reclaim path,
-    where ``grasp_object`` already raises the same sentence as its GraspSkip."""
+    table is not a fault — and NEVER emitted on the grasp path
+    (:func:`_look_for_grasp`), whose wait line already says the same thing."""
     if not _all_instances_done(ctx, recipe):
+        return
+    # r7-m5: when only the tag in the gripper made the type „all done" (a
+    # one-tag object in the jaws), there is nothing to say — and the
+    # once-per-run notice must not be used up on it.
+    done_ids, skipped_ids = _done_and_skipped_of_type(ctx, recipe)
+    if not done_ids and not skipped_ids:
         return
     try:
         seen = _claim_store(ctx, 'all_done_notified', set)
@@ -696,7 +791,7 @@ def _note_all_instances_done(ctx, recipe) -> None:
     _safe_log(ctx, _nothing_to_grasp_message(ctx, recipe))
 
 
-def _detect_named_unclaimed(ctx, type_name) -> list:
+def _detect_named_unclaimed(ctx, type_name, note: bool = True) -> list:
     """``_detect_named`` minus the per-run claimed/skipped ids, WITH the
     recycled-object reclaim (#1) run first on the full set of visible type ids —
     so an object a person moved is un-claimed and grabbed again.
@@ -714,14 +809,51 @@ def _detect_named_unclaimed(ctx, type_name) -> list:
 
     That split was also the whole reason a loop nested inside „falls sehe ich
     Würfel" deadlocked: once every tag was claimed, „sehe ich" answered False
-    forever and the only reclaiming block was unreachable."""
-    return _detect_named(ctx, type_name, reclaim=True)
+    forever and the only reclaiming block was unreachable.
+
+    ``note=False`` skips the all-done notice for this look (see
+    :func:`count_unclaimed_visible`)."""
+    return _detect_named(ctx, type_name, reclaim=True, note=note)
 
 
-def count_unclaimed_visible(ctx, type_name) -> int:
+def count_unclaimed_visible(ctx, type_name, note: bool = True) -> int:
     """Number of currently-visible UNCLAIMED instances of ``type_name``. The
-    gate the interpreter's ``edubotics_while_visible`` loop polls each pass."""
-    return len(_detect_named_unclaimed(ctx, type_name))
+    gate the interpreter's ``edubotics_while_visible`` loop polls each pass.
+
+    ``note=False`` suppresses the once-per-type all-done notice for THIS look.
+    The „Solange sichtbar" loop asks with it: its own empty pass is its normal
+    end, and its own completion line already says how it ended, so the notice
+    („… wegnehmen und neu hinlegen …") would only follow a successful loop with
+    advice nobody needs (F19). Every other caller keeps the default."""
+    return len(_detect_named_unclaimed(ctx, type_name, note=note))
+
+
+# „Greife" waits for a graspable object (Q8) — except inside a „Solange
+# sichtbar" loop, which has its own empty window and its own end, so a grasp in
+# its body must stay the immediate GraspSkip the loop is built around. The
+# exemption is THREAD-LOCAL on purpose: a „wenn …" hat running beside a main
+# stack that sits inside such a loop still waits, because it is not inside the
+# loop. A counter, not a flag, so nested loops (or a procedure re-entering one)
+# restore the outer state correctly.
+_NO_GRASP_WAIT = threading.local()
+
+
+@contextlib.contextmanager
+def no_grasp_wait():
+    """Run the ``with`` body with the grasp wait switched off on THIS thread.
+
+    Re-entrant (a per-thread counter), and the counter is restored in
+    ``finally``, so a raising body leaves the thread exactly as it found it."""
+    _NO_GRASP_WAIT.depth = getattr(_NO_GRASP_WAIT, 'depth', 0) + 1
+    try:
+        yield
+    finally:
+        _NO_GRASP_WAIT.depth = max(0, getattr(_NO_GRASP_WAIT, 'depth', 1) - 1)
+
+
+def in_no_grasp_wait() -> bool:
+    """True while this thread runs inside :func:`no_grasp_wait`."""
+    return getattr(_NO_GRASP_WAIT, 'depth', 0) > 0
 
 
 def _apply_xy_correction(ctx, x: float, y: float) -> tuple[float, float]:
@@ -910,14 +1042,19 @@ def reclaim_from_detections(ctx, recipe, detections) -> None:
     _reclaim_recycled(ctx, recipe, visible_xy)
 
 
-def _look_and_reclaim(ctx, recipe) -> list:
+def _look_and_reclaim(ctx, recipe, frame=None) -> list:
     """Grab ONE scene frame, reclaim over it, and hand the RAW detections back.
 
     The frame-grabbing wrapper around :func:`reclaim_from_detections`, shared by
     the unclaimed view (``_detect_named``'s reclaim branch) and by
     :func:`reclaim_only`. It attaches nothing and emits nothing; that is the
-    caller's job."""
-    bgr = _scene_frame(ctx)
+    caller's job.
+
+    ``frame`` — a scene frame the caller ALREADY judged usable (the „Greife"
+    wait, :func:`_wait_frame_usable`); it is looked at as it is, never
+    re-judged on a second age read. ``None`` (every other caller) fetches and
+    judges one through the strict :func:`_scene_frame`."""
+    bgr = _scene_frame(ctx) if frame is None else frame
     detections = ctx.perception.detect(
         bgr, camera='scene', mode='apriltag', aruco_id=None)
     reclaim_from_detections(ctx, recipe, detections)
@@ -1014,7 +1151,8 @@ def reclaim_only(ctx, type_name) -> None:
         return
 
 
-def _detect_named(ctx, type_name, exclude_ids=None, reclaim=False) -> list:
+def _detect_named(ctx, type_name, exclude_ids=None, reclaim=False,
+                  note: bool = True) -> list:
     """All catalog tags of ``type_name`` currently visible (minus
     ``exclude_ids``), with world_xyz_m + tag_yaw + close_rad attached. Reusable
     by grasp_object / see_object / count_object and the P2 while-visible loop.
@@ -1036,7 +1174,7 @@ def _detect_named(ctx, type_name, exclude_ids=None, reclaim=False) -> list:
         # ids even when every instance is currently claimed/skipped.
         detections = _look_and_reclaim(ctx, recipe)
         wanted = type_ids - {int(i) for i in _excluded_ids(ctx)}
-        if not wanted:
+        if not wanted and note:
             _note_all_instances_done(ctx, recipe)
         kept = [d for d in detections if d.aruco_id in wanted]
         return _attach_named_world(ctx, kept, recipe)
@@ -1123,9 +1261,10 @@ def _note_find_failure(ctx, reason) -> None:
     """Record (or clear, with ``None``) WHY the last „finde" produced no
     Greifziel, so the split motion blocks can say it instead of the generic
     „you never ran finde" message (see ``motion._no_greifziel_error``). Plain
-    attribute on the per-run ctx — never raises."""
+    attribute on the per-run ctx — never raises. In the simulator the reason is
+    worded for the Sim-Tisch (N10, ``motion.sim_greifbereich_de``)."""
     try:
-        ctx.last_find_failure = reason
+        ctx.last_find_failure = _motion.sim_greifbereich_de(ctx, reason)
     except Exception:  # noqa: BLE001 — a diagnostic must never break the run
         pass
 
@@ -1315,17 +1454,196 @@ def grasp_object(ctx, args: dict[str, Any]) -> None:
     hat can't grab the same instance between the detect and the pickup (TOCTOU,
     §12).
 
-    Recoverable per-instance failures (nothing visible right now, every instance
-    out of reach, the orientation couldn't be read, or the grab failed after
-    retries) mark the offending tag(s) SKIPPED and raise ``GraspSkip`` — the loop
-    swallows it and continues on the rest, a standalone „greife" fails loud
-    (``GraspSkip`` IS a ``WorkflowError``). A HARD failure (missing calibration)
-    raises the base ``WorkflowError`` so the loop ABORTS instead of spinning
-    forever."""
+    NOTHING GRASPABLE RIGHT NOW (owner decision Q8): on the rig „Greife" WAITS,
+    with no time limit, until a graspable object appears — Stop ends the wait,
+    and so does a text program that has ended (its ``ctx.should_stop``). One
+    German line says why it waits (:func:`_wait_for_graspable`). The simulator
+    never waits (no person can put an object back there) and a „Solange
+    sichtbar" loop never waits (:func:`no_grasp_wait`, its own empty window
+    ends it): both raise ``GraspSkip`` with :func:`_done_sentence_de` at once.
+
+    Recoverable per-instance failures (every instance out of reach, the
+    orientation couldn't be read, or the grab failed after retries) mark the
+    offending tag(s) SKIPPED and raise ``GraspSkip`` — the loop swallows it and
+    continues on the rest, a standalone „greife" fails loud (``GraspSkip`` IS a
+    ``WorkflowError``). A HARD failure (missing calibration) raises the base
+    ``WorkflowError`` so the loop ABORTS instead of spinning forever."""
     type_name = args.get('object_type')
     if not type_name:
         raise WorkflowError('Kein Objekt ausgewählt.')
     recipe = _recipe_for(_require_catalog(ctx), type_name)
+    while True:
+        if _grasp_may_wait(ctx):
+            _wait_for_graspable(ctx, recipe, type_name)
+        try:
+            return _grasp_object_locked(ctx, type_name, recipe)
+        except _WaitAgain:
+            # Another thread took the object between the wait and the lock:
+            # wait again, outside the lock.
+            continue
+
+
+# ── „Greife" waits for an object (owner decisions Q8, Q14) ──────────────────
+# A frozen scene picture DURING THE WAIT is „noch nichts zu sehen" for this long,
+# judged on the frame's own age; only a camera gone longer stops the program,
+# with the camera sentence of ``_scene_frame``. A plain constant, not an env
+# knob (it would have to be forwarded on every compose, env-forwarding-guard).
+# The look right before the motion keeps refusing a stale frame at once.
+GRASP_WAIT_STALE_GRACE_S = 5.0
+
+
+class _WaitAgain(Exception):
+    """Internal: the object was gone by the time the lock was taken."""
+
+
+class GraspLook(NamedTuple):
+    """ONE look for „Greife", its answer RETURNED, never stored on ctx (a shared
+    field is written by every thread's look and picks the wrong sentence under a
+    race). ``unclaimed`` — the graspable detections, world positions attached;
+    ``done_seen`` / ``skipped_seen`` — the type's CLAIMED / SKIPPED tag ids in
+    the same frame, the tag in the gripper counted as neither."""
+    unclaimed: list
+    done_seen: frozenset
+    skipped_seen: frozenset
+
+
+def _look_for_grasp(ctx, recipe, type_name, frame=None) -> GraspLook:
+    """The reclaiming detect of the unclaimed view (a cube a person moved is
+    un-claimed first) plus, from the SAME frame, which done / skipped ids of the
+    type are in view. Never emits the all-done note: the wait line says it.
+
+    ``frame`` — the wait's already-judged frame (see :func:`_look_and_reclaim`);
+    ``None`` — the strict look (``_grasp_object_locked``, right before the
+    motion: a stale frame there still refuses at once)."""
+    _ensure_perception(ctx)
+    _require_marker_detector(ctx)
+    detections = _look_and_reclaim(ctx, recipe, frame=frame)
+    type_ids = {int(i) for i in recipe.tag_ids}
+
+    def _read():
+        claimed = {int(i) for i in (getattr(ctx, 'claimed_tags', None) or set())}
+        skipped = {int(i) for i in (getattr(ctx, 'skipped_tags', None) or set())}
+        return claimed, skipped
+
+    lock = getattr(ctx, 'claim_lock', None)
+    if lock is not None:
+        with lock:
+            claimed, skipped = _read()
+    else:
+        claimed, skipped = _read()
+    seen = set()
+    for d in detections or []:
+        try:
+            tag = int(d.aruco_id)
+        except (TypeError, ValueError):
+            continue
+        if tag in type_ids:
+            seen.add(tag)
+    carried = _carried_tag(ctx)
+    if carried is not None:
+        seen.discard(carried)
+    wanted = type_ids - claimed - skipped
+    kept = [d for d in detections or [] if d.aruco_id in wanted]
+    return GraspLook(_attach_named_world(ctx, kept, recipe),
+                     frozenset(seen & claimed), frozenset(seen & skipped))
+
+
+def _grasp_may_wait(ctx) -> bool:
+    """True when „Greife" waits on THIS run and thread: the rig, outside a
+    „Solange sichtbar" loop. ``getattr`` throughout — the lock-site tests build
+    stub contexts."""
+    return not bool(getattr(ctx, 'simulated', False)) and not in_no_grasp_wait()
+
+
+def _stop_check(ctx) -> None:
+    """Raise exactly what ``motion._hold_motion_lock`` raises on a Stop."""
+    should_stop = getattr(ctx, 'should_stop', None)
+    if callable(should_stop) and should_stop():
+        raise WorkflowError('Workflow wurde gestoppt.')
+
+
+def _wait_frame_usable(ctx, state: dict):
+    """During the wait: the scene frame to look at now, or ``None`` = „noch
+    nichts zu sehen"; raises the camera sentence once the picture has been
+    unusable too long (Q14).
+
+    The returned frame IS the judgement: the wait's look uses it as it is
+    (``_look_for_grasp(..., frame=…)``) and never reads the age a second time —
+    a frame that crossed ``_SCENE_FRAME_MAX_AGE_S`` between two reads once
+    ended the wait at once with the camera sentence, though the freeze was far
+    inside ``GRASP_WAIT_STALE_GRACE_S``.
+
+    Judged on the frame's OWN age (``ctx.get_scene_frame_age``): ≤
+    ``_SCENE_FRAME_MAX_AGE_S`` → look; up to ``GRASP_WAIT_STALE_GRACE_S`` →
+    nothing to see yet; older → ``_scene_frame``'s own sentence. An age of
+    ``None`` means „no age" and is fresh, exactly as ``_scene_frame`` treats it.
+    A ``None`` FRAME has no age, so it counts from the first poll that met it
+    (``state``), then ``_scene_frame``'s „Kein aktuelles Szenenbild …"."""
+    getter = getattr(ctx, 'get_scene_frame', None)
+    frame = getter() if callable(getter) else None
+    if frame is None:
+        now = time.monotonic()
+        since = state.setdefault('none_since', now)
+        if now - since > GRASP_WAIT_STALE_GRACE_S:
+            _scene_frame(ctx)            # raises the missing-picture sentence
+        return None
+    state.pop('none_since', None)
+    age_getter = getattr(ctx, 'get_scene_frame_age', None)
+    age = None
+    if callable(age_getter):
+        try:
+            age = age_getter()
+        except Exception:  # noqa: BLE001 — age is advisory, like _scene_frame
+            age = None
+    if age is None or age <= _SCENE_FRAME_MAX_AGE_S:
+        return frame
+    if age > GRASP_WAIT_STALE_GRACE_S:
+        _scene_frame(ctx)                # raises the stale-camera sentence
+    return None
+
+
+def _wait_for_graspable(ctx, recipe, type_name) -> None:
+    """Block — OUTSIDE the motion lock — until an unclaimed instance of the type
+    is in view, saying ONCE why it waits. Stop (``ctx.should_stop``) ends it
+    with „Workflow wurde gestoppt.", the sentence of every other stop.
+
+    The FIRST statement is the stop check, before any detect and before the
+    skip decision (M1). The first look is part of the wait, so a freeze that
+    began just before „Greife" is tolerated like one during it."""
+    _stop_check(ctx)
+    state: dict = {}
+    look = GraspLook([], frozenset(), frozenset())
+    frame = _wait_frame_usable(ctx, state)
+    if frame is not None:
+        look = _look_for_grasp(ctx, recipe, type_name, frame=frame)
+        if look.unclaimed:
+            return
+    label = recipe.label_de
+    if look.done_seen or look.skipped_seen:
+        _safe_log(ctx, _done_sentence_de(ctx, label, set(look.done_seen),
+                                         set(look.skipped_seen)))
+    else:
+        _safe_log(ctx, f'Warte auf „{label}" — bitte ein Objekt in den '
+                       'Greifbereich legen.')
+
+    def _graspable() -> bool:
+        wait_if_paused = getattr(ctx, 'wait_if_paused', None)
+        if callable(wait_if_paused):
+            wait_if_paused()
+        usable = _wait_frame_usable(ctx, state)
+        if usable is None:
+            return False
+        return bool(_look_for_grasp(ctx, recipe, type_name, frame=usable).unclaimed)
+
+    # _poll_until releases a lock this thread holds (a hat body) for the wait,
+    # polls Stop every 0.2 s and never times out here; the line is not repeated.
+    _poll_until(ctx, _graspable, math.inf, label, raise_on_timeout=False)
+
+
+def _grasp_object_locked(ctx, type_name, recipe) -> None:
+    """The grasp itself, under ONE hold of the motion lock: look, select,
+    grasp, verify, claim (§12: a concurrent hat cannot take the same instance
+    between the look and the pickup)."""
     # THE one acquire helper. This was a bare, UNBOUNDED ``lock.acquire()`` —
     # the only site that was neither bounded nor stop-polling — so pressing
     # Stop behind a 30 s holder answered in 29.70 s (0.03 s through the helper).
@@ -1333,12 +1651,19 @@ def grasp_object(ctx, args: dict[str, Any]) -> None:
     try:
         attempts = _motion.GRASP_RETRY + 1
         for attempt in range(attempts):
-            detections = _detect_named(ctx, type_name, exclude_ids=_excluded_ids(ctx))
+            _stop_check(ctx)
+            look = _look_for_grasp(ctx, recipe, type_name)
+            detections = look.unclaimed
             if not detections:
-                # The object vanished between the loop's count and this grasp (or a
-                # standalone „greife" with nothing in view). Recoverable: the loop
-                # re-detects next pass; standalone fails loud.
-                raise GraspSkip(_nothing_to_grasp_message(ctx, recipe))
+                if attempt == 0 and _grasp_may_wait(ctx):
+                    # Another thread won the object between the wait and this
+                    # lock: wait again (only the FIRST attempt may wait — a
+                    # vanish during a retry stays a GraspSkip).
+                    raise _WaitAgain()
+                # The simulator, a „Solange sichtbar" loop, or a retry: say what
+                # is (not) there and let the loop move on; standalone fails loud.
+                raise GraspSkip(_done_sentence_de(
+                    ctx, recipe.label_de, set(look.done_seen), set(look.skipped_seen)))
             target = _select_nearest_reachable(ctx, detections)
             if target is None:
                 # Calibration incomplete (world_xyz_m unset) → _resolve_target
@@ -1485,20 +1810,14 @@ def wait_until_held(ctx, args: dict[str, Any]) -> bool:
     tick) instead of silently looping to the timeout on every rig without
     follower-joint feedback.
 
-    LIMITATION (position-only sensing, document-only fix 2026-06-30):
-    ``check_grasp_held`` reads the achieved gripper angle, which is ABOVE the
-    held-threshold whenever the gripper is OPEN (the rest state) — so this
-    block returns True immediately if the gripper is open. It is only
-    meaningful directly AFTER a close (e.g. „Greifer schließen" or a grasp).
-    The block tooltip states this. (The threshold itself is per-object since
-    2026-07-10 — the last COMMANDED close, ``ctx.last_commanded_close_rad``,
-    + ``GRASP_HELD_MARGIN_RAD``. With no close commanded yet this run the
-    fallback is ``motion._grasp_held_max``, which is PROFILE-AWARE since
-    2026-09-08 and is no longer the legacy global constant: that constant
-    (−0.35) sits below the whole Feetech gripper band, so on edu6/edu1 it
-    reported HELD for every readable angle rather than just the open one. The
-    open-gripper behaviour documented above is preserved on all three arms —
-    that is the part the change deliberately kept.)
+    POSITION-ONLY SENSING: ``check_grasp_held`` reads the achieved gripper
+    angle. An OPEN gripper never „hält" (owner decision Q10): the angle has to
+    have left the open position by ``motion.GRASP_HELD_MIN_TRAVEL_FRAC`` of the
+    travel to the reference close (the last COMMANDED close, else the arm's own
+    closed angle), so this block no longer returns True on an open gripper —
+    it used to, on every arm. The blocked-jaw threshold is unchanged: the last
+    commanded close + ``GRASP_HELD_MARGIN_RAD``, else the profile-aware
+    ``motion._grasp_held_max``.
 
     The check runs under ``motion_lock`` (``_check_grasp_held_locked``) so a
     hat-side poll can't read the threshold + joint state mid-close; note
@@ -1574,10 +1893,10 @@ def find_object(ctx, args: dict[str, Any]):
         # Direction-correct reason (the old text said „näher legen" even for an
         # object that was too NEAR), recorded on the ctx so „fahre über" / „senke
         # auf" / „schließe um" report it instead of „Kein Greifziel".
-        reason = _out_of_reach_reason(
+        reason = _motion.sim_greifbereich_de(ctx, _out_of_reach_reason(
             ctx, recipe.label_de,
             next((d.world_xyz_m for d in detections if d.world_xyz_m is not None),
-                 (0.0, 0.0, 0.0)))
+                 (0.0, 0.0, 0.0))))
         _note_find_failure(ctx, reason)
         try:
             ctx.log(f'[WARNUNG] {reason}')

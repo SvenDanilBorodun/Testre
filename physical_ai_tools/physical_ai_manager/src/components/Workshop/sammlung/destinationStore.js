@@ -455,14 +455,30 @@ export function readDestinationEntries(blocklyJson) {
 }
 
 /**
- * The run-payload sibling: exactly {name, kind, x, y, z} per entry. id, source,
- * robot type, timestamps and joints stay in the editor — the server resolves a
- * destination by NAME and decides plane tracking from `kind` in code.
+ * The run-payload sibling: {name, kind, x, y, z} per entry — the server
+ * resolves a destination by NAME and decides plane tracking from `kind` in
+ * code. A Position (`kind: 'pose'`) also sends the arm pose it was taught in,
+ * `joints` + `joint_names`, and the `robot_type` that taught it (owner
+ * decision Q2 of the 2026-10-18 semantics round: the arm drives there in joint
+ * space, but only on that robot); each only when the entry has it. id, source
+ * and timestamps stay in the editor. One helper for the run and the sim
+ * preview (utils/simPreview.js), so the two can never send different entries.
  */
 export function entriesForRunPayload(entries) {
   return (Array.isArray(entries) ? entries : [])
     .filter((e) => e && typeof e === 'object')
-    .map(({ name, kind, x, y, z }) => ({ name, kind, x, y, z }));
+    .map((e) => {
+      const { name, kind, x, y, z } = e;
+      const out = { name, kind, x, y, z };
+      if (kind === 'pose') {
+        if (Array.isArray(e.joints) && Array.isArray(e.joint_names)) {
+          out.joints = e.joints.slice();
+          out.joint_names = e.joint_names.slice();
+        }
+        if (typeof e.robot_type === 'string') out.robot_type = e.robot_type;
+      }
+      return out;
+    });
 }
 
 /** Live typing: strip characters outside the alphabet and cap — no trim. */

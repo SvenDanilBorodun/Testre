@@ -1081,10 +1081,13 @@ function WorkshopPage({ isActive }) {
         return;
       }
       const label = name || 'Ziel';
+      // M4 / Q11: the arm stops ABOVE the Ziel at the program's hover height,
+      // over the table measured in this lesson — the pin's stored z is not
+      // where it goes, so the question names none.
       if (typeof window !== 'undefined'
           && !window.confirm(
-            `Roboter zu „${label}" fahren `
-            + `(x=${x.toFixed(3)}, y=${y.toFixed(3)}, z=${z.toFixed(3)})?`)) {
+            `Arm über das Ziel „${label}" fahren `
+            + `(x=${x.toFixed(3)}, y=${y.toFixed(3)})?`)) {
         return;
       }
       try {

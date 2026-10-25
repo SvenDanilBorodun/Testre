@@ -10,6 +10,7 @@
 
 import * as Blockly from 'blockly/core';
 import { DE } from './messages_de';
+import { apiTooltip } from './apiDocs';
 import { setEditValidator } from './fieldLoad';
 
 // Cyan hue, distinct from the existing category colours; mirrored by the
@@ -58,7 +59,7 @@ export const COUNTER_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: COUNTER_COLOR,
-    tooltip: 'Setzt den genannten Zähler auf 0 zurück.',
+    tooltip: apiTooltip('edubotics_counter_reset'),
     extensions: ['edubotics_validate_counter_name'],
   },
   {
@@ -68,7 +69,7 @@ export const COUNTER_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: COUNTER_COLOR,
-    tooltip: 'Zählt den genannten Zähler um 1 hoch.',
+    tooltip: apiTooltip('edubotics_counter_add'),
     extensions: ['edubotics_validate_counter_name'],
   },
   {
@@ -77,7 +78,7 @@ export const COUNTER_BLOCKS = [
     args0: [{ type: 'field_input', name: 'NAME', text: 'Punkte' }],
     output: 'Number',
     colour: COUNTER_COLOR,
-    tooltip: 'Liefert den aktuellen Wert des genannten Zählers.',
+    tooltip: apiTooltip('edubotics_counter_get'),
     extensions: ['edubotics_validate_counter_name'],
   },
   {

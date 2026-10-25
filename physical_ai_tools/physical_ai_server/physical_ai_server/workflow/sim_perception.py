@@ -60,8 +60,19 @@ class SimPerception:
     """
 
     def __init__(self, objects: Optional[list[dict[str, Any]]], catalog: Any,
-                 world: Any | None = None) -> None:
+                 world: Any | None = None, table_z: float = 0.0) -> None:
         self._catalog = catalog
+        # The EE height at which the fingertips touch the drawn table — what a
+        # real touch-off measures, and what the node's sim calibration reports
+        # as ``z_table`` (Q13): the solver's ``tool_tip_below_ee_m`` (0.04 on the
+        # OMX, 0 on the Feetech arms, whose EE frame IS the closed fingertip).
+        # Base z = 0 stays the drawn table surface. Default 0.0 keeps every
+        # pre-Q13 construction (unit tests, the golden fixture) unchanged.
+        try:
+            table_z = float(table_z)
+        except (TypeError, ValueError):
+            table_z = 0.0
+        self._table_z = table_z if math.isfinite(table_z) else 0.0
         # The MUTABLE virtual scene (workflow.sim_world.SimWorld) when the node
         # supplies one: detect() then reports where an object IS, not where it was
         # placed. None keeps the frozen-snapshot behaviour verbatim, which is what
@@ -198,10 +209,12 @@ class SimPerception:
                     'wird übersprungen.', type_name)
                 continue
             used_per_type[type_name] = idx + 1
-            # Virtual table at z = 0 → grasp z is the body band below the tag-top
-            # plane: object_height − grasp_depth (matches the real path's
-            # z_table + object_height − grasp_depth with z_table = 0).
-            grasp_z = float(recipe.object_height_m) - float(recipe.grasp_depth_m)
+            # The grasp z is the body band below the tag-top plane, exactly the
+            # real path's ``z_table + object_height − grasp_depth``
+            # (perception_blocks._attach_named_world) with the sim's z_table —
+            # the fingertip height over the drawn table (see __init__).
+            grasp_z = (self._table_z + float(recipe.object_height_m)
+                       - float(recipe.grasp_depth_m))
             resolved.append({
                 # Index in the list the editor SENT — the join key with SimWorld.
                 'key': slot,
@@ -223,7 +236,11 @@ class SimPerception:
             })
             if self._world is not None:
                 try:
-                    self._world.bind_tag(slot, tag_ids[idx])
+                    # The object's own height rides the binding, so the sim
+                    # arm can judge a close against the object it would grab
+                    # (N3) without a catalog lookup of its own.
+                    self._world.bind_tag(slot, tag_ids[idx],
+                                         height_m=float(recipe.object_height_m))
                 except Exception:  # noqa: BLE001 — binding is best-effort telemetry
                     pass
         return resolved

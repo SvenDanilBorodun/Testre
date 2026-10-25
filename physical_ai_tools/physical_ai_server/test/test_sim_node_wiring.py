@@ -84,9 +84,32 @@ def test_the_attach_named_world_bypass_is_still_an_or_chain():
 # ── source-level wiring asserts ──────────────────────────────────────────────
 
 def test_the_sim_arm_and_the_sim_perception_share_one_world():
+    """Intent kept: SimArm and SimPerception get the SAME world. SimPerception
+    now also gets the sim table (Q13: ``table_z=sim_table_z``, the fingertip
+    height the sim calibration reports as z_table)."""
     assert 'world=self._sim_world,' in _SRC, 'SimArm must receive the world'
-    assert 'self._sim_world,\n            ),' in _SRC.replace('\r\n', '\n'), (
-        'SimPerception must receive the same world')
+    assert ('self._sim_world,\n                table_z=sim_table_z,\n            ),'
+            in _SRC.replace('\r\n', '\n')), (
+        'SimPerception must receive the same world and the sim table')
+
+
+def test_the_sim_manager_is_built_simulated():
+    """r3-m8: ``WorkflowManager(…, simulated=True)`` in the sim builder and
+    NOWHERE else — without it every sim „Greife" would wait forever for an
+    object no person can put back; with it on the real manager the rig would
+    never wait."""
+    tree = ast.parse(_SRC)
+    flagged = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef):
+            continue
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == 'WorkflowManager'):
+                kw = {k.arg: k.value for k in node.keywords}
+                if 'simulated' in kw:
+                    flagged.append((fn.name, ast.literal_eval(kw['simulated'])))
+    assert flagged == [('_get_or_create_sim_workflow_manager', True)], flagged
 
 
 def test_the_sim_world_is_reset_on_every_start():

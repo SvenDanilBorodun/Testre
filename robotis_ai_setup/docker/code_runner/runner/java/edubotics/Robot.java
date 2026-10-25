@@ -73,12 +73,12 @@ public final class Robot {
         RpcClient.call("close_gripper", new Object[] {}, "call");
     }
 
-    /** Fährt über das Ziel: ein Punkt [x, y, z] in Metern oder der Name eines gemerkten Ziels. */
+    /** Fährt zum Ziel: ein Punkt [x, y, z] in Metern oder der Name eines gemerkten Ziels; bei einem Ziel auf dem Tisch hält der Greifer darüber an (Ablagehöhe). */
     public static void moveTo(double[] target) {
         RpcClient.call("move_to", new Object[] {target}, "call");
     }
 
-    /** Fährt über das Ziel: ein Punkt [x, y, z] in Metern oder der Name eines gemerkten Ziels. */
+    /** Fährt zum Ziel: ein Punkt [x, y, z] in Metern oder der Name eines gemerkten Ziels; bei einem Ziel auf dem Tisch hält der Greifer darüber an (Ablagehöhe). */
     public static void moveTo(String target) {
         RpcClient.call("move_to", new Object[] {target}, "call");
     }
@@ -120,17 +120,17 @@ public final class Robot {
 
     /** Fährt in Anfahrhöhe über das gefundene Objekt. */
     public static void moveAbove(Greifziel ziel) {
-        RpcClient.call("move_above", new Object[] {ziel.handle()}, "call");
+        RpcClient.call("move_above", new Object[] {RpcClient.handleOf(ziel)}, "call");
     }
 
-    /** Senkt den geöffneten Greifer auf das gefundene Objekt ab. */
+    /** Senkt den geöffneten Greifer auf das gefundene Objekt ab; steht er nicht schon darüber, fährt er zuerst darüber. */
     public static void descendTo(Greifziel ziel) {
-        RpcClient.call("descend_to", new Object[] {ziel.handle()}, "call");
+        RpcClient.call("descend_to", new Object[] {RpcClient.handleOf(ziel)}, "call");
     }
 
     /** Schließt den Greifer um das gefundene Objekt. */
     public static void closeOnObject(Greifziel ziel) {
-        RpcClient.call("close_on_object", new Object[] {ziel.handle()}, "call");
+        RpcClient.call("close_on_object", new Object[] {RpcClient.handleOf(ziel)}, "call");
     }
 
     /** Hebt den Greifer gerade nach oben an, so weit der Arm kann. */
@@ -138,34 +138,59 @@ public final class Robot {
         RpcClient.call("lift", new Object[] {}, "call");
     }
 
-    /** Greift das nächste sichtbare Objekt dieses Typs: finden, anfahren, schließen, prüfen. */
+    /** Greift das nächste sichtbare Objekt dieses Typs: finden, anfahren, schließen, prüfen. Ist keines zu sehen, wird gewartet, bis eines zu sehen ist — so lange geht das Programm hier nicht weiter; Stopp beendet das Warten (im Simulator wird nicht gewartet). */
     public static void grasp(String obj) {
         RpcClient.call("grasp", new Object[] {obj}, "call");
     }
 
-    /** Greift das nächste sichtbare Objekt dieses Typs: finden, anfahren, schließen, prüfen. */
+    /** Greift das nächste sichtbare Objekt dieses Typs: finden, anfahren, schließen, prüfen. Ist keines zu sehen, wird gewartet, bis eines zu sehen ist — so lange geht das Programm hier nicht weiter; Stopp beendet das Warten (im Simulator wird nicht gewartet). */
     public static void grasp(Greifobjekt obj) {
         RpcClient.call("grasp", new Object[] {obj.name()}, "call");
     }
 
     /** Merkt dieses Objekt als erledigt, damit es nicht noch einmal gefunden wird. */
     public static void markDone(Greifziel ziel) {
-        RpcClient.call("mark_done", new Object[] {ziel.handle()}, "call");
+        RpcClient.call("mark_done", new Object[] {RpcClient.handleOf(ziel)}, "call");
     }
 
-    /** Merkt den Punkt [x, y, z] in Metern unter diesem Namen als Ziel für move_to und drop_at. */
+    /** Merkt den Tischpunkt (x, y) in Metern unter diesem Namen als Ziel für move_to und drop_at; z gilt nur, wenn der Tisch nicht vermessen ist (im Simulator nie). */
     public static void pin(String name, double x, double y, double z) {
         RpcClient.call("pin", new Object[] {name, x, y, z}, "call");
     }
 
-    /** Merkt die Stelle, an der der Greifer gerade steht, unter diesem Namen als Ziel. */
+    /** Merkt die Stelle, an der der Greifer gerade steht, als Ziel (nur den Punkt, nicht die Armstellung). */
     public static void pinCurrent(String name) {
         RpcClient.call("pin_current", new Object[] {name}, "call");
     }
 
-    /** Schreibt eine Zeile ins Protokoll — Zahlen und Texte, höchstens 2000 Zeichen. */
-    public static void log(Object message) {
+    /** Schreibt eine Zeile ins Protokoll — Zahlen, Texte und Listen, höchstens 2000 Zeichen. */
+    public static void log(int message) {
         RpcClient.call("log", new Object[] {message}, "call");
+    }
+
+    /** Schreibt eine Zeile ins Protokoll — Zahlen, Texte und Listen, höchstens 2000 Zeichen. */
+    public static void log(long message) {
+        RpcClient.call("log", new Object[] {RpcClient.shownLong(message)}, "call");
+    }
+
+    /** Schreibt eine Zeile ins Protokoll — Zahlen, Texte und Listen, höchstens 2000 Zeichen. */
+    public static void log(double message) {
+        RpcClient.call("log", new Object[] {RpcClient.shownDouble(message)}, "call");
+    }
+
+    /** Schreibt eine Zeile ins Protokoll — Zahlen, Texte und Listen, höchstens 2000 Zeichen. */
+    public static void log(boolean message) {
+        RpcClient.call("log", new Object[] {message}, "call");
+    }
+
+    /** Schreibt eine Zeile ins Protokoll — Zahlen, Texte und Listen, höchstens 2000 Zeichen. */
+    public static void log(char message) {
+        RpcClient.call("log", new Object[] {String.valueOf(message)}, "call");
+    }
+
+    /** Schreibt eine Zeile ins Protokoll — Zahlen, Texte und Listen, höchstens 2000 Zeichen. */
+    public static void log(Object message) {
+        RpcClient.call("log", new Object[] {RpcClient.shownObject(message, 2000)}, "call");
     }
 
     /** Spielt einen kurzen Signalton ab — hörbar im Browser. */
@@ -272,13 +297,13 @@ public final class Robot {
         return RpcClient.asBoolean(r);
     }
 
-    /** Wartet, bis der Greifer etwas hält; False, wenn er nach timeout Sekunden noch leer ist. */
+    /** Wartet, bis der Greifer etwas hält; False, wenn er nach timeout Sekunden noch leer ist. Ein offener Greifer hält nie etwas. */
     public static boolean waitUntilHeld(double timeout) {
         Object r = RpcClient.call("wait_until_held", new Object[] {timeout}, "call");
         return RpcClient.asBoolean(r);
     }
 
-    /** Wartet, bis der Greifer etwas hält; False, wenn er nach timeout Sekunden noch leer ist. */
+    /** Wartet, bis der Greifer etwas hält; False, wenn er nach timeout Sekunden noch leer ist. Ein offener Greifer hält nie etwas. */
     public static boolean waitUntilHeld() {
         Object r = RpcClient.call("wait_until_held", new Object[] {10.0}, "call");
         return RpcClient.asBoolean(r);
@@ -298,11 +323,11 @@ public final class Robot {
 
     /** Gibt die Position [x, y, z] des Greifziels in Metern zurück. */
     public static double[] objectPosition(Greifziel ziel) {
-        Object r = RpcClient.call("object_position", new Object[] {ziel.handle()}, "perception");
+        Object r = RpcClient.call("object_position", new Object[] {RpcClient.handleOf(ziel)}, "perception");
         return RpcClient.asPoint(r);
     }
 
-    /** Prüft, ob der Greifer etwas hält. */
+    /** Prüft, ob der Greifer etwas hält. Ein offener Greifer hält nie etwas. */
     public static boolean isHolding() {
         Object r = RpcClient.call("is_holding", new Object[] {}, "call");
         return RpcClient.asBoolean(r);

@@ -135,10 +135,31 @@ def test_the_kind_decides_plane_tracked_in_code():
 
 
 def test_stored_entry_shape_is_exactly_the_runtime_shape():
+    """Intent kept: a stored entry carries exactly the keys the runtime reads —
+    now including the kept ``kind`` (motion.is_position), and for a Position
+    its taught pose (``joints`` / ``joint_names`` / ``robot_type``, spec D1)."""
     out, _, _ = _parse({'destinations': [_entry('A', x=1, y=0, z=0)]})
-    assert set(out['A']) == {'x', 'y', 'z', 'label', 'plane_tracked'}
+    assert set(out['A']) == {'x', 'y', 'z', 'label', 'plane_tracked', 'kind'}
     assert all(type(out['A'][k]) is float for k in ('x', 'y', 'z'))
     assert out['A']['label'] == 'A'
+    assert out['A']['kind'] == 'pin'
+    pose = dict(_entry('P', x=1, y=0, z=0), kind='pose', joints=[0, 1, 2, 3, 4, 0.8],
+                joint_names=['j1', 'j2', 'j3', 'j4', 'j5', 'g'], robot_type='omx_f',
+                surplus='dropped')
+    out, _, _ = _parse({'destinations': [pose]})
+    assert set(out['P']) == {'x', 'y', 'z', 'label', 'plane_tracked', 'kind',
+                             'joints', 'joint_names', 'robot_type'}
+    assert out['P']['joints'] == [0.0, 1.0, 2.0, 3.0, 4.0, 0.8]
+    assert all(type(v) is float for v in out['P']['joints'])
+    # A malformed pose set is dropped key by key: the entry takes the point path.
+    bad = dict(_entry('Q', x=1, y=0, z=0), kind='pose', joints=[float('nan')] * 6,
+               joint_names='j1', robot_type=7)
+    out, _, _ = _parse({'destinations': [bad]})
+    assert set(out['Q']) == {'x', 'y', 'z', 'label', 'plane_tracked', 'kind'}
+    # Only a Position keeps the pose keys.
+    pin = dict(_entry('R', x=1, y=0, z=0), joints=[0, 1, 2, 3, 4, 0.8])
+    out, _, _ = _parse({'destinations': [pin]})
+    assert 'joints' not in out['R']
 
 
 @pytest.mark.parametrize('kind', [None, 'cam', 'PIN', 1, True])
@@ -237,15 +258,16 @@ def test_a_payload_entry_beats_a_persisted_one_of_the_same_name():
 
 def test_with_the_sibling_present_a_robot_local_name_is_NOT_consulted():
     """Another student's „Position 1" on the same rig must not answer for a Ziel
-    this student's document does not have."""
+    this student's document does not have. Intent kept; the refusal is the one
+    unknown-Ziel sentence (F22, ``motion.unknown_destination_de``)."""
     status = []
     mgr, _arm, _w = _sim_manager([], status, {'z_table': 0.0})
     mgr.set_destination('Position 1', 0.18, -0.12, 0.08)
     program = _move_to_ref('Position 1')
     program['destinations'] = []
     assert _run(mgr, program, status) == 'error'
-    assert any(e.startswith('Unbekanntes Ziel: „Position 1"') for e in _errors(status)), (
-        _errors(status))
+    assert any(e.startswith('Das Ziel „Position 1" gibt es in diesem Programm nicht')
+               for e in _errors(status)), _errors(status)
 
 
 def test_without_the_sibling_the_legacy_robot_local_merge_is_unchanged():

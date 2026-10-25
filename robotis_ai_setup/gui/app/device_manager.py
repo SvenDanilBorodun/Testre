@@ -234,12 +234,12 @@ def list_robotis_devices() -> list[USBDevice]:
 
 
 def list_arm_devices(arm_family: str = "omx") -> list[USBDevice]:
-    """Filter USB devices to the given ARM FAMILY's VID/PID set (edu6 §4.4).
+    """Filter USB devices to the given ARM FAMILY's VID/PID set.
 
     ``omx`` = any 2F5D PID (byte-identical to :func:`list_robotis_devices`);
-    ``edu6`` = the WCH CH343P (1A86:55D3) on the Waveshare bus adapter. The
-    PID matters for edu6 — 1A86 covers every CH34x USB-serial dongle on earth,
-    so an unrelated Arduino clone must not be attached/probed as an arm.
+    ``v1`` = the WCH CH343P (1A86:55D3) on the Waveshare bus adapter. The PID
+    matters for a Feetech arm — 1A86 covers every CH34x USB-serial dongle on
+    earth, so an unrelated Arduino clone must not be attached/probed as an arm.
     """
     ids = ARM_USB_IDS.get(arm_family, ARM_USB_IDS["omx"])
     out = []
@@ -425,50 +425,40 @@ def self_heal_wsl_serial() -> dict:
 # /dev/serial/by-id substring markers per arm family. by-id names are built
 # from the USB descriptor strings (usb-<manufacturer>_<product>_<serial>), so
 # the OMX OpenRB-150 shows ROBOTIS/OPENRB; the Feetech arms' CH343P typically
-# shows "1a86_USB_Single_Serial" / WCH strings (rig gate R1 records the exact
-# form — extend this tuple if a board revision differs).
-#
-# ONE tuple for BOTH Feetech families, and that is a statement of fact, not a
-# shortcut: edu6 and edu1 sit on the same Waveshare Bus Servo Adapter, so their
-# by-id strings, their VID:PID and even their servo models on ids 1..6 are
-# identical. Nothing at the USB layer can tell them apart — only the SERVO COUNT
-# can (see _FAMILY_SERVO_COUNT), which is why the prober asserts it exactly.
+# shows "1a86_USB_Single_Serial" / WCH strings (rig gate VR2 records the exact
+# form — extend this tuple if a board revision differs). The by-id string says
+# nothing about WHICH Feetech arm is on the adapter — the SERVO COUNT does (see
+# _FAMILY_SERVO_COUNT), which is why the prober asserts it exactly.
 _FEETECH_BYID_MARKERS = ("1A86", "WCH", "CH343", "USB_SINGLE_SERIAL", "USB SINGLE SERIAL",
                          "USB2.0-SER")
 
 # The same markers as a family table, so a caller can ask "which family does
 # this path look like" instead of only "does it match THIS family". Kept
 # beside the literals `find_serial_paths_for_robotis` uses rather than
-# rewiring that function: it is the pre-edu6 discovery path and must stay
+# rewiring that function: it is the OMX discovery path and must stay
 # byte-identical. `test_arm_family_conflict_twin_lockstep.py` asserts the
 # table and the function still select the same paths, so the duplication
-# cannot drift.
-#
-# CONSEQUENCE of edu6 and edu1 sharing markers, and it is the RIGHT one:
-# `serial_path_family_conflict` can never claim a stored Feetech port belongs to
-# the other Feetech family, because the path genuinely carries no such evidence.
-# It still invalidates a scan across the omx↔Feetech boundary, which is the
-# case it exists for.
+# cannot drift. `serial_path_family_conflict` uses it to invalidate a scan
+# across the omx↔Feetech boundary.
 _ARM_MARKERS = {
-    "omx":  ("ROBOTIS", "OPENRB"),
-    "edu6": _FEETECH_BYID_MARKERS,
-    "edu1": _FEETECH_BYID_MARKERS,
+    "omx": ("ROBOTIS", "OPENRB"),
+    "v1":  _FEETECH_BYID_MARKERS,
 }
 
 # Wire protocol the in-image prober must speak for a family.
-_FAMILY_PROTOCOL = {"omx": "dxl", "edu6": "feetech", "edu1": "feetech"}
+_FAMILY_PROTOCOL = {"omx": "dxl", "v1": "feetech"}
 
-# Servos on a Feetech family's bus, in joint order from id 1. THE ONLY
-# discriminator between the two Feetech arms (see _FEETECH_BYID_MARKERS), so it
-# is passed to the prober as `--servos=N` and asserted EXACTLY there. Absent for
-# `omx`, whose prober keys off leader-vs-follower id ranges instead.
-_FAMILY_SERVO_COUNT = {"edu6": 7, "edu1": 6}
+# Servos on a Feetech family's bus, in joint order from id 1. Passed to the
+# prober as `--servos=N` and asserted EXACTLY there (the adapter's by-id string
+# cannot say which Feetech arm is on it). Absent for `omx`, whose prober keys
+# off leader-vs-follower id ranges instead.
+_FAMILY_SERVO_COUNT = {"v1": 6}
 
 
 def _family_protocol(arm_family: str) -> str:
     """Prober protocol for a family; an unknown family reads as OMX, which is
-    the pre-edu6 default and the one that cannot damage a Feetech bus (a
-    Dynamixel ping on a Feetech arm is simply unanswered)."""
+    the one that cannot damage a Feetech bus (a Dynamixel ping on a Feetech arm
+    is simply unanswered)."""
     return _FAMILY_PROTOCOL.get(arm_family, "dxl")
 
 
@@ -492,7 +482,7 @@ def serial_path_family_conflict(serial_path: str, arm_family: str) -> bool:
     Three-valued on purpose, collapsed to a refusal only on proof: a path that
     matches the family we need is fine whatever else it also matches; a path
     that matches NO family is "the marker list is incomplete", not "the arm is
-    wrong" (``_FEETECH_BYID_MARKERS`` is a guess pending rig gate R1), and must
+    wrong" (``_FEETECH_BYID_MARKERS`` is a guess pending rig gate VR2), and must
     not brick a rig. For the same reason a family with no markers AT ALL — a
     future ``ROBOT_PROFILES`` entry this table has not caught up with — is
     unjudgeable rather than universally conflicting; CI asserts the table
@@ -515,7 +505,7 @@ def find_serial_paths_for_robotis() -> list[str]:
 
 
 def find_serial_paths_for_arms(arm_family: str = "omx") -> list[str]:
-    """Family-aware /dev/serial/by-id discovery (edu6 §4.4). ``omx`` is
+    """Family-aware /dev/serial/by-id discovery. ``omx`` is
     byte-identical to :func:`find_serial_paths_for_robotis`; every Feetech
     family shares one marker set (they share one adapter)."""
     if _family_protocol(arm_family) != "feetech":
@@ -528,7 +518,7 @@ def find_serial_paths_for_arms(arm_family: str = "omx") -> list[str]:
             "find_serial_paths_for_arms",
             f"{arm_family}: no by-id marker matched; candidates were "
             f"{all_serial!r} — record the real CH343 by-id string at rig gate "
-            "R1 and extend _FEETECH_BYID_MARKERS.",
+            "VR2 and extend _FEETECH_BYID_MARKERS.",
         )
     return hits
 
@@ -543,14 +533,14 @@ def identify_arm_via_docker(serial_path: str, protocol: str = "dxl",
     """Run identify_arm.py inside the open_manipulator container.
 
     Returns: "leader", "follower", "unknown", "partial:N", "bus_too_long:N",
-    a family name ("edu6" / "edu1"), a cross-probe token ("omx_arm_found" /
-    "edu6_arm_found" / "edu1_arm_found"), the silent-bus token
-    ("feetech_silent"), or "error:...".
+    a family name ("v1"), a cross-probe token ("omx_arm_found" /
+    "v1_arm_found"), the silent-bus token ("feetech_silent"), or "error:...".
+    An older in-container image may also answer a family this host does not
+    know — see :func:`is_stale_image_token`.
 
     ``servos`` is the Feetech bus length the SELECTED family has; it is passed
-    through as ``--servos=N`` and is what lets the prober tell an edu6 from an
-    edu1 (nothing else can — same adapter, same ids 1..6). ``None`` omits the
-    flag, so a pre-edu1 caller gets the prober's own edu6 default.
+    through as ``--servos=N`` and the prober asserts it exactly. ``None`` omits
+    the flag, leaving the prober's own default.
 
     identify_arm.py PRINTS its verdict to stdout but exits NON-ZERO for every
     result that is not the expected arm (feetech: anything but the selected
@@ -615,7 +605,7 @@ def stop_scanner_container():
 
 
 # German notice from the LAST scan, set when the cross-probe found the OTHER
-# arm family plugged in (edu6 §5.4) — the GUI surfaces it after a failed scan
+# arm family plugged in — the GUI surfaces it after a failed scan
 # so the most likely setup mistake becomes one clear sentence.
 LAST_SCAN_NOTICE: str = ""
 
@@ -623,11 +613,9 @@ LAST_SCAN_NOTICE: str = ""
 # identify_arm probe tokens below and the presence-based check that the real,
 # family-scoped scan flow actually reaches — audit M4).
 #
-# The omx↔Feetech pair is deliberately GENERIC about which EduBotics arm was
-# seen. It is reached from the USB-presence path, and USB cannot distinguish the
-# two (one adapter, one VID:PID) — naming „EduBotics 6-Achs" there, as this text
-# did while it was the only Feetech arm, would now be a coin flip presented to a
-# student as a fact.
+# The omx↔Feetech pair is deliberately GENERIC („ein EduBotics-Arm"): it is
+# reached from the USB-presence path, and USB sees only the shared Feetech
+# adapter (one VID:PID), never which Feetech arm sits on it.
 _CROSS_NOTICE_OMX_WHILE_FEETECH = (
     'Es wurde ein OMX-Arm gefunden, aber ein EduBotics-Arm ist '
     'als Robotertyp ausgewählt. Bitte den Robotertyp oben '
@@ -638,36 +626,14 @@ _CROSS_NOTICE_FEETECH_WHILE_OMX = (
     'OMX-Robotertyp ist ausgewählt. Bitte den Robotertyp oben '
     'passend zum angeschlossenen Arm wählen und erneut scannen.'
 )
-# The Feetech↔Feetech pair can ONLY come from the in-container prober, which
-# counts servos. Six answering servos are ambiguous by construction — a healthy
-# Edu:1 and an EduBotics 6-Achs whose gripper servo has dropped off the chain
-# are the same six servos — so this sentence owns that ambiguity instead of
-# asserting the likelier half and leaving the student stuck if it is wrong.
-_CROSS_NOTICE_EDU1_WHILE_EDU6 = (
-    'Es antworten genau 6 Servos, ausgewählt ist aber „EduBotics 6-Achs – '
-    'Roboter Studio". Zwei Möglichkeiten: entweder ist es ein „Edu:1"-Arm — '
-    'dann bitte oben den Robotertyp passend wählen — oder es ist der '
-    '6-Achs-Arm, dem das siebte Servo fehlt: dann bitte die Kabelverbindung '
-    'zum Greifer prüfen. Danach erneut scannen.'
-)
-_CROSS_NOTICE_EDU6_WHILE_EDU1 = (
-    'Es antworten 7 Servos — das ist ein „EduBotics 6-Achs"-Arm, aber '
-    '„Edu:1 – Roboter Studio" ist ausgewählt. Bitte den Robotertyp oben '
-    'passend zum angeschlossenen Arm wählen und erneut scannen.'
-)
 
 # (found family, selected family) → sentence. An explicit table rather than a
-# chain of conditionals: with three families the "other" family is no longer
-# well defined, and every pair that can actually be OBSERVED deserves its own
-# wording. A pair not listed here yields "" (the caller keeps the generic
+# chain of conditionals, so every pair that can actually be OBSERVED has its
+# own wording. A pair not listed here yields "" (the caller keeps the generic
 # „Kein Arm gefunden").
 _CROSS_NOTICES = {
-    ("omx", "edu6"): _CROSS_NOTICE_OMX_WHILE_FEETECH,
-    ("omx", "edu1"): _CROSS_NOTICE_OMX_WHILE_FEETECH,
-    ("edu6", "omx"): _CROSS_NOTICE_FEETECH_WHILE_OMX,
-    ("edu1", "omx"): _CROSS_NOTICE_FEETECH_WHILE_OMX,
-    ("edu1", "edu6"): _CROSS_NOTICE_EDU1_WHILE_EDU6,
-    ("edu6", "edu1"): _CROSS_NOTICE_EDU6_WHILE_EDU1,
+    ("omx", "v1"): _CROSS_NOTICE_OMX_WHILE_FEETECH,
+    ("v1", "omx"): _CROSS_NOTICE_FEETECH_WHILE_OMX,
 }
 
 
@@ -675,6 +641,35 @@ def cross_family_notice(found_family: str, selected_family: str) -> str:
     """German sentence for "a <found> arm is plugged in, <selected> is chosen".
     Empty string when the pair is not one this scanner can observe."""
     return _CROSS_NOTICES.get((found_family, selected_family), "")
+
+
+# ── Prober tokens from an in-container image OLDER than this host ───────────
+# The prober answers with a family name (``v1``) or ``<family>_arm_found``. A
+# family this host does not know — absent from ``ARM_USB_IDS`` — can only come
+# from an in-container script older than this host, which is reachable in the
+# field because pinning the image tag is a documented rollback. No family name
+# is spelled here: ANY unknown family reads the same way, so a retired arm
+# needs no literal in production code. Such a token carries no servo count, so
+# its sentence is the count-free sibling of ``_STALE_PROBER_NOTICE_DE``.
+_STALE_IMAGE_NOTICE_DE = (
+    'Das Roboter-Abbild ist älter als die Software und erkennt diesen Arm '
+    'nicht. Bitte die Umgebung aktualisieren und erneut scannen.'
+)
+_PROBER_FAMILY_TOKEN_RE = re.compile(r"^([a-z][a-z0-9]*)(_arm_found)?$")
+_NON_FAMILY_TOKENS = frozenset({"leader", "follower", "unknown"})
+
+
+def is_stale_image_token(role: str) -> bool:
+    """True for a prober verdict that names a family this host does not know
+    (``<family>`` or ``<family>_arm_found`` with ``<family>`` not a key of
+    ``ARM_USB_IDS``). Every other verdict (``leader``, ``follower``,
+    ``unknown``, a known family, ``feetech_silent``, ``partial:N``,
+    ``bus_too_long:N``, ``error:*``) keeps its own meaning. Pure."""
+    match = _PROBER_FAMILY_TOKEN_RE.match(role or "")
+    if match is None:
+        return False
+    family = match.group(1)
+    return family not in ARM_USB_IDS and family not in _NON_FAMILY_TOKENS
 
 
 # ── Feetech bus-LENGTH diagnoses ────────────────────────────────────────────
@@ -699,9 +694,9 @@ _TOO_LONG_NOTICE_DE = (
 # at all. The CURRENT prober returns the family NAME whenever the bus is
 # exactly a supported length, so this combination proves the in-container
 # script is OLDER than this host: it ignores ``--servos=`` and measures against
-# its own edu6 default, which turns a healthy six-servo Edu:1 into
-# „partial:6" — rendered by the old wording as „Nur 6 von 6 Servos antworten",
-# i.e. every servo answered and the student is told to check the cabling.
+# its own LONGER default, which turns a healthy arm into „partial:6" — rendered
+# by the old wording as „Nur 6 von 6 Servos antworten", i.e. every servo
+# answered and the student is told to check the cabling.
 # An image pin (EDUBOTICS_IMAGE_TAG) is a documented rollback path, so this is
 # reachable in the field, not only in theory.
 _STALE_PROBER_NOTICE_DE = (
@@ -756,11 +751,10 @@ def _set_cross_family_presence_notice(arm_family: str) -> None:
     enumeration (no attach, no container) and surface the same one-sentence
     German hint — the most likely setup mistake becomes visible again."""
     global LAST_SCAN_NOTICE
-    # "The other" is a two-VALUED question here even with three families: the
-    # only boundary USB can see is OMX (2F5D) vs the shared Feetech adapter
-    # (1A86:55D3). `edu6` STANDS FOR that adapter in this lookup — the notice it
+    # The only boundary USB can see is OMX (2F5D) vs the Feetech adapter
+    # (1A86:55D3); `v1` STANDS FOR that adapter in this lookup — the notice it
     # selects is family-generic on purpose (see above).
-    other = "omx" if _family_protocol(arm_family) == "feetech" else "edu6"
+    other = "omx" if _family_protocol(arm_family) == "feetech" else "v1"
     try:
         present = list_arm_devices(other)
     except Exception:
@@ -778,7 +772,7 @@ def scan_and_identify_arms(image: str, arm_family: str = "omx") -> tuple[Optiona
     """Full scan workflow: attach USB, start scanner, identify arms.
 
     Returns (leader, follower) — either may be None if not found. For the
-    single-arm ``edu6`` family the arm lands in the FOLLOWER slot (it drives
+    single-arm ``v1`` family the arm lands in the FOLLOWER slot (it drives
     FOLLOWER_PORT); leader is always None there.
     """
     import time
@@ -851,10 +845,17 @@ def scan_and_identify_arms(image: str, arm_family: str = "omx") -> tuple[Optiona
             elif role == "follower":
                 follower = ArmDevice(busid=busid, serial_path=path, role="follower", description=desc)
             elif role == arm_family and role in _FAMILY_SERVO_COUNT:
-                # A Feetech arm of the SELECTED family ("edu6" / "edu1") is a
-                # SINGLE arm and drives FOLLOWER_PORT — there is no leader on
-                # either.
+                # A Feetech arm of the SELECTED family ("v1") is a SINGLE arm
+                # and drives FOLLOWER_PORT — there is no leader on it.
                 follower = ArmDevice(busid=busid, serial_path=path, role="follower", description=desc)
+            elif is_stale_image_token(role):
+                # A family this host does not know: the in-container prober is
+                # OLDER than this host. Never a follower — the stack would come
+                # up against a bus this software cannot drive.
+                LAST_SCAN_NOTICE = _STALE_IMAGE_NOTICE_DE
+                _append_diag("scan_and_identify_arms",
+                             f"stale prober: unknown family token {role} at "
+                             f"{path} while family={arm_family} was selected")
             elif role in _FAMILY_SERVO_COUNT:
                 # A family name that is NOT the selected one. The current
                 # prober cannot produce this (it is handed --servos= and
@@ -929,9 +930,9 @@ def fast_rehydrate_arms(
     is legal and the result is ``(None, follower)``. The follower is ALWAYS
     required — a follower mismatch still returns ``(None, None)``.
 
-    ``arm_family`` (edu6 §4.4) scopes the USB attach and the by-id discovery to
-    the right hardware — ``omx`` is byte-identical to before, ``edu6`` attaches
-    the CH343 adapter and matches the CH343 by-id markers so an edu6 rig
+    ``arm_family`` scopes the USB attach and the by-id discovery to
+    the right hardware — ``omx`` is byte-identical to before, ``v1`` attaches
+    the CH343 adapter and matches the CH343 by-id markers so a V1 rig
     self-heals on launch exactly like OMX.
     """
     import time
@@ -1203,7 +1204,7 @@ def _scan_cameras_native() -> list[CameraDevice]:
 
 def _arm_vid_pnp_filter(arm_family: str = "omx") -> str:
     """Build the Get-PnpDevice ``InstanceId -like`` clause for an arm family's
-    VID/PID set (edu6 §4.4). ``omx`` → ``*VID_2F5D*``; ``edu6`` →
+    VID/PID set. ``omx`` → ``*VID_2F5D*``; ``v1`` →
     ``*VID_1A86&PID_55D3*`` (the PID pin matters — 1A86 covers every CH34x
     dongle). Pure (no subprocess) so it is testable off-Windows."""
     ids = ARM_USB_IDS.get(arm_family, ARM_USB_IDS["omx"])
@@ -1219,7 +1220,7 @@ def _arm_vid_pnp_filter(arm_family: str = "omx") -> str:
 
 def _windows_sees_robotis_vid(arm_family: str = "omx") -> Optional[bool]:
     """Ask Windows itself (not usbipd) whether the arm FAMILY's VID is
-    enumerated (2F5D for OMX, 1A86:55D3 for the edu6 CH343P).
+    enumerated (2F5D for OMX, 1A86:55D3 for the V1's CH343P).
 
     PowerShell's Get-PnpDevice covers devices that exist on the USB bus
     even if usbipd doesn't recognize them yet. Returns True/False, or
@@ -1272,11 +1273,9 @@ class UsbDiagnosis:
     details: str = ""
 
 
-# Per-family display bits for the German diagnosis (edu6 §4.4): the same chain
-# must name the hardware the student actually plugged in — OpenRB-150 / VID 2F5D
-# for OMX, the CH343 adapter for either Feetech arm. The two Feetech rows differ
-# ONLY in the arm's name: they share the adapter, so they share the VID and the
-# whole checklist.
+# Per-family display bits for the German diagnosis: the same chain must name
+# the hardware the student actually plugged in — OpenRB-150 / VID 2F5D for OMX,
+# the CH343 adapter for the Feetech arm.
 _FAMILY_DIAG_TEXT = {
     "omx": {
         "hw": "ROBOTIS-Gerät",
@@ -1288,19 +1287,8 @@ _FAMILY_DIAG_TEXT = {
             "  • Im Geräte-Manager nach 'OpenRB' oder gelben Warndreiecken suchen"
         ),
     },
-    "edu6": {
-        "hw": "EduBotics 6-Achs-Arm (CH343-Adapter)",
-        "vid": "VID 1A86:55D3",
-        "bullets": (
-            "  • USB-Kabel ist eingesteckt UND ein Datenkabel (kein Ladekabel)\n"
-            "  • 12-V-Netzteil des Arms ist eingesteckt und eingeschaltet\n"
-            "  • Anderen USB-Port am PC versuchen (direkt am Mainboard, keinen Hub)\n"
-            "  • Im Geräte-Manager nach 'CH343' / 'USB-Enhanced-SERIAL' oder "
-            "gelben Warndreiecken suchen"
-        ),
-    },
-    "edu1": {
-        "hw": "Edu:1-Arm (CH343-Adapter)",
+    "v1": {
+        "hw": "V1-Arm (CH343-Adapter)",
         "vid": "VID 1A86:55D3",
         "bullets": (
             "  • USB-Kabel ist eingesteckt UND ein Datenkabel (kein Ladekabel)\n"
@@ -1320,8 +1308,8 @@ def diagnose_usb_environment(image: Optional[str] = None,
     Args:
         image: Open-manipulator image used by the scanner container. If
             None, the docker-image check is skipped (caller doesn't care).
-        arm_family: which arm family the scan targeted (``omx`` / ``edu6`` /
-            ``edu1``) — selects the VID/PID probe and the German hardware naming
+        arm_family: which arm family the scan targeted (``omx`` / ``v1``) —
+            selects the VID/PID probe and the German hardware naming
             so a Feetech-only rig is never told to check for "VID 2F5D".
     """
     diag = UsbDiagnosis()
@@ -1569,9 +1557,9 @@ def list_unbound_robotis(arm_family: str = "omx") -> list[USBDevice]:
     post-install PATH race), the arms sit here and the student needs one
     elevated ``bind`` to make them attachable.
 
-    Family-aware (edu6 §4.4): the OMX-only 2F5D filter never matched a
-    Not-shared CH343, so the "Arme freigeben" repair could never trigger for an
-    edu6 rig — ``arm_family="edu6"`` fixes that.
+    Family-aware: the OMX-only 2F5D filter never matched a Not-shared CH343,
+    so the "Arme freigeben" repair could never trigger for a Feetech rig —
+    ``arm_family="v1"`` fixes that.
     """
     unbound: list[USBDevice] = []
     for dev in list_arm_devices(arm_family):

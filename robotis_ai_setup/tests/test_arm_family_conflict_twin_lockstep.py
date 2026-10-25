@@ -8,13 +8,13 @@ this file asserts BOTH implementations answer identically over one table.
 
 What the predicate is FOR: a robot-type change must invalidate a scan that was
 made for the other arm family. Measured before it existed — a Pi seeded with an
-OMX pair and switched to ``edu6_studio`` answered
+OMX pair and switched to a Feetech profile answered
 ``200 {'hardware_ready': True}``, wrote an OpenRB-150 as the FOLLOWER_PORT of a
 Feetech rig, and let „Umgebung starten" through into a ~300 s
 ``service_healthy`` block whose only student-visible outcome was the generic
 „konnte nicht gestartet werden". Windows had the identical hole in both
-directions (`_hardware_ready('edu6_studio')` True on an OMX pair;
-`_hardware_ready('omx_follower')` True on an edu6 arm).
+directions (`_hardware_ready(<Feetech profile>)` True on an OMX pair;
+`_hardware_ready('omx_follower')` True on a Feetech arm).
 
 The evidence is the recorded by-id path itself — the scan only ever stores a
 path that matched that family's markers — so nothing new is persisted and the
@@ -38,34 +38,34 @@ _TABLE = [
     # ── the two real rigs, each judged against its own family ───────────────
     ("/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_A0-if00", "omx", False,
      "the OMX arm on an OMX profile"),
-    ("/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A68010132-if00", "edu6", False,
-     "the measured edu6 CH343P (rig gate R1) on the edu6 profile"),
+    ("/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A68010132-if00", "v1", False,
+     "a measured CH343P by-id string on the v1 profile"),
 
     # ── the defect this predicate exists for, both directions ───────────────
-    ("/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_A0-if00", "edu6", True,
-     "an OMX arm recorded, edu6 selected — a Dynamixel board on a Feetech bus"),
+    ("/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_A0-if00", "v1", True,
+     "an OMX arm recorded, v1 selected — a Dynamixel board on a Feetech bus"),
     ("/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A68010132-if00", "omx", True,
-     "an edu6 arm recorded, OMX selected — the reverse, equally wrong"),
+     "a Feetech arm recorded, OMX selected — the reverse, equally wrong"),
 
-    # ── every other edu6 marker still attributes ────────────────────────────
+    # ── every other Feetech marker still attributes ─────────────────────────
     ("/dev/serial/by-id/usb-WCH.CN_USB_Single_Serial_0001-if00", "omx", True, "WCH"),
     ("/dev/serial/by-id/usb-1a86_CH343_0001-if00", "omx", True, "CH343"),
     ("/dev/serial/by-id/usb-1a86_USB2.0-Ser_-if00", "omx", True, "USB2.0-SER"),
     ("/dev/serial/by-id/usb-Vendor_USB Single Serial_0001-if00", "omx", True,
      "the space-separated spelling"),
-    ("/dev/serial/by-id/usb-OpenRB-150_x-if00", "edu6", True, "OPENRB alone"),
+    ("/dev/serial/by-id/usb-OpenRB-150_x-if00", "v1", True, "OPENRB alone"),
 
     # ── NO evidence is not evidence: these must NOT refuse ───────────────────
     ("/dev/serial/by-id/usb-Mystery_Board_0001-if00", "omx", False,
-     "matches no family — _EDU6_BYID_MARKERS is a guess, so an unattributable "
+     "matches no family — _FEETECH_BYID_MARKERS is a guess, so an unattributable "
      "path means the marker list is incomplete, not that the arm is wrong"),
-    ("/dev/serial/by-id/usb-Mystery_Board_0001-if00", "edu6", False,
+    ("/dev/serial/by-id/usb-Mystery_Board_0001-if00", "v1", False,
      "same, from the other side"),
     ("", "omx", False, "an empty path claims nothing"),
-    (None, "edu6", False, "a None path claims nothing"),
+    (None, "v1", False, "a None path claims nothing"),
     ("/dev/serial/by-id/usb-ROBOTIS_1a86_weird-if00", "omx", False,
      "matches BOTH — ambiguity is not evidence AGAINST the family we need"),
-    ("/dev/serial/by-id/usb-ROBOTIS_1a86_weird-if00", "edu6", False,
+    ("/dev/serial/by-id/usb-ROBOTIS_1a86_weird-if00", "v1", False,
      "same, from the other side"),
     ("/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_A0-if00", "nonsense_family", False,
      "a family with NO markers is unjudgeable, not universally conflicting: "
@@ -76,7 +76,7 @@ _TABLE = [
      "what a future family inherits"),
 
     # ── case: by-id names arrive lowercase from udev ─────────────────────────
-    ("/dev/serial/by-id/usb-robotis_openrb-150_a0-if00", "edu6", True,
+    ("/dev/serial/by-id/usb-robotis_openrb-150_a0-if00", "v1", True,
      "the markers are uppercase; the path is not"),
 ]
 
@@ -126,7 +126,7 @@ class TestSerialPathFamilyConflict(unittest.TestCase):
 
     def test_the_marker_tables_are_the_same_on_both_platforms(self):
         """The predicate is only as good as the markers, and they are copies.
-        ``_EDU6_BYID_MARKERS`` is already lockstepped in
+        ``_FEETECH_BYID_MARKERS`` is already lockstepped in
         ``pi_agent/tests/test_identify_arm.py``; this pins the whole table,
         which is what the conflict predicate iterates."""
         self.assertEqual(win._ARM_MARKERS, pi._ARM_MARKERS)
@@ -135,10 +135,10 @@ class TestSerialPathFamilyConflict(unittest.TestCase):
     def test_the_windows_table_selects_exactly_what_its_finder_selects(self):
         """`_ARM_MARKERS` is a SECOND spelling of the literals inside
         ``find_serial_paths_for_robotis``, which was deliberately left alone
-        (it is the pre-edu6 discovery path and must stay byte-identical). This
+        (it is the OMX discovery path and must stay byte-identical). This
         is what stops the two spellings drifting apart."""
         paths = [p for p, _, _, _ in _TABLE if p]
-        for family in ("omx", "edu6"):
+        for family in ("omx", "v1"):
             with self.subTest(family):
                 expected = [p for p in paths
                             if any(m in p.upper() for m in win._ARM_MARKERS[family])]
@@ -149,7 +149,7 @@ class TestSerialPathFamilyConflict(unittest.TestCase):
 
     def test_the_pi_table_selects_exactly_what_its_finder_selects(self):
         paths = [p for p, _, _, _ in _TABLE if p]
-        for family in ("omx", "edu6"):
+        for family in ("omx", "v1"):
             with self.subTest(family):
                 expected = [p for p in paths
                             if any(m in p.upper() for m in pi._ARM_MARKERS[family])]
@@ -165,7 +165,7 @@ class TestSerialPathFamilyConflict(unittest.TestCase):
         """
         paths = [p for p, _, _, _ in _TABLE if p]
         import unittest.mock as mock
-        for family in ("omx", "edu6"):
+        for family in ("omx", "v1"):
             with mock.patch.object(pi, "list_serial_by_id", return_value=paths):
                 selected = pi.find_serial_paths_for_arms(family)
             self.assertTrue(selected, family)
@@ -173,6 +173,37 @@ class TestSerialPathFamilyConflict(unittest.TestCase):
                 with self.subTest(f"{family} :: {path}"):
                     self.assertFalse(pi.serial_path_family_conflict(path, family))
                     self.assertFalse(win.serial_path_family_conflict(path, family))
+
+
+class TestProberTokenTwinsAgree(unittest.TestCase):
+    """The scan-notice half of the twin pair: both platforms must read every
+    prober token the same way. A family token this host does not know — here a
+    synthetic one, so no retired arm needs a literal — reads as an in-container
+    image OLDER than the host, on both twins, with the same count-free
+    sentence."""
+
+    _TOKENS = ("leader", "follower", "unknown", "v1", "omx_arm_found",
+               "v1_arm_found", "feetech_silent", "partial:3", "partial:6",
+               "bus_too_long:7", "error:timeout", "zz9", "zz9_arm_found", "")
+
+    def test_both_twins_classify_every_token_alike(self):
+        for token in self._TOKENS:
+            with self.subTest(token):
+                self.assertEqual(win.is_stale_image_token(token),
+                                 pi.is_stale_image_token(token))
+        for token in ("zz9", "zz9_arm_found"):
+            self.assertTrue(win.is_stale_image_token(token), token)
+            self.assertTrue(pi.is_stale_image_token(token), token)
+
+    def test_both_twins_say_the_same_sentences(self):
+        self.assertEqual(win._STALE_IMAGE_NOTICE_DE, pi._STALE_IMAGE_NOTICE_DE)
+        self.assertEqual(win._STALE_PROBER_NOTICE_DE, pi._STALE_PROBER_NOTICE_DE)
+        self.assertEqual(win._CROSS_NOTICES, pi._CROSS_NOTICES)
+        self.assertEqual(win._FAMILY_SERVO_COUNT, pi._FAMILY_SERVO_COUNT)
+        self.assertEqual(win._FAMILY_PROTOCOL, pi._FAMILY_PROTOCOL)
+        for token in ("partial:3", "partial:6", "bus_too_long:7"):
+            self.assertEqual(win.feetech_bus_length_notice(token, 6),
+                             pi.feetech_bus_length_notice(token, 6), token)
 
 
 if __name__ == "__main__":

@@ -274,22 +274,17 @@ def cameras_use_native_bridge() -> bool:
 # USB identifiers
 ROBOTIS_VID = "2F5D"  # ROBOTIS USB Vendor ID (OpenRB-150 boards, PIDs: 0103, 2202)
 
-# Arm-family USB identity table (edu6 §4.4). Keys are the ARM FAMILY (what the
-# scan hardware-matches), not the profile id — both OMX profiles share one
-# family. Values: tuples of (VID, PID-or-None) where None = any PID under the
-# VID. The edu6 bridge is the WCH CH343P on the Waveshare Bus Servo Adapter;
-# identity is still PROVEN by the servos answering (identify_arm.py --protocol
-# feetech), the VID match only scopes the usbipd attach.
-# NOTE the two Feetech rows are IDENTICAL and must stay so: edu6 and edu1 ship
-# on the same Waveshare Bus Servo Adapter, so nothing at the USB layer separates
-# them. The separation happens one layer down, at the servo count the prober
-# asserts (`device_manager._FAMILY_SERVO_COUNT`). Two rows rather than one
-# shared key because every consumer looks up by FAMILY, and a family missing
-# from this table silently attaches nothing.
+# Arm-family USB identity table. Keys are the ARM FAMILY (what the scan
+# hardware-matches), not the profile id — both OMX profiles share one family.
+# Values: tuples of (VID, PID-or-None) where None = any PID under the VID. The
+# V1 bridge is the WCH CH343P on the Waveshare Bus Servo Adapter; identity is
+# still PROVEN by the servos answering (identify_arm.py --protocol feetech, with
+# the servo count `device_manager._FAMILY_SERVO_COUNT` asserts), the VID match
+# only scopes the usbipd attach. Every consumer looks up by FAMILY, and a family
+# missing from this table silently attaches nothing.
 ARM_USB_IDS = {
-    "omx":  (("2F5D", None),),
-    "edu6": (("1A86", "55D3"),),
-    "edu1": (("1A86", "55D3"),),
+    "omx": (("2F5D", None),),
+    "v1":  (("1A86", "55D3"),),
 }
 
 # Dynamixel servo config
@@ -310,8 +305,7 @@ ROS_DOMAIN_ID = 30
 # the GUI only needs the display label + the two scan/leader flags.
 #   - omx_full     → both arms; RS runs via the mid-session LeaderToggle.
 #   - omx_follower → follower only; no leader, LeaderToggle hidden, RS native.
-#   - edu6_studio  → the 6-DOF Feetech arm; follower-only, RS only.
-#   - edu1_studio  → the 5-DOF Feetech „Edu:1"; follower-only, RS only.
+#   - v1_studio    → the 5-DOF Feetech arm „V1"; follower-only, RS only.
 # `scan_requires_leader` drives the follower-only GUI scan surface (Schritt A/B
 # wording, start-button gating, fast rehydrate). `follower_only` is the INITIAL
 # EDUBOTICS_FOLLOWER_ONLY value the .env generator derives from the type.
@@ -322,8 +316,8 @@ ROS_DOMAIN_ID = 30
 # gui_app-local map so „every robot type has help text" is a testable invariant
 # (tests/test_gui_profile_help.py); a GUI-local dict can silently miss a new
 # profile. The two static paragraphs it replaced named „OMX – Roboter Studio
-# (nur Follower)" on every profile, including edu6_studio, which is a different
-# robot. KEEP THIS ASSIGNMENT A PLAIN literal_eval-able DICT LITERAL — the
+# (nur Follower)" on every profile, including the Feetech arm, which is a
+# different robot. KEEP THIS ASSIGNMENT A PLAIN literal_eval-able DICT LITERAL — the
 # cross-boundary lockstep test parses it with ast.literal_eval.
 ROBOT_PROFILES = {
     "omx_full": {
@@ -345,22 +339,13 @@ ROBOT_PROFILES = {
             "(Greifen & Programmieren) und Inferenz."
         ),
     },
-    "edu6_studio": {
-        "display_de": "EduBotics 6-Achs – Roboter Studio",
+    "v1_studio": {
+        "display_de": "V1 – Roboter Studio",
         "follower_only": True, "scan_requires_leader": False,
-        "arm_family": "edu6", "camera_roles": ("scene",),
+        "arm_family": "v1", "camera_roles": ("scene",),
         "help_de": (
-            "Der 6-Achs-Arm von EduBotics mit einer Szenen-Kamera. Nur für "
+            "Der 5-Achs-Arm V1 von EduBotics mit einer Szenen-Kamera. Nur für "
             "Roboter Studio (Greifen & Programmieren)."
-        ),
-    },
-    "edu1_studio": {
-        "display_de": "Edu:1 – Roboter Studio",
-        "follower_only": True, "scan_requires_leader": False,
-        "arm_family": "edu1", "camera_roles": ("scene",),
-        "help_de": (
-            "Der 5-Achs-Arm Edu:1 von EduBotics mit einer Szenen-Kamera. Nur "
-            "für Roboter Studio (Greifen & Programmieren)."
         ),
     },
 }

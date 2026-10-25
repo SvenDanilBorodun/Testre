@@ -693,17 +693,17 @@ class AgentApp:
         """Whether the scanned hardware satisfies the (given/selected) robot type.
 
         Twin of ``gui_app.py::_hardware_ready``: a both-arms type needs
-        leader+follower, a follower-only type (Roboter Studio kit, edu6) needs
+        leader+follower, a follower-only type (Roboter Studio kit, V1) needs
         only the follower. The Pi's ``HardwareConfig`` has no ``is_complete`` /
         ``follower_present`` properties, so the two cases are spelled out.
 
         PRESENCE IS NOT ENOUGH — the arms must also be of this profile's ARM
         FAMILY. Measured before this check existed: a Pi scanned as ``omx_full``
-        and then switched to ``edu6_studio`` answered
+        and then switched to a Feetech profile answered
         ``200 {'hardware_ready': True}``, wrote a ``.env`` naming a ROBOTIS
         OpenRB-150 as the FOLLOWER_PORT of a Feetech rig, and let „Umgebung
         starten" through — where it blocked ~300 s on ``service_healthy`` while
-        the entrypoint drove the edu6 branch against a Dynamixel bus, and the
+        the entrypoint drove the Feetech branch against a Dynamixel bus, and the
         student got the generic „konnte nicht gestartet werden — bitte das
         Protokoll prüfen". The driver's specific German reason is in the
         CONTAINER's stdout, which the agent's Protokoll ring does not carry, so
@@ -742,7 +742,7 @@ class AgentApp:
         It also refuses to write a port from ANOTHER arm family. This method is
         the Pi's eager convenience — Windows defers the whole .env to „Umgebung
         starten" — and it runs at robot-type-selection time, so before this
-        guard a switch to ``edu6_studio`` rewrote the managed block to name a
+        guard a switch to a Feetech profile rewrote the managed block to name a
         ROBOTIS OpenRB-150 as ``FOLLOWER_PORT`` with
         ``EDUBOTICS_FOLLOWER_ONLY=1``: a configuration that never corresponded
         to any rig, and one nothing would later notice, since the arms are
@@ -899,9 +899,9 @@ class AgentApp:
         ``identify_arm.py`` can open the serial ports a live 100 Hz controller
         would otherwise hold.
 
-        The ARM FAMILY comes from the on-disk managed ``EDUBOTICS_ROBOT_TYPE``
-        (edu6 §4.4): it scopes the /dev/serial/by-id filter AND selects the
-        in-container prober's protocol, so an edu6 rig is probed with
+        The ARM FAMILY comes from the on-disk managed ``EDUBOTICS_ROBOT_TYPE``:
+        it scopes the /dev/serial/by-id filter AND selects the
+        in-container prober's protocol, so a V1 rig is probed with
         ``--protocol=feetech`` and its single arm is slotted as the FOLLOWER.
         A failed scan can carry a one-sentence German ``notice`` naming the most
         likely setup mistake (wrong family plugged in, partial servo chain, 12-V
@@ -967,7 +967,7 @@ class AgentApp:
             # a success: `partial:N` and `feetech_silent` both mean the arm did
             # NOT identify, and the two cross-family ones only fire when the
             # wrong family is attached. Byte-identical on `omx_full` and
-            # `edu6_studio`, where the scanner's own clear already fired.
+            # `v1_studio`, where the scanner's own clear already fired.
             if follower is not None and (leader is not None or not requires_leader):
                 notice = ""
             elif notice:
@@ -1073,15 +1073,15 @@ class AgentApp:
         or absent one is a German 400 regardless of how many cameras were sent.
 
         A well-formed role is then checked against the SELECTED PROFILE's
-        ``camera_roles`` allowlist, which is narrower than gripper/scene on BOTH
-        Feetech arms (``edu6_studio`` and ``edu1_studio``: ``scene`` only). Both
-        OMX profiles carry both roles, so this second gate is a no-op there —
-        the whole behavioural delta is „gripper on a Roboter-Studio rig", which
-        used to be accepted and is now a 400 on each of the two.
+        ``camera_roles`` allowlist, which is narrower than gripper/scene on the
+        Feetech arm (``v1_studio``: ``scene`` only). Both OMX profiles carry both
+        roles, so this second gate is a no-op there — the whole behavioural
+        delta is „gripper on a Roboter-Studio rig", which used to be accepted
+        and is now a 400.
 
         Why it is refused rather than silently corrected: the server's
-        ``config/<type>_config.yaml`` declares exactly one camera topic on those
-        arms (``scene:/scene/image_raw/compressed``), so a camera named
+        ``config/<type>_config.yaml`` declares exactly one camera topic on that
+        arm (``scene:/scene/image_raw/compressed``), so a camera named
         ``gripper`` publishes ``/gripper/image_raw/compressed``, which nothing subscribes
         to — and the opi compose healthcheck greps
         ``/$${CAMERA_NAME_1:-gripper}/image_raw/compressed``, i.e. the very
@@ -1317,7 +1317,7 @@ class AgentApp:
         try:
             # PROFILE-AWARE readiness, not "both arms": a follower-only kit has
             # no leader to scan, so demanding one made both omx_follower and
-            # edu6_studio unstartable on a Pi.
+            # v1_studio unstartable on a Pi.
             robot_type = self._current_robot_type()
             if not self._hardware_ready(robot_type):
                 row = ROBOT_PROFILES[robot_type]
@@ -2568,7 +2568,7 @@ class AgentApp:
         (group=dialout, mode 0660) plus a stable ``TAG+="edubotics-arm"`` on the
         arm boards' tty nodes — it is explicitly NOT the leader/follower role
         source. A release that adds a VID/PID line — the CH343P line for the
-        edu6 arm, shipped since ``2951b87``, was precisely that — would
+        Feetech arm, shipped since ``2951b87``, was precisely that — would
         otherwise ship an agent that knows how to scan for an arm whose
         ``/dev`` node its scanner container cannot open, and the drift would be
         invisible because nothing compared the files.
@@ -2758,7 +2758,7 @@ class AgentApp:
         the fix for is inert here. It is fixed anyway, on the reasoning that a
         latent bug in a repair path is not worth keeping until it has something
         to bite — and note the growth this once anticipated did NOT happen: the
-        CH343P/edu6 rule landed as a LINE inside the existing
+        CH343P Feetech rule landed as a LINE inside the existing
         ``99-edubotics-robotis.rules`` (``2951b87``), not as a second file, so
         the set stayed at one. That is also why it reached the fielded fleet at
         all — the repair REPLACES and never CREATES, so a genuinely NEW rule

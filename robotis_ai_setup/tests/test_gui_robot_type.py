@@ -227,12 +227,12 @@ class ScanArmsTypeAwareTest(unittest.TestCase):
         """A successful scan must not say „Nicht gefunden" anywhere.
 
         Measured on the shipped code before this landed: on omx_follower /
-        edu6_studio a scan that found everything the rig HAS set Schritt A to
+        a Feetech profile a scan that found everything the rig HAS set Schritt A to
         „Nicht gefunden" and logged „Leader-Arm nicht gefunden." while the
         status bar simultaneously said „Follower-Arm gefunden!". The routing
         was already type-aware; only the leader if/else was not.
         """
-        for profile in ("omx_follower", "edu6_studio"):
+        for profile in ("omx_follower", "v1_studio"):
             with self.subTest(profile):
                 self._run_scan(profile, (None, self._follower()))
                 self.assertEqual(
@@ -253,7 +253,7 @@ class ScanArmsTypeAwareTest(unittest.TestCase):
     def test_the_leaderless_wording_uses_literal_umlauts(self):
         """Rule §1: ä/ö/ü/ß, never ae/oe/ue/ss. No CI lint reaches this line —
         `german-strings-lint` only scans [FEHLER]/[WARNUNG]/[STOPP] lines."""
-        self._run_scan("edu6_studio", (None, self._follower()))
+        self._run_scan("v1_studio", (None, self._follower()))
         text = self._leader_status[0]
         self.assertIn("Für", text)
         self.assertIn("nötig", text)
@@ -356,38 +356,21 @@ class TryRehydrateArmsTest(unittest.TestCase):
         self.assertTrue(any("wiederhergestellt" in ln for ln in logs))
         self.assertEqual(update_calls, [True])
 
-    def test_edu6_env_threads_edu6_arm_family(self):
-        # (a2) An edu6_studio .env fast-rehydrates like a follower-only OMX kit,
-        # but the family must be threaded as "edu6" so the CH343 adapter is
-        # attached + matched (OMX defaults would silently no-op an edu6 rig).
+    def test_v1_env_threads_the_v1_arm_family(self):
+        # (a2) A v1_studio .env fast-rehydrates like a follower-only OMX kit,
+        # but the family must be threaded as "v1" so the CH343 adapter is
+        # attached + matched (OMX defaults would silently no-op a V1 rig).
         follower = types.SimpleNamespace(
             description="1a86 USB Single Serial", serial_path=self._FOLLOWER_PATH)
         env = {
-            "EDUBOTICS_ROBOT_TYPE": "edu6_studio",
+            "EDUBOTICS_ROBOT_TYPE": "v1_studio",
             "FOLLOWER_PORT": self._FOLLOWER_PATH,
             "LEADER_PORT": None,
         }
         _owner, _logs, calls, _update, _fs, _ls = self._run(env, (None, follower))
         self.assertEqual(len(calls), 1)
         self.assertFalse(calls[0]["require_leader"])
-        self.assertEqual(calls[0]["arm_family"], "edu6")
-
-    def test_edu1_env_threads_its_OWN_arm_family(self):
-        """edu1 and edu6 share an adapter, so the by-id path a rehydrate sees is
-        indistinguishable — but the family is what selects the prober's SERVO
-        COUNT downstream, and threading "edu6" here would probe a 5-DOF arm for
-        seven servos."""
-        follower = types.SimpleNamespace(
-            description="1a86 USB Single Serial", serial_path=self._FOLLOWER_PATH)
-        env = {
-            "EDUBOTICS_ROBOT_TYPE": "edu1_studio",
-            "FOLLOWER_PORT": self._FOLLOWER_PATH,
-            "LEADER_PORT": None,
-        }
-        _owner, _logs, calls, _update, _fs, _ls = self._run(env, (None, follower))
-        self.assertEqual(len(calls), 1)
-        self.assertFalse(calls[0]["require_leader"])
-        self.assertEqual(calls[0]["arm_family"], "edu1")
+        self.assertEqual(calls[0]["arm_family"], "v1")
 
     def test_mismatch_prompts_rescan_and_never_auto_scans(self):
         # (b) fast_rehydrate_arms falls back with (None, None) — the method
@@ -445,8 +428,8 @@ class HardwareReadyArmFamilyTest(unittest.TestCase):
     """_hardware_ready is ARM-FAMILY-aware: crossing families invalidates a scan.
 
     MEASURED headless before this landed, with the real device_manager
-    dataclasses: an OMX pair scanned gave ``_hardware_ready('edu6_studio')``
-    True, and a single edu6 arm scanned gave ``_hardware_ready('omx_follower')``
+    dataclasses: an OMX pair scanned gave ``_hardware_ready(<Feetech profile>)``
+    True, and a single Feetech arm scanned gave ``_hardware_ready('omx_follower')``
     True. Either one arms „Umgebung starten" for a bringup against the wrong
     servo bus — the Pi twin of this hole was measured all the way through to a
     ~300 s ``service_healthy`` block and a generic German failure.
@@ -458,7 +441,7 @@ class HardwareReadyArmFamilyTest(unittest.TestCase):
 
     _OMX_L = "/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_LEADER-if00"
     _OMX_F = "/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_FOLLOWER-if00"
-    _EDU6 = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A68010132-if00"
+    _V1 = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A68010132-if00"
 
     def _arm(self, path):
         return types.SimpleNamespace(serial_path=path)
@@ -486,16 +469,16 @@ class HardwareReadyArmFamilyTest(unittest.TestCase):
 
     # ── the defect, both directions ─────────────────────────────────────────
 
-    def test_an_omx_pair_is_not_ready_for_edu6(self):
-        self.assertFalse(self._ready(self._OMX_L, self._OMX_F, "edu6_studio"))
+    def test_an_omx_pair_is_not_ready_for_v1(self):
+        self.assertFalse(self._ready(self._OMX_L, self._OMX_F, "v1_studio"))
 
-    def test_an_edu6_arm_is_not_ready_for_omx_follower(self):
-        self.assertFalse(self._ready(None, self._EDU6, "omx_follower"))
+    def test_a_v1_arm_is_not_ready_for_omx_follower(self):
+        self.assertFalse(self._ready(None, self._V1, "omx_follower"))
 
-    def test_an_edu6_arm_is_not_ready_for_omx_full_either(self):
+    def test_a_v1_arm_is_not_ready_for_omx_full_either(self):
         # Already False before the fix, but for the WRONG reason (no leader) —
         # pin it against a future change that relaxes the leader rule.
-        self.assertFalse(self._ready(self._EDU6, self._EDU6, "omx_full"))
+        self.assertFalse(self._ready(self._V1, self._V1, "omx_full"))
 
     # ── what must NOT change ────────────────────────────────────────────────
 
@@ -503,32 +486,32 @@ class HardwareReadyArmFamilyTest(unittest.TestCase):
         self.assertTrue(self._ready(self._OMX_L, self._OMX_F, "omx_full"))
         self.assertTrue(self._ready(self._OMX_L, self._OMX_F, "omx_follower"))
 
-    def test_an_ordinary_edu6_rig_is_unaffected(self):
-        self.assertTrue(self._ready(None, self._EDU6, "edu6_studio"))
+    def test_an_ordinary_v1_rig_is_unaffected(self):
+        self.assertTrue(self._ready(None, self._V1, "v1_studio"))
 
     def test_a_missing_scan_is_still_just_not_ready(self):
         self.assertFalse(self._ready(None, None, "omx_full"))
         self.assertFalse(self._ready(self._OMX_L, None, "omx_full"))
-        self.assertFalse(self._ready(None, None, "edu6_studio"))
+        self.assertFalse(self._ready(None, None, "v1_studio"))
 
     def test_an_unattributable_port_is_not_refused(self):
-        # "cannot prove" must never become "wrong": _EDU6_BYID_MARKERS is a
-        # guess pending rig gate R1, so an unmatched board revision must still
+        # "cannot prove" must never become "wrong": _FEETECH_BYID_MARKERS is a
+        # guess pending rig gate VR2, so an unmatched board revision must still
         # start rather than be told to rescan forever.
         mystery = "/dev/serial/by-id/usb-Mystery_Board_0001-if00"
-        self.assertTrue(self._ready(None, mystery, "edu6_studio"))
+        self.assertTrue(self._ready(None, mystery, "v1_studio"))
         self.assertTrue(self._ready(mystery, mystery, "omx_full"))
 
     def test_a_leftover_wrong_family_leader_does_not_refuse_a_follower_only_rig(self):
         # omx_follower never launches a leader, so judging it would refuse a
         # rig over a record nothing reads.
-        self.assertTrue(self._ready(self._EDU6, self._OMX_F, "omx_follower"))
+        self.assertTrue(self._ready(self._V1, self._OMX_F, "omx_follower"))
 
     def test_an_unknown_profile_falls_back_to_omx_and_still_judges(self):
         # ROBOT_PROFILES.get(...) → {} → arm_family "omx", the same default
-        # _hardware_ready's leader rule uses. An edu6 arm under that fallback
+        # _hardware_ready's leader rule uses. A Feetech arm under that fallback
         # is a genuine conflict.
-        self.assertFalse(self._ready(self._OMX_L, self._EDU6, "kein_profil"))
+        self.assertFalse(self._ready(self._OMX_L, self._V1, "kein_profil"))
         self.assertTrue(self._ready(self._OMX_L, self._OMX_F, "kein_profil"))
 
 
@@ -577,14 +560,14 @@ class ArmFamilyMismatchWordingTest(unittest.TestCase):
         def run(ready, conflict):
             seen.clear()
             owner = types.SimpleNamespace(
-                _robot_label_to_id={"EduBotics 6-Achs – Roboter Studio": "edu6_studio"},
+                _robot_label_to_id={"V1 – Roboter Studio": "v1_studio"},
                 robot_type_var=types.SimpleNamespace(
-                    get=lambda: "EduBotics 6-Achs – Roboter Studio"),
+                    get=lambda: "V1 – Roboter Studio"),
                 _apply_robot_type_labels=lambda: None,
                 # `_on_robot_type_changed` now re-derives the camera roles too:
                 # the profile decides them, so a type switch must not leave a
                 # camera picked under omx_full holding role="gripper" on
-                # edu6_studio. Test-double completion, not a weakening.
+                # v1_studio. Test-double completion, not a weakening.
                 _on_cameras_changed=lambda: None,
                 cloud_only=types.SimpleNamespace(get=lambda: False),
                 _hardware_ready=lambda *a: ready,
@@ -623,7 +606,7 @@ class ArmFamilyMismatchWordingTest(unittest.TestCase):
             method(owner)
             return list(shown)
 
-        self.assertEqual(run("edu6_studio", conflict=True),
+        self.assertEqual(run("v1_studio", conflict=True),
                          [("Falscher Robotertyp", consts["ARM_FAMILY_MISMATCH_DE"])])
         # The two pre-existing wordings are untouched when there is no conflict.
         self.assertEqual(
@@ -631,7 +614,7 @@ class ArmFamilyMismatchWordingTest(unittest.TestCase):
             [("Fehlende Hardware",
               "Bitte beide Arme scannen und identifizieren, bevor du startest.")])
         self.assertEqual(
-            run("edu6_studio", conflict=False),
+            run("v1_studio", conflict=False),
             [("Fehlende Hardware",
               "Bitte den Follower-Arm scannen und identifizieren, bevor du startest.")])
 

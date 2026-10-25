@@ -1218,7 +1218,7 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
     def test_the_udev_leg_has_the_same_no_short_circuit_shape(self):
         """UDEV_RULE_NAMES carries ONE entry today, so the short-circuit is
         currently inert there — which is exactly why it has to be pinned now.
-        The CH343P line for the edu6 arm landed INSIDE that one file, so the
+        The CH343P line for the Feetech arm landed INSIDE that one file, so the
         set did not grow and the short-circuit is still untested in anger. It
         grows the day a second rules FILE ships — which is also the day the
         replace-only repair stops being able to deliver it. A
@@ -1837,7 +1837,7 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
     def test_a_drifted_udev_rule_is_renewed_and_udev_is_reloaded(self):
         """The fail-open this closes: the rules always rode the tarball (and the
         self-update rsync), but nothing ever COMPARED them, so a release adding a
-        VID/PID line — the CH343P line for the edu6 arm was exactly that, and it
+        VID/PID line — the CH343P line for the Feetech arm was exactly that, and it
         shipped through this comparison — left an agent that scans for an arm
         whose /dev node its scanner
         container may not be permitted to open, on 100 % of the fielded fleet."""
@@ -3243,7 +3243,7 @@ class TestRobotTypeEndpoint(_RobotTypeBase):
     hand-edit the .env."""
 
     def test_origin_gate_rejects_a_cross_site_post_before_any_side_effect(self):
-        code, payload = self._post("/robot-type", {"robot_type": "edu6_studio"},
+        code, payload = self._post("/robot-type", {"robot_type": "v1_studio"},
                                    origin="http://evil.com")
         self.assertEqual(code, 403)
         self.assertIn("Origin", payload["message"])
@@ -3252,38 +3252,38 @@ class TestRobotTypeEndpoint(_RobotTypeBase):
             "EDUBOTICS_ROBOT_TYPE", self.env))
 
     def test_a_valid_id_is_persisted_and_read_back(self):
-        code, payload = self._post("/robot-type", {"robot_type": "edu6_studio"},
+        code, payload = self._post("/robot-type", {"robot_type": "v1_studio"},
                                    origin=None)
         self.assertEqual(code, 200, payload)
-        self.assertEqual(payload["robot_type"], "edu6_studio")
-        self.assertEqual(self.app._current_robot_type(), "edu6_studio")
+        self.assertEqual(payload["robot_type"], "v1_studio")
+        self.assertEqual(self.app._current_robot_type(), "v1_studio")
 
     def test_the_id_is_written_UNQUOTED(self):
         """entrypoint_omx.sh compares this value literally
-        (`[ "$EDUBOTICS_ROBOT_TYPE" = "edu6_studio" ]`), so a surviving pair of
-        quotes would silently take the OMX path on an edu6 rig — the split brain
+        (the `case` on `EDUBOTICS_ROBOT_TYPE`), so a surviving pair of
+        quotes would silently take the OMX path on a V1 rig — the split brain
         WP-1 closed. The managed emitters write it unquoted; this writer must
         match them byte for byte."""
-        self._post("/robot-type", {"robot_type": "edu6_studio"}, origin=None)
+        self._post("/robot-type", {"robot_type": "v1_studio"}, origin=None)
         raw = open(self.env, encoding="utf-8").read()
-        self.assertIn("EDUBOTICS_ROBOT_TYPE=edu6_studio", raw)
+        self.assertIn("EDUBOTICS_ROBOT_TYPE=v1_studio", raw)
         self.assertNotIn('EDUBOTICS_ROBOT_TYPE="', raw)
 
     def test_it_is_settable_before_any_hardware_exists(self):
         """The scan reads the arm FAMILY back off this key, so the type must be
         persistable on a rig with nothing scanned yet — otherwise selecting
-        edu6 could never lead to an edu6 scan."""
+        V1 could never lead to a V1 scan."""
         self.assertIsNone(self.app._hardware.follower)
-        code, _ = self._post("/robot-type", {"robot_type": "edu6_studio"},
+        code, _ = self._post("/robot-type", {"robot_type": "v1_studio"},
                              origin=None)
         self.assertEqual(code, 200)
         self.assertEqual(
             agent.arm_family_for_robot_type(self.app._current_robot_type()),
-            "edu6")
+            "v1")
 
     def test_a_ready_rig_gets_the_derived_follower_only_immediately(self):
         self._seed_arms(leader=False)
-        code, _ = self._post("/robot-type", {"robot_type": "edu6_studio"},
+        code, _ = self._post("/robot-type", {"robot_type": "v1_studio"},
                              origin=None)
         self.assertEqual(code, 200)
         raw = open(self.env, encoding="utf-8").read()
@@ -3323,7 +3323,7 @@ class TestRobotTypeEndpoint(_RobotTypeBase):
         The GUI grays its combobox for the same reason."""
         self._post("/robot-type", {"robot_type": "omx_full"}, origin=None)
         self._tier_running()
-        code, payload = self._post("/robot-type", {"robot_type": "edu6_studio"},
+        code, payload = self._post("/robot-type", {"robot_type": "v1_studio"},
                                    origin=None)
         self.assertEqual(code, 409)
         self.assertIn("gestoppt", payload["message"])
@@ -3332,7 +3332,7 @@ class TestRobotTypeEndpoint(_RobotTypeBase):
     def test_a_manager_only_pi_can_still_choose(self):
         # Only the ROBOT tier blocks; the always-on manager must not.
         self._status = {"physical_ai_manager": "running"}
-        code, _ = self._post("/robot-type", {"robot_type": "edu6_studio"},
+        code, _ = self._post("/robot-type", {"robot_type": "v1_studio"},
                              origin=None)
         self.assertEqual(code, 200)
 
@@ -3343,7 +3343,7 @@ class TestRobotTypeEndpoint(_RobotTypeBase):
         self.assertTrue(self.app._lifecycle_lock.acquire(timeout=1))
         self.addCleanup(self.app._lifecycle_lock.release)
         started = time.monotonic()
-        code, payload = self._post("/robot-type", {"robot_type": "edu6_studio"},
+        code, payload = self._post("/robot-type", {"robot_type": "v1_studio"},
                                    origin=None)
         self.assertEqual(code, 503, payload)
         self.assertLess(time.monotonic() - started, 4.0)
@@ -3379,7 +3379,7 @@ class TestRobotTypeEndpoint(_RobotTypeBase):
                       payload["message"])
 
     def test_the_lock_is_released_again_on_every_path(self):
-        for body in ({"robot_type": "edu6_studio"},   # success
+        for body in ({"robot_type": "v1_studio"},   # success
                      {"robot_type": "hovercraft"}):   # 400 before the acquire
             self._post("/robot-type", body, origin=None)
         self._tier_running()
@@ -3396,10 +3396,10 @@ class TestRobotTypeEndpoint(_RobotTypeBase):
 
 class TestStatusCarriesTheProfileSurface(_RobotTypeBase):
     def test_status_reports_the_selected_type_and_the_selectable_list(self):
-        self._post("/robot-type", {"robot_type": "edu6_studio"}, origin=None)
+        self._post("/robot-type", {"robot_type": "v1_studio"}, origin=None)
         code, payload = self._get("/status")
         self.assertEqual(code, 200)
-        self.assertEqual(payload["robot_type"], "edu6_studio")
+        self.assertEqual(payload["robot_type"], "v1_studio")
         rows = {r["id"]: r for r in payload["robot_profiles"]}
         self.assertEqual(set(rows), set(agent.ROBOT_PROFILES))
         for pid, row in rows.items():
@@ -3412,14 +3412,14 @@ class TestStatusCarriesTheProfileSurface(_RobotTypeBase):
         self._seed_arms(leader=False)
         self._post("/robot-type", {"robot_type": "omx_full"}, origin=None)
         self.assertFalse(self._get("/status")[1]["hardware_ready"])
-        self._post("/robot-type", {"robot_type": "edu6_studio"}, origin=None)
+        self._post("/robot-type", {"robot_type": "v1_studio"}, origin=None)
         self.assertTrue(self._get("/status")[1]["hardware_ready"])
 
     def test_both_arms_still_answers_its_own_question(self):
         # `arms_identified.both` is NOT redefined: a follower-only rig is ready
         # with both=False, and the two keys must not be conflated.
         self._seed_arms(leader=False)
-        self._post("/robot-type", {"robot_type": "edu6_studio"}, origin=None)
+        self._post("/robot-type", {"robot_type": "v1_studio"}, origin=None)
         payload = self._get("/status")[1]
         self.assertFalse(payload["arms_identified"]["both"])
         self.assertTrue(payload["hardware_ready"])
@@ -3443,7 +3443,7 @@ class TestPersistCarriesTheSessionModeWithoutContradicting(_RobotTypeBase):
 
     def test_a_camera_edit_on_a_follower_only_rig_does_not_500(self):
         self._seed_arms(leader=False)
-        self._post("/robot-type", {"robot_type": "edu6_studio"}, origin=None)
+        self._post("/robot-type", {"robot_type": "v1_studio"}, origin=None)
         # Simulate the stale/contradictory value.
         agent.config_generator.upsert_env_var(
             "EDUBOTICS_FOLLOWER_ONLY", "0", self.env, quote=False)
@@ -3484,11 +3484,11 @@ class TestPersistCarriesTheSessionModeWithoutContradicting(_RobotTypeBase):
 class TestEnvironmentStartIsProfileAware(_RobotTypeBase):
     """„Umgebung starten" hard-required BOTH arms, which is why omx_follower —
     shipping on Windows since the robot-type system landed — was unreachable on
-    a Pi, edu6 aside."""
+    a Pi, the Feetech arm aside."""
 
     def test_a_follower_only_rig_can_start_with_no_leader(self):
         self._seed_arms(leader=False)
-        self._post("/robot-type", {"robot_type": "edu6_studio"}, origin=None)
+        self._post("/robot-type", {"robot_type": "v1_studio"}, origin=None)
         with patch.object(agent.docker_manager, "start_robot_tier",
                           return_value=True) as start:
             code, payload = self._post("/environment/start", {}, origin=None)
@@ -3496,7 +3496,7 @@ class TestEnvironmentStartIsProfileAware(_RobotTypeBase):
         start.assert_called_once()
         raw = open(self.env, encoding="utf-8").read()
         self.assertIn("EDUBOTICS_FOLLOWER_ONLY=1", raw)
-        self.assertIn("EDUBOTICS_ROBOT_TYPE=edu6_studio", raw)
+        self.assertIn("EDUBOTICS_ROBOT_TYPE=v1_studio", raw)
 
     def test_omx_full_still_demands_both_arms(self):
         self._seed_arms(leader=False)
@@ -3523,7 +3523,7 @@ class TestEnvironmentStartIsProfileAware(_RobotTypeBase):
     def test_the_follower_only_refusal_does_not_mention_a_leader(self):
         # A follower-only kit HAS no leader; telling the student to scan one is
         # the misdiagnosis this gate exists to remove.
-        self._post("/robot-type", {"robot_type": "edu6_studio"}, origin=None)
+        self._post("/robot-type", {"robot_type": "v1_studio"}, origin=None)
         code, payload = self._post("/environment/start", {}, origin=None)
         self.assertEqual(code, 400)
         self.assertNotIn("Leader", payload["message"])

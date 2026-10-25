@@ -340,7 +340,7 @@ class TheRenderedWindowClipsNothing(unittest.TestCase):
         return out
 
     def test_no_paragraph_is_clipped_at_the_minimum_window_size(self):
-        for profile in ("omx_full", "edu6_studio"):
+        for profile in ("omx_full", "v1_studio"):
             with self.subTest(profile):
                 root, _app, original, saved = self._build(profile, 640, 520)
                 try:

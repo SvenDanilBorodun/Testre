@@ -134,10 +134,10 @@ class TestScanArms(_EnvTempBase):
 class TestScanArmFamily(_EnvTempBase):
     """The scan's arm family comes from the on-disk managed EDUBOTICS_ROBOT_TYPE
     (the WP-3 bridge). It scopes the /dev/serial/by-id filter AND selects the
-    in-container prober's protocol — an edu6 rig scanned as `omx` is invisible.
+    in-container prober's protocol — a V1 rig scanned as `omx` is invisible.
     """
 
-    def _edu6_arm(self):
+    def _v1_arm(self):
         return ArmDevice(
             serial_path="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A68010132-if00",
             role="follower")
@@ -151,9 +151,9 @@ class TestScanArmFamily(_EnvTempBase):
             code, payload = self.app.handle_scan_arms({})
         return code, payload, scan
 
-    def test_an_edu6_env_scans_the_edu6_family(self):
-        _, _, scan = self._scan_with_robot_type("edu6_studio")
-        self.assertEqual(scan.call_args.kwargs.get("arm_family"), "edu6")
+    def test_a_v1_env_scans_the_v1_family(self):
+        _, _, scan = self._scan_with_robot_type("v1_studio")
+        self.assertEqual(scan.call_args.kwargs.get("arm_family"), "v1")
 
     def test_a_default_env_scans_the_omx_family(self):
         _, _, scan = self._scan_with_robot_type(None)
@@ -167,9 +167,9 @@ class TestScanArmFamily(_EnvTempBase):
         _, _, scan = self._scan_with_robot_type("kein_solcher_typ")
         self.assertEqual(scan.call_args.kwargs.get("arm_family"), "omx")
 
-    def test_the_single_edu6_arm_is_reported_in_the_follower_slot(self):
-        arm = self._edu6_arm()
-        code, payload, _ = self._scan_with_robot_type("edu6_studio", (None, arm))
+    def test_the_single_v1_arm_is_reported_in_the_follower_slot(self):
+        arm = self._v1_arm()
+        code, payload, _ = self._scan_with_robot_type("v1_studio", (None, arm))
         # WP-5: a leader-less profile SUCCEEDS with one arm. Until then this was
         # a 409 whose German named a Leader-Arm the rig does not have.
         self.assertEqual(code, 200)
@@ -182,7 +182,7 @@ class TestScanArmFamily(_EnvTempBase):
         # Seed a BOTH-ports .env (the fast-rehydrate path only runs when both
         # LEADER_PORT and FOLLOWER_PORT are saved), then re-type the rig — the
         # shape a rig has right after POST /robot-type but before a rescan.
-        # Generating directly with robot_type='edu6_studio' would derive
+        # Generating directly with robot_type='v1_studio' would derive
         # follower_only=True and omit LEADER_PORT, so the rehydrate would never
         # be reached.
         cg.generate_env_file(
@@ -190,7 +190,7 @@ class TestScanArmFamily(_EnvTempBase):
                 leader=ArmDevice(serial_path="/dev/serial/by-id/usb-A", role="leader"),
                 follower=ArmDevice(serial_path="/dev/serial/by-id/usb-B", role="follower")),
             self.env_path, robot_type="omx_full")
-        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "edu6_studio", self.env_path,
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "v1_studio", self.env_path,
                           quote=False)
         with patch.object(agent.docker_manager, "ensure_environment_stopped"), \
              patch.object(agent.identify_arm, "fast_rehydrate_arms",
@@ -198,7 +198,7 @@ class TestScanArmFamily(_EnvTempBase):
              patch.object(agent.identify_arm, "scan_and_identify_arms",
                           return_value=(None, None)):
             self.app.handle_scan_arms({})
-        self.assertEqual(fast.call_args.kwargs.get("arm_family"), "edu6")
+        self.assertEqual(fast.call_args.kwargs.get("arm_family"), "v1")
 
 
 class TestLeaderLessScanGating(_EnvTempBase):
@@ -207,7 +207,7 @@ class TestLeaderLessScanGating(_EnvTempBase):
 
     The gate is the PROFILE, not the arm family: ``omx_follower`` shares the
     two-arm ``omx`` family, and it was unreachable on a Pi for exactly this
-    reason long before edu6 existed.
+    reason long before the Feetech arm existed.
     """
 
     LEADER = "/dev/serial/by-id/usb-ROBOTIS_LEADER"
@@ -235,14 +235,14 @@ class TestLeaderLessScanGating(_EnvTempBase):
 
     # ── the leader-less success path ────────────────────────────────────────
 
-    def test_edu6_succeeds_with_one_arm(self):
+    def test_v1_succeeds_with_one_arm(self):
         arm = self._arm("/dev/serial/by-id/usb-1a86_x", "follower")
-        code, payload = self._scan("edu6_studio", (None, arm))
+        code, payload = self._scan("v1_studio", (None, arm))
         self.assertEqual(code, 200)
         self.assertTrue(payload["ok"])
 
     def test_omx_follower_succeeds_with_one_arm_too(self):
-        # The pre-existing parity gap, independent of edu6.
+        # The pre-existing parity gap, independent of the Feetech arm.
         arm = self._arm(self.FOLLOWER, "follower")
         code, payload = self._scan("omx_follower", (None, arm))
         self.assertEqual(code, 200)
@@ -318,13 +318,13 @@ class TestLeaderLessScanGating(_EnvTempBase):
         self.assertNotIn("nicht erkannt", payload["message"])
         self.assertNotIn("USB prüfen", payload["message"])
 
-    def test_edu6_takes_the_same_branch_defensively(self):
-        # NOT physically reachable: the edu6 family scans with protocol
+    def test_v1_takes_the_same_branch_defensively(self):
+        # NOT physically reachable: the v1 family scans with protocol
         # 'feetech', whose prober can never return the role 'leader'
-        # (identify_arm.scan_and_identify_arms), so a real edu6 rig with no
+        # (identify_arm.scan_and_identify_arms), so a real V1 rig with no
         # follower hits the 404 above. Pinned anyway — the branch is shared.
         code, payload = self._scan(
-            "edu6_studio", (self._arm(self.LEADER, "leader"), None))
+            "v1_studio", (self._arm(self.LEADER, "leader"), None))
         self.assertEqual(code, 409)
         self.assertEqual(payload["message"], self.WRONG_ARM)
 
@@ -355,8 +355,8 @@ class TestLeaderLessScanGating(_EnvTempBase):
 
     def test_no_arms_at_all_is_still_404_on_every_profile(self):
         # From the REGISTRY, never a restated list: three separate hardcoded
-        # profile tuples in this file silently stopped covering `edu1_studio`
-        # the day it was added, while their own docstrings still claimed to
+        # profile tuples in this file once silently stopped covering a newly
+        # added profile, while their own docstrings still claimed to
         # cover every profile.
         for pid in ROBOT_PROFILES:
             with self.subTest(pid):
@@ -382,7 +382,7 @@ class TestLeaderLessScanGating(_EnvTempBase):
     def test_a_leader_less_rig_takes_the_fast_path_without_a_saved_leader(self):
         arm = self._arm(self.FOLLOWER, "follower")
         code, _, fast, full = self._rehydrate(
-            "edu6_studio", None, self.FOLLOWER, (None, arm))
+            "v1_studio", None, self.FOLLOWER, (None, arm))
         self.assertEqual(code, 200)
         fast.assert_called_once()
         self.assertIs(fast.call_args.kwargs.get("require_leader"), False)
@@ -458,7 +458,7 @@ class TestCameraRolesRequireAnExplicitRole(_EnvTempBase):
 
     def test_an_invalid_non_empty_role_is_still_a_400_even_when_alone(self):
         code, payload = self._roles(
-            "edu6_studio", [{"path": "/dev/video0", "role": "phone"}])
+            "v1_studio", [{"path": "/dev/video0", "role": "phone"}])
         self.assertEqual(code, 400)
         self.assertIn("Ungültige Rolle", payload["message"])
 
@@ -489,7 +489,7 @@ class TestCameraRolesRequireAnExplicitRole(_EnvTempBase):
         # `{"path": ""}` rows never reach the role check, so a well-formed
         # camera beside one is still accepted.
         code, payload = self._roles(
-            "edu6_studio", [{"path": ""},
+            "v1_studio", [{"path": ""},
                             {"path": "/dev/video0", "role": "scene"}])
         self.assertEqual(code, 200)
         self.assertEqual(payload["cameras"], [{"path": "/dev/video0",
@@ -507,7 +507,7 @@ class TestCameraRolesRequireAnExplicitRole(_EnvTempBase):
 class TestCameraRoleMustSuitTheProfile(_EnvTempBase):
     """A well-formed role the SELECTED profile does not declare is a German 400.
 
-    The scar: ``edu6_studio`` declares ONE camera topic server-side
+    The scar: ``v1_studio`` declares ONE camera topic server-side
     (``scene:/scene/image_raw/compressed``), so naming its only camera
     ``gripper`` publishes a topic nothing subscribes to — while the opi compose
     healthcheck greps ``/$${CAMERA_NAME_1:-gripper}/image_raw/compressed``,
@@ -520,8 +520,8 @@ class TestCameraRoleMustSuitTheProfile(_EnvTempBase):
     anyway, and a hand-crafted POST bypasses the SPA entirely.
 
     The behavioural delta is exactly the ROBOTER-STUDIO cells of the profile x
-    role grid: both Feetech arms declare ``camera_roles = ('scene',)`` and both
-    ship a config YAML with one camera topic, so „gripper" is refused on each.
+    role grid: the Feetech arm declares ``camera_roles = ('scene',)`` and ships
+    a config YAML with one camera topic, so „gripper" is refused there.
     ``test_the_delta_is_exactly_the_feetech_cells`` asserts that set directly
     (and derives it from the registry), so widening or narrowing the allowlist
     anywhere fails here.
@@ -553,16 +553,15 @@ class TestCameraRoleMustSuitTheProfile(_EnvTempBase):
         # grid's order follows the registry's insertion order and a new profile
         # must move this list for a REASON, not for a position.
         self.assertEqual(sorted(k for k, v in accepted.items() if not v),
-                         [("edu1_studio", "gripper"),
-                          ("edu6_studio", "gripper")])
+                         [("v1_studio", "gripper")])
 
-    def test_gripper_on_edu6_is_refused_in_german_naming_role_type_and_remedy(self):
+    def test_gripper_on_v1_is_refused_in_german_naming_role_type_and_remedy(self):
         code, payload = self._roles(
-            "edu6_studio", [{"path": "/dev/video0", "role": "gripper"}])
+            "v1_studio", [{"path": "/dev/video0", "role": "gripper"}])
         self.assertEqual(code, 400)
         msg = payload["message"]
         self.assertIn("Greifer", msg)          # the role they picked
-        self.assertIn("EduBotics 6-Achs", msg)  # the type that rules it out
+        self.assertIn("V1 – Roboter Studio", msg)  # the type that rules it out
         self.assertIn("Szene", msg)             # what to pick instead
         self.assertIn("/dev/video0", msg)       # which camera
         self.assertFalse(payload["ok"])
@@ -570,33 +569,13 @@ class TestCameraRoleMustSuitTheProfile(_EnvTempBase):
         # from a REAL dropdown must not be told it is „ungültig".
         self.assertNotIn("Ungültige Rolle", msg)
 
-    def test_gripper_on_edu1_is_refused_in_german_naming_role_type_and_remedy(self):
-        """The Edu:1 half of the same scar, and it had NO test at all.
-
-        `config/edu1_studio_config.yaml` declares exactly one camera topic, so
-        naming this arm's only camera „gripper" publishes a topic nothing
-        subscribes to — while the opi healthcheck greps the topic the STUDENT
-        named, reports success, and leaves the failure to surface much later as
-        an empty Roboter Studio."""
-        code, payload = self._roles(
-            "edu1_studio", [{"path": "/dev/video0", "role": "gripper"}])
-        self.assertEqual(code, 400)
-        msg = payload["message"]
-        self.assertIn("Greifer", msg)      # the role they picked
-        self.assertIn("Edu:1", msg)        # the type that rules it out
-        self.assertNotIn("6-Achs", msg)    # …and NOT the other Feetech arm
-        self.assertIn("Szene", msg)        # what to pick instead
-        self.assertIn("/dev/video0", msg)  # which camera
-        self.assertFalse(payload["ok"])
-        self.assertNotIn("Ungültige Rolle", msg)
-
-    def test_scene_on_edu1_is_accepted(self):
+    def test_scene_on_v1_is_accepted(self):
         # The other half of the cell: the refusal must be role-scoped, not a
         # blanket "this profile cannot have cameras".
         self.app._hardware = HardwareConfig(
             follower=ArmDevice(serial_path="/dev/f"))
         code, _payload = self._roles(
-            "edu1_studio", [{"path": "/dev/video0", "role": "scene"}])
+            "v1_studio", [{"path": "/dev/video0", "role": "scene"}])
         self.assertEqual(code, 200)
 
     def test_a_role_of_the_wrong_shape_still_gets_the_shape_message(self):
@@ -617,7 +596,7 @@ class TestCameraRoleMustSuitTheProfile(_EnvTempBase):
         # the .env regenerate — a rejected save must not half-apply.
         self.app._hardware = HardwareConfig(
             follower=ArmDevice(serial_path="/dev/f"))
-        code, _ = self._roles("edu6_studio", [
+        code, _ = self._roles("v1_studio", [
             {"path": "/dev/video0", "role": "scene"},
             {"path": "/dev/video2", "role": "gripper"},
         ])
@@ -642,7 +621,7 @@ class TestCameraRoleMustSuitTheProfile(_EnvTempBase):
         # Two bad rows, different reasons: the SHAPE check runs per-camera in
         # order, so the first row's message wins even though the second row is
         # the profile-specific one.
-        code, payload = self._roles("edu6_studio", [
+        code, payload = self._roles("v1_studio", [
             {"path": "/dev/videoA", "role": "phone"},
             {"path": "/dev/videoB", "role": "gripper"},
         ])
@@ -749,18 +728,18 @@ class TestScanNotice(_EnvTempBase):
         and this is the seam that proves the agent surfaces the result of that
         decision rather than a value of its own.
 
-        Scenario: a stray CH34x dongle sorts before the real edu6 arm, answers
+        Scenario: a stray CH34x dongle sorts before the real V1 arm, answers
         no Feetech ping and sets the 12-V sentence; the arm then identifies
         fine. Reporting that sends the student hunting a working power supply.
         """
         DONGLE = "/dev/serial/by-id/usb-1a86_USB2.0-Serial-if00"
         ARM = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A68-if00"
-        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "edu6_studio", self.env_path)
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "v1_studio", self.env_path)
 
         def run(argv, **kw):
             if argv[:2] == ["docker", "exec"]:
                 silent = DONGLE in argv[5]
-                return MagicMock(stdout="feetech_silent\n" if silent else "edu6\n",
+                return MagicMock(stdout="feetech_silent\n" if silent else "v1\n",
                                  stderr="", returncode=1 if silent else 0)
             return MagicMock(stdout="cid", stderr="", returncode=0)
 
@@ -797,7 +776,7 @@ class TestScanNotice(_EnvTempBase):
         green scan is the same contradiction one line lower.
         """
         follower = ArmDevice(serial_path="/dev/serial/by-id/usb-ROBOTIS_F", role="follower")
-        text = ('Es wurde ein „EduBotics 6-Achs"-Arm gefunden, aber ein '
+        text = ('Es wurde ein EduBotics-Arm gefunden, aber ein '
                 'OMX-Robotertyp ist ausgewählt. Bitte den Robotertyp oben '
                 'passend zum angeschlossenen Arm wählen und erneut scannen.')
         cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "omx_follower", self.env_path,
@@ -960,7 +939,7 @@ class TestCrossFamilyInvalidatesTheScan(_EnvTempBase):
     """Changing the robot type ACROSS arm families invalidates the scan.
 
     MEASURED before this landed, on a real AgentApp: scan an OMX pair, then
-    ``POST /robot-type {"robot_type": "edu6_studio"}`` answered
+    ``POST /robot-type {"robot_type": "v1_studio"}`` answered
     ``200 {'hardware_ready': True}``; the .env then named a ROBOTIS OpenRB-150
     as the FOLLOWER_PORT of a Feetech rig with EDUBOTICS_FOLLOWER_ONLY=1, while
     /status still reported a leader on a profile that has none; and „Umgebung
@@ -977,7 +956,7 @@ class TestCrossFamilyInvalidatesTheScan(_EnvTempBase):
 
     OMX_L = "/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_LEADER-if00"
     OMX_F = "/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_FOLLOWER-if00"
-    EDU6 = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A68010132-if00"
+    V1_PORT = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A68010132-if00"
 
     def _seed_omx_pair(self):
         with patch.object(agent.docker_manager, "ensure_environment_stopped"), \
@@ -986,12 +965,12 @@ class TestCrossFamilyInvalidatesTheScan(_EnvTempBase):
                                         ArmDevice(serial_path=self.OMX_F, role="follower"))):
             self.app.handle_scan_arms({})
 
-    def _seed_edu6(self):
-        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "edu6_studio", self.env_path,
+    def _seed_v1(self):
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "v1_studio", self.env_path,
                           quote=False)
         with patch.object(agent.docker_manager, "ensure_environment_stopped"), \
              patch.object(agent.identify_arm, "scan_and_identify_arms",
-                          return_value=(None, ArmDevice(serial_path=self.EDU6,
+                          return_value=(None, ArmDevice(serial_path=self.V1_PORT,
                                                         role="follower"))):
             self.app.handle_scan_arms({})
 
@@ -1006,24 +985,24 @@ class TestCrossFamilyInvalidatesTheScan(_EnvTempBase):
 
     # ── the defect, both directions ─────────────────────────────────────────
 
-    def test_omx_scan_then_edu6_is_not_ready(self):
+    def test_omx_scan_then_v1_is_not_ready(self):
         self._seed_omx_pair()
-        code, payload = self._set_type("edu6_studio")
+        code, payload = self._set_type("v1_studio")
         self.assertEqual(code, 200)
         self.assertFalse(payload["hardware_ready"])
         self.assertFalse(self._status()["hardware_ready"])
 
-    def test_edu6_scan_then_omx_follower_is_not_ready(self):
+    def test_v1_scan_then_omx_follower_is_not_ready(self):
         # The reverse, and the one a leader-less OMX profile makes reachable:
         # omx_follower needs only a follower, so PRESENCE alone said ready.
-        self._seed_edu6()
+        self._seed_v1()
         code, payload = self._set_type("omx_follower")
         self.assertEqual(code, 200)
         self.assertFalse(payload["hardware_ready"])
 
     def test_the_start_gate_refuses_and_never_reaches_docker(self):
         self._seed_omx_pair()
-        self._set_type("edu6_studio")
+        self._set_type("v1_studio")
         with patch.object(agent.docker_manager, "start_robot_tier") as start:
             code, payload = self.app.handle_environment_start({})
         self.assertEqual(code, 400)
@@ -1037,7 +1016,7 @@ class TestCrossFamilyInvalidatesTheScan(_EnvTempBase):
         # that is still on screen — indistinguishable from a glitch.
         self._seed_omx_pair()
         with patch.object(self.app, "_log") as log:
-            self._set_type("edu6_studio")
+            self._set_type("v1_studio")
         lines = [str(c[0][0]) for c in log.call_args_list]
         self.assertTrue(any(agent._ARM_FAMILY_MISMATCH_DE in ln for ln in lines), lines)
 
@@ -1045,9 +1024,9 @@ class TestCrossFamilyInvalidatesTheScan(_EnvTempBase):
         # The Pi writes the .env at SELECTOR time (Windows defers to start), so
         # this is the one platform that could persist the chimera.
         self._seed_omx_pair()
-        self._set_type("edu6_studio")
+        self._set_type("v1_studio")
         self.assertEqual(cg.read_env_var("EDUBOTICS_ROBOT_TYPE", self.env_path),
-                         "edu6_studio")
+                         "v1_studio")
         # The LAST COHERENT scan survives untouched — clearing it would destroy
         # a valid OMX scan just because a student looked at the dropdown.
         self.assertEqual(cg.read_env_var("FOLLOWER_PORT", self.env_path), self.OMX_F)
@@ -1066,7 +1045,7 @@ class TestCrossFamilyInvalidatesTheScan(_EnvTempBase):
         cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "omx_full", self.env_path,
                           quote=False)
         self.app._hardware = HardwareConfig(
-            leader=ArmDevice(serial_path=self.EDU6, role="leader"),
+            leader=ArmDevice(serial_path=self.V1_PORT, role="leader"),
             follower=ArmDevice(serial_path=self.OMX_F, role="follower"))
         self.app._persist_env_if_ready()
         self.assertIsNone(cg.read_env_var("LEADER_PORT", self.env_path))
@@ -1081,7 +1060,7 @@ class TestCrossFamilyInvalidatesTheScan(_EnvTempBase):
         cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "omx_follower", self.env_path,
                           quote=False)
         self.app._hardware = HardwareConfig(
-            leader=ArmDevice(serial_path=self.EDU6, role="leader"),
+            leader=ArmDevice(serial_path=self.V1_PORT, role="leader"),
             follower=ArmDevice(serial_path=self.OMX_F, role="follower"))
         self.app._persist_env_if_ready()
         self.assertEqual(cg.read_env_var("FOLLOWER_PORT", self.env_path), self.OMX_F)
@@ -1089,7 +1068,7 @@ class TestCrossFamilyInvalidatesTheScan(_EnvTempBase):
 
     def test_arms_identified_still_reports_what_was_scanned(self):
         self._seed_omx_pair()
-        self._set_type("edu6_studio")
+        self._set_type("v1_studio")
         arms = self._status()["arms_identified"]
         self.assertEqual(arms["follower"], self.OMX_F)
         self.assertEqual(arms["leader"], self.OMX_L)
@@ -1099,10 +1078,10 @@ class TestCrossFamilyInvalidatesTheScan(_EnvTempBase):
         # No new persisted state: the recorded PORT is the family tag, so a
         # fresh AgentApp over the same .env must reach the same verdict.
         self._seed_omx_pair()
-        self._set_type("edu6_studio")
+        self._set_type("v1_studio")
         fresh = agent.AgentApp(env_file=self.env_path)
         fresh.rehydrate_hardware()  # what the boot path does (agent.py: start())
-        self.assertEqual(fresh._current_robot_type(), "edu6_studio")
+        self.assertEqual(fresh._current_robot_type(), "v1_studio")
         self.assertEqual(fresh._hardware.follower.serial_path, self.OMX_F)
         self.assertFalse(fresh._hardware_ready())
 
@@ -1126,8 +1105,8 @@ class TestCrossFamilyInvalidatesTheScan(_EnvTempBase):
         self.assertEqual(code, 200)
         start.assert_called_once()
 
-    def test_an_ordinary_edu6_rig_is_completely_unaffected(self):
-        self._seed_edu6()
+    def test_an_ordinary_v1_rig_is_completely_unaffected(self):
+        self._seed_v1()
         self.assertTrue(self._status()["hardware_ready"])
         with patch.object(agent.docker_manager, "start_robot_tier", return_value=True) as start:
             code, _ = self.app.handle_environment_start({})
@@ -1135,11 +1114,11 @@ class TestCrossFamilyInvalidatesTheScan(_EnvTempBase):
         start.assert_called_once()
 
     def test_an_unattributable_port_is_not_refused(self):
-        # A hand-edited .env, or an edu6 board revision _EDU6_BYID_MARKERS has
+        # A hand-edited .env, or a Feetech board revision _FEETECH_BYID_MARKERS has
         # not caught up with (it is a guess pending rig gate R1). "Cannot
         # prove" must not become "wrong" — that would brick the rig the
         # markers were meant to find.
-        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "edu6_studio", self.env_path,
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "v1_studio", self.env_path,
                           quote=False)
         self.app._hardware = HardwareConfig(
             follower=ArmDevice(serial_path="/dev/serial/by-id/usb-Mystery_Board-if00"))
@@ -1148,7 +1127,7 @@ class TestCrossFamilyInvalidatesTheScan(_EnvTempBase):
     def test_a_missing_scan_still_gets_the_missing_scan_wording(self):
         # The two 400s must stay distinguishable: nothing scanned is not the
         # same problem as the wrong thing scanned.
-        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "edu6_studio", self.env_path,
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "v1_studio", self.env_path,
                           quote=False)
         self.app._hardware = HardwareConfig()
         with patch.object(agent.docker_manager, "start_robot_tier") as start:
@@ -1163,7 +1142,7 @@ class TestCrossFamilyInvalidatesTheScan(_EnvTempBase):
         cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "omx_follower", self.env_path,
                           quote=False)
         self.app._hardware = HardwareConfig(
-            leader=ArmDevice(serial_path=self.EDU6, role="leader"),
+            leader=ArmDevice(serial_path=self.V1_PORT, role="leader"),
             follower=ArmDevice(serial_path=self.OMX_F, role="follower"))
         self.assertTrue(self.app._hardware_ready())
 
@@ -1279,7 +1258,7 @@ class TestRoboterStudioLeaderLess(_EnvTempBase):
                           quote=False)
 
     def test_both_directions_are_refused_on_every_leader_less_profile(self):
-        for pid in ("omx_follower", "edu6_studio"):
+        for pid in ("omx_follower", "v1_studio"):
             for follower_only in (True, False):
                 with self.subTest(profile=pid, follower_only=follower_only):
                     self._set_type(pid)
@@ -1296,7 +1275,7 @@ class TestRoboterStudioLeaderLess(_EnvTempBase):
                     slm.assert_not_called()
 
     def test_the_refusal_reports_the_rigs_true_mode_not_the_request(self):
-        self._set_type("edu6_studio")
+        self._set_type("v1_studio")
         with patch.object(agent.docker_manager, "set_leader_mode"):
             _, payload = self.app.handle_rs_set_mode(False)
         self.assertTrue(payload["follower_only"])
@@ -1304,7 +1283,7 @@ class TestRoboterStudioLeaderLess(_EnvTempBase):
     def test_the_refusal_does_not_leave_the_busy_flag_set(self):
         # It returns BEFORE taking _rs_busy_lock, so a refused click must not
         # wedge the toggle into „Ein Moduswechsel läuft bereits".
-        self._set_type("edu6_studio")
+        self._set_type("v1_studio")
         with patch.object(agent.docker_manager, "set_leader_mode"):
             self.app.handle_rs_set_mode(True)
         self.assertFalse(self.app._rs_busy)
@@ -1338,7 +1317,7 @@ class TestRoboterStudioLeaderLess(_EnvTempBase):
 
     def test_rs_status_reports_has_leader_per_profile(self):
         for pid, expected in (("omx_full", True), ("omx_follower", False),
-                              ("edu6_studio", False)):
+                              ("v1_studio", False)):
             with self.subTest(pid):
                 self._set_type(pid)
                 with patch.object(agent.docker_manager, "get_container_status",
@@ -1350,7 +1329,7 @@ class TestRoboterStudioLeaderLess(_EnvTempBase):
     def test_has_leader_is_reported_on_the_busy_short_circuit_too(self):
         # The busy branch returns early; a toggle that hides on has_leader
         # must not un-hide itself just because another switch is in flight.
-        self._set_type("edu6_studio")
+        self._set_type("v1_studio")
         self.app._rs_busy = True
         code, payload = self.app.handle_rs_status()
         self.assertEqual(code, 200)

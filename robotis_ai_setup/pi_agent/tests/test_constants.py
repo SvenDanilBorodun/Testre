@@ -300,8 +300,8 @@ class TestArmUsbIdsLockstep(unittest.TestCase):
 
         self.assertEqual(constants.ARM_USB_IDS, win.ARM_USB_IDS)
 
-    def test_the_edu6_row_is_the_ch343p(self):
-        self.assertEqual(constants.ARM_USB_IDS["edu6"], (("1A86", "55D3"),))
+    def test_the_v1_row_is_the_ch343p(self):
+        self.assertEqual(constants.ARM_USB_IDS["v1"], (("1A86", "55D3"),))
 
     def test_the_omx_row_is_any_pid_under_the_robotis_vid(self):
         self.assertEqual(constants.ARM_USB_IDS["omx"],
@@ -348,20 +348,20 @@ class TestArmFamilyForRobotType(unittest.TestCase):
     def test_each_profile_maps_to_its_family(self):
         self.assertEqual(constants.arm_family_for_robot_type("omx_full"), "omx")
         self.assertEqual(constants.arm_family_for_robot_type("omx_follower"), "omx")
-        self.assertEqual(constants.arm_family_for_robot_type("edu6_studio"), "edu6")
+        self.assertEqual(constants.arm_family_for_robot_type("v1_studio"), "v1")
 
     def test_unknown_absent_and_blank_fall_back_to_omx(self):
         """Matches robot_profiles.resolve: an unrecognised .env value keeps
         today's OMX behaviour instead of making every arm unscannable."""
-        for value in (None, "", "   ", "nonsense", "EDU6_STUDIO"):
+        for value in (None, "", "   ", "nonsense", "V1_STUDIO"):
             self.assertEqual(constants.arm_family_for_robot_type(value),
                              constants.DEFAULT_ARM_FAMILY, repr(value))
         self.assertEqual(constants.DEFAULT_ARM_FAMILY, "omx")
 
     def test_surrounding_whitespace_is_tolerated(self):
         """`.env` values reach us via read_env_var; a stray space must not
-        silently demote an edu6 rig to an OMX scan."""
-        self.assertEqual(constants.arm_family_for_robot_type(" edu6_studio "), "edu6")
+        silently demote a V1 rig to an OMX scan."""
+        self.assertEqual(constants.arm_family_for_robot_type(" v1_studio "), "v1")
 
     def test_ids_and_families_match_the_windows_registry(self):
         """The absorb must not have changed a single verdict: the family this

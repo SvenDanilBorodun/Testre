@@ -273,10 +273,10 @@ CAMERA_BRIDGE_ROLES = ("gripper", "scene")
 ROBOTIS_VID = "2F5D"  # ROBOTIS USB Vendor ID (OpenRB-150; PIDs 0103, 2202)
 
 # Arm-family USB identity table — the Pi twin of `gui/app/constants.py`'s
-# ARM_USB_IDS (edu6 §4.4), kept equal by tests/test_constants.py. Keys are the
+# ARM_USB_IDS, kept equal by tests/test_constants.py. Keys are the
 # ARM FAMILY (what the scan hardware-matches), NOT the profile id — both OMX
 # profiles share one family. Values: (VID, PID-or-None) tuples, None = any PID
-# under that VID. The edu6 bridge is the WCH CH343P on the Waveshare Bus Servo
+# under that VID. The V1 bridge is the WCH CH343P on the Waveshare Bus Servo
 # Adapter; identity is still PROVEN by the SERVOS answering
 # (`identify_arm.py --protocol=feetech`), never by the bridge chip.
 #
@@ -287,15 +287,12 @@ ROBOTIS_VID = "2F5D"  # ROBOTIS USB Vendor ID (OpenRB-150; PIDs 0103, 2202)
 # `identify_arm._ARM_MARKERS`. This table is therefore the shared IDENTITY
 # statement of what hardware each family is: the authority the udev
 # permission-floor rule mirrors (`udev/99-edubotics-robotis.rules`) and the
-# anchor that stops the two platforms drifting apart.
-# The two Feetech rows are IDENTICAL and must stay so: edu6 and edu1 ship on the
-# same Waveshare Bus Servo Adapter, so nothing at the USB layer separates them —
-# the separation is the servo count the in-container prober asserts
-# (`identify_arm._FAMILY_SERVO_COUNT`).
+# anchor that stops the two platforms drifting apart. The bridge says nothing
+# about WHICH Feetech arm sits on it — that is the servo count the in-container
+# prober asserts (`identify_arm._FAMILY_SERVO_COUNT`).
 ARM_USB_IDS = {
-    "omx":  (("2F5D", None),),
-    "edu6": (("1A86", "55D3"),),
-    "edu1": (("1A86", "55D3"),),
+    "omx": (("2F5D", None),),
+    "v1":  (("1A86", "55D3"),),
 }
 
 # --- Robot type (ArmProfile) registry — the Pi's THIN descriptor ---
@@ -321,8 +318,7 @@ ARM_USB_IDS = {
 #
 #   - omx_full     → both arms; Roboter Studio via the mid-session LeaderToggle.
 #   - omx_follower → follower only; no leader, LeaderToggle hidden, RS native.
-#   - edu6_studio  → the 6-DOF Feetech arm; follower-only, RS only.
-#   - edu1_studio  → the 5-DOF Feetech „Edu:1"; follower-only, RS only.
+#   - v1_studio    → the 5-DOF Feetech arm „V1"; follower-only, RS only.
 #
 # `display_de` is HARD-mandatory (it is direct-subscripted when the wizard's
 # profile list is built — an absent key must fail loudly, not degrade to a blank
@@ -340,7 +336,7 @@ ARM_USB_IDS = {
 #
 # Why it must be an allowlist and not a hint: the server's per-profile
 # `config/<type>_config.yaml` declares the camera TOPICS by role name, and
-# `edu6_studio` declares exactly one (`scene:/scene/image_raw/compressed`).
+# `v1_studio` declares exactly one (`scene:/scene/image_raw/compressed`).
 # Naming that camera `gripper` publishes `/gripper/image_raw/compressed`, which
 # no consumer subscribes to — while the opi compose healthcheck greps the very
 # topic the student just named, so it goes GREEN, „Umgebung starten" reports
@@ -361,8 +357,7 @@ ARM_USB_IDS = {
 ROBOT_PROFILES = {
     "omx_full":     {"display_de": "OMX – Voll",                          "follower_only": False, "scan_requires_leader": True,  "arm_family": "omx",  "camera_roles": ("gripper", "scene")},
     "omx_follower": {"display_de": "OMX – Roboter Studio (nur Follower)", "follower_only": True,  "scan_requires_leader": False, "arm_family": "omx",  "camera_roles": ("scene", "gripper")},
-    "edu6_studio":  {"display_de": "EduBotics 6-Achs – Roboter Studio",   "follower_only": True,  "scan_requires_leader": False, "arm_family": "edu6", "camera_roles": ("scene",)},
-    "edu1_studio":  {"display_de": "Edu:1 – Roboter Studio",               "follower_only": True,  "scan_requires_leader": False, "arm_family": "edu1", "camera_roles": ("scene",)},
+    "v1_studio":    {"display_de": "V1 – Roboter Studio",                 "follower_only": True,  "scan_requires_leader": False, "arm_family": "v1",   "camera_roles": ("scene",)},
 }
 DEFAULT_ROBOT_PROFILE = "omx_full"
 
@@ -508,7 +503,7 @@ SYSTEMD_UNIT_NAMES = ("edubotics-pi.service", "edubotics-pi-firstboot.service")
 # VERBATIM (`install -m 0644`, no templating) into UDEV_RULES_DIR, which
 # self-update never touches. Until 2026-07-28 nothing then compared the two, so
 # the udev rule was structurally the SAME fail-open the compose just closed: a
-# release that adds a VID/PID line (the CH343P/edu6 rule, SHIPPED since
+# release that adds a VID/PID line (the CH343P Feetech rule, SHIPPED since
 # `2951b87`, was exactly that) would ship an agent that scans for an arm whose
 # /dev node it has no permission to open, on 100 % of the fielded fleet, with
 # the only remedy being a `setup.sh` re-run from a source checkout no

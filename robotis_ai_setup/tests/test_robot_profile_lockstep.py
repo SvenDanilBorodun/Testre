@@ -204,7 +204,7 @@ class RegistryLockstepTest(unittest.TestCase):
         self.assertEqual(set(self.gui), set(self.pi))
         # Not vacuous: the shipped profiles must actually be present.
         self.assertLessEqual(
-            {"omx_full", "omx_follower", "edu6_studio", "edu1_studio"},
+            {"omx_full", "omx_follower", "v1_studio"},
             set(self.gui))
 
     def test_follower_only_agrees_per_id(self):

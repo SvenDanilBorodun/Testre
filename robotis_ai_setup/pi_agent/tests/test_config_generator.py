@@ -215,7 +215,7 @@ class TestFollowerOnlyDerivedFromProfile(_TmpEnvBase):
     Without the derive a follower-only rig — which by definition never scans a
     leader — hit the leader-null guard and raised „Der Leader-Arm muss
     konfiguriert sein" on every single .env write, which is why neither
-    omx_follower nor edu6_studio could be provisioned on a Pi at all.
+    omx_follower nor a Feetech profile could be provisioned on a Pi at all.
     """
 
     def _follower_only_rig(self):
@@ -229,7 +229,7 @@ class TestFollowerOnlyDerivedFromProfile(_TmpEnvBase):
         self.assertIn("LEADER_PORT=", content)
 
     def test_each_follower_only_profile_derives_follower_only(self):
-        for profile in ("omx_follower", "edu6_studio"):
+        for profile in ("omx_follower", "v1_studio"):
             with self.subTest(profile=profile):
                 content = generate_env_file(self._follower_only_rig(), self.path,
                                             robot_type=profile)
@@ -241,7 +241,7 @@ class TestFollowerOnlyDerivedFromProfile(_TmpEnvBase):
         """THE ordering assertion. A leaderless rig on a follower-only profile
         must generate cleanly. Move the derive below the `not follower_only and
         config.leader is None` guard and this raises instead."""
-        for profile in ("omx_follower", "edu6_studio"):
+        for profile in ("omx_follower", "v1_studio"):
             with self.subTest(profile=profile):
                 content = generate_env_file(self._follower_only_rig(), self.path,
                                             robot_type=profile)
@@ -265,7 +265,7 @@ class TestFollowerOnlyDerivedFromProfile(_TmpEnvBase):
     def test_explicit_false_on_a_follower_only_profile_is_a_german_refusal(self):
         # Contradiction: the profile has no leader to re-arm. Refuse loudly
         # rather than silently write a both-arms .env (GUI twin).
-        for profile in ("omx_follower", "edu6_studio"):
+        for profile in ("omx_follower", "v1_studio"):
             with self.subTest(profile=profile):
                 with self.assertRaises(ValueError) as ctx:
                     generate_env_file(_both_arms(), self.path,
@@ -291,10 +291,10 @@ class TestFollowerOnlyDerivedFromProfile(_TmpEnvBase):
         )
         with self.assertRaises(ValueError) as pi_ctx:
             generate_env_file(_both_arms(), self.path,
-                              robot_type="edu6_studio", follower_only=False)
+                              robot_type="v1_studio", follower_only=False)
         with self.assertRaises(ValueError) as win_ctx:
             win_cg.generate_env_file(win_hw, self.path,
-                                     robot_type="edu6_studio", follower_only=False)
+                                     robot_type="v1_studio", follower_only=False)
         self.assertEqual(str(pi_ctx.exception), str(win_ctx.exception))
 
     def test_an_unknown_robot_type_falls_back_to_the_default_profile(self):
@@ -315,8 +315,8 @@ class TestFollowerOnlyDerivedFromProfile(_TmpEnvBase):
 
     def test_surrounding_whitespace_on_the_id_is_tolerated(self):
         content = generate_env_file(self._follower_only_rig(), self.path,
-                                    robot_type=" edu6_studio ")
-        self.assertIn("EDUBOTICS_ROBOT_TYPE=edu6_studio", content)
+                                    robot_type=" v1_studio ")
+        self.assertIn("EDUBOTICS_ROBOT_TYPE=v1_studio", content)
         self.assertIn("EDUBOTICS_FOLLOWER_ONLY=1", content)
 
     def test_the_derive_reads_the_registry_not_a_hardcoded_id_list(self):

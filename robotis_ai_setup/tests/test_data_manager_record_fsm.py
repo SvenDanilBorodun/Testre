@@ -2073,7 +2073,7 @@ class ResumeCompatibilityTest(_FsmTestCase):
         for line, expected in (
                 ("features: expected {...}, got {...}",
                  _texts().resume_features_de('Würfel in die Schale')),
-                ('robot_type: expected omx_f, got edu6_studio',
+                ('robot_type: expected omx_f, got v1_studio',
                  _texts().resume_robot_de('Würfel in die Schale'))):
             with self.subTest(line=line):
                 dm = self._dm('Dataset metadata compatibility check failed with '

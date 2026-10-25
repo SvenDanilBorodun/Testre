@@ -6,7 +6,7 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
-### 2026-10-25 — the V1 replaces `edu6_studio` and `edu1_studio`
+### v2.35.0, 2026-10-25 — the V1 replaces `edu6_studio` and `edu1_studio`
 
 **Why.** The owner replaced both EduBotics Feetech arms with one new 5-DOF arm, the V1 (Roboter Studio only,
 follower-only). The V1 has the Edu:1 topology (joint1 yaw, three parallel pitch joints, a roll, a rotating two-blade

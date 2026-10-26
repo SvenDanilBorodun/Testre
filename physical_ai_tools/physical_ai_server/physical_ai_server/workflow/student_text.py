@@ -51,6 +51,13 @@ STUDENT_TEXT_MAX_ITEMS = 200
 # but a depth cap is cheaper than proving that stays true.
 STUDENT_TEXT_MAX_DEPTH = 5
 
+# What NOTHING reads as INSIDE a list or as a dict value (C9-a): „[1, nichts, a]",
+# not „[1, , a]". A top-level None keeps its rendering (empty in „verbinde",
+# ``output.LOG_NONE_DE`` in ``log``). The same word as ``output.LOG_NONE_DE``,
+# spelled here because ``output`` imports this module at its top (an import
+# cycle the other way); test_student_text pins the two equal.
+NONE_IN_CONTAINER_DE = 'nichts'
+
 
 def _fmt_m(value: Any) -> str:
     """A metre value with 3 decimals and a German decimal comma."""
@@ -112,8 +119,15 @@ def student_text(value: Any, _depth: int = 0) -> str:
             return ''
 
 
+def _item_text(value: Any, depth: int) -> str:
+    """One element of a container: nothing reads „nichts" (C9-a)."""
+    if value is None:
+        return NONE_IN_CONTAINER_DE
+    return student_text(value, depth)
+
+
 def _container(value, open_c: str, close_c: str, depth: int) -> str:
-    shown = [student_text(v, depth + 1) for v in list(value)[:STUDENT_TEXT_MAX_ITEMS]]
+    shown = [_item_text(v, depth + 1) for v in list(value)[:STUDENT_TEXT_MAX_ITEMS]]
     if len(value) > STUDENT_TEXT_MAX_ITEMS:
         # Same wording as `_jsonable`'s tail, so the Protokoll and the
         # Variablen-Tafel say the same thing about the same list.
@@ -123,7 +137,7 @@ def _container(value, open_c: str, close_c: str, depth: int) -> str:
 
 def _mapping(value: dict, depth: int) -> str:
     items = list(value.items())[:STUDENT_TEXT_MAX_ITEMS]
-    shown = [f'{k}: {student_text(v, depth + 1)}' for k, v in items]
+    shown = [f'{k}: {_item_text(v, depth + 1)}' for k, v in items]
     if len(value) > STUDENT_TEXT_MAX_ITEMS:
         shown.append(f'… ({len(value)} Elemente)')
     return '{' + ', '.join(shown) + '}'

@@ -20,7 +20,7 @@ import fs from 'fs';
 import path from 'path';
 import { describe, it, expect } from 'vitest';
 import { codeOnlyText } from '../codeAssetUsage';
-import { pythonRobotAliases } from '../pythonAliases';
+import { bareNamesOf, pythonRobotAliases } from '../pythonAliases';
 
 const aliasesOf = (src) => {
   const a = pythonRobotAliases(codeOnlyText(src, 'python'));
@@ -96,5 +96,33 @@ describe('pythonRobotAliases', () => {
     expect(src).not.toMatch(/from ['"][^'"]*codeAssetUsage['"]/);
     expect(src).not.toMatch(/from ['"](react|codemirror|@codemirror\/|@lezer\/|blockly)/);
     expect(src).not.toMatch(/import\(/);
+  });
+});
+
+// Fix round 1, R2: which bare names a file binds from robot as themselves.
+describe('pythonRobotAliases — the bare names bound from robot (R2)', () => {
+  const bound = (src) => {
+    const a = pythonRobotAliases(codeOnlyText(src, 'python'));
+    return { star: a.star, imported: [...a.imported] };
+  };
+
+  it('reads `from robot import NAME`, `*` and a multi-line list', () => {
+    expect(bound('import robot\n')).toEqual({ star: false, imported: [] });
+    expect(bound('from robot import replay, home as heim\n')).toEqual({ star: false, imported: ['replay'] });
+    expect(bound('from robot import *\n')).toEqual({ star: true, imported: [] });
+    expect(bound('from robot import (\n    replay,\n    move_to,\n)\n')).toEqual({ star: false, imported: ['replay', 'move_to'] });
+    // Another module, a non-public name, a nested import: nothing.
+    expect(bound('from roboter import *\nfrom robot import replya\ndef f():\n    from robot import replay\n'))
+      .toEqual({ star: false, imported: [] });
+  });
+
+  it('bareNamesOf names the row itself only when it is bound', () => {
+    const of = (src) => bareNamesOf(pythonRobotAliases(codeOnlyText(src, 'python')), 'replay');
+    expect(of('')).toEqual([]);
+    expect(of('def replay(n):\n    pass\n')).toEqual([]);
+    expect(of('from robot import replay\n')).toEqual(['replay']);
+    expect(of('from robot import *\n')).toEqual(['replay']);
+    expect(of('from robot import replay as abspielen\n')).toEqual(['abspielen']);
+    expect(of('from robot import *\nfrom robot import home as replay\n')).toEqual([]);
   });
 });

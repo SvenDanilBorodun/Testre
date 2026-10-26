@@ -468,3 +468,36 @@ describe('E1: aliases of `robot` at the top level of a Python file', () => {
     expect(findAssetCalls('import robot as r;\nr.replay("A");\n', 'java')).toEqual([]);
   });
 });
+
+// Fix round 1, R2: a bare `replay("…")` is a use of a recording only when the
+// file binds `replay` from robot (`from robot import replay` / `*` / an
+// alias), like the asset lint — a student's own `replay` function is no use,
+// no rename target and no name RunControls sends first. The run-time scan
+// (`collectCodeReplayNames`' own half) stays loose by design.
+describe('R2: a bare replay counts only when the file imports it from robot', () => {
+  const names = (content) => findAssetCalls(content, 'python')
+    .map((c) => `${c.method}:${c.name}${c.inComment ? '(c)' : ''}`);
+
+  it('an own or unimported bare replay is no use and is not renamed', () => {
+    const own = 'def replay(name):\n    print(name)\nreplay("A")\n# replay("A")\n';
+    expect(names(own)).toEqual([]);
+    expect(names('import robot\nreplay("A")\n')).toEqual([]);
+    const { files, count } = renameCodeAssetRefs({ 'main.py': own }, 'python', 'recording', 'A', 'B');
+    expect(count).toBe(0);
+    expect(files['main.py']).toBe(own);
+    expect([...scanCodeAssets({ 'main.py': own }, 'python').replay.keys()]).toEqual([]);
+    // Another bare row keeps its old reading (only replay is judged here).
+    expect(names('move_to("Ablage")\n')).toEqual(['move_to:Ablage']);
+  });
+
+  it('a bound bare replay is a use, in code and in a comment', () => {
+    for (const head of ['from robot import replay', 'from robot import *', 'from robot import (\n    replay,\n)']) {
+      expect([head, names(`${head}\nreplay("A")\n# replay("C")\n`)]).toEqual([head, ['replay:A', 'replay:C(c)']]);
+    }
+    const files = { 'main.py': 'from robot import *\nreplay("A")\n', 'helfer.py': 'replay("A")\n' };
+    const { files: out, count } = renameCodeAssetRefs(files, 'python', 'recording', 'A', 'B');
+    expect(count).toBe(1);
+    expect(out['main.py']).toBe('from robot import *\nreplay("B")\n');
+    expect(out['helfer.py']).toBe('replay("A")\n');
+  });
+});

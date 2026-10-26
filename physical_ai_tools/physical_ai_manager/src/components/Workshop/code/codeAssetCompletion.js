@@ -29,8 +29,10 @@
 //     (codeProject.collectCodeReplayNames), so that one never reaches the
 //     robot. Only the robot's own call is judged: `Robot.replay` in Java (a
 //     student's own static `replay` method is none of this), in Python
-//     `robot.replay`, a bare `replay(` and every top-level alias of either
-//     (`import robot as r`, `from robot import replay as abspielen`; E1).
+//     `robot.replay`, every top-level alias of either (`import robot as r`,
+//     `from robot import replay as abspielen`; E1) and a bare `replay(` only
+//     where the file binds it from robot (`from robot import replay` / `*`;
+//     a student's own `def replay` is none — fix round 1, R2).
 //   * HOVER text in German: „Ziel „Ablage“ · x 12,3 cm · y 4,0 cm".
 //
 // The asset lint has its OWN ship switch, `ASSET_LINT_LANGUAGES`, separate

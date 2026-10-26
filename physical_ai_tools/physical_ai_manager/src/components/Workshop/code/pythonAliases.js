@@ -24,6 +24,14 @@
 // alias made inside a function, under a condition or in a loop is not
 // followed. Java has no aliasing. Pure and small: it may reach the entry
 // bundle (codeAssetUsage is in it already).
+//
+// BARE `replay`. A bare `replay(…)` is the robot's only when the file binds
+// that name from robot — `from robot import replay` (also inside a multi-line
+// `( … )` list), `from robot import *`, or an alias (fix round 1 of the review
+// fixes, owner decision Verify-1): a student's own `def replay(…)` and an
+// unimported bare call are no robot call for any scanner. Only `replay` is
+// judged this way (BOUND_ONLY_ROWS); every other row's bare name keeps its
+// reading.
 
 import robotApi from './robot_api.json';
 
@@ -36,6 +44,8 @@ const NAME_RE = new RegExp(`^${NAME}$`, 'u');
 const IMPORT_RE = /^import\s+([\s\S]+)$/u;
 const FROM_ROBOT_RE = /^from\s+robot\s+import\s+([\s\S]+)$/u;
 const ITEM_RE = new RegExp(`^(${NAME}(?:\\s*\\.\\s*${NAME})*)(?:\\s+as\\s+(\\S+))?$`, 'u');
+// The rows whose BARE name is the robot's only where the file binds it.
+const BOUND_ONLY_ROWS = new Set(['replay']);
 
 // The file's top-level logical statements: a logical line (physical lines
 // joined while a bracket is open or a line ends in `\`) that starts in column
@@ -101,18 +111,28 @@ function importItems(list) {
 
 /**
  * The robot's names in one Python file, from its code-only text:
- * `{receivers: ['robot', …module aliases], functions: Map(alias → row name)}`.
- * Total: anything that is not a string answers just `robot`.
+ * `{receivers: ['robot', …module aliases], functions: Map(alias → row name),
+ * imported: Set(public rows bound bare as themselves), star: boolean}`
+ * (`star` — the file has `from robot import *`). Total: anything that is not
+ * a string answers just `robot`.
  */
 export function pythonRobotAliases(codeOnly) {
   const receivers = ['robot'];
   const functions = new Map();
-  if (typeof codeOnly !== 'string' || !codeOnly) return { receivers, functions };
+  const imported = new Set();
+  let star = false;
+  if (typeof codeOnly !== 'string' || !codeOnly) return { receivers, functions, imported, star };
   for (const statement of topLevelStatements(codeOnly)) {
     const from = FROM_ROBOT_RE.exec(statement);
     if (from) {
+      if (from[1].trim() === '*') {
+        star = true;
+        continue;
+      }
       for (const [row, alias] of importItems(from[1]) || []) {
-        if (alias && PUBLIC_ROWS.has(row)) functions.set(alias, row);
+        if (!PUBLIC_ROWS.has(row)) continue;
+        if (alias) functions.set(alias, row);
+        else imported.add(row);
       }
       continue;
     }
@@ -122,7 +142,17 @@ export function pythonRobotAliases(codeOnly) {
       if (module === 'robot' && alias && !receivers.includes(alias)) receivers.push(alias);
     }
   }
-  return { receivers, functions };
+  return { receivers, functions, imported, star };
+}
+
+/** Whether the file binds the bare name `row` to the robot's row `row`: a
+ *  `from robot import row` or `*`, and no alias re-binding that name to
+ *  another row (`from robot import home as replay`). */
+function bindsBare(aliases, row) {
+  const functions = aliases && aliases.functions instanceof Map ? aliases.functions : new Map();
+  if (functions.has(row)) return functions.get(row) === row;
+  return !!(aliases && (aliases.star === true
+    || (aliases.imported instanceof Set && aliases.imported.has(row))));
 }
 
 /** `s` as a literal inside a RegExp source. */
@@ -137,12 +167,16 @@ export function receiverAlternation(aliases) {
   return receivers.map(escapeRegExp).join('|');
 }
 
-/** The bare names that call row `row` here: `row` itself unless an alias
- *  re-binds that name to another row, plus every alias of `row`. */
+/** The bare names that call row `row` here: `row` itself (for a
+ *  BOUND_ONLY_ROWS row only when the file binds it — `from robot import row`
+ *  or `*`), unless an alias re-binds that name to another row, plus every
+ *  alias of `row`. */
 export function bareNamesOf(aliases, row) {
   const functions = aliases && aliases.functions instanceof Map ? aliases.functions : new Map();
   const out = [];
-  if (!functions.has(row) || functions.get(row) === row) out.push(row);
+  const itself = BOUND_ONLY_ROWS.has(row)
+    ? bindsBare(aliases, row) : (!functions.has(row) || functions.get(row) === row);
+  if (itself) out.push(row);
   for (const [alias, target] of functions) if (target === row && !out.includes(alias)) out.push(alias);
   return out;
 }
@@ -151,13 +185,18 @@ export function bareNamesOf(aliases, row) {
 export function aliasKey(aliases) {
   if (!aliases) return 'robot|';
   const functions = aliases.functions instanceof Map ? [...aliases.functions] : [];
-  return `${receiverAlternation(aliases)}|${functions.map(([a, r]) => `${a}=${r}`).join(',')}`;
+  const imported = aliases.imported instanceof Set ? [...aliases.imported].sort() : [];
+  return `${receiverAlternation(aliases)}|${functions.map(([a, r]) => `${a}=${r}`).join(',')}`
+    + `|${aliases.star === true ? '*' : ''}${imported.join(',')}`;
 }
 
 /** The row a call `spelling(…)` names: with a receiver its own name, bare
- *  through the file's function aliases first. */
+ *  through the file's function aliases first; null for a bare BOUND_ONLY_ROWS
+ *  name the file does not bind (a student's own `replay`). */
 export function rowNameOf(aliases, receiver, spelling) {
   if (receiver) return spelling;
   const functions = aliases && aliases.functions instanceof Map ? aliases.functions : null;
-  return functions && functions.has(spelling) ? functions.get(spelling) : spelling;
+  if (functions && functions.has(spelling)) return functions.get(spelling);
+  if (BOUND_ONLY_ROWS.has(spelling) && !bindsBare(aliases, spelling)) return null;
+  return spelling;
 }

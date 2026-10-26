@@ -1469,6 +1469,120 @@ class TheLauncherReportsWhatThePythonProgramDid(unittest.TestCase):
             self.assertEqual((info['kind'], info['exc_type'], info['name']),
                              ('other', 'AttributeError', ''), name)
 
+    # ── fix round 1, R3: a hostile exception subclass keeps its report ────
+
+    # Each program raises, on line 9, a subclass whose `name`, `name_from`
+    # or `obj` runs student code that raises: a property, a
+    # __getattribute__, or a property raising AttributeError so that
+    # __getattr__ runs. The report keeps the position and a [TECHNIK] line;
+    # the base class's own slot answers instead of the student's attribute.
+    _HOSTILE_BODIES = {
+        'property': '    @property\n    def {attr}(self):\n        raise RuntimeError("boom")\n',
+        'getattribute': ('    def __getattribute__(self, key):\n'
+                         '        if key == "{attr}":\n'
+                         '            raise RuntimeError("boom")\n'
+                         '        return object.__getattribute__(self, key)\n'),
+        'getattr': ('    @property\n    def {attr}(self):\n        raise AttributeError("{attr}")\n'
+                    '    def __getattr__(self, key):\n        raise RuntimeError("boom")\n'),
+    }
+
+    def _hostile(self, base, attr, how, raise_args):
+        body = self._HOSTILE_BODIES[how].format(attr=attr)
+        head = f'import robot\nclass Boese({base}):\n{body}'
+        lines = head.count('\n')
+        src = head + '\n' * (8 - lines) + f'raise Boese({raise_args})\n'
+        self.assertEqual(src.count('\n'), 9, src)
+        proc, info = self._run(src)
+        self.assertEqual(proc.returncode, 1, (base, attr, how, proc.stderr))
+        self.assertEqual((info['file'], info['line'], info['exc_type']), ('main.py', 9, 'Boese'),
+                         (base, attr, how, info))
+        # The [TECHNIK] line: Python's own last line for the fault (the type
+        # name when its formatting itself fails).
+        self.assertIsInstance(info['detail_line'], str)
+        self.assertTrue(info['detail_line'], (base, attr, how, info))
+        return info
+
+    def test_a_hostile_import_error_keeps_its_report(self):
+        for how in self._HOSTILE_BODIES:
+            info = self._hostile('ImportError', 'name_from', how, '"kaputt", name="helfer"')
+            # name_from's base slot is None: a missing module, named from the
+            # base `name` slot.
+            self.assertEqual((info['kind'], info['name']), ('import', 'helfer'), how)
+            info = self._hostile('ImportError', 'name', how, '"kaputt", name="helfer", name_from="x"')
+            self.assertEqual((info['kind'], info['name']), ('name', 'helfer.x'), how)
+
+    def test_a_hostile_attribute_error_keeps_its_report(self):
+        for how in self._HOSTILE_BODIES:
+            info = self._hostile('AttributeError', 'obj', how, '"kaputt", name="x", obj=None')
+            self.assertEqual((info['kind'], info['name']), ('other', 'None'), how)
+            info = self._hostile('AttributeError', 'name', how, '"kaputt", name="x", obj=None')
+            self.assertEqual((info['kind'], info['name']), ('other', 'None'), how)
+
+    def test_a_hostile_name_error_keeps_its_report(self):
+        for how in self._HOSTILE_BODIES:
+            info = self._hostile('NameError', 'name', how, '"kaputt", name="robto"')
+            self.assertEqual((info['kind'], info['name']), ('name', 'robto'), how)
+
+    def test_the_three_reads_run_no_student_code(self):
+        """In process: `name`, `name_from` and `obj` come from the base
+        class's own member descriptors, and a value that is not an exact str
+        (or, for obj, the exact module type) is no name. The [TECHNIK] text is
+        Python's own formatting of the fault (it may read the attributes and
+        is guarded on its own), so it is stubbed here: `called` records only
+        what the classification itself ran."""
+        import types
+        from unittest import mock
+        sm = _load_student_main()
+        robot = types.ModuleType('robot')
+        called = []
+        stub = mock.patch.object(sm.traceback, 'format_exception_only', lambda exc: ['Fehler'])
+        stub.start()
+        self.addCleanup(stub.stop)
+
+        class Text(str):
+            def __str__(self):
+                called.append('str')
+                return 'x'
+
+            def __bool__(self):
+                called.append('bool')
+                return True
+
+        class Hostile(AttributeError):
+            def __getattribute__(self, key):
+                if key in ('name', 'obj'):
+                    called.append(key)
+                    raise RuntimeError(key)
+                return object.__getattribute__(self, key)
+        exc = Hostile('k', name='nope', obj=sm)
+        info = sm.classify_exception(exc, tempfile.gettempdir(), robot)
+        self.assertEqual((info['kind'], info['name']), ('name', 'edubotics_student_main.nope'))
+        exc = Hostile('k', name=Text('nope'), obj=None)
+        info = sm.classify_exception(exc, tempfile.gettempdir(), robot)
+        self.assertEqual((info['kind'], info['name']), ('other', ''))
+
+        class HostileImport(ImportError):
+            def __getattribute__(self, key):
+                if key in ('name', 'name_from'):
+                    called.append(key)
+                    raise RuntimeError(key)
+                return object.__getattribute__(self, key)
+        info = sm.classify_exception(HostileImport('k', name='robot', name_from='mvoe_to'),
+                                     tempfile.gettempdir(), robot)
+        self.assertEqual((info['kind'], info['name']), ('robot_method', 'mvoe_to'))
+
+        class HostileName(NameError):
+            def __getattribute__(self, key):
+                if key == 'name':
+                    called.append(key)
+                    raise RuntimeError(key)
+                return object.__getattribute__(self, key)
+        info = sm.classify_exception(HostileName('k', name='robto'), tempfile.gettempdir(), robot)
+        self.assertEqual((info['kind'], info['name']), ('name', 'robto'))
+        info = sm.classify_exception(NameError('k', name=Text('robto')), tempfile.gettempdir(), robot)
+        self.assertEqual((info['kind'], info['name']), ('name', ''))
+        self.assertEqual(called, [])
+
     # ── C9-b: sys.exit("…") shows its text ────────────────────────────────
 
     def test_a_text_exit_code_is_printed(self):

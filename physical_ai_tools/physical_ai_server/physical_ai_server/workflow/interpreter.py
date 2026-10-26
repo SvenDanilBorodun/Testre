@@ -39,6 +39,7 @@ import logging
 import math
 import os
 import random
+import threading
 import time
 from typing import Any, Callable, Iterable
 
@@ -251,6 +252,28 @@ _BLOCK_LABEL_DE: dict[str, str] = {
 }
 
 
+# B1 (owner decision OQ-3 A): an EMPTY socket of these blocks is refused in
+# German, as „<"/„>" already were — Blockly's generator silently fills in 0,
+# wahr or falsch there, and the robot used to read None (EQ/NEQ compared with
+# None, „und"/„oder" took it as falsch, „nicht" made it wahr, „Rest von" read an
+# empty divisor as 1). INTENTIONAL #9 of test_blockly_conformance.
+_EMPTY_SOCKET_DE = {
+    'logic_compare': 'Beim Vergleich fehlt ein Wert — bitte beide Felder des '
+                     'Vergleichs-Blocks füllen.',
+    'logic_operation': 'Bei „und“/„oder“ fehlt ein Wert — bitte beide Felder füllen.',
+    'logic_negate': 'Bei „nicht“ fehlt ein Wert — bitte einen Wahrheitswert einsetzen.',
+    'math_modulo': 'Bei „Rest von“ fehlt eine Zahl — bitte beide Felder füllen.',
+}
+
+# B2: a number socket whose block answered NOTHING (a variable that never got a
+# value) — the preview's `None + 1` raises; the robot used to count it as 0.
+_EMPTY_NUMBER_DE = ('Hier wird eine Zahl gebraucht — der Wert ist leer (hat die '
+                    'Variable schon einen Wert bekommen?).')
+
+_TOO_DEEP_DE = ('Das Programm ist zu tief verschachtelt — eine Funktion ruft sich '
+                'zu oft selbst auf, oder Blöcke stecken zu tief ineinander.')
+
+
 def _block_label_de(btype: Any) -> str:
     return _BLOCK_LABEL_DE.get(btype, str(btype or '?'))
 
@@ -261,6 +284,13 @@ def _unexpected_block_error(btype: Any, exc: BaseException, *, value: bool) -> '
     Python's own text (English, and naming internals) is logged for the
     maintainer and never reaches the student."""
     _logger.warning('block %s failed: %s: %s', btype, type(exc).__name__, exc)
+    if isinstance(exc, RecursionError):
+        # A function that calls itself too often runs out of Python's stack
+        # (about 100 to 160 levels in a program thread, depending on the
+        # blocks). Say THAT, not „Der Block „Funktionsaufruf" konnte nicht …"
+        # (B6). No depth cap of our own (it would refuse programs that run
+        # today) and no sys.setrecursionlimit (process-wide in the ROS node).
+        return InterpreterError(_TOO_DEEP_DE)
     verb = 'ausgewertet' if value else 'ausgeführt'
     return InterpreterError(
         f'Der Block „{_block_label_de(btype)}" konnte nicht {verb} werden.')
@@ -406,6 +436,13 @@ class Interpreter:
         # never sees an empty registry, and so the parameter ids it discovers
         # are available to _read_variable_name from the first block onwards.
         self._procedures: dict[str, dict[str, Any]] = self._build_procedure_registry()
+        # One stack of „Funktion" frames PER THREAD (M1, owner decision OQ-4 A):
+        # a call binds its parameters in a frame of its own instead of the one
+        # shared ``ctx.variables`` dict, so a hat thread and the main stack
+        # calling the same function never read each other's arguments, and a
+        # global of the same name as a parameter is never touched. Created on
+        # first push (``_call_procedure``).
+        self._frames = threading.local()
 
     # ------------------------------------------------------------------
     # Construction + validation
@@ -988,6 +1025,10 @@ class Interpreter:
     ) -> None:
         times_block = self._get_input_block(block, 'TIMES')
         times_val = self._eval_value(times_block, ctx) if times_block else block.get('fields', {}).get('TIMES')
+        # A socket whose block answers NOTHING (a variable never set) is refused
+        # (B2): the preview's range(int(None)) raises; it used to run 0 times.
+        if times_block is not None and not _is_disabled(times_block) and times_val is None:
+            raise InterpreterError(_EMPTY_NUMBER_DE)
         try:
             n = int(times_val) if times_val is not None else 0
         except (TypeError, ValueError):
@@ -1560,9 +1601,15 @@ class Interpreter:
         # A bound that is not a number (a text in a variable) is refused in
         # German (F7): Blockly's own Python raises there, and the old silent
         # fallback to 0 / 1 ran a loop the student never asked for.
-        start = self._as_number(self._eval_value(self._get_input_block(block, 'FROM'), ctx), 0.0)
-        end = self._as_number(self._eval_value(self._get_input_block(block, 'TO'), ctx), 0.0)
-        step = self._as_number(self._eval_value(self._get_input_block(block, 'BY'), ctx), 1.0)
+        #
+        # A bound whose block answers NOTHING (a variable never set) is refused
+        # too (B2): the preview's float(None) raises; it used to count as 0.
+        from_block = self._get_input_block(block, 'FROM')
+        start = self._socket_number(from_block, self._eval_value(from_block, ctx), 0.0)
+        to_block = self._get_input_block(block, 'TO')
+        end = self._socket_number(to_block, self._eval_value(to_block, ctx), 0.0)
+        by_block = self._get_input_block(block, 'BY')
+        step = self._socket_number(by_block, self._eval_value(by_block, ctx), 1.0)
         if step == 0:
             # Name the FIX, not only the fault. „ungleich 0", not „größer als
             # 0": a negative step is legal and counts down.
@@ -1687,15 +1734,27 @@ class Interpreter:
         except Exception:  # noqa: BLE001 — observability never breaks a run
             pass
 
+    def _innermost_frame(self) -> dict[str, Any] | None:
+        """This thread's innermost „Funktion" frame, or None outside a call."""
+        stack = getattr(self._frames, 'stack', None)
+        return stack[-1] if stack else None
+
     def _set_variable(self, ctx, name: str, value: Any) -> None:
-        # Audit §A1: serialize all variable writes via ctx.var_lock so
-        # hat handlers and the main stack don't tear the dict.
-        lock = getattr(ctx, 'var_lock', None)
-        if lock is not None:
-            with lock:
-                ctx.variables[name] = value
+        # Inside a „Funktion" a parameter is that call's own binding (M1): the
+        # write stays in this thread's innermost frame. Every other name is the
+        # global.
+        frame = self._innermost_frame()
+        if frame is not None and name in frame:
+            frame[name] = value
         else:
-            ctx.variables[name] = value
+            # Audit §A1: serialize all variable writes via ctx.var_lock so
+            # hat handlers and the main stack don't tear the dict.
+            lock = getattr(ctx, 'var_lock', None)
+            if lock is not None:
+                with lock:
+                    ctx.variables[name] = value
+            else:
+                ctx.variables[name] = value
         # Emit a [VAR:name=json] sentinel so the React variable
         # inspector (debugger panel) can mirror the change. Failures
         # here must not raise — variables are best-effort observability.
@@ -1721,8 +1780,13 @@ class Interpreter:
         except Exception:
             pass
 
-    @staticmethod
-    def _read_variable(ctx, name: str) -> Any:
+    def _read_variable(self, ctx, name: str) -> Any:
+        """A name inside a „Funktion" is that call's parameter, else the global
+        — lexical scope, exactly the preview's ``global`` declarations (OQ-4 A):
+        a nested call does NOT see its caller's parameters."""
+        frame = self._innermost_frame()
+        if frame is not None and name in frame:
+            return frame[name]
         lock = getattr(ctx, 'var_lock', None)
         if lock is not None:
             with lock:
@@ -1757,7 +1821,7 @@ class Interpreter:
         # An empty AT is element 1, as the generator's default; a text is
         # refused (F7, N13).
         at_block = self._get_input_block(block, 'AT')
-        at = int(self._as_number(self._eval_value(at_block, ctx), 1.0))
+        at = int(self._socket_number(at_block, self._eval_value(at_block, ctx), 1.0))
         value_block = self._get_input_block(block, 'TO')
         value = self._eval_value(value_block, ctx) if value_block else None
         inserting = (mode == 'INSERT')
@@ -1767,6 +1831,11 @@ class Interpreter:
             raise InterpreterError(
                 f'Liste ist auf {MAX_LIST_ITEMS} Elemente begrenzt.'
             )
+        # Element 0 does not exist, from either end (B3, INTENTIONAL #2):
+        # „füge ein als #0 von hinten" resolved to len − 0 = len, a legal
+        # append, where the preview's insert(-0) puts it at the FRONT.
+        if where in ('FROM_START', 'FROM_END') and at < 1:
+            raise InterpreterError(_list_index_error_de(at, len(target)))
         idx = self._resolve_index(target, where, at, for_insert=inserting)
         # An insert may address one past the end (that is an append); a SET must
         # land on an element that exists.
@@ -1818,17 +1887,32 @@ class Interpreter:
         # „entferne Element", in its value form „hole Element".
         block_de = 'entferne Element' if statement else 'hole Element'
         target = self._eval_value(self._get_input_block(block, 'VALUE'), ctx)
-        if not isinstance(target, list):
-            raise InterpreterError(
-                f'„{block_de}" braucht eine Liste — bitte eine Liste in den '
-                'Sockel ziehen.')
         fields = block.get('fields') or {}
         mode = fields.get('MODE', 'GET')
         where = fields.get('WHERE', 'FROM_START')
+        # „hole Element" of a TEXT is its character, as the preview's `a[i]`
+        # reads it (B4) — the same rule „nimm Teilliste" follows, so the two
+        # reading blocks agree. Removing („entferne", „hole und entferne")
+        # keeps the list refusal below: the preview's `a.pop(i)` raises on a
+        # text.
+        text_get = isinstance(target, str) and not statement and mode == 'GET'
+        if not text_get and not isinstance(target, list):
+            raise InterpreterError(
+                f'„{block_de}" braucht eine Liste — bitte eine Liste in den '
+                'Sockel ziehen.')
         # An empty AT is element 1, as the generator's default; a text is
         # refused (F7, N13).
         at_block = self._get_input_block(block, 'AT')
-        at = int(self._as_number(self._eval_value(at_block, ctx), 1.0))
+        at = int(self._socket_number(at_block, self._eval_value(at_block, ctx), 1.0))
+        if text_get:
+            if not target:
+                raise InterpreterError('Der Text ist leer — „hole Element“ findet nichts.')
+            if where in ('FROM_START', 'FROM_END') and at < 1:
+                raise InterpreterError(_text_index_error_de(at, len(target)))
+            idx = self._resolve_index(target, where, at)
+            if idx < 0 or idx >= len(target):
+                raise InterpreterError(_text_index_error_de(at, len(target)))
+            return target[idx]
         if not target:
             raise InterpreterError(
                 f'Die Liste ist leer — „{block_de}" findet nichts.')
@@ -1866,14 +1950,44 @@ class Interpreter:
             raise InterpreterError('Variable hat keinen Namen.')
         # The DELTA must be a number (F7): the generator's `x + delta` raises
         # for a text delta; the old silent fallback added 0.
-        delta = self._as_number(
-            self._eval_value(self._get_input_block(block, 'DELTA'), ctx), 0.0)
+        delta_block = self._get_input_block(block, 'DELTA')
+        delta = self._socket_number(delta_block, self._eval_value(delta_block, ctx), 0.0)
         current = self._read_variable(ctx, var_name)
-        if isinstance(current, bool) or not isinstance(current, (int, float)):
-            base = 0.0
-        else:
+        # A Wahrheitswert counts like the preview's isinstance(x, Number) —
+        # wahr is 1, falsch 0 (B2); it used to count as 0 either way.
+        if isinstance(current, (int, float)):
             base = float(current)
+        else:
+            base = 0.0
         self._set_variable(ctx, var_name, base + delta)
+
+    @classmethod
+    def _socket_number(cls, inner: Any, value: Any, default: float = 0.0) -> float:
+        """The number a math socket holds (B2).
+
+        ``inner`` is the socket's block and ``value`` what it ALREADY evaluated
+        to — the evaluation stays at the call site, so this adds no Python
+        frame to the evaluation chain (the recursion pin of
+        test_interpreter_procedure_frames). An EMPTY (or disabled) socket is
+        the generator's ``default``; a block that answered NOTHING (a variable
+        that never got a value) is refused, as the preview's ``None + 1``
+        raises — it used to count as 0. Anything else goes through
+        :meth:`_as_number`."""
+        if inner is None or _is_disabled(inner):
+            return float(default)
+        if value is None:
+            raise InterpreterError(_EMPTY_NUMBER_DE)
+        return cls._as_number(value, default)
+
+    def _refuse_empty_sockets(self, block: dict[str, Any], *names: str) -> None:
+        """Refuse an EMPTY (or disabled) socket of „vergleiche", „und"/„oder",
+        „nicht" and „Rest von" BEFORE any socket is evaluated (B1, owner
+        decision OQ-3 A), so „und" with an empty B refuses even when A would
+        decide. Evaluates nothing itself (no extra frame in the chain)."""
+        for name in names:
+            inner = self._get_input_block(block, name)
+            if inner is None or _is_disabled(inner):
+                raise InterpreterError(_EMPTY_SOCKET_DE[block.get('type')])
 
     @staticmethod
     def _as_number(value: Any, default: float = 0.0) -> float:
@@ -2009,31 +2123,31 @@ class Interpreter:
         spec = self._procedures.get(name)
         if spec is None:
             raise InterpreterError(f'Unbekannte Funktion: {name}')
-        # Save+restore caller's variable scope so procedure params don't
-        # leak out. (Block-style procedures share globals for non-param
-        # writes — that's documented Blockly behaviour.)
-        saved: dict[str, Any] = {}
+        # A call has its OWN frame (M1, owner decision OQ-4 A): the parameters
+        # are bound in a dict pushed onto THIS thread's stack and popped in the
+        # finally, never written into the shared ``ctx.variables``. The old
+        # save → overwrite → restore of the shared dict let a hat thread and
+        # the main stack calling the same function read each other's argument
+        # (the first restore popped the other call's binding), and overwrote a
+        # global of the same name for the whole call. A write to a NON-parameter
+        # inside the body still goes to the global (Blockly's own semantics: the
+        # generator declares every other workspace variable ``global``).
+        #
+        # The arguments are already evaluated, in the caller's frame, by
+        # _read_call_args; nothing here evaluates a block, so the frame adds no
+        # Python frame to the evaluation chain (the recursion-depth pin of
+        # test_interpreter_procedure_frames).
         param_names = spec.get('params') or []
-        # Move the param-shadow setup *inside* the try/finally so a
-        # partial failure (e.g., args[i] eval throws) doesn't leave the
-        # caller's scope half-overwritten. Audit §B4.
         proc_block = spec['block']
         body = self._get_statement_block(proc_block, 'STACK')
         return_value: Any = None
+        frame = {pname: (args[i] if i < len(args) else None)
+                 for i, pname in enumerate(param_names) if pname}
+        stack = getattr(self._frames, 'stack', None)
+        if stack is None:
+            stack = self._frames.stack = []
+        stack.append(frame)
         try:
-            lock = getattr(ctx, 'var_lock', None)
-            for i, pname in enumerate(param_names):
-                if not pname:
-                    continue
-                if lock is not None:
-                    with lock:
-                        if pname in ctx.variables:
-                            saved[pname] = ctx.variables[pname]
-                        ctx.variables[pname] = args[i] if i < len(args) else None
-                else:
-                    if pname in ctx.variables:
-                        saved[pname] = ctx.variables[pname]
-                    ctx.variables[pname] = args[i] if i < len(args) else None
             if body is not None:
                 self._exec_chain(body, ctx, on_block_change)
             if spec.get('has_return'):
@@ -2042,23 +2156,7 @@ class Interpreter:
         except _ProcedureReturn as early:
             return_value = early.value
         finally:
-            # Restore param-shadowed variables. Use the same lock for
-            # consistency with the setup path above.
-            lock = getattr(ctx, 'var_lock', None)
-            for pname in param_names:
-                if not pname:
-                    continue
-                if lock is not None:
-                    with lock:
-                        if pname in saved:
-                            ctx.variables[pname] = saved[pname]
-                        else:
-                            ctx.variables.pop(pname, None)
-                else:
-                    if pname in saved:
-                        ctx.variables[pname] = saved[pname]
-                    else:
-                        ctx.variables.pop(pname, None)
+            stack.pop()
         return return_value
 
     def _exec_procedure_call(
@@ -2177,11 +2275,17 @@ class Interpreter:
             return block.get('fields', {}).get('BOOL', 'FALSE') == 'TRUE'
 
         if btype == 'logic_negate':
+            # An empty socket is refused (B1, OQ-3 A): `not None` answered wahr
+            # where the preview's `not True` is falsch.
+            self._refuse_empty_sockets(block, 'BOOL')
             inner = self._get_input_block(block, 'BOOL')
             return not self._truthy(self._eval_value(inner, ctx))
 
         if btype == 'logic_compare':
             op = block.get('fields', {}).get('OP', 'EQ')
+            # An EMPTY socket is refused for every operator (B1, OQ-3 A): EQ/NEQ
+            # used to compare with None where the preview compares with 0.
+            self._refuse_empty_sockets(block, 'A', 'B')
             a = self._eval_value(self._get_input_block(block, 'A'), ctx)
             b = self._eval_value(self._get_input_block(block, 'B'), ctx)
             # Both operands carry check:null, so Blockly lets ANY pairing
@@ -2192,12 +2296,12 @@ class Interpreter:
             # "a" > 1 → False), so flipping the operator never revealed the
             # problem and the sonst branch ran either way with no message.
             # Blockly's own generated Python raises here; so do we, in German.
+            # This now covers a VALUE that is nothing (a variable never set):
+            # the preview's `None < 1` raises too, while EQ/NEQ keep comparing
+            # (the preview's `None == 0` is falsch as well).
             if op in ('LT', 'LTE', 'GT', 'GTE'):
                 if a is None or b is None:
-                    raise InterpreterError(
-                        'Beim Vergleich fehlt ein Wert — bitte beide Felder '
-                        'des Vergleichs-Blocks füllen.'
-                    )
+                    raise InterpreterError(_EMPTY_SOCKET_DE['logic_compare'])
             try:
                 return self._apply_compare(op, a, b)
             except (TypeError, ValueError):
@@ -2213,6 +2317,9 @@ class Interpreter:
             # Element 1 = 5" must not fail on the empty list. The answer stays
             # a Boolean (INTENTIONAL #1 of test_blockly_conformance).
             op = block.get('fields', {}).get('OP', 'AND')
+            # Both sockets are checked BEFORE either is evaluated (B1, OQ-3 A),
+            # so „und" with an empty B refuses even when A already decides.
+            self._refuse_empty_sockets(block, 'A', 'B')
             a = self._truthy(self._eval_value(self._get_input_block(block, 'A'), ctx))
             if op == 'AND' and not a:
                 return False
@@ -2222,31 +2329,49 @@ class Interpreter:
 
         if btype == 'math_arithmetic':
             op = block.get('fields', {}).get('OP', 'ADD')
-            a = self._as_number(self._eval_value(self._get_input_block(block, 'A'), ctx))
-            b = self._as_number(self._eval_value(self._get_input_block(block, 'B'), ctx))
+            a_block = self._get_input_block(block, 'A')
+            a = self._socket_number(a_block, self._eval_value(a_block, ctx), 0.0)
+            b_block = self._get_input_block(block, 'B')
+            b = self._socket_number(b_block, self._eval_value(b_block, ctx), 0.0)
             return self._apply_arithmetic(op, a, b)
 
         if btype == 'math_random_int':
-            lo = int(self._as_number(self._eval_value(self._get_input_block(block, 'FROM'), ctx)))
-            hi = int(self._as_number(self._eval_value(self._get_input_block(block, 'TO'), ctx)))
+            from_block = self._get_input_block(block, 'FROM')
+            lo_f = self._socket_number(from_block, self._eval_value(from_block, ctx), 0.0)
+            to_block = self._get_input_block(block, 'TO')
+            hi_f = self._socket_number(to_block, self._eval_value(to_block, ctx), 0.0)
+            # B5: the preview's random.randint raises for a fractional (or
+            # infinite) bound; truncating 1,5 to 1 drew numbers the student
+            # never asked for.
+            if not (math.isfinite(lo_f) and math.isfinite(hi_f)
+                    and lo_f.is_integer() and hi_f.is_integer()):
+                raise InterpreterError('„Zufallszahl“ braucht ganze Zahlen als Grenzen.')
+            lo, hi = int(lo_f), int(hi_f)
             if lo > hi:
                 lo, hi = hi, lo
             return random.randint(lo, hi)
         if btype == 'math_constrain':
-            v = self._as_number(self._eval_value(self._get_input_block(block, 'VALUE'), ctx))
-            lo = self._as_number(self._eval_value(self._get_input_block(block, 'LOW'), ctx))
-            hi = self._as_number(self._eval_value(self._get_input_block(block, 'HIGH'), ctx))
+            value_block = self._get_input_block(block, 'VALUE')
+            v = self._socket_number(value_block, self._eval_value(value_block, ctx), 0.0)
+            low_block = self._get_input_block(block, 'LOW')
+            lo = self._socket_number(low_block, self._eval_value(low_block, ctx), 0.0)
+            # An empty HIGH is the generator's float('inf') (B1): a defaulted
+            # bound, not a half-built comparison; it used to read 0.
+            high_block = self._get_input_block(block, 'HIGH')
+            hi = self._socket_number(high_block, self._eval_value(high_block, ctx), math.inf)
             if lo > hi:
                 lo, hi = hi, lo
             return min(max(v, lo), hi)
         if btype == 'math_modulo':
-            # Read WITHOUT the old `or 1` coercion: `0 or 1 == 1` silently turned
-            # an explicit zero divisor into 1 (a different silent-wrong-value
-            # bug). Only a genuinely missing (None) input falls back to 1.
-            raw_a = self._eval_value(self._get_input_block(block, 'DIVIDEND'), ctx)
-            raw_b = self._eval_value(self._get_input_block(block, 'DIVISOR'), ctx)
-            a = self._as_number(raw_a, 0.0)
-            b = self._as_number(raw_b, 1.0)
+            # An EMPTY socket is refused (B1, OQ-3 A): the old divisor default
+            # of 1 turned „Rest von 7 durch ( )" into 0 where the preview's
+            # `7 % 0` raises. Read WITHOUT the old `or 1` coercion: `0 or 1 == 1`
+            # silently turned an explicit zero divisor into 1.
+            self._refuse_empty_sockets(block, 'DIVIDEND', 'DIVISOR')
+            dividend_block = self._get_input_block(block, 'DIVIDEND')
+            a = self._socket_number(dividend_block, self._eval_value(dividend_block, ctx), 0.0)
+            divisor_block = self._get_input_block(block, 'DIVISOR')
+            b = self._socket_number(divisor_block, self._eval_value(divisor_block, ctx), 0.0)
             # Fail loud instead of the old silent `0.0`: a modulo-by-zero is a
             # student mistake, and returning 0 would feed a wrong value silently
             # into the rest of the program (violates "no silent fallbacks").
@@ -2258,7 +2383,8 @@ class Interpreter:
             return a % b
         if btype == 'math_round':
             op = (block.get('fields') or {}).get('OP', 'ROUND')
-            n = self._as_number(self._eval_value(self._get_input_block(block, 'NUM'), ctx))
+            num_block = self._get_input_block(block, 'NUM')
+            n = self._socket_number(num_block, self._eval_value(num_block, ctx), 0.0)
             # NOTE: `math` is imported at module scope. A function-local
             # `import math` here would rebind `math` as a LOCAL for the WHOLE of
             # _eval_value_impl, so every earlier `math.` use in this function
@@ -2309,10 +2435,14 @@ class Interpreter:
             return []
         if btype == 'lists_repeat':
             v = self._eval_value(self._get_input_block(block, 'ITEM'), ctx)
-            raw_n = self._as_number(
-                self._eval_value(self._get_input_block(block, 'NUM'), ctx), 0.0)
+            num_block = self._get_input_block(block, 'NUM')
+            raw_n = self._socket_number(num_block, self._eval_value(num_block, ctx), 0.0)
             if not math.isfinite(raw_n):
                 raise InterpreterError('Anzahl ist keine gültige Zahl.')
+            # B5: the preview's `[x] * 2.7` raises; truncating to 2 built a
+            # list of a length the student never asked for.
+            if not raw_n.is_integer():
+                raise InterpreterError('„erzeuge Liste mit … Mal“ braucht eine ganze Zahl.')
             n = max(0, int(raw_n))
             # lists_create_with is capped by MAX_LIST_CREATE_ITEMS above (ours,
             # not the mutator's — it has none); this one had NO cap at all, so a
@@ -2374,17 +2504,31 @@ class Interpreter:
             return self._lists_get_index(block, ctx, statement=False)
         if btype == 'lists_getSublist':
             target = self._eval_value(self._get_input_block(block, 'LIST'), ctx)
-            if not isinstance(target, list):
-                return []
+            # A text is sliced like the preview's `a[i:j]` and answers a text
+            # (B4); anything else that is not a list is refused, as the
+            # preview's slice raises — it used to answer [] silently.
+            if not isinstance(target, (list, str)):
+                raise InterpreterError('„nimm Teilliste“ braucht eine Liste oder einen Text.')
             where1 = (block.get('fields') or {}).get('WHERE1', 'FROM_START')
             where2 = (block.get('fields') or {}).get('WHERE2', 'FROM_END')
             at1_block = self._get_input_block(block, 'AT1')
             at2_block = self._get_input_block(block, 'AT2')
-            at1 = int(self._as_number(self._eval_value(at1_block, ctx), 1.0))
-            at2 = int(self._as_number(self._eval_value(at2_block, ctx), 1.0))
+            at1 = int(self._socket_number(at1_block, self._eval_value(at1_block, ctx), 1.0))
+            at2 = int(self._socket_number(at2_block, self._eval_value(at2_block, ctx), 1.0))
+            # Element 0 does not exist, from either end (B3, INTENTIONAL #2):
+            # it used to be clamped (from the start: the whole list, preview
+            # [30]; from the end: [], preview the whole list). Past the end
+            # keeps clamping, as the preview's slice clamps.
+            for where, at in ((where1, at1), (where2, at2)):
+                if where in ('FROM_START', 'FROM_END') and at < 1:
+                    if isinstance(target, str):
+                        raise InterpreterError(_text_index_error_de(at, len(target)))
+                    raise InterpreterError(_list_index_error_de(at, len(target)))
             i1 = max(0, self._resolve_index(target, where1, at1))
             i2 = self._resolve_index(target, where2, at2) + 1
             i2 = max(i1, min(len(target), i2))
+            if isinstance(target, str):
+                return target[i1:i2]
             return list(target[i1:i2])
 
         # Procedure call (returning).
@@ -2634,6 +2778,17 @@ def _list_index_error_de(at: Any, length: int) -> str:
     elements = 'Element' if length == 1 else 'Elemente'
     return (f'Element {which} gibt es nicht — die Liste hat nur {length} '
             f'{elements}. Das erste Element ist Nummer 1.')
+
+
+def _text_index_error_de(at: Any, length: int) -> str:
+    """The out-of-range sentence for „hole Element" / „nimm Teilliste" of a
+    TEXT (B4): a text is read like a list of characters, numbered from 1."""
+    try:
+        which = int(at)
+    except (TypeError, ValueError):
+        which = at
+    return (f'Zeichen {which} gibt es nicht — der Text hat nur {length} Zeichen. '
+            'Das erste Zeichen ist Nummer 1.')
 
 
 def _jsonable(value: Any, budget: int = _MAX_VAR_PAYLOAD_ITEMS) -> Any:

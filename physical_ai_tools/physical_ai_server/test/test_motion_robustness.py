@@ -347,7 +347,8 @@ def test_move_to_with_unseeded_pose_raises_before_publishing():
         publisher=lambda chunk: published.append(chunk),
     )
     with pytest.raises(WorkflowError):
-        move_to(ctx, {'destination': {'x': 0.20, 'y': 0.0, 'z': 0.0}})
+        # A point (a tuple), not „Position von" (an {x, y, z} dict, M6).
+        move_to(ctx, {'destination': (0.20, 0.0, 0.0)})
     assert published == []
 
 

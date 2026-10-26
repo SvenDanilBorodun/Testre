@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import time
 from typing import Any
 
@@ -1323,7 +1324,16 @@ def _solve_or_raise(
     target_xyz: tuple[float, float, float],
     free_yaw: bool = True,
     roll: float | None = None,
+    unreachable_de: str | None = None,
 ) -> list[float]:
+    """Solve ``target_xyz`` or refuse in German.
+
+    ``unreachable_de`` is the caller's sentence for an unreachable target (B8:
+    „bewege zu" / „aufnehmen" / „ablegen bei" name the Ziel or the point, see
+    :func:`_unreachable_target_de`); ``None`` keeps the object sentence of the
+    composite „Greife" path. Every sentence goes through
+    :func:`sim_greifbereich_de`, so the simulator never reads the rig's
+    „markierten Greifbereich"."""
     if ctx.ik is None:
         raise WorkflowError(
             'Roboter-Beschreibung nicht verfügbar — der Bewegungsrechner (IK) '
@@ -1338,11 +1348,49 @@ def _solve_or_raise(
     seed = ctx.last_arm_joints or _home_joints(ctx)
     solution = ctx.ik.solve(target_xyz=target_xyz, seed=seed, free_yaw=free_yaw, roll=roll)
     if solution is None:
-        raise WorkflowError(
-            'Position außerhalb des Arbeitsbereichs — bitte das Objekt in den '
-            'markierten Greifbereich legen (nicht zu nah am Roboter, nicht zu weit).'
-        )
+        raise WorkflowError(sim_greifbereich_de(
+            ctx, unreachable_de if unreachable_de is not None else _UNREACHABLE_OBJECT_DE))
     return list(solution)
+
+
+# The object sentence: the composite „Greife" path, whose target IS an object.
+_UNREACHABLE_OBJECT_DE = (
+    'Position außerhalb des Arbeitsbereichs — bitte das Objekt in den '
+    'markierten Greifbereich legen (nicht zu nah am Roboter, nicht zu weit).'
+)
+# B8: „bewege zu" / „aufnehmen" / „ablegen bei" with an unreachable ZIEL or
+# point used to say the object sentence above, which names neither the Ziel nor
+# the fix.
+_UNREACHABLE_ZIEL_DE = ('Das Ziel „{name}“ liegt außerhalb des Arbeitsbereichs — bitte '
+                        'das Ziel neu setzen, nicht zu nah am Roboter und nicht zu weit weg.')
+_UNREACHABLE_ZIEL_SIM_DE = ('Das Ziel „{name}“ liegt außerhalb des Arbeitsbereichs — '
+                            'bitte das Ziel auf dem Sim-Tisch im Greifbereich neu setzen.')
+_UNREACHABLE_POINT_DE = ('Dieser Punkt liegt außerhalb des Arbeitsbereichs — bitte einen '
+                         'Punkt im Greifbereich wählen, nicht zu nah am Roboter und nicht '
+                         'zu weit weg.')
+# The no-approach-room skip. It ends „in den markierten Greifbereich legen." so
+# that sim_greifbereich_de can word it for the Sim-Tisch (review-3 MJ-C: the old
+# „… in die Mitte des markierten Greifbereichs legen." was left untouched).
+_NO_APPROACH_ROOM_DE = (
+    'Kein Platz, um von oben anzufahren — über diesem Punkt ist der Arm schon '
+    'ganz ausgestreckt. Er könnte das Objekt nur von der Seite anschieben und '
+    'würde es umwerfen. Bitte das Objekt etwas weiter zur Mitte hin in den '
+    'markierten Greifbereich legen.'
+)
+
+
+def _unreachable_target_de(ctx, dest: Any) -> str | None:
+    """The sentence for an unreachable DESTINATION of „bewege zu" /
+    „aufnehmen" / „ablegen bei": a Ziel name names the Ziel (worded for the
+    mode), a point (list, tuple or dict) says „Dieser Punkt"; anything else
+    keeps the object sentence (``None``)."""
+    if isinstance(dest, str):
+        template = (_UNREACHABLE_ZIEL_SIM_DE if getattr(ctx, 'simulated', False)
+                    else _UNREACHABLE_ZIEL_DE)
+        return template.format(name=dest)
+    if isinstance(dest, (list, tuple, dict)):
+        return _UNREACHABLE_POINT_DE
+    return None
 
 
 # How close (metres) the bisected approach height is allowed to converge to the
@@ -1480,6 +1528,7 @@ def _solve_grasp_and_approach(
     roll: float | None = None,
     refuse_without_clearance: bool = True,
     purpose: str = 'grasp',
+    unreachable_de: str | None = None,
 ) -> tuple[list[float], list[float]]:
     """Solve the GRASP first, then the APPROACH derived from the reachable
     envelope. Returns ``(grasp_arm_q, approach_arm_q)``.
@@ -1532,9 +1581,13 @@ def _solve_grasp_and_approach(
     (measured: it costs the whole place to save 1.6 mm of clearance at the OMX
     outer ring, and most of the pick band on an arm with a low top-down
     ceiling). Re-introducing it here would undo that fix.
+
+    ``unreachable_de`` is handed to :func:`_solve_or_raise` (B8): the caller's
+    sentence for an unreachable grasp/drop point, ``None`` for the object one.
     """
     gx, gy, gz = (float(v) for v in grasp_xyz)
-    grasp_arm_q = _solve_or_raise(ctx, (gx, gy, gz), roll=roll)
+    grasp_arm_q = _solve_or_raise(ctx, (gx, gy, gz), roll=roll,
+                                  unreachable_de=unreachable_de)
 
     requested = max(0.0, float(approach_height_m))
     best_lift, best_q = _max_reachable_rise(
@@ -1554,12 +1607,7 @@ def _solve_grasp_and_approach(
         # 3-cube program over one badly-placed cube while a perfectly good one sat
         # at mid-band. A standalone „Greife" / „fahre über" still fails loud
         # (GraspSkip IS a WorkflowError) with this exact message.
-        raise GraspSkip(
-            'Kein Platz, um von oben anzufahren — über diesem Punkt ist der Arm '
-            'schon ganz ausgestreckt. Er könnte das Objekt nur von der Seite '
-            'anschieben und würde es umwerfen. Bitte das Objekt etwas weiter in '
-            'die Mitte des markierten Greifbereichs legen.'
-        )
+        raise GraspSkip(sim_greifbereich_de(ctx, _NO_APPROACH_ROOM_DE))
     if purpose == 'grasp' and best_lift < _APPROACH_WARN_FRAC * requested:
         # PLACE deliberately excluded — see the ``purpose`` note in the docstring.
         ctx.log(
@@ -1690,10 +1738,10 @@ _GREIFZIEL_IN_DESTINATION_DE = {
         'gefundenes Objekt bitte „Greife <Typ>" benutzen oder „fahre über" → '
         '„senke auf" → „schließe um" → „hebe an".'
     ),
-    # F5: „Position von <Ziel>" is NOT recommended here any more — it slips
-    # past this very refusal (a plain {x, y, z}) and drives sideways to the
-    # cube's mid-height with the fixed jaw roll, the blind move this refusal
-    # exists to prevent.
+    # F5: „Position von <Ziel>" is NOT recommended here: it drives sideways to
+    # the cube's grasp height with the fixed jaw roll, the blind move this
+    # refusal exists to prevent — and it is refused here itself now (M6,
+    # _POSITION_VON_IN_DESTINATION_DE).
     'bewege zu': (
         'Ein Greifziel gehört nicht in „bewege zu" — dieser Block fährt zu '
         'einem gepinnten Ziel. Für ein gefundenes Objekt bitte „fahre über" '
@@ -1703,6 +1751,40 @@ _GREIFZIEL_IN_DESTINATION_DE = {
         'Ein Greifziel gehört nicht in „ablegen bei" — dieser Block legt an '
         'einem gepinnten Ziel ab. Wenn du an der Stelle eines gefundenen '
         'Objekts ablegen willst, bitte „Position von <Ziel>" hier einsetzen.'
+    ),
+}
+
+
+def _is_position_von(value: Any) -> bool:
+    """True when ``value`` is what „Position von <Ziel>" answers: a plain
+    ``{x, y, z}`` dict with no ``world_xyz_m`` (M6).
+
+    In a Blockly run this shape has exactly ONE producer,
+    ``perception_blocks.object_position`` (pinned by
+    test_greifziel_socket_contract). A text program's point is a list/tuple on
+    the wire and in the handler, carries no provenance and is never judged
+    here."""
+    return (isinstance(value, dict)
+            and all(k in value for k in ('x', 'y', 'z'))
+            and 'world_xyz_m' not in value)
+
+
+# M6, owner decision OQ-1 A: „Position von <Ziel>" is the found object's centre
+# at GRASP height. „aufnehmen" grasps it blindly from above without the object's
+# rotation and too high (measured: fingertip 27.0 mm, roll joint ±1.571 rad,
+# where „Greife" closes at 15.0 mm with the tag's own roll); „bewege zu" drives
+# the open gripper sideways into the object. „ablegen bei" keeps accepting it.
+_POSITION_VON_IN_DESTINATION_DE = {
+    'aufnehmen': (
+        '„Position von <Ziel>" gehört nicht in „aufnehmen" — dieser Block greift '
+        'blind von oben, ohne die Drehung des Objekts zu kennen, und packt es zu '
+        'hoch. Für ein gefundenes Objekt bitte „Greife <Typ>" benutzen oder „fahre '
+        'über" → „senke auf" → „schließe um" → „hebe an".'
+    ),
+    'bewege zu': (
+        '„Position von <Ziel>" gehört nicht in „bewege zu" — der Greifer würde '
+        'seitlich in das Objekt fahren. Um über ein gefundenes Objekt zu fahren, '
+        'bitte „fahre über" benutzen; „Position von" passt in „ablegen bei".'
     ),
 }
 
@@ -1729,11 +1811,15 @@ def _refuse_greifziel(value: Any, block_de: str) -> None:
     a 30 mm cube that grips 3 mm below its top. ``move_to(Greifziel)`` likewise
     ends at EE z = 0.0150, i.e. it drives LATERALLY at cube height.
 
-    Refused rather than silently re-interpreted: „Position von <Ziel>" already
-    exists for the legitimate "go where that object is" intent and returns a
-    plain ``{x, y, z}``, which these blocks keep accepting unchanged."""
+    Refused rather than silently re-interpreted. „Position von <Ziel>" returns a
+    plain ``{x, y, z}`` at the object's grasp height, which drives the same
+    blind motion: „aufnehmen" and „bewege zu" refuse it too
+    (``_is_position_von``, M6, owner decision OQ-1 A), and only „ablegen bei"
+    accepts it — releasing where a found object lies is its intended use."""
     if _is_greifziel(value):
         raise WorkflowError(_GREIFZIEL_IN_DESTINATION_DE[block_de])
+    if block_de in _POSITION_VON_IN_DESTINATION_DE and _is_position_von(value):
+        raise WorkflowError(_POSITION_VON_IN_DESTINATION_DE[block_de])
 
 
 # F22 / N5: ONE sentence for a Ziel name this run does not know, whichever path
@@ -2343,7 +2429,8 @@ def move_to(ctx, args: dict[str, Any]) -> None:
     arm_q = _solve_with_carry_roll(ctx, target, roll)
     if arm_q is None:
         roll = GRASP_ROLL_RAD
-        arm_q = _solve_or_raise(ctx, target, roll=GRASP_ROLL_RAD)
+        arm_q = _solve_or_raise(ctx, target, roll=GRASP_ROLL_RAD,
+                                unreachable_de=_unreachable_target_de(ctx, dest))
     q_end = arm_q + [ctx.last_full_joints[_n(ctx)]]
     # TRANSIT — route around any no-go zone (raw _publish_motion when none).
     # Optional per-move „mit Tempo" override; None → workflow-global tempo.
@@ -2463,6 +2550,7 @@ def _execute_pickup(
     roll: float,
     close_rad: float,
     tempo: float | None = None,
+    unreachable_de: str | None = None,
 ) -> None:
     """Open → hover above → descend straight down → close → lift, at the FINAL
     ``grasp_xyz`` (NO extra clearance added here — the caller supplies the exact
@@ -2475,9 +2563,12 @@ def _execute_pickup(
     HIGH-5: solve the GRASP first; derive the approach from the reachable
     envelope (clamping the lift at the annulus edge) instead of refusing a
     graspable object because its +approach pose fell outside the annulus.
+
+    ``unreachable_de``: the ``pickup`` block names its Ziel or point (B8); the
+    composite „Greife" passes nothing and keeps the object sentence.
     """
     grasp_arm_q, above_arm_q = _solve_grasp_and_approach(
-        ctx, grasp_xyz, approach_height_m, roll=roll)
+        ctx, grasp_xyz, approach_height_m, roll=roll, unreachable_de=unreachable_de)
     lift_arm_q = above_arm_q
 
     open_q = ctx.last_full_joints[:_n(ctx)] + [_gripper_open(ctx)]
@@ -2796,7 +2887,8 @@ def pickup(ctx, args: dict[str, Any]) -> None:
     # PICKUP_CLOSE_RAD block comment. On the OMX the two are the same number, so
     # that arm is byte-identical.
     _execute_pickup(ctx, grasp_xyz, DEFAULT_APPROACH_HEIGHT_M,
-                    GRASP_ROLL_RAD, _pickup_close(ctx), tempo=_move_tempo(args))
+                    GRASP_ROLL_RAD, _pickup_close(ctx), tempo=_move_tempo(args),
+                    unreachable_de=_unreachable_target_de(ctx, args.get('target')))
 
 
 def drop_at(ctx, args: dict[str, Any]) -> None:
@@ -2838,7 +2930,8 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
     # is derived from grasp geometry — see _solve_grasp_and_approach.
     drop_arm_q, above_arm_q = _solve_grasp_and_approach(
         ctx, drop_xyz, DEFAULT_APPROACH_HEIGHT_M, roll=roll,
-        refuse_without_clearance=False, purpose='place')
+        refuse_without_clearance=False, purpose='place',
+        unreachable_de=_unreachable_target_de(ctx, args.get('destination')))
 
     # Carry at the close the GRASP actually commanded, not at the profile's
     # full-closed value. The two are the same number on the OMX
@@ -2967,8 +3060,18 @@ def _no_greifziel_error(ctx) -> WorkflowError:
     reason means „finde …" never ran at all, i.e. the socket is empty in the
     PROGRAM: no pass and no retry can fill it, so it is a base ``WorkflowError``
     that ends the run instead of being swallowed by the „Solange sichtbar" loop
-    for MAX_LOOP_ITERATIONS passes."""
-    reason = getattr(ctx, 'last_find_failure', None)
+    for MAX_LOOP_ITERATIONS passes.
+
+    The reason is THIS thread's (M1-b): ``find_failure_by_thread`` holds what
+    each thread's last „finde" recorded, so another thread's failure never
+    explains this thread's empty socket and never erases this thread's reason.
+    A ctx that carries only the plain ``last_find_failure`` string (an older
+    caller, a test that sets it) is read as before."""
+    by_thread = getattr(ctx, 'find_failure_by_thread', None)
+    if isinstance(by_thread, dict):
+        reason = by_thread.get(threading.get_ident())
+    else:
+        reason = getattr(ctx, 'last_find_failure', None)
     if not isinstance(reason, str) or not reason.strip():
         return WorkflowError(_NO_GREIFZIEL_MSG)
     reason = sim_greifbereich_de(ctx, reason)
@@ -3252,6 +3355,15 @@ _LIFT_NOT_SOLVABLE_HOME_DE = (
     _LIFT_NOT_SOLVABLE_DE + ' „hebe an" gehört hinter „Greife" oder „schließe '
     'um"; aus der Grundstellung heraus gibt es nichts anzuheben.'
 )
+# B7: „hebe an" that cannot rise any further. The „Greife" clause is said only
+# while an object is carried (``ctx.carried_tag``): right after „Greife" the
+# hover is already the top, so it explains the no-op; in a program that never
+# grasped it described an object that is not there.
+_LIFT_AT_TOP_DE = (
+    '[WARNUNG] „hebe an" hat den Arm nicht bewegt — über dieser Stelle ist er '
+    'schon so hoch, wie er kommt.'
+)
+_LIFT_AT_TOP_CARRYING_DE = _LIFT_AT_TOP_DE + ' „Greife" hebt das Objekt bereits vom Tisch ab.'
 # „In the Grundstellung" for N8's wording: every arm joint within this of HOME
 # (the same 0.01 rad the manual home glide calls „steht bereits in der
 # Grundstellung").
@@ -3339,11 +3451,9 @@ def lift(ctx, args: dict[str, Any]) -> None:
     if rise_m <= _MIN_APPROACH_CLEARANCE_M:
         # Nothing to gain — say so plainly and publish NOTHING (the old code
         # published a zero-length move and warned about the wrong thing).
-        ctx.log(
-            '[WARNUNG] „hebe an" hat den Arm nicht bewegt — über dieser Stelle '
-            'ist er schon so hoch, wie er kommt. „Greife" hebt das Objekt '
-            'bereits vom Tisch ab.'
-        )
+        ctx.log(_LIFT_AT_TOP_CARRYING_DE
+                if getattr(ctx, 'carried_tag', None) is not None
+                else _LIFT_AT_TOP_DE)
         ctx.last_arm_joints = list(cur[:_n(ctx)])
         return
     if rise_m < _APPROACH_WARN_FRAC * DEFAULT_APPROACH_HEIGHT_M:

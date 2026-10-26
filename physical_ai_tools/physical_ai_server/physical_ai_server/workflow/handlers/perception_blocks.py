@@ -289,12 +289,21 @@ def _poll_until(ctx, predicate, timeout_s: float, label: str,
             # called from a non-hat path (e.g. test harness).
             released = False
     try:
-        while time.monotonic() < deadline:
+        # LOOK FIRST, and take the last look AT the deadline (C1). The loop
+        # used to be ``while monotonic() < deadline``: a timeout of 0 never
+        # evaluated the predicate (so „warte bis Greifer hält (max 0 s)" answered
+        # falsch while the gripper held), and a positive timeout could take its
+        # last look up to 0.2 s before the deadline. ``math.inf`` (the Q8 grasp
+        # wait) keeps polling every 0.2 s until Stopp, as before.
+        while True:
             if ctx.should_stop():
                 raise WorkflowError('Workflow wurde gestoppt.')
             if predicate():
                 return True
-            time.sleep(0.2)
+            now = time.monotonic()
+            if now >= deadline:
+                break
+            time.sleep(min(0.2, deadline - now))
         if raise_on_timeout:
             raise WorkflowError(f'Timeout: {label} nicht erkannt.')
         return False
@@ -1262,9 +1271,20 @@ def _note_find_failure(ctx, reason) -> None:
     Greifziel, so the split motion blocks can say it instead of the generic
     „you never ran finde" message (see ``motion._no_greifziel_error``). Plain
     attribute on the per-run ctx — never raises. In the simulator the reason is
-    worded for the Sim-Tisch (N10, ``motion.sim_greifbereich_de``)."""
+    worded for the Sim-Tisch (N10, ``motion.sim_greifbereich_de``).
+
+    PER THREAD (M1-b). A hat body and the main stack share one run ctx, so a
+    single slot let a hat's failed „finde" decide what the MAIN thread's next
+    split block said and which class it raised (a genuinely empty socket — the
+    program's fault — became a skip a „Solange sichtbar" loop swallows), and a
+    later failure in another thread overwrote this thread's own reason. The
+    reason is therefore ALSO kept in ``ctx.find_failure_by_thread``, keyed by
+    the looking thread; ``dict.setdefault`` is atomic, so two threads never
+    create two maps. The plain string stays for its existing readers."""
     try:
-        ctx.last_find_failure = _motion.sim_greifbereich_de(ctx, reason)
+        worded = _motion.sim_greifbereich_de(ctx, reason)
+        ctx.last_find_failure = worded
+        vars(ctx).setdefault('find_failure_by_thread', {})[threading.get_ident()] = worded
     except Exception:  # noqa: BLE001 — a diagnostic must never break the run
         pass
 
@@ -1678,10 +1698,11 @@ def _grasp_object_locked(ctx, type_name, recipe) -> None:
                     _skip_tag(ctx, d.aruco_id)
                 # Direction-correct reason, shared with find_object (F4): the old
                 # text told the student to move a TOO-NEAR object even nearer.
-                raise GraspSkip(_out_of_reach_reason(
+                # Worded for the Sim-Tisch in the simulator (B8).
+                raise GraspSkip(_motion.sim_greifbereich_de(ctx, _out_of_reach_reason(
                     ctx, recipe.label_de,
                     next((d.world_xyz_m for d in detections
-                          if d.world_xyz_m is not None), (0.0, 0.0, 0.0))))
+                          if d.world_xyz_m is not None), (0.0, 0.0, 0.0)))))
             _motion._require_seeded_start_pose(ctx)
             x, y, z = target.world_xyz_m
             # Refine the SELECTED target's yaw over N frames (circular mean + R
@@ -1931,8 +1952,14 @@ def find_object(ctx, args: dict[str, Any]):
 
 def object_position(ctx, args: dict[str, Any]):
     """„Position von <Ziel>" — VALUE: the Greifziel's base-frame ``{x, y, z}`` so a
-    found object's location can drive ``bewege zu`` / ``lege ab bei``. Raises the
-    precise German calib error when the position isn't known yet."""
+    found object's location can drive „lege ab bei". Raises the precise German
+    calib error when the position isn't known yet.
+
+    „bewege zu" and „aufnehmen" REFUSE this value (M6, owner decision OQ-1 A,
+    ``motion._is_position_von``): it is the object's centre at GRASP height, so
+    they would drive the open gripper sideways into the object or grasp it
+    blindly without its rotation. This is the only handler that returns the
+    {x, y, z} dict shape (pinned by test_greifziel_socket_contract)."""
     ziel = args.get('ziel')
     if ziel is None:
         raise WorkflowError('Kein Greifziel — bitte zuerst „finde …" benutzen.')

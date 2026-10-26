@@ -665,3 +665,180 @@ def test_mark_done_still_does_the_work_and_is_not_bypassed():
         'no split block may claim behind the student\'s back')
     pb.mark_done(ctx, {'ziel': ziel})
     assert ctx.claimed_tags == {20}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# PART D — the find-failure reason belongs to the THREAD that looked (M1-b)
+# ══════════════════════════════════════════════════════════════════════════
+#
+# A hat body and the main stack share one run ctx. The reason a „finde" found
+# nothing used to be ONE slot, ``ctx.last_find_failure``: a hat thread's failed
+# „finde" decided what the MAIN thread's next split block said AND which class
+# it raised, and a later failure in another thread overwrote this thread's own
+# reason. It is now kept per thread (``ctx.find_failure_by_thread``).
+
+_NOTHING_VISIBLE = 'Kein „Banane" sichtbar'
+_TOO_FAR = '„Banane" gesehen, aber zu weit weg'
+
+
+def _in_other_thread(fn):
+    out = {}
+
+    def run():
+        try:
+            out['r'] = fn()
+        except BaseException as e:  # noqa: BLE001 — the datum
+            out['r'] = e
+
+    th = threading.Thread(target=run)
+    th.start()
+    th.join(10)
+    assert not th.is_alive()
+    return out.get('r')
+
+
+def test_a_find_failure_in_another_thread_does_not_explain_this_threads_empty_socket():
+    """Only a hat thread's „finde" failed: the main thread never ran „finde",
+    so its empty socket is the PROGRAM's fault — a base ``WorkflowError`` with
+    the generic sentence, never that thread's ``GraspSkip`` (47aea6fa: the
+    other thread's reason, as a skip a „Solange sichtbar" loop swallows)."""
+    ctx = _Ctx(_StubPerception([_det(21, (0.60, 0.0))]))
+    assert _in_other_thread(lambda: pb.find_object(ctx, {'object_type': 'banane'})) is None
+    with pytest.raises(WorkflowError) as exc:
+        motion.move_above(ctx, {'ziel': None})
+    assert not isinstance(exc.value, GraspSkip), str(exc.value)
+    assert str(exc.value) == motion._NO_GREIFZIEL_MSG
+    assert ctx.published == []
+
+
+def test_another_threads_later_find_failure_does_not_erase_this_threads_reason():
+    """Main's „finde" fails (nothing visible), then a hat's „finde" fails for
+    another reason (too far) before main's split block runs — the natural order,
+    since the hat body holds the motion lock. Main's error carries MAIN's reason
+    (47aea6fa: the hat's)."""
+    ctx = _Ctx(_StubPerception([]))
+    assert pb.find_object(ctx, {'object_type': 'banane'}) is None
+    ctx.perception = _StubPerception([_det(21, (0.60, 0.0))])
+    assert _in_other_thread(lambda: pb.find_object(ctx, {'object_type': 'banane'})) is None
+    with pytest.raises(GraspSkip) as exc:
+        motion.move_above(ctx, {'ziel': None})
+    msg = str(exc.value)
+    assert _NOTHING_VISIBLE in msg, msg
+    assert _TOO_FAR not in msg, msg
+    # The other thread's own reason is still its own.
+    other = _in_other_thread(lambda: motion.move_above(ctx, {'ziel': None}))
+    assert isinstance(other, GraspSkip), other
+    assert _TOO_FAR in str(other), str(other)
+    assert ctx.published == []
+
+
+def test_the_plain_reason_string_alone_is_still_read():
+    """A ctx that carries only the plain ``last_find_failure`` string (an older
+    caller, a test that sets it) keeps its ``GraspSkip`` with that reason."""
+    ctx = _Ctx(_StubPerception([]))
+    ctx.last_find_failure = 'Kein „Banane" sichtbar — bitte das Objekt legen.'
+    with pytest.raises(GraspSkip) as exc:
+        motion.move_above(ctx, {'ziel': None})
+    assert 'Kein „Banane" sichtbar' in str(exc.value)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# PART E — „Position von <Ziel>" in „aufnehmen" / „bewege zu" (M6, OQ-1 A)
+# ══════════════════════════════════════════════════════════════════════════
+#
+# „Position von" answers a plain {x, y, z} at the object's GRASP height, so it
+# slipped past the Greifziel refusal: measured on the simulated rig (cube at
+# (0.17, −0.03), yaw 0.6), aufnehmen(Position von) closed with the fingertip
+# 27.0 mm up and the roll joint at ±1.571 rad (the composite „Greife": 15.0 mm,
+# the tag's own roll), and bewege zu(Position von) drove sideways to 15.0 mm with
+# an open gripper. Both are now refused; „ablegen bei" keeps accepting it.
+
+_POSITION_VON_SENTENCES = {
+    'aufnehmen': (
+        '„Position von <Ziel>" gehört nicht in „aufnehmen" — dieser Block greift '
+        'blind von oben, ohne die Drehung des Objekts zu kennen, und packt es zu '
+        'hoch. Für ein gefundenes Objekt bitte „Greife <Typ>" benutzen oder „fahre '
+        'über" → „senke auf" → „schließe um" → „hebe an".'),
+    'bewege zu': (
+        '„Position von <Ziel>" gehört nicht in „bewege zu" — der Greifer würde '
+        'seitlich in das Objekt fahren. Um über ein gefundenes Objekt zu fahren, '
+        'bitte „fahre über" benutzen; „Position von" passt in „ablegen bei".'),
+}
+
+
+def _one_profile_per_ik_backend():
+    from physical_ai_server import robot_profiles as rp
+    seen = {}
+    for pid, prof in rp.ROBOT_PROFILES.items():
+        seen.setdefault(prof.ik_backend, pid)
+    return sorted(seen.values())
+
+
+def test_position_von_is_refused_by_pickup_and_move_to_and_accepted_by_drop_at():
+    ctx = _Ctx(_StubPerception([]))
+    ziel = types.SimpleNamespace(world_xyz_m=(0.18, 0.0, 0.015), aruco_id=20,
+                                 corners_px=None, extras={'tag_yaw': 0.0})
+    pos = pb.object_position(ctx, {'ziel': ziel})
+    assert motion._is_position_von(pos)
+    for block_de, call in (('aufnehmen', lambda: motion.pickup(ctx, {'target': pos})),
+                           ('bewege zu', lambda: motion.move_to(ctx, {'destination': pos}))):
+        with pytest.raises(WorkflowError) as exc:
+            call()
+        assert not isinstance(exc.value, GraspSkip), block_de
+        assert str(exc.value) == _POSITION_VON_SENTENCES[block_de]
+        assert str(exc.value) == motion._POSITION_VON_IN_DESTINATION_DE[block_de]
+        assert ctx.published == [], f'{block_de} moved the arm'
+    motion.drop_at(ctx, {'destination': pos})       # the intended use: must NOT raise
+    assert ctx.published, '„ablegen bei (Position von …)" must still drive the arm'
+
+
+def test_a_point_and_a_greifziel_are_not_a_position_von():
+    """The predicate is exactly the {x, y, z} dict with no ``world_xyz_m``: a
+    text program's point (a list/tuple) and a Greifziel (its own refusal) are
+    never judged by it."""
+    assert not motion._is_position_von([0.2, 0.0, 0.05])
+    assert not motion._is_position_von((0.2, 0.0, 0.05))
+    assert not motion._is_position_von('Ablage')
+    assert not motion._is_position_von({'x': 0.2, 'y': 0.0, 'z': 0.0, 'world_xyz_m': None})
+    assert not motion._is_position_von({'x': 0.2, 'y': 0.0})
+    assert motion._is_position_von({'x': 0.2, 'y': 0.0, 'z': 0.0})
+
+
+def test_object_position_is_the_only_producer_of_an_xyz_dict():
+    """PIN (review mi-12): the refusal reads a plain {x, y, z} dict as „Position
+    von" because, in a Blockly run, exactly ONE handler returns that shape. A
+    second producer would be refused by „bewege zu" / „aufnehmen" too."""
+    import ast
+    from pathlib import Path
+    root = Path(motion.__file__).resolve().parent
+    producers = []
+    for path in sorted(root.glob('*.py')):
+        tree = ast.parse(path.read_text(encoding='utf-8'))
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict):
+                    keys = {k.value for k in node.value.keys if isinstance(k, ast.Constant)}
+                    if {'x', 'y', 'z'} <= keys:
+                        producers.append(f'{path.stem}.{fn.name}')
+    assert producers == ['perception_blocks.object_position'], producers
+
+
+@pytest.mark.parametrize('profile_id', _one_profile_per_ik_backend())
+@pytest.mark.parametrize('block_type,socket,block_de', [
+    ('edubotics_pickup', 'TARGET', 'aufnehmen'),
+    ('edubotics_move_to', 'DESTINATION', 'bewege zu'),
+])
+def test_a_position_von_program_stops_at_the_block_and_moves_nothing(
+        monkeypatch, profile_id, block_type, socket, block_de):
+    from rig_emulation import B, Rig, cube, program
+    rig = Rig(monkeypatch, profile_id, objects=[cube(0.17, -0.03, 0.6)], simulated=True)
+    trace = rig.trace_waypoints()
+    find = B('edubotics_find_object', fields={'OBJECT_TYPE': 'wuerfel'})
+    blk = B(block_type, fields={'GESCHWINDIGKEIT': 'global'},
+            inputs={socket: B('edubotics_object_position', inputs={'ZIEL': find})})
+    phase = rig.run(program(blk), timeout=30)
+    assert phase == 'error', (phase, rig.logs()[-4:])
+    assert any(_POSITION_VON_SENTENCES[block_de] in e for e in rig.errors()), rig.errors()
+    assert trace == [], 'the arm moved before the refusal'

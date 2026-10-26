@@ -1262,9 +1262,20 @@ def _note_find_failure(ctx, reason) -> None:
     Greifziel, so the split motion blocks can say it instead of the generic
     „you never ran finde" message (see ``motion._no_greifziel_error``). Plain
     attribute on the per-run ctx — never raises. In the simulator the reason is
-    worded for the Sim-Tisch (N10, ``motion.sim_greifbereich_de``)."""
+    worded for the Sim-Tisch (N10, ``motion.sim_greifbereich_de``).
+
+    PER THREAD (M1-b). A hat body and the main stack share one run ctx, so a
+    single slot let a hat's failed „finde" decide what the MAIN thread's next
+    split block said and which class it raised (a genuinely empty socket — the
+    program's fault — became a skip a „Solange sichtbar" loop swallows), and a
+    later failure in another thread overwrote this thread's own reason. The
+    reason is therefore ALSO kept in ``ctx.find_failure_by_thread``, keyed by
+    the looking thread; ``dict.setdefault`` is atomic, so two threads never
+    create two maps. The plain string stays for its existing readers."""
     try:
-        ctx.last_find_failure = _motion.sim_greifbereich_de(ctx, reason)
+        worded = _motion.sim_greifbereich_de(ctx, reason)
+        ctx.last_find_failure = worded
+        vars(ctx).setdefault('find_failure_by_thread', {})[threading.get_ident()] = worded
     except Exception:  # noqa: BLE001 — a diagnostic must never break the run
         pass
 

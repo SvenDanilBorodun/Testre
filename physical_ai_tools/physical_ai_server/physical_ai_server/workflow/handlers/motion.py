@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import time
 from typing import Any
 
@@ -2967,8 +2968,18 @@ def _no_greifziel_error(ctx) -> WorkflowError:
     reason means „finde …" never ran at all, i.e. the socket is empty in the
     PROGRAM: no pass and no retry can fill it, so it is a base ``WorkflowError``
     that ends the run instead of being swallowed by the „Solange sichtbar" loop
-    for MAX_LOOP_ITERATIONS passes."""
-    reason = getattr(ctx, 'last_find_failure', None)
+    for MAX_LOOP_ITERATIONS passes.
+
+    The reason is THIS thread's (M1-b): ``find_failure_by_thread`` holds what
+    each thread's last „finde" recorded, so another thread's failure never
+    explains this thread's empty socket and never erases this thread's reason.
+    A ctx that carries only the plain ``last_find_failure`` string (an older
+    caller, a test that sets it) is read as before."""
+    by_thread = getattr(ctx, 'find_failure_by_thread', None)
+    if isinstance(by_thread, dict):
+        reason = by_thread.get(threading.get_ident())
+    else:
+        reason = getattr(ctx, 'last_find_failure', None)
     if not isinstance(reason, str) or not reason.strip():
         return WorkflowError(_NO_GREIFZIEL_MSG)
     reason = sim_greifbereich_de(ctx, reason)

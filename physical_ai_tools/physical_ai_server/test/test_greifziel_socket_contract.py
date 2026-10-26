@@ -665,3 +665,78 @@ def test_mark_done_still_does_the_work_and_is_not_bypassed():
         'no split block may claim behind the student\'s back')
     pb.mark_done(ctx, {'ziel': ziel})
     assert ctx.claimed_tags == {20}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# PART D — the find-failure reason belongs to the THREAD that looked (M1-b)
+# ══════════════════════════════════════════════════════════════════════════
+#
+# A hat body and the main stack share one run ctx. The reason a „finde" found
+# nothing used to be ONE slot, ``ctx.last_find_failure``: a hat thread's failed
+# „finde" decided what the MAIN thread's next split block said AND which class
+# it raised, and a later failure in another thread overwrote this thread's own
+# reason. It is now kept per thread (``ctx.find_failure_by_thread``).
+
+_NOTHING_VISIBLE = 'Kein „Banane" sichtbar'
+_TOO_FAR = '„Banane" gesehen, aber zu weit weg'
+
+
+def _in_other_thread(fn):
+    out = {}
+
+    def run():
+        try:
+            out['r'] = fn()
+        except BaseException as e:  # noqa: BLE001 — the datum
+            out['r'] = e
+
+    th = threading.Thread(target=run)
+    th.start()
+    th.join(10)
+    assert not th.is_alive()
+    return out.get('r')
+
+
+def test_a_find_failure_in_another_thread_does_not_explain_this_threads_empty_socket():
+    """Only a hat thread's „finde" failed: the main thread never ran „finde",
+    so its empty socket is the PROGRAM's fault — a base ``WorkflowError`` with
+    the generic sentence, never that thread's ``GraspSkip`` (47aea6fa: the
+    other thread's reason, as a skip a „Solange sichtbar" loop swallows)."""
+    ctx = _Ctx(_StubPerception([_det(21, (0.60, 0.0))]))
+    assert _in_other_thread(lambda: pb.find_object(ctx, {'object_type': 'banane'})) is None
+    with pytest.raises(WorkflowError) as exc:
+        motion.move_above(ctx, {'ziel': None})
+    assert not isinstance(exc.value, GraspSkip), str(exc.value)
+    assert str(exc.value) == motion._NO_GREIFZIEL_MSG
+    assert ctx.published == []
+
+
+def test_another_threads_later_find_failure_does_not_erase_this_threads_reason():
+    """Main's „finde" fails (nothing visible), then a hat's „finde" fails for
+    another reason (too far) before main's split block runs — the natural order,
+    since the hat body holds the motion lock. Main's error carries MAIN's reason
+    (47aea6fa: the hat's)."""
+    ctx = _Ctx(_StubPerception([]))
+    assert pb.find_object(ctx, {'object_type': 'banane'}) is None
+    ctx.perception = _StubPerception([_det(21, (0.60, 0.0))])
+    assert _in_other_thread(lambda: pb.find_object(ctx, {'object_type': 'banane'})) is None
+    with pytest.raises(GraspSkip) as exc:
+        motion.move_above(ctx, {'ziel': None})
+    msg = str(exc.value)
+    assert _NOTHING_VISIBLE in msg, msg
+    assert _TOO_FAR not in msg, msg
+    # The other thread's own reason is still its own.
+    other = _in_other_thread(lambda: motion.move_above(ctx, {'ziel': None}))
+    assert isinstance(other, GraspSkip), other
+    assert _TOO_FAR in str(other), str(other)
+    assert ctx.published == []
+
+
+def test_the_plain_reason_string_alone_is_still_read():
+    """A ctx that carries only the plain ``last_find_failure`` string (an older
+    caller, a test that sets it) keeps its ``GraspSkip`` with that reason."""
+    ctx = _Ctx(_StubPerception([]))
+    ctx.last_find_failure = 'Kein „Banane" sichtbar — bitte das Objekt legen.'
+    with pytest.raises(GraspSkip) as exc:
+        motion.move_above(ctx, {'ziel': None})
+    assert 'Kein „Banane" sichtbar' in str(exc.value)

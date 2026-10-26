@@ -658,9 +658,12 @@ class LiveValues:
         self._sleep = sleep
         self._busy = threading.Lock()
         self._next_check = float('-inf')
-        # When the last ``__vars`` frame was handed to the stub: the
-        # server's floor counts from there (set BEFORE the call, so a thread
-        # that has since released the RPC lock has always set it).
+        # When the last ``__vars`` frame went out: the server's floor counts
+        # from its accept, which is no later than its reply. Stamped inside
+        # the RPC-lock hold twice — before the call (for a reader in another
+        # thread) and again right after the reply (M5: a stamp taken before
+        # the lock wait made `final` wait too little, and the floor answered
+        # the last values `skipped`).
         self._last_send = float('-inf')
         self._sent_key = None
         self._position = None
@@ -732,8 +735,15 @@ class LiveValues:
         key = self._key(fitted)
         if key == self._sent_key:
             return
-        self._last_send = self._clock()
-        reply = self._rpc.call('__vars', [pos[0], pos[1], fitted], 'call')
+        # The stub's RPC lock is re-entrant (its call takes it again): holding
+        # it here puts both stamps inside the one hold the frame goes out in,
+        # never before a wait for another thread's robot call. Lock order:
+        # `_busy` → the RPC lock; nothing takes `_busy` under the RPC lock.
+        lock = getattr(self._rpc, '_lock', None)
+        with lock if lock is not None else contextlib.nullcontext():
+            self._last_send = self._clock()
+            reply = self._rpc.call('__vars', [pos[0], pos[1], fitted], 'call')
+            self._last_send = self._clock()
         self.sent += 1
         # The robot's floor answered without looking: send it again next time.
         if reply != VARS_REPLY_SKIPPED:

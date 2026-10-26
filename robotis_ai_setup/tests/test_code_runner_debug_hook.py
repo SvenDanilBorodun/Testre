@@ -882,6 +882,81 @@ class LiveValuesThroughTheStub(unittest.TestCase):
         self.assertEqual([c[1][2] for c in rpc.calls if c[0] == '__vars'], [{'punkte': 4}])
 
 
+class TheSendStampCountsFromTheReply(unittest.TestCase):
+    """M5: `_send_if_changed` stamped `_last_send` BEFORE its `__vars` call,
+    and that call first waits for the stub's RPC lock (held by another
+    thread's robot call) — so the frame left up to one robot call after its
+    stamp, `final` waited too little and the server's floor answered the last
+    values `skipped`. The stamp is now taken inside the RPC-lock hold, after
+    the reply."""
+
+    class _Rpc:
+        """The stub's surface: `call` runs under `_lock`, as the real one does."""
+
+        def __init__(self, now, round_trip_s=0.0):
+            self._lock = threading.RLock()
+            self._now = now
+            self._round_trip_s = round_trip_s
+            self.calls = []
+
+        def call(self, method, args, kind):
+            with self._lock:
+                self.calls.append((method, self._now[0]))
+                self._now[0] += self._round_trip_s
+            return None
+
+    def test_the_send_stamp_is_taken_after_the_lock_wait(self):
+        dbg = _load_hook()
+        now = [0.0]
+        rpc = self._Rpc(now)
+        # This test file is the „project": a frame of it is a program frame.
+        live = dbg.LiveValues(rpc, str(pathlib.Path(__file__).resolve().parent),
+                              clock=lambda: now[0], sleep=lambda _s: None)
+        held = threading.Event()
+        released = []
+
+        def long_robot_call():
+            with rpc._lock:
+                held.set()
+                time.sleep(0.3)
+                now[0] = 10.0
+                released.append(now[0])
+        holder = threading.Thread(target=long_robot_call, daemon=True)
+        holder.start()
+        self.assertTrue(held.wait(2.0))
+
+        def program_thread_before_its_call():
+            live.before_call()
+        checker = threading.Thread(target=program_thread_before_its_call, daemon=True)
+        checker.start()
+        checker.join(5.0)
+        holder.join(5.0)
+        self.assertTrue(live.enabled)
+        self.assertEqual([m for m, _t in rpc.calls], ['__vars'])
+        self.assertGreaterEqual(live._last_send, released[0],
+                                'the stamp is taken after the lock was released')
+
+    def test_final_waits_out_the_floor_counted_from_the_reply(self):
+        dbg = _load_hook()
+        now = [0.0]
+
+        def sleep(seconds):
+            now[0] += seconds
+        # A frame takes 0.3 s from the stamp to the reply (the lock wait and
+        # the round trip): the server accepted it no earlier than... its reply.
+        rpc = self._Rpc(now, round_trip_s=0.3)
+        live = dbg.LiveValues(rpc, tempfile.mkdtemp(prefix='edu-final-'), interval_s=0.5,
+                              clock=lambda: now[0], sleep=sleep)
+        live._send_if_changed(('main.py', 1), {'wert': 1})
+        first_reply = now[0]
+        live.final([{'wert': 99}], ('main.py', 0))
+        sends = [t for m, t in rpc.calls if m == '__vars']
+        self.assertEqual(len(sends), 2)
+        # code_rpc.VARS_MIN_INTERVAL_S (0.4), counted from the server's accept
+        # of the previous frame, which is no later than its reply.
+        self.assertGreaterEqual(sends[1] - first_reply, 0.4)
+
+
 class TheLastValuesAndExitShareOneHoldOfTheRpcLock(unittest.TestCase):
     """Review round 5 (md7). Round 4 (mc3) bounded `final`'s wait for the
     stub's RPC lock and SKIPPED the last values when another thread held it

@@ -1032,7 +1032,9 @@ def test_paused_blocks_until_resume_and_emits_vars_and_status(server):
     resume.set()
     t.join(5.0)
     assert reply == {'id': 2, 'ok': True, 'r': 'continue'}
-    # A step leaves the run paused after the wait: the reply says so.
+    # A step (the manager re-armed the pause) answers 'step' AND releases the
+    # pause: a step from a breakpoint is ONE LINE of a text program, so that
+    # line's robot calls must run (M4).
     resume.clear()
     reply.clear()
     t = threading.Thread(target=lambda: reply.update(c.call('__paused', ['main.py', 13, {}])), daemon=True)
@@ -1041,7 +1043,52 @@ def test_paused_blocks_until_resume_and_emits_vars_and_status(server):
     resume.set()                                          # paused stays True
     t.join(5.0)
     assert reply['r'] == 'step'
+    assert paused['v'] is False
     server.close_run(session)
+
+
+def test_a_step_from_a_breakpoint_releases_the_pause_so_the_lines_robot_call_runs(
+        server, monkeypatch):
+    """M4: on the REAL manager's pause primitives a „Schritt" took the step
+    token and re-armed the pause (Blockly's „one block"), so the stepped
+    line's own robot call found the run paused again in `_execute` and waited
+    for the NEXT press — two presses per line, and stuck with a worker thread
+    making robot calls."""
+    from physical_ai_server.workflow.workflow_manager import WorkflowManager
+    mgr = WorkflowManager(publisher=lambda pts: None)
+    monkeypatch.setattr(WorkflowManager, 'is_running', property(lambda self: True))
+    ctx = _ctx(set_paused=mgr._set_paused, wait_for_resume=mgr._wait_for_resume,
+               wait_if_paused=mgr._wait_if_paused,
+               is_paused=lambda: mgr._pause_event.is_set())
+    ctx.code_language = 'python'
+    session = server.open_run(ctx)
+    c = _Client(server.socket_path, session.token)
+    reply = {}
+    t = threading.Thread(target=lambda: reply.update(c.call('__paused', ['main.py', 2, {}])),
+                         daemon=True)
+    t.start()
+    deadline = time.monotonic() + 5.0
+    while not mgr._pause_event.is_set() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert mgr._pause_event.is_set()
+    assert mgr.step()[0] is True
+    t.join(5.0)
+    assert reply.get('r') == 'step'
+    # The stepped line's robot call runs at once — no second press.
+    logged = {}
+    t0 = time.monotonic()
+    t = threading.Thread(target=lambda: logged.update(c.call('log', ['x'])), daemon=True)
+    t.start()
+    t.join(1.0)
+    elapsed = time.monotonic() - t0
+    try:
+        assert logged.get('ok') is True and elapsed < 1.0, (logged, elapsed)
+        assert not mgr._pause_event.is_set()
+    finally:
+        mgr._set_paused(False)          # releases a call still held (main)
+        t.join(5.0)
+        c.close()
+        server.close_run(session)
 
 
 def test_paused_answers_stop_when_the_run_was_stopped(server):

@@ -997,7 +997,15 @@ class RunSession:
     def _paused(self, file: str, line: int, local_vars: dict) -> str:
         """A breakpoint hit: mirror ``Interpreter._pause_for_breakpoint`` —
         emit the paused status and the locals, set the pause, wait for the
-        manager, and tell the hook what the student pressed."""
+        manager, and tell the hook what the student pressed.
+
+        A „Schritt" is ONE LINE of a text program (M4): the manager's step
+        token re-arms the pause after one Blockly block, so when the answer is
+        ``'step'`` the run's pause is released first — the robot calls of the
+        stepped line pass ``_execute``'s gate, and the hook's next LINE event
+        pauses again. Its cost: during a stepped line EVERY thread of the
+        program runs. „Pause" pressed while a line runs still holds the next
+        robot call of any thread."""
         ctx = self.ctx
         block_id = f'{file}:L{line}'
         try:
@@ -1017,7 +1025,10 @@ class RunSession:
         if ctx.should_stop():
             return 'stop'
         is_paused = getattr(ctx, 'is_paused', None)
-        return 'step' if callable(is_paused) and is_paused() else 'continue'
+        stepping = callable(is_paused) and is_paused()
+        if stepping and callable(set_paused):
+            set_paused(False)   # a step is one LINE: the hook pauses at the next one (M4)
+        return 'step' if stepping else 'continue'
 
     def _vars_floor_ok(self) -> bool:
         """True for a `__vars` frame at least ``VARS_MIN_INTERVAL_S`` after the

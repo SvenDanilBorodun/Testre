@@ -6,7 +6,7 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
-### The next release, 2026-10-26 — Roboter Studio review fixes
+### v2.36.0, 2026-10-26 — Roboter Studio review fixes
 
 **Why.** A review of v2.34.0 (`main` 593d7e71) RAN the shipped code — the arm64 images `physical-ai-server-opi:2.34.0`
 and `code-runner-opi:2.34.0`, real headless Blockly, `test/rig_emulation.py::Rig`, CPython 3.12 and javac 21 — and

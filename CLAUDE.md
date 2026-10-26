@@ -2,7 +2,7 @@
 
 Guidance for Claude Code (claude.ai/code) working in this repository.
 
-**Present-tense invariants only**, audit-verified against the code at v2.21.1 (2026-09-16), with v2.22.0's coding-suite sections folded in from that release and managed ACT training on RunPod (migrations 047/049) folded in from its build spec (2026-10-18), and v2.33.0's RunPod-only ladder, cheapest-first placement and capped publish with „Fortsetzen" (migration 050) folded in from its spec (2026-10-20), and the Roboter Studio review fixes (the release after v2.35.0) folded in from their spec (2026-10-26). Three companion files carry what does not belong here:
+**Present-tense invariants only**, audit-verified against the code at v2.21.1 (2026-09-16), with v2.22.0's coding-suite sections folded in from that release and managed ACT training on RunPod (migrations 047/049) folded in from its build spec (2026-10-18), and v2.33.0's RunPod-only ladder, cheapest-first placement and capped publish with „Fortsetzen" (migration 050) folded in from its spec (2026-10-20), and v2.36.0's Roboter Studio review fixes folded in from their spec (2026-10-26). Three companion files carry what does not belong here:
 
 | File | Holds | Read it when |
 |---|---|---|

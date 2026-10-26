@@ -167,6 +167,14 @@ function buildCases() {
     ]),
     kind: 'filled',
   });
+  // E2: „höchstens 1 Mal" renders a counted loop (MAX_REPS 0 above keeps the
+  // `while`).
+  cases.push({
+    ...program('while_visible_max_reps', [
+      { type: 'edubotics_while_visible', fields: { OBJECT_TYPE: 'wuerfel', MAX_REPS: 1 }, inputs: { DO: { block: { type: 'edubotics_grasp_object', fields: { OBJECT_TYPE: 'wuerfel' } } } } },
+    ]),
+    kind: 'filled',
+  });
   cases.push({ ...program('empty_program', []), kind: 'empty' });
   return cases;
 }

@@ -23,8 +23,12 @@ dropdown and an un-pinned pin, and writes the previews into
 * every LITERAL argument of a filled case passes ``code_rpc.validate_value``
   for its parameter (an empty input renders as ``None``, which a non-nullable
   kind refuses, so the empty cases are only parsed and must name their row);
-* a hat is a ``def when_…():`` and a broadcast calls a function that the
-  module defines.
+* a hat is a ``def when_…():`` and a broadcast starts a thread whose
+  ``target`` is a function the module defines (on the robot every hat runs
+  in its own thread and the send goes on at once — E3 of the Roboter Studio
+  review fixes); ``threading`` is imported right after ``robot``;
+* every preview compiles (``compile``, not only ``ast.parse``: a ``break``
+  outside a loop is a compile error — E2's counted „Solange … sichtbar").
 """
 
 from __future__ import annotations
@@ -93,6 +97,7 @@ def _check(case) -> list[str]:
     errors: list[str] = []
     try:
         tree = ast.parse(case['py'])
+        compile(case['py'], case['name'], 'exec')
     except SyntaxError as e:
         return [f'SyntaxError: {e}']
     first = tree.body[0] if tree.body else None
@@ -134,25 +139,55 @@ def test_every_robot_call_is_a_valid_row_call():
     assert not wrong, json.dumps(wrong, ensure_ascii=False, indent=1)
 
 
-def test_the_hats_are_functions_and_a_broadcast_calls_them():
+def _thread_targets(tree: ast.AST) -> list[str]:
+    """The ``target`` of every ``threading.Thread(target=NAME).start()``."""
+    targets = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == 'start' and not node.args and not node.keywords):
+            continue
+        thread = node.func.value
+        if not (isinstance(thread, ast.Call) and isinstance(thread.func, ast.Attribute)
+                and isinstance(thread.func.value, ast.Name)
+                and thread.func.value.id == 'threading' and thread.func.attr == 'Thread'
+                and not thread.args):
+            continue
+        for kw in thread.keywords:
+            if kw.arg == 'target' and isinstance(kw.value, ast.Name):
+                targets.append(kw.value.id)
+    return targets
+
+
+def test_the_hats_are_functions_and_a_broadcast_starts_them_in_a_thread():
     by_name = {c['name']: c for c in _cases()}
     tree = ast.parse(by_name['hats_and_broadcast']['py'])
     defined = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
     assert all(name.startswith('when_') for name in defined), defined
     # Two hats on one message, one object hat, one counter hat.
     assert len(defined) == 4, defined
+    # The send starts BOTH hats of its message in a thread, and calls no hat
+    # directly (the main program goes on at once, as on the robot).
+    targets = _thread_targets(tree)
+    start_hats = {name for name in defined if 'start' in name}
+    assert len(start_hats) == 2 and sorted(targets) == sorted(start_hats), (start_hats, targets)
+    assert set(targets) <= defined, set(targets) - defined
     called = {n.func.id for n in ast.walk(tree)
               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-    start_hats = {name for name in defined if 'start' in name}
-    assert len(start_hats) == 2 and start_hats <= called, (start_hats, called)
-    assert called <= defined, called - defined
+    assert not called & defined, called & defined
+    # `import threading` right after `import robot`, which stays first.
+    imports = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+    assert [a.name for a in imports[0].names] == ['robot'], ast.dump(imports[0])
+    assert isinstance(imports[1], ast.Import) and [a.name for a in imports[1].names] == ['threading']
     # Every hat says, in German, that it runs by itself.
     src = by_name['hats_and_broadcast']['py']
     assert src.count('# Läuft von selbst') == 4, src
-    # A broadcast nobody waits for calls nothing and still parses.
-    lonely = ast.parse(by_name['broadcast_without_hat']['py'])
+    # A broadcast nobody waits for starts nothing, imports nothing and still
+    # parses.
+    lonely_src = by_name['broadcast_without_hat']['py']
+    lonely = ast.parse(lonely_src)
     assert not [n for n in ast.walk(lonely) if isinstance(n, ast.Call)
                 and isinstance(n.func, ast.Name)]
+    assert not _thread_targets(lonely) and 'threading' not in lonely_src
 
 
 def test_tempo_and_an_unpinned_pin_are_end_of_line_comments():

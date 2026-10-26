@@ -136,13 +136,15 @@ export function robotApiCompletionSource(language) {
 /**
  * The Sammlung completion source: inside the string argument of an asset call
  * (`robot.move_to("`, `Robot.replay("`), the names the Sammlung and the
- * program know. `knownRef.current` is read on every query.
+ * program know. `knownRef.current` is read on every query. The whole document
+ * goes along, so a top-level alias of `robot` (`import robot as r` →
+ * `r.replay("`, code/pythonAliases.js) completes too.
  */
 export function assetCompletionSource(language, knownRef) {
   return (context) => {
     const line = context.state.doc.lineAt(context.pos);
     const before = line.text.slice(0, context.pos - line.from);
-    const hit = assetArgContext(before, language);
+    const hit = assetArgContext(before, language, context.state.doc.toString());
     if (!hit) return null;
     const options = assetOptions(hit.asset, knownRef && knownRef.current)
       .map((o) => ({ label: o.label, detail: o.detail, type: 'constant' }));

@@ -302,3 +302,50 @@ describe('F10: a replay whose name is not written directly in quotes', () => {
     );
   });
 });
+
+// E1 (Roboter Studio review fixes): a top-level alias of `robot` or of one of
+// its functions is the robot for the completion and the not-a-literal warning
+// too. The completion reads the aliases from the whole document (its third
+// argument); without it only `robot.` is the robot, as before.
+describe('E1: aliases of `robot` in the completion and the warning', () => {
+  const lineOf = (src, offset) => src.slice(0, offset).split('\n').length;
+  const notLiteral = (src) => assetDiagnostics(src, 'python', KNOWN, { cursorLine: 0 })
+    .filter((d) => d.message === CODE_DE.REPLAY_NAME_NOT_LITERAL)
+    .map((d) => [lineOf(src, d.from), src.slice(d.from, d.to)]);
+
+  it('completes inside r.replay(" and a function alias', () => {
+    const doc = 'import robot as r\nfrom robot import replay as abspielen\nr.replay("Wi';
+    expect(assetArgContext('r.replay("Wi', 'python', doc))
+      .toMatchObject({ asset: 'recording', method: 'replay', prefix: 'Wi' });
+    expect(assetArgContext('abspielen("', 'python', doc)).toMatchObject({ asset: 'recording', method: 'replay' });
+    expect(assetArgContext('r.move_to(speed=2, target="A', 'python', doc))
+      .toMatchObject({ asset: 'place', prefix: 'A' });
+    // Without the document, or in another document, `r` is not the robot.
+    expect(assetArgContext('r.replay("Wi', 'python')).toBeNull();
+    expect(assetArgContext('r.replay("Wi', 'python', 'import math as r\n')).toBeNull();
+    expect(assetArgContext('r.abspielen("', 'python', doc)).toBeNull();
+  });
+
+  it('flags a not-literal name on r.replay(x) and on a bare replay(x)', () => {
+    const src = [
+      'import robot as r',
+      'from robot import replay, replay as abspielen',
+      'n = "Winken"',
+      'r.replay(n)',
+      'replay(n)',
+      'abspielen(n)',
+      'r.replay("Winken")',
+      'abspielen("Winken")',
+      'def replay(name):',
+      '    pass',
+      'self.replay(n)',
+      '',
+    ].join('\n');
+    expect(notLiteral(src)).toEqual([[4, 'n'], [5, 'n'], [6, 'n']]);
+  });
+
+  it('a bare replay re-bound to another row, and an alias in another file, are not judged', () => {
+    expect(notLiteral('from robot import home as replay\nreplay(1)\n')).toEqual([]);
+    expect(notLiteral('r.replay(n)\nabspielen(n)\n')).toEqual([]);
+  });
+});

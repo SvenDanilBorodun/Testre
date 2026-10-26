@@ -1260,3 +1260,126 @@ def test_obj_refusal_suggests_the_type_for_a_label(server):
         assert 'Meintest du' not in r['e'], r
         c.close()
         server.close_run(session)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# C2: a frame the reader cannot judge never ends the connection silently
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_a_huge_int_is_a_range_refusal_not_a_dropped_connection(server):
+    """`robot.wait(10**400)`: `math.isfinite` raised OverflowError for an int
+    beyond float range, which escaped the reader thread and closed the
+    connection with no reply. Every numeric parameter is bounded, so an exact
+    int comparison is the whole answer."""
+    ctx = _ctx()
+    ctx.code_language = 'python'
+    session = server.open_run(ctx)
+    c = _Client(server.socket_path, session.token)
+    r = c.call('wait', [10 ** 400])
+    assert r['ok'] is False and r['k'] == 'value', r
+    assert r['e'] == 'robot.wait: „seconds“ muss zwischen 0.0 und 300.0 liegen.'
+    r = c.call('wait', [-10 ** 400])
+    assert r['e'] == 'robot.wait: „seconds“ muss zwischen 0.0 und 300.0 liegen.'
+    r = c.call('toast', ['x', 'info', 10 ** 400])
+    assert r['e'] == 'robot.toast: „seconds“ muss zwischen 1 und 15 liegen.', r
+    r = c.call('move_to', [[10 ** 400, 0, 0]])
+    assert r['ok'] is False and r['k'] == 'value', r
+    # The connection survived: the next call is served.
+    assert c.call('log', ['weiter'])['ok'] is True
+    assert 'weiter' in ctx._test_logs
+    c.close()
+    server.close_run(session)
+
+
+def test_validate_value_takes_a_huge_int_without_raising():
+    seconds = robot_api.ROBOT_API_BY_NAME['wait'].params[0]
+    assert code_rpc._is_number(10 ** 400) is True
+    assert code_rpc._is_number(float('inf')) is False
+    assert code_rpc._is_number(float('nan')) is False
+    assert code_rpc._is_number(True) is False
+    assert validate_value(seconds, 10 ** 400) == '„seconds“ muss zwischen 0.0 und 300.0 liegen.'
+    assert validate_value(seconds, 2) is None
+    toast_s = robot_api.ROBOT_API_BY_NAME['toast'].params[2]
+    assert validate_value(toast_s, 10 ** 400) == '„seconds“ muss zwischen 1 und 15 liegen.'
+    assert validate_value(toast_s, 2.5) == '„seconds“ muss eine ganze Zahl sein.'
+    assert validate_value(toast_s, 3.0) is None
+
+
+def test_a_deeply_nested_frame_is_a_bad_frame(server):
+    """A frame nested ~30 000 deep made `json.loads` raise RecursionError —
+    not a ValueError — on the reader thread: no reply, the thread gone. It is
+    a hostile frame like any malformed one: BAD_FRAME_DE, then close."""
+    a, b = socket.socketpair()
+    body = ('{"id":1,"m":"log","a":[' + '[' * 30000 + ']' * 30000 + ']}').encode('utf-8')
+    assert len(body) < _L.MAX_FRAME_BYTES
+    # A writer thread: the frame is larger than a socketpair's buffer.
+    writer = threading.Thread(target=a.sendall, args=(struct.pack('>I', len(body)) + body,),
+                              daemon=True)
+    writer.start()
+    with pytest.raises(FrameError):
+        read_frame(b, _L.MAX_FRAME_BYTES, timeout_s=2.0)
+    writer.join(5.0)
+    a.close()
+    b.close()
+    session = server.open_run(_ctx())
+    c = _Client(server.socket_path, session.token)
+    c.sock.sendall(struct.pack('>I', len(body)) + body)
+    r = c.recv()
+    assert r is not None and r['ok'] is False and r['k'] == 'protocol', r
+    assert r['e'] == code_rpc.BAD_FRAME_DE
+    assert _peer_closed(c.sock)
+    c.close()
+    # The listener lives on: another connection of the run is served.
+    c2 = _Client(server.socket_path, session.token)
+    assert c2.hello_reply['ok'] is True
+    assert c2.call('log', ['x'])['ok'] is True
+    c2.close()
+    server.close_run(session)
+
+
+def test_an_unexpected_handler_side_exception_keeps_the_connection(server, monkeypatch, caplog):
+    """Anything the reader's own code raises for a frame is an `internal`
+    answer and the connection stays; the traceback is logged ONCE per run
+    (a hostile raw socket could otherwise write 200 tracebacks a second)."""
+    def boom(*_a, **_k):
+        raise RuntimeError('validator bug')
+    session = server.open_run(_ctx())
+    c = _Client(server.socket_path, session.token)
+    monkeypatch.setattr(code_rpc, '_validate_call', boom)   # after the hello
+    with caplog.at_level('DEBUG', logger=code_rpc.__name__):
+        for _ in range(2):
+            r = c.call('log', ['x'])
+            assert r['ok'] is False and r['k'] == 'internal', r
+            assert r['e'] == code_rpc.INTERNAL_ERROR_DE
+            assert 'validator bug' not in json.dumps(r)
+    tracebacks = [rec for rec in caplog.records if 'Traceback' in rec.getMessage()]
+    assert len(tracebacks) == 1, [rec.getMessage() for rec in caplog.records]
+    monkeypatch.undo()
+    assert c.call('log', ['x'])['ok'] is True
+    c.close()
+    server.close_run(session)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# C3: an enumerated parameter names its choices
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_a_toast_level_outside_the_four_names_them(server):
+    """`robot.toast("x", "warnung")` read „… enthält ein Zeichen, das hier
+    nicht erlaubt ist." (and "information" „zu lang"): the level is one of
+    four names, and the sentence says which."""
+    for language, method in (('python', 'robot.toast'), ('java', 'Robot.toast')):
+        ctx = _ctx()
+        ctx.code_language = language
+        session = server.open_run(ctx)
+        c = _Client(server.socket_path, session.token)
+        for level in ('warnung', 'INFO', 'information', 'critical', ''):
+            r = c.call('toast', ['x', level, 3])
+            assert r['ok'] is False and r['k'] == 'value', (level, r)
+            assert r['e'] == (f'{method}: „level“ muss eines davon sein: info, success, '
+                              'warning oder error.'), (level, r)
+        assert c.call('toast', ['x', 'warning', 3])['ok'] is True
+        r = c.call('toast', ['x', 5, 3])
+        assert r['e'] == f'{method}: „level“ muss ein Text sein.', r
+        c.close()
+        server.close_run(session)

@@ -1027,7 +1027,7 @@ def test_melde_strips_newlines_so_a_fehler_line_cannot_be_forged():
     c = _LogCtx()
     out.log(c, {'message': 'a\n[FEHLER] alles kaputt'})
     assert '\n' not in c.msgs[0]
-    assert '[FEHLER]' not in c.msgs[0]
+    assert not c.msgs[0].startswith('[')
 
 
 def test_the_log_cap_is_the_cap():

@@ -207,7 +207,7 @@ function registerForBlocks(generator, Order) {
   F.edubotics_while_visible = (b, g) => {
     const body = g.statementToCode(b, 'DO') || g.PASS;
     const type = pyStr(b.getFieldValue('OBJECT_TYPE'));
-    const comment = `# „Solange ${commentText(fieldText(b, 'OBJECT_TYPE'))} sichtbar": vor jedem Blick fährt der Arm in `
+    const comment = `# „Solange ${commentText(fieldText(b, 'OBJECT_TYPE'))} sichtbar“: vor jedem Blick fährt der Arm in `
       + 'die Beobachtungsstellung; ein Objekt, das nicht gegriffen werden kann, wird übersprungen; ohne Fortschritt '
       + 'endet die Schleife von selbst.\n';
     const raw = Number(b.getFieldValue('MAX_REPS'));

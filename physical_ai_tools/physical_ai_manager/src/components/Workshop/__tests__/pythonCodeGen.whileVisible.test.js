@@ -25,7 +25,7 @@ import { registerPerceptionBlocks, setObjectCatalogOptions } from '../blocks/per
 import { registerControlBlocks } from '../blocks/control';
 import { generatePython } from '../pythonCodeGen';
 
-const COMMENT = '# „Solange Würfel sichtbar": vor jedem Blick fährt der Arm in die Beobachtungsstellung; '
+const COMMENT = '# „Solange Würfel sichtbar“: vor jedem Blick fährt der Arm in die Beobachtungsstellung; '
   + 'ein Objekt, das nicht gegriffen werden kann, wird übersprungen; ohne Fortschritt endet die Schleife von selbst.';
 
 async function gen(blocks) {

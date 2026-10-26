@@ -70,8 +70,8 @@
   {"name":"broadcast_without_hat","kind":"hats","py":"import robot\n\n\nif True:\n  pass  # Nachricht „niemand“ — kein „wenn“-Block wartet darauf\n"},
   {"name":"tempo","kind":"filled","py":"import robot\n\n\nrobot.move_to(robot.ziel('Ablage'))  # mit Tempo „schnell“\n\nrobot.lift()  # mit Tempo „langsam“\n"},
   {"name":"pin_unpinned","kind":"empty","row":"pin","py":"import robot\n\n\nrobot.pin('B', None, None, None)  # nicht gepinnt\n"},
-  {"name":"control_blocks","kind":"filled","py":"import robot\n\n\nwhile True:\n  while not (robot.is_holding()):\n    robot.wait(0.1)\n\n# „Solange Würfel sichtbar\": vor jedem Blick fährt der Arm in die Beobachtungsstellung; ein Objekt, das nicht gegriffen werden kann, wird übersprungen; ohne Fortschritt endet die Schleife von selbst.\nwhile robot.sees('wuerfel'):\n  robot.grasp('wuerfel')\n"},
-  {"name":"while_visible_max_reps","kind":"filled","py":"import robot\n\n\n# „Solange Würfel sichtbar\": vor jedem Blick fährt der Arm in die Beobachtungsstellung; ein Objekt, das nicht gegriffen werden kann, wird übersprungen; ohne Fortschritt endet die Schleife von selbst.\nfor _durchgang in range(1):\n  if not robot.sees('wuerfel'):\n    break\n  robot.grasp('wuerfel')\n"},
+  {"name":"control_blocks","kind":"filled","py":"import robot\n\n\nwhile True:\n  while not (robot.is_holding()):\n    robot.wait(0.1)\n\n# „Solange Würfel sichtbar“: vor jedem Blick fährt der Arm in die Beobachtungsstellung; ein Objekt, das nicht gegriffen werden kann, wird übersprungen; ohne Fortschritt endet die Schleife von selbst.\nwhile robot.sees('wuerfel'):\n  robot.grasp('wuerfel')\n"},
+  {"name":"while_visible_max_reps","kind":"filled","py":"import robot\n\n\n# „Solange Würfel sichtbar“: vor jedem Blick fährt der Arm in die Beobachtungsstellung; ein Objekt, das nicht gegriffen werden kann, wird übersprungen; ohne Fortschritt endet die Schleife von selbst.\nfor _durchgang in range(1):\n  if not robot.sees('wuerfel'):\n    break\n  robot.grasp('wuerfel')\n"},
   {"name":"empty_program","kind":"empty","py":"import robot\n"}
  ]
 }

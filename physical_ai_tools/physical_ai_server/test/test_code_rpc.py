@@ -1225,7 +1225,9 @@ def test_log_takes_a_list_none_and_a_greifziel(server):
     r = c.call('log', [deep])
     assert r['ok'] is False and r['k'] == 'value'
     logs = [m for m in ctx._test_logs if not m.startswith('[')]
-    assert logs[:3] == ['(1, b, (2.5, wahr))', 'nichts', 'Greifziel(0)']
+    # B9: the list keeps its ASCII brackets, guarded by U+2060 at the line
+    # start; the stub's own Greifziel(0) text keeps its parentheses.
+    assert logs[:3] == ['\u2060[1, b, [2.5, wahr]]', 'nichts', 'Greifziel(0)']
     assert len(logs[3]) == out.MAX_LOG_CHARS
     c.close()
     server.close_run(session)

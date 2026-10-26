@@ -10,7 +10,7 @@ P14(A) — a program blocking in an unbounded recv wedges stop() — turned into
 P14(B): a CodeProgram releases the manager within the DERIVED deadline whatever
 the runner does. Plus the derived-constant pin, the second-connection kill, a
 project at exactly the cap, the no-unbounded-wait AST fence, and the
-`emit_student_text` / 'ausgabe' fence (the SOLE fence on the bracket strip).
+`emit_student_text` / 'ausgabe' fence (the sentinel guard on both kinds).
 """
 
 from __future__ import annotations
@@ -637,7 +637,7 @@ def test_prev_run_threads_alive_reads_code_threads_and_states_the_bound():
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# print() → 'ausgabe', log() → 'melde'; the bracket strip on BOTH (acceptance 9)
+# print() → 'ausgabe', log() → 'melde'; the sentinel guard on BOTH (acceptance 9)
 # ══════════════════════════════════════════════════════════════════════════
 
 def _log_ctx():
@@ -652,8 +652,11 @@ def test_print_lines_use_the_ausgabe_kind_and_log_keeps_melde():
     out.emit_student_text(c, '[VAR:x=1] ausgabe', 'ausgabe')
     # „melde" stringifies then routes through the same helper as 'melde'.
     out.log(c, {'message': '[VAR:y=2] melde'})
-    # The bracket-sentinel strip applies to BOTH kinds (its SOLE fence).
-    assert c.msgs == ['(VAR:x=1) ausgabe', '(VAR:y=2) melde']
+    # The sentinel guard applies to BOTH kinds (B9, owner decision OQ-5 B: the
+    # brackets stay ASCII, a leading `[` gets U+2060 in front, so the line can
+    # never START a sentinel — test_output_brackets.py, and the client half in
+    # test_student_line_sentinels_lockstep.py).
+    assert c.msgs == ['\u2060[VAR:x=1] ausgabe', '\u2060[VAR:y=2] melde']
     # Per-kind, per-run bucket: both kinds have their own state.
     assert 'ausgabe' in c._output_rate_state
     assert 'melde' in c._output_rate_state

@@ -217,10 +217,21 @@ def _rate_ok(ctx, kind: str) -> bool:
         return True
 
 
+# B9 (owner decision OQ-5 B): a student's line keeps its ASCII brackets
+# („melde [1, b]" reads „[1, b]"); a line whose first character other than a
+# space or U+FEFF is `[` gets this invisible WORD JOINER in front, so it can
+# never START a sentinel. That is a guard only because every client parser of
+# a student line is anchored at the line's first character
+# (robotis_ai_setup/tests/test_student_line_sentinels_lockstep.py). U+2060 is
+# a format character (Cf): JS trim() and Python's \s and strip() keep it.
+STUDENT_LINE_GUARD = '\u2060'
+
+
 def emit_student_text(ctx, text: str, kind: str) -> None:
     """Emit ONE student-facing line: rate-check under ``kind``'s bucket,
-    truncate to ``MAX_LOG_CHARS``, strip bracket sentinels, collapse
-    line-breaking whitespace, and hand it to ``ctx.log``.
+    collapse line-breaking whitespace, guard a leading ``[``
+    (:data:`STUDENT_LINE_GUARD`), truncate to ``MAX_LOG_CHARS``, and hand it
+    to ``ctx.log``.
 
     ``text`` is already a ``str`` — a „melde" VALUE is stringified by ``log``
     before the call, a Python/Java ``print()`` line arrives as a ``str`` — so
@@ -229,17 +240,7 @@ def emit_student_text(ctx, text: str, kind: str) -> None:
     bucket and drop notice (§3.2)."""
     if not _rate_ok(ctx, kind):
         return
-    if len(text) > MAX_LOG_CHARS:
-        # Truncate so the RESULT is MAX_LOG_CHARS, not MAX_LOG_CHARS + 2. The
-        # old form emitted 2002 characters for a 2000-character cap; measured
-        # 2026-09-07, and the constant is the thing the WorkflowStatus channel
-        # is sized against.
-        text = text[:MAX_LOG_CHARS - 2] + ' …'
-    # Strip ALL bracket-sentinel chars so a student's log/output payload can't
-    # spoof [VAR:...] / [SPEAK:...] / [TONE:...] / [SOUND] tokens into
-    # the React-side debug panel.
-    text = text.replace('[', '(').replace(']', ')')
-    # …and collapse newlines + the Unicode line/paragraph separators, exactly as
+    # Collapse newlines + the Unicode line/paragraph separators, exactly as
     # speak_de and toast already do — a DIFFERENT and, as first written, weaker
     # mechanism than either (see below). „melde" was the one output block that
     # emitted them verbatim, so `melde("a\n[FEHLER] …")` forged a second,
@@ -256,6 +257,22 @@ def emit_student_text(ctx, text: str, kind: str) -> None:
     # which speak_de and toast use: that also collapses RUNS of spaces, and a
     # student's „melde"-Text keeps its own spacing.
     text = re.sub(r'\s', ' ', text)
+    # A line can never START a sentinel ([VAR:…], [SPEAK:…], [TONE:…],
+    # [SOUND], [TOAST:…], [CNT:…], [TECHNIK] ): only what follows spaces and
+    # U+FEFF counts as the start — U+FEFF is the one character JS trim()
+    # strips that Python's \s does not (review-3 mi-B).
+    rest = text.lstrip(' \ufeff')
+    if rest.startswith('['):
+        at = len(text) - len(rest)
+        text = text[:at] + STUDENT_LINE_GUARD + text[at:]
+    if len(text) > MAX_LOG_CHARS:
+        # Truncate so the RESULT is MAX_LOG_CHARS, not MAX_LOG_CHARS + 2. The
+        # old form emitted 2002 characters for a 2000-character cap; measured
+        # 2026-09-07, and the constant is the thing the WorkflowStatus channel
+        # is sized against. The substitution and the guard run first (both are
+        # length-neutral or +1), so a guarded line is cut one character earlier
+        # and is never MAX_LOG_CHARS + 1 long (review-3 mi-D).
+        text = text[:MAX_LOG_CHARS - 2] + ' …'
     ctx.log(text)
 
 

@@ -178,6 +178,12 @@ _RECOMMENDATIONS = {
     ('greifziel', 'aufnehmen', 'split'): _split_pick,
     ('greifziel', 'ablegen bei'): lambda: [vset('Z', _find()), B('edubotics_drop_at', inputs={
         'DESTINATION': B('edubotics_object_position', inputs={'ZIEL': vget('Z')})})],
+    # M6: „Position von <Ziel>" in „aufnehmen" / „bewege zu" recommends the
+    # composite „Greife", the split chain and „fahre über".
+    ('position_von', 'aufnehmen'): lambda: [grasp()],
+    ('position_von', 'aufnehmen', 'split'): _split_pick,
+    ('position_von', 'bewege zu'): lambda: [vset('Z', _find()),
+                                           B('edubotics_move_above', inputs={'ZIEL': vget('Z')})],
     ('not_a_greifziel',): _split_pick,
     ('no_greifziel',): _split_pick,
     ('position_not_here',): lambda: [B('edubotics_move_to', inputs={'DESTINATION': ref('P')}),
@@ -189,6 +195,8 @@ _RECOMMENDATIONS = {
 def _sentence(key):
     if key[0] == 'greifziel':
         return M._GREIFZIEL_IN_DESTINATION_DE[key[1]]
+    if key[0] == 'position_von':
+        return M._POSITION_VON_IN_DESTINATION_DE[key[1]]
     if key[0] == 'not_a_greifziel':
         return M._NOT_A_GREIFZIEL_DE['fahre über']
     if key[0] == 'no_greifziel':

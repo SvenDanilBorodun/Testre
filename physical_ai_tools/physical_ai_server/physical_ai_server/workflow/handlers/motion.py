@@ -1691,10 +1691,10 @@ _GREIFZIEL_IN_DESTINATION_DE = {
         'gefundenes Objekt bitte „Greife <Typ>" benutzen oder „fahre über" → '
         '„senke auf" → „schließe um" → „hebe an".'
     ),
-    # F5: „Position von <Ziel>" is NOT recommended here any more — it slips
-    # past this very refusal (a plain {x, y, z}) and drives sideways to the
-    # cube's mid-height with the fixed jaw roll, the blind move this refusal
-    # exists to prevent.
+    # F5: „Position von <Ziel>" is NOT recommended here: it drives sideways to
+    # the cube's grasp height with the fixed jaw roll, the blind move this
+    # refusal exists to prevent — and it is refused here itself now (M6,
+    # _POSITION_VON_IN_DESTINATION_DE).
     'bewege zu': (
         'Ein Greifziel gehört nicht in „bewege zu" — dieser Block fährt zu '
         'einem gepinnten Ziel. Für ein gefundenes Objekt bitte „fahre über" '
@@ -1704,6 +1704,40 @@ _GREIFZIEL_IN_DESTINATION_DE = {
         'Ein Greifziel gehört nicht in „ablegen bei" — dieser Block legt an '
         'einem gepinnten Ziel ab. Wenn du an der Stelle eines gefundenen '
         'Objekts ablegen willst, bitte „Position von <Ziel>" hier einsetzen.'
+    ),
+}
+
+
+def _is_position_von(value: Any) -> bool:
+    """True when ``value`` is what „Position von <Ziel>" answers: a plain
+    ``{x, y, z}`` dict with no ``world_xyz_m`` (M6).
+
+    In a Blockly run this shape has exactly ONE producer,
+    ``perception_blocks.object_position`` (pinned by
+    test_greifziel_socket_contract). A text program's point is a list/tuple on
+    the wire and in the handler, carries no provenance and is never judged
+    here."""
+    return (isinstance(value, dict)
+            and all(k in value for k in ('x', 'y', 'z'))
+            and 'world_xyz_m' not in value)
+
+
+# M6, owner decision OQ-1 A: „Position von <Ziel>" is the found object's centre
+# at GRASP height. „aufnehmen" grasps it blindly from above without the object's
+# rotation and too high (measured: fingertip 27.0 mm, roll joint ±1.571 rad,
+# where „Greife" closes at 15.0 mm with the tag's own roll); „bewege zu" drives
+# the open gripper sideways into the object. „ablegen bei" keeps accepting it.
+_POSITION_VON_IN_DESTINATION_DE = {
+    'aufnehmen': (
+        '„Position von <Ziel>" gehört nicht in „aufnehmen" — dieser Block greift '
+        'blind von oben, ohne die Drehung des Objekts zu kennen, und packt es zu '
+        'hoch. Für ein gefundenes Objekt bitte „Greife <Typ>" benutzen oder „fahre '
+        'über" → „senke auf" → „schließe um" → „hebe an".'
+    ),
+    'bewege zu': (
+        '„Position von <Ziel>" gehört nicht in „bewege zu" — der Greifer würde '
+        'seitlich in das Objekt fahren. Um über ein gefundenes Objekt zu fahren, '
+        'bitte „fahre über" benutzen; „Position von" passt in „ablegen bei".'
     ),
 }
 
@@ -1730,11 +1764,15 @@ def _refuse_greifziel(value: Any, block_de: str) -> None:
     a 30 mm cube that grips 3 mm below its top. ``move_to(Greifziel)`` likewise
     ends at EE z = 0.0150, i.e. it drives LATERALLY at cube height.
 
-    Refused rather than silently re-interpreted: „Position von <Ziel>" already
-    exists for the legitimate "go where that object is" intent and returns a
-    plain ``{x, y, z}``, which these blocks keep accepting unchanged."""
+    Refused rather than silently re-interpreted. „Position von <Ziel>" returns a
+    plain ``{x, y, z}`` at the object's grasp height, which drives the same
+    blind motion: „aufnehmen" and „bewege zu" refuse it too
+    (``_is_position_von``, M6, owner decision OQ-1 A), and only „ablegen bei"
+    accepts it — releasing where a found object lies is its intended use."""
     if _is_greifziel(value):
         raise WorkflowError(_GREIFZIEL_IN_DESTINATION_DE[block_de])
+    if block_de in _POSITION_VON_IN_DESTINATION_DE and _is_position_von(value):
+        raise WorkflowError(_POSITION_VON_IN_DESTINATION_DE[block_de])
 
 
 # F22 / N5: ONE sentence for a Ziel name this run does not know, whichever path

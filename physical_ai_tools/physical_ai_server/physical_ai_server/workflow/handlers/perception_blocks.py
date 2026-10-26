@@ -1942,8 +1942,14 @@ def find_object(ctx, args: dict[str, Any]):
 
 def object_position(ctx, args: dict[str, Any]):
     """„Position von <Ziel>" — VALUE: the Greifziel's base-frame ``{x, y, z}`` so a
-    found object's location can drive ``bewege zu`` / ``lege ab bei``. Raises the
-    precise German calib error when the position isn't known yet."""
+    found object's location can drive „lege ab bei". Raises the precise German
+    calib error when the position isn't known yet.
+
+    „bewege zu" and „aufnehmen" REFUSE this value (M6, owner decision OQ-1 A,
+    ``motion._is_position_von``): it is the object's centre at GRASP height, so
+    they would drive the open gripper sideways into the object or grasp it
+    blindly without its rotation. This is the only handler that returns the
+    {x, y, z} dict shape (pinned by test_greifziel_socket_contract)."""
     ziel = args.get('ziel')
     if ziel is None:
         raise WorkflowError('Kein Greifziel — bitte zuerst „finde …" benutzen.')

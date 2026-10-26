@@ -215,12 +215,13 @@ def test_move_to_passes_per_move_tempo_to_safe_move(monkeypatch):
 
     monkeypatch.setattr(motion, 'safe_move', _fake_safe_move)
     ctx = _ik_ctx()
-    move_to(ctx, {'destination': {'x': 0.20, 'y': 0.0, 'z': 0.0},
+    # A point (a tuple): an {x, y, z} dict is „Position von", refused here (M6).
+    move_to(ctx, {'destination': (0.20, 0.0, 0.0),
                   'geschwindigkeit': 'langsam'})
     assert captured['tempo'] == motion._TEMPO_MIN
     # No field → None (use global).
     captured.clear()
-    move_to(ctx, {'destination': {'x': 0.20, 'y': 0.0, 'z': 0.0}})
+    move_to(ctx, {'destination': (0.20, 0.0, 0.0)})
     assert captured['tempo'] is None
 
 

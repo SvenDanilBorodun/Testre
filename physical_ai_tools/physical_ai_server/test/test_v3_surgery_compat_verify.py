@@ -101,7 +101,14 @@ def test_two_still_takes_with_equal_rows_but_different_video_are_two_episodes(tm
     assert a.data_rows(0).select(V.payload_columns(a.data_rows(0))).equals(
         b.data_rows(0).select(V.payload_columns(b.data_rows(0))))
     assert V.episode_identity(a, 0) != V.episode_identity(b, 0)
-    c = V.Source(build_dataset(tmp_path / 'lena' / 'omx_f_c', lengths=(20,), motion=still, seed=1))
+    # The same take is a COPY of its bytes, as an upload or a download makes one
+    # (the engine's copy is pinned by test_the_same_take_keeps_its_identity_
+    # through_the_engine); encoding the same frames a second time is not the
+    # same take — libx264 does not promise identical bytes across encodes, and
+    # CI produced two different encodes of one take in one process.
+    c_root = tmp_path / 'lena' / 'omx_f_c'
+    shutil.copytree(a.root, c_root)
+    c = V.Source(c_root)
     assert V.episode_identity(a, 0) == V.episode_identity(c, 0), 'the same take is the same id'
 
 

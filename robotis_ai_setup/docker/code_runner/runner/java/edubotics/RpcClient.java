@@ -35,6 +35,7 @@ public final class RpcClient {
     static final String FRAME_TOO_BIG_DE = "Der Aufruf ist zu groß für den Roboter.";
     static final String BAD_REPLY_DE = "Der Roboter hat unverständlich geantwortet.";
     static final String NOT_A_GREIFZIEL_DE = "Hier wird ein Greifziel erwartet — das Ergebnis von find, wenn es etwas gefunden hat.";
+    static final String NOT_SENDABLE_DE = "Ein Wert in diesem Aufruf kann nicht an den Roboter geschickt werden — erlaubt sind Zahlen, Texte, Wahrheitswerte und Listen davon.";
 
     /** Der Roboter hat einen Aufruf abgelehnt; getMessage() ist die deutsche Meldung. */
     public static final class RobotError extends RuntimeException {
@@ -144,6 +145,12 @@ public final class RpcClient {
             } catch (IOException e) {
                 close();
                 throw new RobotError(CONNECTION_LOST_DE);
+            } catch (RobotError e) {
+                // A reply that cannot be read ends that connection: the next
+                // call connects again with the run's token instead of writing
+                // into a dead socket.
+                close();
+                throw e;
             }
         }
         if (Boolean.TRUE.equals(reply.get("ok"))) {
@@ -153,9 +160,19 @@ public final class RpcClient {
         throw new RobotError(e == null ? BAD_REPLY_DE : String.valueOf(e));
     }
 
-    /** u32 big-endian length + the JSON object as UTF-8 (umlauts raw, compact). */
+    /**
+     * u32 big-endian length + the JSON object as UTF-8 (umlauts raw, compact).
+     * An argument EduJson cannot write is the German NOT_SENDABLE_DE, before
+     * any byte is sent.
+     */
     static byte[] encodeFrame(Object obj) {
-        byte[] body = EduJson.encode(obj).getBytes(StandardCharsets.UTF_8);
+        String text;
+        try {
+            text = EduJson.encode(obj);
+        } catch (IllegalArgumentException e) {
+            throw new RobotError(NOT_SENDABLE_DE);
+        }
+        byte[] body = text.getBytes(StandardCharsets.UTF_8);
         if (body.length > MAX_FRAME_BYTES) {
             throw new RobotError(FRAME_TOO_BIG_DE);
         }

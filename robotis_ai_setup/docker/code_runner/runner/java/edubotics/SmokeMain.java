@@ -44,6 +44,21 @@ public final class SmokeMain {
         check(EduJson.asArray(a.get(0)).size() == 3, "point survives");
         check("\"a\\\"b\\n\"".equals(EduJson.encode("a\"b\n")), "escapes");
         check("x\u0001".equals(EduJson.decode("\"x\\u0001\"")), "unicode escape");
+        // C5: a non-finite double is CPython's json token (the robot refuses
+        // it in German), a char or any CharSequence is its text, and anything
+        // else the encoder cannot write is the German NOT_SENDABLE_DE (C5-b).
+        check("NaN".equals(EduJson.encode(Double.NaN)), "NaN token");
+        check("Infinity".equals(EduJson.encode(Double.POSITIVE_INFINITY)), "Infinity token");
+        check("-Infinity".equals(EduJson.encode(Double.NEGATIVE_INFINITY)), "-Infinity token");
+        check("\"a\"".equals(EduJson.encode('a')), "char as text");
+        check("\"ab\"".equals(EduJson.encode(new StringBuilder("ab"))), "CharSequence as text");
+        boolean unsendable = false;
+        try {
+            RpcClient.encodeFrame(List.of(new Object()));
+        } catch (RpcClient.RobotError e) {
+            unsendable = RpcClient.NOT_SENDABLE_DE.equals(e.getMessage());
+        }
+        check(unsendable, "an unencodable argument is refused in German");
 
         // 2. The Robot surface against a socket that does not exist.
         RpcClient.configure("/nirgends/rpc.sock", "0123456789abcdef0123456789abcdef");

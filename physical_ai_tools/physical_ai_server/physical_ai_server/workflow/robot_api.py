@@ -69,7 +69,10 @@ Two rules both stubs carry are spelled here once: :data:`NOT_A_GREIFZIEL_DE`
 (the sentence a grasp step raises locally for anything that is not a
 Greifziel, a Java ``null`` included) and :func:`type_name_for` (the type name
 of a Greifobjekt that names none, rendered into the Python stub from its own
-source and spelled in Java, SmokeMain holding the two equal).
+source and spelled in Java, SmokeMain holding the two equal). Two more local
+sentences: :data:`NOT_SENDABLE_DE` (both stubs: an argument the encoder cannot
+write) and :data:`GREIFZIEL_AS_TARGET_DE` (the Python stub only: a Greifziel
+where a Ziel or a point is expected).
 
 The rate budget both ends enforce lives here as :data:`RPC_LIMITS` (the
 generated stubs embed the numbers; ``code_rpc.py`` imports them). The project
@@ -448,8 +451,11 @@ ROBOT_API: tuple[ApiCall, ...] = (
           example=(_EX_ZIEL,),
           doc_de_block='Schließt den Greifer um das Greifziel.'),
     _stmt('lift', 'lift', 'edubotics_lift', (),
-          'Hebt den Greifer gerade nach oben an, so weit der Arm kann.',
-          doc_de_block='Hebt den Greifer gerade nach oben an, so weit der Arm kann.'),
+          # B7: one block rises at most DEFAULT_APPROACH_HEIGHT_M (6 cm).
+          'Hebt den Greifer gerade nach oben an — um bis zu 6 cm, weniger, wenn der Arm '
+          'nicht so hoch kommt.',
+          doc_de_block='Hebt den Greifer gerade nach oben an — um bis zu 6 cm, weniger, wenn '
+                       'der Arm nicht so hoch kommt.'),
     # ── Named-object grasp ────────────────────────────────────────────────
     _stmt('grasp', 'grasp', 'edubotics_grasp_object', (_OBJ,),
           # Q8: on the rig an empty scene is WAITED for, with no time limit;
@@ -620,14 +626,24 @@ ROBOT_API: tuple[ApiCall, ...] = (
                         'dir das Ergebnis in einer Variablen.'),
     _value('object_position', 'objectPosition', 'edubotics_object_position',
            (_ZIEL,), 'point',
-           'Gibt die Position [x, y, z] des Greifziels in Metern zurück.',
+           # M6 (owner decision OQ-1 A): in Blockly „bewege zu" and „aufnehmen"
+           # refuse „Position von"; the text API is unchanged (a computed point
+           # carries no provenance), so only these docs say where it fits.
+           'Gibt die Position [x, y, z] des Greifziels in Metern zurück — die Mitte des '
+           'Objekts in Greifhöhe. Zum Hinfahren robot.move_above, zum Greifen robot.grasp '
+           'benutzen; robot.move_to oder robot.pickup an diesem Punkt fahren seitlich bzw. '
+           'greifen blind.',
            budget='perception',
            returns_de='Die Position (x, y, z) des Objekts in Metern – drei Zahlen, gemessen '
                       'über die Kamera.',
            doc_de_java='Gibt die Position {x, y, z} des Greifziels als double[] in Metern '
-                       'zurück.',
+                       'zurück — die Mitte des Objekts in Greifhöhe. Zum Hinfahren '
+                       'Robot.moveAbove, zum Greifen Robot.grasp benutzen; Robot.moveTo oder '
+                       'Robot.pickup an diesem Punkt fahren seitlich bzw. greifen blind.',
            example=(_EX_ZIEL,), example_var='position',
-           doc_de_block='Gibt die Position (x, y, z) des Greifziels in Metern zurück.'),
+           doc_de_block='Gibt die Position (x, y, z) des Greifziels in Metern zurück — gedacht '
+                        'für „ablegen bei“. Zum Hinfahren „fahre über“, zum Greifen „Greife“ '
+                        'benutzen.'),
     _value('is_holding', 'isHolding', 'edubotics_grasp_held', (), 'bool',
            'Prüft, ob der Greifer etwas hält. Ein offener Greifer hält nie etwas.',
            returns_de='Wahr, wenn der Greifer etwas hält – sonst falsch.',
@@ -753,6 +769,23 @@ def suggest(name: str) -> str | None:
 NOT_A_GREIFZIEL_DE = ('Hier wird ein Greifziel erwartet — das Ergebnis von find, wenn es '
                       'etwas gefunden hat.')
 
+# The sentence the PYTHON stub raises locally when a Greifziel is handed to a
+# call that takes a Ziel's name or a point (move_to, pickup, drop_at: the
+# `target` kind, C4) — it reached json.dumps and read as an English TypeError.
+# Python only: Java's Robot.moveTo has no Greifziel overload, so javac refuses
+# that call before it runs.
+GREIFZIEL_AS_TARGET_DE = ('Ein Greifziel gehört nicht hierher — hier wird der Name eines '
+                          'Ziels oder ein Punkt (x, y, z) erwartet. Über ein gefundenes Objekt '
+                          'fährt robot.move_above(…), greifen tut robot.grasp(…), an seiner '
+                          'Stelle ablegen geht mit robot.drop_at(robot.object_position(…)).')
+
+# The sentence BOTH stubs raise locally when an argument cannot be encoded
+# (C5-b: Python's json.dumps TypeError/ValueError/RecursionError — bytes, a
+# complex, a set, a custom object, a circular or too-deep list — and Java's
+# EduJson IllegalArgumentException), before any byte is sent.
+NOT_SENDABLE_DE = ('Ein Wert in diesem Aufruf kann nicht an den Roboter geschickt werden '
+                   '— erlaubt sind Zahlen, Texte, Wahrheitswerte und Listen davon.')
+
 # The catalog's own field names (object_catalog.parse_catalog's refusals name
 # them) → the Greifobjekt attribute the student wrote (F17). Java spells each
 # as its constructor parameter (java_camel).
@@ -858,6 +891,8 @@ _SHOWN_MAX_ITEMS = 50
 
 _PY_ARG_MARSHAL = {
     'ziel': '_handle({v})',
+    # C4: a Greifziel is refused in German before json.dumps sees it.
+    'target': '_target({v})',
     'obj': '_type_name({v})',
     'tagids': 'list({v})',
     'value': '_shown({v})',
@@ -953,6 +988,8 @@ _CONNECTION_LOST_DE = 'Die Verbindung zum Roboter ist abgebrochen.'
 _FRAME_TOO_BIG_DE = 'Der Aufruf ist zu groß für den Roboter.'
 _BAD_REPLY_DE = 'Der Roboter hat unverständlich geantwortet.'
 _NOT_A_GREIFZIEL_DE = {NOT_A_GREIFZIEL_DE!r}
+_GREIFZIEL_AS_TARGET_DE = {GREIFZIEL_AS_TARGET_DE!r}
+_NOT_SENDABLE_DE = {NOT_SENDABLE_DE!r}
 _NOT_AN_OBJECT_DE = ('Hier wird ein Objekt-Name (z. B. "wuerfel") oder eine '
                      'Greifobjekt-Klasse erwartet.')
 
@@ -1027,7 +1064,8 @@ class _Rpc:
 
     def connect(self, path, token, project_root=None):
         """Connect and greet; the launcher calls this, or the first call does
-        from the two environment variables."""
+        from the two environment variables. A reconnect (no project root
+        given) keeps the launcher's."""
         with self._lock:
             if self._sock is not None:
                 return
@@ -1038,7 +1076,8 @@ class _Rpc:
                 sock.close()
                 raise RobotError(_NO_CONNECTION_DE) from None
             self._sock = sock
-            self.project_root = project_root
+            if project_root is not None:
+                self.project_root = project_root
             self.call('__hello', [token], 'call')
 
     def _ensure_connected(self):
@@ -1088,8 +1127,12 @@ class _Rpc:
             if file is not None:
                 request['f'] = file
                 request['l'] = line
-            data = json.dumps(request, ensure_ascii=False,
-                              separators=(',', ':')).encode('utf-8')
+            try:
+                data = json.dumps(request, ensure_ascii=False,
+                                  separators=(',', ':')).encode('utf-8')
+            except (TypeError, ValueError, RecursionError):
+                # Nothing is sent: the connection stays usable.
+                raise RobotError(_NOT_SENDABLE_DE) from None
             if len(data) > MAX_FRAME_BYTES:
                 raise RobotError(_FRAME_TOO_BIG_DE)
             try:
@@ -1098,6 +1141,12 @@ class _Rpc:
             except OSError:
                 self.close()
                 raise RobotError(_CONNECTION_LOST_DE) from None
+            except RobotError:
+                # A connection the robot ended, or a reply that cannot be read,
+                # is closed: the next call connects again with the run's token
+                # instead of writing into a dead socket.
+                self.close()
+                raise
         if reply.get('ok') is True:
             return reply.get('r')
         raise RobotError(str(reply.get('e') or _BAD_REPLY_DE))
@@ -1142,6 +1191,12 @@ def _handle(value):
     if isinstance(value, Greifziel):
         return value._h
     raise RobotError(_NOT_A_GREIFZIEL_DE)
+
+
+def _target(value):
+    if isinstance(value, Greifziel):
+        raise RobotError(_GREIFZIEL_AS_TARGET_DE)
+    return value
 
 
 def _type_name(value):
@@ -1305,6 +1360,8 @@ def render_python_stub() -> str:
         SHOWN_TOO_BIG_DE=_SHOWN_TOO_BIG_DE,
         PUBLIC_METHODS=_py_name_block(c.name for c in ROBOT_API + CODE_ONLY_METHODS),
         NOT_A_GREIFZIEL_DE=NOT_A_GREIFZIEL_DE,
+        GREIFZIEL_AS_TARGET_DE=GREIFZIEL_AS_TARGET_DE,
+        NOT_SENDABLE_DE=NOT_SENDABLE_DE,
     )
     head += _py_type_name_block()
     methods = '\n'.join(_py_method(c) for c in ROBOT_API + CODE_ONLY_METHODS)
@@ -1639,6 +1696,7 @@ public final class RpcClient {{
     static final String FRAME_TOO_BIG_DE = "Der Aufruf ist zu groß für den Roboter.";
     static final String BAD_REPLY_DE = "Der Roboter hat unverständlich geantwortet.";
     static final String NOT_A_GREIFZIEL_DE = {NOT_A_GREIFZIEL_DE};
+    static final String NOT_SENDABLE_DE = {NOT_SENDABLE_DE};
 
     /** Der Roboter hat einen Aufruf abgelehnt; getMessage() ist die deutsche Meldung. */
     public static final class RobotError extends RuntimeException {{
@@ -1748,6 +1806,12 @@ public final class RpcClient {{
             }} catch (IOException e) {{
                 close();
                 throw new RobotError(CONNECTION_LOST_DE);
+            }} catch (RobotError e) {{
+                // A reply that cannot be read ends that connection: the next
+                // call connects again with the run's token instead of writing
+                // into a dead socket.
+                close();
+                throw e;
             }}
         }}
         if (Boolean.TRUE.equals(reply.get("ok"))) {{
@@ -1757,9 +1821,19 @@ public final class RpcClient {{
         throw new RobotError(e == null ? BAD_REPLY_DE : String.valueOf(e));
     }}
 
-    /** u32 big-endian length + the JSON object as UTF-8 (umlauts raw, compact). */
+    /**
+     * u32 big-endian length + the JSON object as UTF-8 (umlauts raw, compact).
+     * An argument EduJson cannot write is the German NOT_SENDABLE_DE, before
+     * any byte is sent.
+     */
     static byte[] encodeFrame(Object obj) {{
-        byte[] body = EduJson.encode(obj).getBytes(StandardCharsets.UTF_8);
+        String text;
+        try {{
+            text = EduJson.encode(obj);
+        }} catch (IllegalArgumentException e) {{
+            throw new RobotError(NOT_SENDABLE_DE);
+        }}
+        byte[] body = text.getBytes(StandardCharsets.UTF_8);
         if (body.length > MAX_FRAME_BYTES) {{
             throw new RobotError(FRAME_TOO_BIG_DE);
         }}
@@ -2077,6 +2151,7 @@ def render_java_rpc_client() -> str:
         SHOWN_BIG_BITS=_java_literal(_SHOWN_BIG_BITS),
         SHOWN_TOO_BIG_DE=_SHOWN_TOO_BIG_DE,
         NOT_A_GREIFZIEL_DE=_java_literal(NOT_A_GREIFZIEL_DE),
+        NOT_SENDABLE_DE=_java_literal(NOT_SENDABLE_DE),
     )
 
 

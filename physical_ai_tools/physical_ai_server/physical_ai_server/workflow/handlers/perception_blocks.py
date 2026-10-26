@@ -1689,10 +1689,11 @@ def _grasp_object_locked(ctx, type_name, recipe) -> None:
                     _skip_tag(ctx, d.aruco_id)
                 # Direction-correct reason, shared with find_object (F4): the old
                 # text told the student to move a TOO-NEAR object even nearer.
-                raise GraspSkip(_out_of_reach_reason(
+                # Worded for the Sim-Tisch in the simulator (B8).
+                raise GraspSkip(_motion.sim_greifbereich_de(ctx, _out_of_reach_reason(
                     ctx, recipe.label_de,
                     next((d.world_xyz_m for d in detections
-                          if d.world_xyz_m is not None), (0.0, 0.0, 0.0))))
+                          if d.world_xyz_m is not None), (0.0, 0.0, 0.0)))))
             _motion._require_seeded_start_pose(ctx)
             x, y, z = target.world_xyz_m
             # Refine the SELECTED target's yaw over N frames (circular mean + R

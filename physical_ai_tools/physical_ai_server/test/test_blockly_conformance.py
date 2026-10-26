@@ -52,8 +52,12 @@ INTENTIONAL: dict[int, tuple[str, tuple[str, ...]]] = {
         ('and_value', 'or_value')),
     2: ('A list element is numbered from 1. Element 0 and an element past '
         'the end are refused in German; the preview’s L[-1] silently reads '
-        'the LAST element.',
-        ('getidx_0',)),
+        'the LAST element, its insert(-0) puts a new element at the FRONT, a '
+        'slice starting at element 0 (L[-1:…]) wraps around, and element 0 '
+        'counted from the end reads from the front as a start (L[-0:…]) and '
+        'nothing as an end (L[…:-0]).',
+        ('getidx_0', 'setidx_insert_fromend_0', 'sublist_fromstart_0',
+         'sublist_fromend_0')),
     3: ('A power with no real result (a negative base, a fractional exponent) '
         'is refused; the preview hands a complex number to the next block.',
         ('pow_complex',)),
@@ -74,6 +78,14 @@ INTENTIONAL: dict[int, tuple[str, tuple[str, ...]]] = {
         'preview would keep going.',
         ('cap_for_loop', 'cap_lists_repeat', 'cap_lists_create_with',
          'cap_text_join')),
+    9: ('An empty socket of „vergleiche", „und“/„oder“, „nicht“ or „Rest von“ '
+        'is refused in German; the preview fills in 0, wahr or falsch.',
+        ('cmp_eq_empty', 'cmp_lt_empty', 'and_empty_b', 'or_empty_a',
+         'neg_empty', 'mod_empty_dividend')),
+    10: ('A function that calls itself more deeply than the robot’s own Python '
+         'allows (about 100 to 160 levels, depending on the blocks) is refused '
+         'in German; the preview’s Python goes deeper.',
+         ('proc_recursion_400',)),
 }
 
 # Cases whose VALUE is random: only „raises or not" is compared.

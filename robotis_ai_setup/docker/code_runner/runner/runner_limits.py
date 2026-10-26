@@ -5,7 +5,7 @@ Two kinds of value live in this file, and a deps-free test tells them apart:
 
 * TWINS of ``physical_ai_server/workflow/robot_api.py`` (``RpcLimits``, the
   code-project caps, ``RUN_TOKEN_RE``, ``PAUSED_MAX_LOCALS``) and of
-  ``workflow/code_rpc.py`` (the two stdout bounds). The runner cannot import
+  ``workflow/code_rpc.py`` (the three stdout bounds). The runner cannot import
   the server package (a different image, a different interpreter), so the
   numbers are re-spelled and ``tests/test_code_runner_limits_lockstep.py``
   AST-compares every one of them. Change the server, and that test names the
@@ -41,8 +41,13 @@ RUN_TOKEN_RE = r'^[0-9a-f]{32}$'
 PAUSED_MAX_LOCALS = 30
 
 # ── stdout bounds twin (code_rpc.STDOUT_*) ─────────────────────────────────
+# Program output (stdout AND stderr alike) is a token bucket per pump: it
+# starts with STDOUT_BURST_LINES lines (= handlers/output.py::OUTPUT_BURST_LOG,
+# the server's own `ausgabe` burst) and refills at STDOUT_MAX_LINES_PER_S; every
+# line is cut at STDOUT_MAX_LINE_BYTES.
 STDOUT_MAX_LINE_BYTES = 2000
 STDOUT_MAX_LINES_PER_S = 20
+STDOUT_BURST_LINES = 500
 
 # ── the sandbox's own numbers ──────────────────────────────────────────────
 # The student uid/gid. The supervisor is uid 0 with exactly SETUID, SETGID and

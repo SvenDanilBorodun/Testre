@@ -262,8 +262,10 @@ def test_drop_at_ends_gripper_open():
 # ── move_to ──────────────────────────────────────────────────────────────────
 
 def test_move_to_reachable_destination_dict():
+    # A POINT (a tuple), not „Position von": an {x, y, z} dict is what
+    # „Position von <Ziel>" answers, and „bewege zu" refuses that (M6).
     ctx = _ctx()
-    move_to(ctx, {'destination': {'x': 0.20, 'y': 0.0, 'z': 0.0}})
+    move_to(ctx, {'destination': (0.20, 0.0, 0.0)})
     assert ctx.published, 'move_to should publish a motion'
     # The arm joints are updated to the solved config; the gripper joint
     # is carried over unchanged (move_to doesn't open/close).
@@ -274,7 +276,7 @@ def test_move_to_reachable_destination_dict():
 def test_move_to_unreachable_destination_raises_arbeitsbereich():
     ctx = _ctx()
     with pytest.raises(WorkflowError) as exc:
-        move_to(ctx, {'destination': {'x': 0.50, 'y': 0.0, 'z': 0.0}})
+        move_to(ctx, {'destination': (0.50, 0.0, 0.0)})
     assert 'Arbeitsbereich' in str(exc.value)
 
 

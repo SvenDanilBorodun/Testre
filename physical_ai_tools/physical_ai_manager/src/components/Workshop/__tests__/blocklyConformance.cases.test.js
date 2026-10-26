@@ -222,6 +222,85 @@ function buildCorpus() {
   add('cap_lists_create_with', set('r', lst(...Array.from({ length: 21 }, (_, k) => num(k)))));
   add('cap_text_join', set('r', join(txt('x'.repeat(6000)), txt('y'.repeat(6000)))));
 
+  // The review-fix round (2026-10-25). Every socket left out of `inputs` below
+  // is EMPTY in the saved JSON too (Blockly keeps an empty socket empty).
+  const cmp = (op, a, b) => B('logic_compare', { OP: op }, { A: a, B: b });
+  const pdef = (name, params, stack, ret) => B(
+    ret ? 'procedures_defreturn' : 'procedures_defnoreturn',
+    { NAME: name },
+    { STACK: stack, RETURN: ret },
+    { params: params.map((p) => ({ name: p, id: `v_${p}` })) },
+  );
+  const pcall = (name, args, params, ret = false) => B(
+    ret ? 'procedures_callreturn' : 'procedures_callnoreturn', null,
+    Object.fromEntries(args.map((a, k) => [`ARG${k}`, a])),
+    { name, params },
+  );
+  // procedures_ifreturn has no JSON extraState: Blockly saves its XML mutation.
+  const ifret = (cond, value) => B('procedures_ifreturn', null, { CONDITION: cond, VALUE: value },
+    '<mutation value="1"></mutation>');
+  // M1 — a „Funktion" call has its own frame: a parameter shadows the global
+  // and a write to it stays in the call; a nested call reads the GLOBAL, not
+  // its caller's parameter (the preview declares every other variable global).
+  add('proc_param_shadows_global',
+    chain(set('a', num(7)), pcall('setze', [num(1)], ['a']), set('r', get('a'))),
+    pdef('setze', ['a'], set('b', get('a'))));
+  add('proc_nested_reads_global',
+    chain(set('a', num(5)), pcall('aussen', [num(1)], ['a'])),
+    pdef('aussen', ['a'], pcall('innen', [], [])),
+    pdef('innen', [], set('b', get('a'))));
+  add('proc_recursion_sum_20',
+    set('r', pcall('summe', [num(20)], ['a'], true)),
+    pdef('summe', ['a'], ifret(cmp('LTE', get('a'), num(0)), num(0)),
+      arith('ADD', get('a'), pcall('summe', [arith('MINUS', get('a'), num(1))], ['a'], true))));
+  add('proc_param_write_is_local',
+    chain(set('a', num(1)), pcall('f', [num(2)], ['a'])),
+    pdef('f', ['a'], chain(set('a', num(3)), set('b', get('a')))));
+  // B6 — deeper than the robot's Python allows (INTENTIONAL #10).
+  add('proc_recursion_400',
+    set('r', pcall('tief', [num(400)], ['a'], true)),
+    pdef('tief', ['a'], ifret(cmp('LTE', get('a'), num(0)), num(0)),
+      arith('ADD', num(1), pcall('tief', [arith('MINUS', get('a'), num(1))], ['a'], true))));
+  // B1 — an empty socket of „vergleiche", „und"/„oder", „nicht", „Rest von"
+  // (INTENTIONAL #9) and „beschränke"'s empty HIGH (the preview's infinity).
+  add('cmp_eq_empty', set('r', cmp('EQ', null, num(0))));
+  add('cmp_lt_empty', set('r', cmp('LT', num(1), null)));
+  add('and_empty_b', set('r', B('logic_operation', { OP: 'AND' }, { A: bool(true) })));
+  add('or_empty_a', set('r', B('logic_operation', { OP: 'OR' }, { B: bool(true) })));
+  add('neg_empty', set('r', B('logic_negate', null, null)));
+  add('mod_empty_divisor', set('r', B('math_modulo', null, { DIVIDEND: num(7) })));
+  add('mod_empty_dividend', set('r', B('math_modulo', null, { DIVISOR: num(3) })));
+  add('constrain_empty_high', set('r', B('math_constrain', null, { VALUE: num(50), LOW: num(1) })));
+  // B2 — a variable that holds nothing is not 0 in a number socket; „ändere
+  // um" counts a Wahrheitswert like the preview's isinstance(x, Number).
+  add('arith_unset_var', set('r', arith('ADD', get('a'), num(1))));
+  add('for_unset_to', forLoop(num(1), get('b'), num(1)));
+  add('repeat_unset_times', chain(
+    set('trace', lst()),
+    B('controls_repeat_ext', null, { TIMES: get('b'), DO: append('trace', num(1)) }),
+  ));
+  add('change_bool', chain(set('a', bool(true)), B('math_change', { VAR: V('a') }, { DELTA: num(1) })));
+  // B3 — element 0 in „füge ein … von hinten" and „nimm Teilliste" (INTENTIONAL #2).
+  add('setidx_insert_fromend_0', chain(set('a', L3()),
+    B('lists_setIndex', { MODE: 'INSERT', WHERE: 'FROM_END' }, { LIST: get('a'), AT: num(0), TO: num(99) }),
+    set('b', get('a'))));
+  add('sublist_fromstart_0', set('r', B('lists_getSublist', { WHERE1: 'FROM_START', WHERE2: 'FROM_END' },
+    { LIST: L3(), AT1: num(0), AT2: num(1) })));
+  add('sublist_fromend_0', set('r', B('lists_getSublist', { WHERE1: 'FROM_END', WHERE2: 'FROM_END' },
+    { LIST: L3(), AT1: num(0), AT2: num(1) })));
+  // B4 — a text is read like a list of characters by „nimm Teilliste" and
+  // „hole Element"; „entferne" and a number keep their refusal.
+  add('sublist_text', chain(set('a', txt('abcd')),
+    set('r', B('lists_getSublist', { WHERE1: 'FROM_START', WHERE2: 'FROM_START' }, { LIST: get('a'), AT1: num(2), AT2: num(3) }))));
+  add('getidx_text', chain(set('a', txt('abc')), set('r', getIdx(num(2), 'FROM_START', get('a')))));
+  add('sublist_number', chain(set('a', num(5)),
+    set('r', B('lists_getSublist', { WHERE1: 'FROM_START', WHERE2: 'FROM_START' }, { LIST: get('a'), AT1: num(1), AT2: num(2) }))));
+  add('getidx_text_remove', chain(set('a', txt('abc')),
+    set('r', B('lists_getIndex', { MODE: 'GET_REMOVE', WHERE: 'FROM_START' }, { VALUE: get('a'), AT: num(2) }))));
+  // B5 — a fractional count / fractional bounds.
+  add('repeat_list_2.7', set('r', B('lists_repeat', null, { ITEM: txt('x'), NUM: num(2.7) })));
+  add('randint_1.5', set('r', B('math_random_int', null, { FROM: num(1.5), TO: num(3.5) })));
+
   // A seeded fuzz over arithmetic, rounding, modulo, „zähle" and „wiederhole".
   // Combinations that land on a listed deviation (a complex power) are left
   // out: those are covered once, by name, above.
@@ -314,6 +393,15 @@ describe('the Blockly conformance corpus (the preview is the meaning of a block)
       'round_2.5', 'repeat_2.7', 'getidx_1.5',
       'constrain_low_gt_high', 'random_from_gt_to', 'isempty_empty_socket', 'join_float_and_list',
       'cap_for_loop', 'cap_lists_repeat', 'cap_lists_create_with', 'cap_text_join',
+      // the review-fix round (2026-10-25)
+      'proc_param_shadows_global', 'proc_nested_reads_global', 'proc_recursion_sum_20',
+      'proc_param_write_is_local', 'proc_recursion_400',
+      'cmp_eq_empty', 'cmp_lt_empty', 'and_empty_b', 'or_empty_a', 'neg_empty',
+      'mod_empty_divisor', 'mod_empty_dividend', 'constrain_empty_high',
+      'arith_unset_var', 'for_unset_to', 'repeat_unset_times', 'change_bool',
+      'setidx_insert_fromend_0', 'sublist_fromstart_0', 'sublist_fromend_0',
+      'sublist_text', 'getidx_text', 'sublist_number', 'getidx_text_remove',
+      'repeat_list_2.7', 'randint_1.5',
     ]) {
       expect(names).toContain(name);
     }

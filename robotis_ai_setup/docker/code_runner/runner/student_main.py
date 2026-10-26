@@ -38,6 +38,7 @@ import runpy
 import sys
 import threading
 import traceback
+import types
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _LIB = os.path.join(_HERE, 'lib')
@@ -57,24 +58,79 @@ def _load_limits():
     return module
 
 
+def _exc_field(exc: BaseException, base: type, field: str):
+    """``exc``'s own ``field`` slot, read through the BASE class's member
+    descriptor (``ImportError.__dict__['name_from'].__get__(exc)``) — never
+    ``getattr``, which runs a student subclass's property, ``__getattribute__``
+    or ``__getattr__`` for that name (fix round 1, R3: one that raised made
+    :func:`classify_exception` itself raise, and the report lost its line and
+    its ``[TECHNIK]`` line). The descriptor reads the C slot and runs no
+    student code; anything that goes wrong answers None."""
+    try:
+        descriptor = base.__dict__.get(field)
+        return None if descriptor is None else descriptor.__get__(exc, base)
+    except Exception:  # noqa: BLE001 — no field is no name
+        return None
+
+
+def _exc_text(exc: BaseException, base: type, field: str) -> str:
+    """:func:`_exc_field` when it is an EXACT ``str`` (a ``str`` subclass's
+    ``__bool__``/``__eq__``/``__str__`` would be student code), else ``''``."""
+    value = _exc_field(exc, base, field)
+    return value if type(value) is str else ''
+
+
 def classify_exception(exc: BaseException, project_root: str, robot_module) -> dict:
-    """Map a fault to the exit-report dict (pure; tested without a process)."""
+    """Map a fault to the exit-report dict (pure; tested without a process).
+
+    ``name``, ``name_from`` and ``obj`` are read through the base class's
+    member descriptors (:func:`_exc_field`), never ``getattr``: a hostile
+    subclass keeps its report (fix round 1, R3)."""
     kind, name = 'other', ''
     if isinstance(exc, IndentationError):
         kind = 'indentation'
     elif isinstance(exc, SyntaxError):
         kind = 'syntax'
     elif isinstance(exc, NameError):
-        kind, name = 'name', str(getattr(exc, 'name', '') or '')
-    elif isinstance(exc, AttributeError) and getattr(exc, 'obj', None) is robot_module:
-        kind, name = 'robot_method', str(getattr(exc, 'name', '') or '')
-    elif (isinstance(exc, AttributeError) and getattr(exc, 'name', None)
-          and getattr(exc, 'obj', 0) is None):
+        kind, name = 'name', _exc_text(exc, NameError, 'name')
+    elif isinstance(exc, AttributeError) and _exc_field(exc, AttributeError, 'obj') is robot_module:
+        kind, name = 'robot_method', _exc_text(exc, AttributeError, 'name')
+    elif (isinstance(exc, AttributeError) and _exc_text(exc, AttributeError, 'name')
+          and _exc_field(exc, AttributeError, 'obj') is None):
         # `ziel.x` with ziel None: the server words it „Hier ist kein Wert da
         # (None bzw. null)" (code_errors_de, chosen from exc_type + this name).
         name = 'None'
+    elif (isinstance(exc, AttributeError)
+          and type(_exc_field(exc, AttributeError, 'obj')) is types.ModuleType):
+        # `math.sqrtt`, `helfer.nope` (M3): kind `name` with `module.attr` —
+        # the server words a dotted name „„sqrtt“ gibt es im Modul „math“
+        # nicht" (code_errors_de 'name_in_module'). An EXACT type test, never
+        # isinstance (which reads `obj.__class__`, i.e. a student class's own
+        # __getattribute__ — review-2 mi-2), and the module's name read from its
+        # __dict__, which never runs a module-level __getattr__. A module whose
+        # __name__ is not a str stays `other` (review-3 mi-E).
+        module = _exc_field(exc, AttributeError, 'obj').__dict__.get('__name__')
+        attr = _exc_text(exc, AttributeError, 'name')
+        if type(module) is str and module and module != 'robot' and attr:
+            kind, name = 'name', f'{module}.{attr}'
     elif isinstance(exc, ImportError):
-        kind, name = 'import', str(getattr(exc, 'name', '') or '')
+        # CPython 3.12: `from X import Y` names the MODULE in exc.name and the
+        # missing NAME in exc.name_from (M3). `from robot import mvoe_to` is
+        # the robot_method sentence; any other module a dotted `name` (a
+        # NameError's name never holds a dot, so the dot is the signal); a
+        # missing module keeps `import`; a program's own bare ImportError is
+        # `other` (no module to name).
+        module = _exc_text(exc, ImportError, 'name')
+        name_from = _exc_text(exc, ImportError, 'name_from')
+        if name_from:
+            if module == 'robot':
+                kind, name = 'robot_method', name_from
+            elif module:
+                kind, name = 'name', f'{module}.{name_from}'
+            else:
+                kind, name = 'name', name_from
+        elif module:
+            kind, name = 'import', module
     elif isinstance(exc, TypeError):
         kind = 'type'
     elif isinstance(exc, ZeroDivisionError):
@@ -232,13 +288,19 @@ def main(argv: list[str]) -> int:
         elif isinstance(exc.code, int):
             code = exc.code
         else:
-            sys.stderr.write(f'{exc.code}\n')
+            # `sys.exit("Fehler!")`: the text is the program's own output —
+            # stdout reaches the Protokoll before the exit sentence, stderr is
+            # never shown (C9-b).
+            print(exc.code, flush=True)
             code = 1
     except BaseException as exc:  # noqa: BLE001 — every fault is reported
         namespaces = edubotics_debug.project_namespaces(exc.__traceback__, run_dir)
         info = classify_exception(exc, run_dir, robot)
         code = 1
-        traceback.print_exc()
+        try:
+            traceback.print_exc()
+        except Exception:  # noqa: BLE001 — a hostile exception's own attributes (R3)
+            sys.stderr.write(f'{type(exc).__name__}\n')
     finally:
         try:
             sys.stdout.flush()

@@ -19,8 +19,12 @@
 // `from robot import move_to` — and, in Python, the same argument given by
 // its keyword wherever it stands (`robot.replay(speed=2, name="Winken")`, the
 // parameter name read from the table; review round 2, ni1). The receiver is
-// `robot`/`Robot` (Java also `edubotics.Robot`) or none, bounded like an
-// identifier in both languages: `Größrobot.replay`, `ßreplay` and
+// `robot`/`Robot` (Java also `edubotics.Robot`) or none, and in Python also a
+// name the FILE gives the robot at its top level (`import robot as r` →
+// `r.replay("A")`; `from robot import replay as abspielen` → a bare
+// `abspielen("A")` is the replay row — code/pythonAliases.js, E1 of the
+// Roboter Studio review fixes; an alias in another file does not count),
+// bounded like an identifier in both languages: `Größrobot.replay`, `ßreplay` and
 // `x.robot.replay` are not the robot (ni2), and `"abc".count("a")` (Python's
 // str.count) is never an object reference. A literal must be the WHOLE
 // argument (followed by `,` or `)`), unprefixed or `r`/`u`, single-line, with
@@ -43,6 +47,9 @@
 
 import robotApi from './robot_api.json';
 import { codeBreakpointId } from './codeBreakpoints';
+import {
+  aliasKey, pythonRobotAliases, receiverAlternation, rowNameOf,
+} from './pythonAliases';
 
 // ── the asset call table (from robot_api.json) ─────────────────────────────
 
@@ -249,6 +256,22 @@ export function codeOnlyText(content, language) {
   return out;
 }
 
+// One remembered answer: the completion and the hover ask for the same
+// document's aliases on every query.
+let lastAliases = { content: null, aliases: null };
+
+/**
+ * The robot's names in one PYTHON file — code/pythonAliases.js over this
+ * file's code-only text: `{receivers: ['robot', …], functions: Map}`.
+ */
+export function pythonAliasesOf(content) {
+  const text = typeof content === 'string' ? content : '';
+  if (lastAliases.content !== text) {
+    lastAliases = { content: text, aliases: pythonRobotAliases(codeOnlyText(text, 'python')) };
+  }
+  return lastAliases.aliases;
+}
+
 // ── lines and columns ──────────────────────────────────────────────────────
 
 function lineStarts(text) {
@@ -271,32 +294,47 @@ function lineColAt(starts, offset) {
 // ── the asset calls ────────────────────────────────────────────────────────
 
 // The receiver of a call, bounded like an identifier on its left (a letter,
-// a digit, `_` or a `.` before it means it is not the robot).
+// a digit, `_` or a `.` before it means it is not the robot). Python's
+// receivers are the FILE's — `robot` and its top-level aliases (E1) — and its
+// call name is a Unicode identifier, so a bare alias such as `spiele_ä` is
+// found too; the row lookup decides whether a name is a robot call at all.
 const RECEIVER = {
-  python: '(?<![\\p{L}\\p{N}_.])(robot)\\s*\\.\\s*',
+  python: '(?<![\\p{L}\\p{N}_.])(RECEIVERS)\\s*\\.\\s*',
   java: '(?<![\\p{L}\\p{N}_.])((?:edubotics\\s*\\.\\s*)?Robot)\\s*\\.\\s*',
 };
-const CALLEE = '(?:RECV|(?<![\\p{L}\\p{N}_.]))([A-Za-z_][A-Za-z0-9_]*)';
-const callee = (language) => CALLEE.replace('RECV', RECEIVER[language] || RECEIVER.python);
-// The call right before a string: `robot.name(` / `Robot.name(` / bare `name(`.
-const CALL_TAIL_RE = {
-  python: new RegExp(`${callee('python')}\\s*\\(\\s*$`, 'u'),
-  java: new RegExp(`${callee('java')}\\s*\\(\\s*$`, 'u'),
+const CALL_NAME = {
+  python: '([\\p{L}_][\\p{L}\\p{N}_]*)',
+  java: '([A-Za-z_][A-Za-z0-9_]*)',
 };
-// A call's name right before its `(` (the keyword path scans back to it).
-const CALL_NAME_RE = {
-  python: new RegExp(`${callee('python')}\\s*$`, 'u'),
-  java: new RegExp(`${callee('java')}\\s*$`, 'u'),
-};
+const CALLEE = '(?:RECV|(?<![\\p{L}\\p{N}_.]))NAME';
+
+// The call regexes of one language and alias set, built once per set:
+// `tail` — the call right before a string (`robot.name(` / `Robot.name(` /
+// bare `name(`); `name` — a call's name right before its `(` (the keyword
+// path scans back to it); `commentHead` — the same call inside a comment's
+// text (a comment holds no string tokens): its head, then its arguments are
+// read one by one (review round 3, nb3 — a keyword argument anywhere in the
+// list, like the code path, not only first).
+const CALL_RES = new Map();
+function callRegexes(language, aliases) {
+  const lang = language === 'java' ? 'java' : 'python';
+  const key = lang === 'python' ? `python:${aliasKey(aliases)}` : 'java';
+  let res = CALL_RES.get(key);
+  if (!res) {
+    const recv = RECEIVER[lang].replace('RECEIVERS', receiverAlternation(aliases));
+    const callee = CALLEE.replace('RECV', recv).replace('NAME', CALL_NAME[lang]);
+    res = {
+      tail: new RegExp(`${callee}\\s*\\(\\s*$`, 'u'),
+      name: new RegExp(`${callee}\\s*$`, 'u'),
+      commentHead: new RegExp(`${callee}\\s*\\(`, 'gu'),
+    };
+    if (CALL_RES.size >= 64) CALL_RES.clear();
+    CALL_RES.set(key, res);
+  }
+  return res;
+}
 // A keyword right before a string: `name=`, `target = `.
 const KEYWORD_TAIL_RE = /(?<![\p{L}\p{N}_])([A-Za-z_][A-Za-z0-9_]*)\s*=\s*$/u;
-// The same call inside a comment's text (a comment holds no string tokens):
-// its head, then its arguments read one by one (review round 3, nb3 — a
-// keyword argument anywhere in the list, like the code path, not only first).
-const COMMENT_CALL_HEAD_RE = {
-  python: new RegExp(`${callee('python')}\\s*\\(`, 'gu'),
-  java: new RegExp(`${callee('java')}\\s*\\(`, 'gu'),
-};
 // One argument that is exactly a literal: `"A"` / `'A'`, or (Python)
 // `name="A"`; no backslash, no line break, no other quote inside.
 const COMMENT_LITERAL_ARG_RE = /^(["'])([^"'\\\n]*)\1$/;
@@ -306,10 +344,13 @@ const PIN_COORD_KEYS = ['x', 'y', 'z'];
 // Farther back than this a keyword's call is not looked for.
 const KEYWORD_SCAN_MAX = 2000;
 
-function lookupCall(language, receiver, spelling) {
+// The asset row a call names: its own spelling, and in Python a BARE name
+// through the file's function aliases first (`abspielen` → replay).
+function lookupCall(language, receiver, spelling, aliases) {
   const table = ASSET_CALLS[language];
   if (!table) return null;
-  return table.get(spelling) || null;
+  const name = language === 'python' ? rowNameOf(aliases, receiver, spelling) : spelling;
+  return table.get(name) || null;
 }
 
 function literalIsUsable(seg) {
@@ -436,14 +477,13 @@ function commentCallArgs(body, open) {
 // like the table's asset parameter, wherever it stands (`robot.replay(speed=2,
 // name="A")`) — the same rule as the code path. `quoteAt` is relative to
 // `body`.
-function commentAssetCalls(body, language) {
-  const re = COMMENT_CALL_HEAD_RE[language];
-  if (!re) return [];
+function commentAssetCalls(body, language, res, aliases) {
+  const re = res.commentHead;
   const out = [];
   re.lastIndex = 0;
   let m = re.exec(body);
   while (m !== null) {
-    const hit = lookupCall(language, m[1], m[2]);
+    const hit = lookupCall(language, m[1], m[2], aliases);
     if (hit) {
       const open = m.index + m[0].length;
       const { args, close } = commentCallArgs(body, open);
@@ -495,6 +535,9 @@ export function findAssetCalls(content, language) {
   if (!ASSET_CALLS[language]) return [];
   const segs = tokenizeCode(text, language);
   const code = blankedFrom(text, segs);
+  // The robot's names in THIS file (Python only; Java has no aliasing).
+  const aliases = language === 'python' ? pythonRobotAliases(code) : null;
+  const res = callRegexes(language, aliases);
   const starts = lineStarts(text);
   const out = [];
   const push = (hit, quoteAt, valueStart, valueEnd, inComment, paren) => {
@@ -514,7 +557,7 @@ export function findAssetCalls(content, language) {
   segs.forEach((seg, idx) => {
     if (seg.type === 'comment') {
       const body = text.slice(seg.start, seg.end);
-      for (const found of commentAssetCalls(body, language)) {
+      for (const found of commentAssetCalls(body, language, res, aliases)) {
         const quoteAt = seg.start + found.quoteAt;
         const row = push(found.hit, quoteAt, quoteAt + 1, quoteAt + 1 + found.value.length, true, -1);
         if (row && found.hit.method === 'pin') {
@@ -532,9 +575,9 @@ export function findAssetCalls(content, language) {
     // The literal must be the WHOLE argument.
     if (!next || next.type !== 'code' || !/^\s*[,)]/.test(text.slice(next.start, next.end))) return;
     const before = code.slice(Math.max(0, seg.start - 200), seg.start);
-    const tail = CALL_TAIL_RE[language].exec(before);
+    const tail = res.tail.exec(before);
     if (tail) {
-      const hit = lookupCall(language, tail[1], tail[2]);
+      const hit = lookupCall(language, tail[1], tail[2], aliases);
       if (hit) {
         push(hit, seg.start + seg.prefix.length, seg.valueStart, seg.valueEnd, false,
           seg.start - before.length + before.lastIndexOf('('));
@@ -549,8 +592,8 @@ export function findAssetCalls(content, language) {
     if (!kw) return;
     const paren = enclosingParen(code, seg.start - kw[0].length);
     if (paren < 0) return;
-    const call = CALL_NAME_RE.python.exec(code.slice(Math.max(0, paren - 200), paren));
-    const hit = call ? lookupCall(language, call[1], call[2]) : null;
+    const call = res.name.exec(code.slice(Math.max(0, paren - 200), paren));
+    const hit = call ? lookupCall(language, call[1], call[2], aliases) : null;
     if (!hit || hit.param !== kw[1]) return;
     push(hit, seg.start + seg.prefix.length, seg.valueStart, seg.valueEnd, false, paren);
   });

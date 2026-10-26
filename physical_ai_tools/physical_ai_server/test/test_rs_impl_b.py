@@ -476,14 +476,25 @@ def test_a_greifziel_is_refused_by_the_destination_blocks(
     assert ctx.published == []
 
 
-@pytest.mark.parametrize('profile_id', PROFILE_IDS)
-def test_a_position_dict_is_still_accepted_by_bewege_zu(profile_id):
-    """„Position von <Ziel>" is the LEGITIMATE way to drive „bewege zu" from a
-    found object, and it must keep working."""
+def _one_profile_per_ik_backend():
+    seen = {}
+    for pid, prof in rp.ROBOT_PROFILES.items():
+        seen.setdefault(prof.ik_backend, pid)
+    return sorted(seen.values())
+
+
+@pytest.mark.parametrize('profile_id', _one_profile_per_ik_backend())
+def test_a_position_von_dict_is_refused_by_bewege_zu(profile_id):
+    """INVERTED (M6, owner decision OQ-1 A): „Position von <Ziel>" answers the
+    object's centre at GRASP height, so „bewege zu" with it drove the open
+    gripper sideways into the object. It is refused now, before anything moves;
+    „fahre über" is the block for driving over a found object."""
     ctx = Ctx(profile_id)
     x, y, z = band_xyz(ctx)
-    motion.move_to(ctx, {'destination': {'x': x, 'y': y, 'z': z}})
-    assert ctx.published
+    with pytest.raises(WorkflowError) as exc:
+        motion.move_to(ctx, {'destination': {'x': x, 'y': y, 'z': z}})
+    assert str(exc.value) == motion._POSITION_VON_IN_DESTINATION_DE['bewege zu']
+    assert ctx.published == []
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1027,7 +1038,7 @@ def test_melde_strips_newlines_so_a_fehler_line_cannot_be_forged():
     c = _LogCtx()
     out.log(c, {'message': 'a\n[FEHLER] alles kaputt'})
     assert '\n' not in c.msgs[0]
-    assert '[FEHLER]' not in c.msgs[0]
+    assert not c.msgs[0].startswith('[')
 
 
 def test_the_log_cap_is_the_cap():

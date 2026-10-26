@@ -302,3 +302,103 @@ describe('F10: a replay whose name is not written directly in quotes', () => {
     );
   });
 });
+
+// E1 (Roboter Studio review fixes): a top-level alias of `robot` or of one of
+// its functions is the robot for the completion and the not-a-literal warning
+// too. The completion reads the aliases from the whole document (its third
+// argument); without it only `robot.` is the robot, as before.
+describe('E1: aliases of `robot` in the completion and the warning', () => {
+  const lineOf = (src, offset) => src.slice(0, offset).split('\n').length;
+  const notLiteral = (src) => assetDiagnostics(src, 'python', KNOWN, { cursorLine: 0 })
+    .filter((d) => d.message === CODE_DE.REPLAY_NAME_NOT_LITERAL)
+    .map((d) => [lineOf(src, d.from), src.slice(d.from, d.to)]);
+
+  it('completes inside r.replay(" and a function alias', () => {
+    const doc = 'import robot as r\nfrom robot import replay as abspielen\nr.replay("Wi';
+    expect(assetArgContext('r.replay("Wi', 'python', doc))
+      .toMatchObject({ asset: 'recording', method: 'replay', prefix: 'Wi' });
+    expect(assetArgContext('abspielen("', 'python', doc)).toMatchObject({ asset: 'recording', method: 'replay' });
+    expect(assetArgContext('r.move_to(speed=2, target="A', 'python', doc))
+      .toMatchObject({ asset: 'place', prefix: 'A' });
+    // Without the document, or in another document, `r` is not the robot.
+    expect(assetArgContext('r.replay("Wi', 'python')).toBeNull();
+    expect(assetArgContext('r.replay("Wi', 'python', 'import math as r\n')).toBeNull();
+    expect(assetArgContext('r.abspielen("', 'python', doc)).toBeNull();
+  });
+
+  it('flags a not-literal name on r.replay(x) and on a bare replay(x)', () => {
+    const src = [
+      'import robot as r',
+      'from robot import replay, replay as abspielen',
+      'n = "Winken"',
+      'r.replay(n)',
+      'replay(n)',
+      'abspielen(n)',
+      'r.replay("Winken")',
+      'abspielen("Winken")',
+      'def replay(name):',
+      '    pass',
+      'self.replay(n)',
+      '',
+    ].join('\n');
+    expect(notLiteral(src)).toEqual([[4, 'n'], [5, 'n'], [6, 'n']]);
+  });
+
+  it('a bare replay re-bound to another row, and an alias in another file, are not judged', () => {
+    expect(notLiteral('from robot import home as replay\nreplay(1)\n')).toEqual([]);
+    expect(notLiteral('r.replay(n)\nabspielen(n)\n')).toEqual([]);
+  });
+});
+
+// Fix round 1, R2 (owner decision Verify-1): a BARE `replay(…)` is the robot's
+// only when the file binds `replay` from robot — `from robot import replay`
+// (also in a multi-line list), `from robot import *`, or an alias. A student's
+// own `def replay(…)` and an unimported bare call are judged by no warning
+// (as before E1); `robot.replay` and a module alias are unchanged.
+describe('R2: a bare replay is the robot only when the file imports it from robot', () => {
+  const lineOf = (src, offset) => src.slice(0, offset).split('\n').length;
+  const warned = (src) => assetDiagnostics(src, 'python', KNOWN, { cursorLine: 0 })
+    .map((d) => [lineOf(src, d.from), src.slice(d.from, d.to), d.message]);
+  const MISSING_Z = formatCode(CODE_DE.ASSET_MISSING_RECORDING, 'Z');
+  const NOT_LITERAL = CODE_DE.REPLAY_NAME_NOT_LITERAL;
+
+  it('a student’s own replay function and an unimported bare replay get no warning', () => {
+    expect(warned('def replay(name):\n    pass\nn = 1\nreplay(n)\nreplay("Z")\n')).toEqual([]);
+    expect(warned('n = 1\nreplay(n)\nreplay("Z")\n')).toEqual([]);
+    expect(warned('import robot\nn = 1\nreplay(n)\nreplay("Z")\n')).toEqual([]);
+    // Bound under another name only: the bare `replay` is not the robot.
+    expect(warned('from robot import replay as abspielen\nreplay(n)\nabspielen(n)\n'))
+      .toEqual([[3, 'n', NOT_LITERAL]]);
+    // Another module's replay is not the robot's.
+    expect(warned('from roboter import replay\nreplay(n)\nreplay("Z")\n')).toEqual([]);
+  });
+
+  it('after `from robot import replay`, `*` or a multi-line import a bare replay is judged', () => {
+    for (const head of [
+      'from robot import replay',
+      'from robot import home, replay',
+      'from robot import *',
+      'from robot import (\n    home,\n    replay,\n)',
+      'from robot import replay as replay',
+    ]) {
+      const src = `${head}\nn = 1\nreplay(n)\nreplay("Z")\n`;
+      const at = head.split('\n').length + 2;
+      expect([head, warned(src)]).toEqual([head, [[at, 'n', NOT_LITERAL], [at + 1, 'Z', MISSING_Z]]]);
+    }
+  });
+
+  it('robot.replay and a module alias are judged as before, with or without an import', () => {
+    expect(warned('import robot as r\nn = 1\nr.replay(n)\nrobot.replay(n)\n'))
+      .toEqual([[3, 'n', NOT_LITERAL], [4, 'n', NOT_LITERAL]]);
+  });
+
+  it('completion and hover follow the same rule', () => {
+    expect(assetArgContext('replay("', 'python', 'def replay(n):\n    pass\nreplay("')).toBeNull();
+    expect(assetArgContext('replay("', 'python', 'from robot import *\nreplay("'))
+      .toMatchObject({ asset: 'recording', method: 'replay' });
+    const own = 'def replay(n):\n    pass\nreplay("Winken")\n';
+    expect(assetAtOffset(own, 'python', own.indexOf('Winken'))).toBeNull();
+    const bound = 'from robot import replay\nreplay("Winken")\n';
+    expect(assetAtOffset(bound, 'python', bound.indexOf('Winken'))).toMatchObject({ asset: 'recording', name: 'Winken' });
+  });
+});

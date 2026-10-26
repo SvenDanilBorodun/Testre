@@ -159,3 +159,58 @@ def test_missing_static_main_is_german():
     # is an ordinary fault, not the missing entry point.
     assert ce.sentence('other', file='Main.java', line=9, exc_type='NoSuchMethodException') \
         == 'Zeile 9 in Main.java: Das Programm ist mit einem Fehler abgebrochen (NoSuchMethodException).'
+
+
+# ── M3: a misspelled name in a from-import or a module attribute ──────────
+
+_NAME_IN_MODULE_DE = ('Zeile 1 in main.py: „sqrtt“ gibt es im Modul „math“ nicht — '
+                      'ist es anders geschrieben?')
+
+
+def test_a_dotted_name_is_named_in_its_module():
+    """The launcher reports `from math import sqrtt` and `math.sqrtt` as kind
+    `name` with `module.attr` (no new wire kind, no new exit key — MA-1); the
+    dot chooses the sentence, which names the module."""
+    s = ce.sentence('name', file='main.py', line=1, name='math.sqrtt')
+    assert s == _NAME_IN_MODULE_DE
+    assert _is_german(_gdl(), s)
+    assert ce.sentence('name', file='main.py', line=3, name='helfer.nicht_da') == (
+        'Zeile 3 in main.py: „nicht_da“ gibt es im Modul „helfer“ nicht — '
+        'ist es anders geschrieben?')
+    # The module part may itself be dotted.
+    assert ce.sentence('name', file='main.py', line=1, name='collections.abc.Nope') == (
+        'Zeile 1 in main.py: „Nope“ gibt es im Modul „collections.abc“ nicht — '
+        'ist es anders geschrieben?')
+    # Without a position the prefix goes, like every positioned sentence.
+    assert ce.sentence('name', name='math.sqrtt') == (
+        '„sqrtt“ gibt es im Modul „math“ nicht — ist es anders geschrieben?')
+
+
+def test_an_undotted_name_keeps_the_plain_name_sentence():
+    plain = ('Zeile 2 in main.py: „x“ ist unbekannt — wurde es vorher definiert oder '
+             'anders geschrieben?')
+    assert ce.sentence('name', file='main.py', line=2, name='x') == plain
+    # The template asked for directly with an undotted name never reads
+    # „im Modul „“" (review-2 mi-3: it would raise on the unpacking otherwise).
+    assert ce.sentence('name_in_module', file='main.py', line=2, name='x') == plain
+    assert 'im Modul' not in ce.sentence('name_in_module', name='n')
+    assert ce.SENTENCES['name_in_module'] == (
+        'Zeile {line} in {file}: „{name}“ gibt es im Modul „{module}“ nicht — '
+        'ist es anders geschrieben?')
+
+
+# ── C6: Java's Main.java with a package line, or no class Main ─────────────
+
+def test_a_missing_main_class_has_its_own_sentence():
+    """The Java launcher reports a ClassNotFoundException with no position
+    when Main.java has a `package` line or no class `Main`; chosen like
+    `no_main`, so an old runner gets it too."""
+    s = ce.sentence('other', exc_type='ClassNotFoundException')
+    assert s == ('In Main.java fehlt die Klasse „Main“ — sie muss genau so heißen, und über '
+                 'ihr darf keine „package“-Zeile stehen.')
+    assert _is_german(_gdl(), s)
+    # The student's own ClassNotFoundException carries its line: an ordinary
+    # fault, not the missing entry class.
+    assert ce.sentence('other', file='Main.java', line=4, exc_type='ClassNotFoundException') \
+        == ('Zeile 4 in Main.java: Das Programm ist mit einem Fehler abgebrochen '
+            '(ClassNotFoundException).')

@@ -225,3 +225,24 @@ describe('methodAtOffset — a robot method in code, nowhere else', () => {
     expect(methodAtOffset('robot.home()', 'python', -1)).toBeNull();
   });
 });
+
+// E1 (Roboter Studio review fixes): a top-level `import robot as r` makes `r.`
+// a receiver of the hover too — in that file only.
+describe('methodAtOffset — an alias of the robot module', () => {
+  const at = (text, needle, delta = 2) => methodAtOffset(text, 'python', text.indexOf(needle) + delta);
+
+  it('hits r.home() after `import robot as r`', () => {
+    const text = 'import robot as r\nr.home()\n';
+    const hit = at(text, 'home');
+    expect(hit).toMatchObject({ from: text.indexOf('home'), to: text.indexOf('home') + 4 });
+    expect(hit.method.name).toBe('home');
+    expect(at('import robot as r\nimport robot\nrobot.home()\n', 'home')).not.toBeNull();
+  });
+
+  it('misses r.home() without the alias, with a commented alias and with another module', () => {
+    expect(at('r.home()\n', 'home')).toBeNull();
+    expect(at('# import robot as r\nr.home()\n', 'home')).toBeNull();
+    expect(at('import math as r\nr.home()\n', 'home')).toBeNull();
+    expect(at('import robot as r\nxr.home()\n', 'home')).toBeNull();
+  });
+});

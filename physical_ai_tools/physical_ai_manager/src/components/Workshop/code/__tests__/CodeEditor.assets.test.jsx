@@ -249,6 +249,32 @@ describe('asset completion', () => {
     });
     expect(currentCompletions(view.state).map((c) => c.label)).toEqual(['Ablage', 'Hoch', 'Mitte']);
   });
+
+  // E1 (Roboter Studio review fixes): the completion source reads the file's
+  // top-level aliases of `robot` from the WHOLE document, so `r.replay("`
+  // after `import robot as r` is the robot's replay.
+  test('the source and the running editor complete after an alias of robot', async () => {
+    const source = assetCompletionSource('python', { current: KNOWN });
+    const doc = 'import robot as r\nfrom robot import replay as abspielen\nr.replay("';
+    const result = source(new CompletionContext(EditorState.create({ doc }), doc.length, true));
+    expect(result && result.options.map((o) => o.label)).toEqual(['Winken']);
+    const bare = `${doc}")\nabspielen("`;
+    expect(source(new CompletionContext(EditorState.create({ doc: bare }), bare.length, true))
+      .options.map((o) => o.label)).toEqual(['Winken']);
+    // Another module named r is not the robot.
+    const other = 'import math as r\nr.replay("';
+    expect(source(new CompletionContext(EditorState.create({ doc: other }), other.length, true))).toBeNull();
+
+    const { view } = mount({ value: 'import robot as r\nr.replay("' });
+    act(() => {
+      view.dispatch({ selection: EditorSelection.cursor(view.state.doc.length) });
+    });
+    await act(async () => {
+      startCompletion(view);
+      await new Promise((r) => { setTimeout(r, 120); });
+    });
+    expect(currentCompletions(view.state).map((c) => c.label)).toEqual(['Winken']);
+  });
 });
 
 describe('asset warnings', () => {

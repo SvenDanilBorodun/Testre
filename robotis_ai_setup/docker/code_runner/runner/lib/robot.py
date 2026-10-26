@@ -57,6 +57,8 @@ _CONNECTION_LOST_DE = 'Die Verbindung zum Roboter ist abgebrochen.'
 _FRAME_TOO_BIG_DE = 'Der Aufruf ist zu groß für den Roboter.'
 _BAD_REPLY_DE = 'Der Roboter hat unverständlich geantwortet.'
 _NOT_A_GREIFZIEL_DE = 'Hier wird ein Greifziel erwartet — das Ergebnis von find, wenn es etwas gefunden hat.'
+_GREIFZIEL_AS_TARGET_DE = 'Ein Greifziel gehört nicht hierher — hier wird der Name eines Ziels oder ein Punkt (x, y, z) erwartet. Über ein gefundenes Objekt fährt robot.move_above(…), greifen tut robot.grasp(…), an seiner Stelle ablegen geht mit robot.drop_at(robot.object_position(…)).'
+_NOT_SENDABLE_DE = 'Ein Wert in diesem Aufruf kann nicht an den Roboter geschickt werden — erlaubt sind Zahlen, Texte, Wahrheitswerte und Listen davon.'
 _NOT_AN_OBJECT_DE = ('Hier wird ein Objekt-Name (z. B. "wuerfel") oder eine '
                      'Greifobjekt-Klasse erwartet.')
 
@@ -131,7 +133,8 @@ class _Rpc:
 
     def connect(self, path, token, project_root=None):
         """Connect and greet; the launcher calls this, or the first call does
-        from the two environment variables."""
+        from the two environment variables. A reconnect (no project root
+        given) keeps the launcher's."""
         with self._lock:
             if self._sock is not None:
                 return
@@ -142,7 +145,8 @@ class _Rpc:
                 sock.close()
                 raise RobotError(_NO_CONNECTION_DE) from None
             self._sock = sock
-            self.project_root = project_root
+            if project_root is not None:
+                self.project_root = project_root
             self.call('__hello', [token], 'call')
 
     def _ensure_connected(self):
@@ -192,8 +196,12 @@ class _Rpc:
             if file is not None:
                 request['f'] = file
                 request['l'] = line
-            data = json.dumps(request, ensure_ascii=False,
-                              separators=(',', ':')).encode('utf-8')
+            try:
+                data = json.dumps(request, ensure_ascii=False,
+                                  separators=(',', ':')).encode('utf-8')
+            except (TypeError, ValueError, RecursionError):
+                # Nothing is sent: the connection stays usable.
+                raise RobotError(_NOT_SENDABLE_DE) from None
             if len(data) > MAX_FRAME_BYTES:
                 raise RobotError(_FRAME_TOO_BIG_DE)
             try:
@@ -202,6 +210,12 @@ class _Rpc:
             except OSError:
                 self.close()
                 raise RobotError(_CONNECTION_LOST_DE) from None
+            except RobotError:
+                # A connection the robot ended, or a reply that cannot be read,
+                # is closed: the next call connects again with the run's token
+                # instead of writing into a dead socket.
+                self.close()
+                raise
         if reply.get('ok') is True:
             return reply.get('r')
         raise RobotError(str(reply.get('e') or _BAD_REPLY_DE))
@@ -246,6 +260,12 @@ def _handle(value):
     if isinstance(value, Greifziel):
         return value._h
     raise RobotError(_NOT_A_GREIFZIEL_DE)
+
+
+def _target(value):
+    if isinstance(value, Greifziel):
+        raise RobotError(_GREIFZIEL_AS_TARGET_DE)
+    return value
 
 
 def _type_name(value):
@@ -365,15 +385,15 @@ def close_gripper():
 
 def move_to(target):
     """Fährt zum Ziel: ein Punkt [x, y, z] in Metern oder der Name eines gemerkten Ziels; bei einem Ziel auf dem Tisch hält der Greifer darüber an (Ablagehöhe)."""
-    _rpc.call('move_to', [target], 'call')
+    _rpc.call('move_to', [_target(target)], 'call')
 
 def pickup(target):
     """Nimmt an dieser Stelle etwas auf: hinfahren, absenken, Greifer schließen, anheben."""
-    _rpc.call('pickup', [target], 'call')
+    _rpc.call('pickup', [_target(target)], 'call')
 
 def drop_at(target):
     """Legt das Gehaltene über dem Ziel ab und öffnet den Greifer."""
-    _rpc.call('drop_at', [target], 'call')
+    _rpc.call('drop_at', [_target(target)], 'call')
 
 def wait(seconds):
     """Wartet so viele Sekunden (höchstens 300)."""
@@ -396,7 +416,7 @@ def close_on_object(ziel):
     _rpc.call('close_on_object', [_handle(ziel)], 'call')
 
 def lift():
-    """Hebt den Greifer gerade nach oben an, so weit der Arm kann."""
+    """Hebt den Greifer gerade nach oben an — um bis zu 6 cm, weniger, wenn der Arm nicht so hoch kommt."""
     _rpc.call('lift', [], 'call')
 
 def grasp(obj):
@@ -469,7 +489,7 @@ def find(obj):
     return _greifziel(r)
 
 def object_position(ziel):
-    """Gibt die Position [x, y, z] des Greifziels in Metern zurück."""
+    """Gibt die Position [x, y, z] des Greifziels in Metern zurück — die Mitte des Objekts in Greifhöhe. Zum Hinfahren robot.move_above, zum Greifen robot.grasp benutzen; robot.move_to oder robot.pickup an diesem Punkt fahren seitlich bzw. greifen blind."""
     r = _rpc.call('object_position', [_handle(ziel)], 'perception')
     return _point(r)
 

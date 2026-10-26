@@ -493,3 +493,27 @@ def test_get_object_catalog_callback_passes_the_profile_id():
     # …and that argument reads the resolved profile via _arm_profile.profile_id.
     src = ast.get_source_segment(_NODE.read_text(encoding='utf-8'), call) or ''
     assert 'profile_id' in src and '_arm_profile' in src, src
+
+
+def test_the_band_top_is_refused_with_an_exclusive_sentence():
+    """C8: the band's top is EXCLUSIVE (on the V1 the top 0.90 is the OPEN
+    command, so a „close" there closes nothing), and the sentence says so: „muss
+    mindestens … und kleiner als … sein", never the inclusive-sounding „muss
+    zwischen … und … liegen" (47aea6fa)."""
+    import copy
+    from physical_ai_server.workflow.object_catalog import _CATALOG_BY_PROFILE
+    assert _CATALOG_BY_PROFILE, 'no banded profile left to check'
+    for pid, (catalog, (lo, hi)) in _CATALOG_BY_PROFILE.items():
+        def with_close(close, catalog=catalog):
+            data = copy.deepcopy(catalog)
+            for entry in data['types'].values():
+                entry['gripper_close_rad'] = close
+            return data
+        with pytest.raises(ObjectCatalogError) as exc:
+            parse_catalog(with_close(hi), gripper_close_range=(lo, hi))
+        msg = str(exc.value)
+        assert (f'Feld „gripper_close_rad" muss mindestens {lo} und kleiner als {hi} '
+                'sein (Schließwinkel in rad für diesen Greifer).') in msg, (pid, msg)
+        assert 'zwischen' not in msg, msg
+        parse_catalog(with_close(hi - 1e-3), gripper_close_range=(lo, hi))
+        parse_catalog(with_close(lo), gripper_close_range=(lo, hi))

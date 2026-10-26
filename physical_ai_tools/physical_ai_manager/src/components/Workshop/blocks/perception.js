@@ -49,8 +49,8 @@ const PERCEPTION_JSON_BLOCKS = [
     type: 'edubotics_object_position',
     message0: DE.OBJECT_POSITION,
     args0: [{ type: 'input_value', name: 'ZIEL', check: 'Greifziel' }],
-    // Output 'String' to match edubotics_destination_ref so it plugs into the
-    // same „bewege zu" / „ablegen bei" sockets (which carry no check today).
+    // Output 'String' like edubotics_destination_ref; meant for „ablegen bei"
+    // („bewege zu"/„aufnehmen" refuse it: motion._is_position_von).
     output: 'String',
     colour: PERCEPTION_COLOR,
     tooltip: apiTooltip('edubotics_object_position'),

@@ -52,8 +52,12 @@ INTENTIONAL: dict[int, tuple[str, tuple[str, ...]]] = {
         ('and_value', 'or_value')),
     2: ('A list element is numbered from 1. Element 0 and an element past '
         'the end are refused in German; the preview’s L[-1] silently reads '
-        'the LAST element.',
-        ('getidx_0',)),
+        'the LAST element, its insert(-0) puts a new element at the FRONT, a '
+        'slice starting at element 0 (L[-1:…]) wraps around, and element 0 '
+        'counted from the end reads from the front as a start (L[-0:…]) and '
+        'nothing as an end (L[…:-0]).',
+        ('getidx_0', 'setidx_insert_fromend_0', 'sublist_fromstart_0',
+         'sublist_fromend_0')),
     3: ('A power with no real result (a negative base, a fractional exponent) '
         'is refused; the preview hands a complex number to the next block.',
         ('pow_complex',)),
@@ -74,6 +78,50 @@ INTENTIONAL: dict[int, tuple[str, tuple[str, ...]]] = {
         'preview would keep going.',
         ('cap_for_loop', 'cap_lists_repeat', 'cap_lists_create_with',
          'cap_text_join')),
+    9: ('An empty socket of „vergleiche", „und“/„oder“, „nicht“ or „Rest von“ '
+        'is refused in German; the preview fills in 0, wahr or falsch.',
+        ('cmp_eq_empty', 'cmp_lt_empty', 'and_empty_b', 'or_empty_a',
+         'neg_empty', 'mod_empty_dividend')),
+    10: ('A function that calls itself more deeply than the robot’s own Python '
+         'allows (about 100 to 160 levels, depending on the blocks) is refused '
+         'in German; the preview’s Python goes deeper.',
+         ('proc_recursion_400',)),
+}
+
+# Every INTENTIONAL case whose ROBOT side is a refusal → the exact German
+# sentence the interpreter raises (fix round 1, owner decision Verify-1:
+# „pin every INTENTIONAL refusal cell"). `test_corpus_matches_the_preview`
+# only sees that the two sides disagree; without this table a refusal that
+# turns back into a silent value (or into another sentence) stays green.
+_ELEMENT_0_OF_3_DE = ('Element 0 gibt es nicht — die Liste hat nur 3 Elemente. '
+                      'Das erste Element ist Nummer 1.')
+REFUSALS: dict[str, str] = {
+    # 2 — element 0 („hole Element", „füge ein … von hinten", „nimm Teilliste").
+    'getidx_0': _ELEMENT_0_OF_3_DE,
+    'setidx_insert_fromend_0': _ELEMENT_0_OF_3_DE,
+    'sublist_fromstart_0': _ELEMENT_0_OF_3_DE,
+    'sublist_fromend_0': _ELEMENT_0_OF_3_DE,
+    # 3 — a power with no real result.
+    'pow_complex': ('Diese Potenz hat kein reelles Ergebnis (negative Basis mit '
+                    'gebrochenem Exponenten).'),
+    # 8 — the loop, list and text caps.
+    'cap_for_loop': 'Schleife abgebrochen — Maximum von 10000 Wiederholungen erreicht.',
+    'cap_lists_repeat': 'Liste ist auf 1000 Elemente begrenzt.',
+    'cap_lists_create_with': 'Listen-Erstellen-Block ist auf 20 Elemente begrenzt.',
+    'cap_text_join': 'Text ist auf 10000 Zeichen begrenzt.',
+    # 9 — an empty socket of „vergleiche", „und“/„oder“, „nicht“, „Rest von“.
+    'cmp_eq_empty': ('Beim Vergleich fehlt ein Wert — bitte beide Felder des '
+                     'Vergleichs-Blocks füllen.'),
+    'cmp_lt_empty': ('Beim Vergleich fehlt ein Wert — bitte beide Felder des '
+                     'Vergleichs-Blocks füllen.'),
+    'and_empty_b': 'Bei „und“/„oder“ fehlt ein Wert — bitte beide Felder füllen.',
+    'or_empty_a': 'Bei „und“/„oder“ fehlt ein Wert — bitte beide Felder füllen.',
+    'neg_empty': 'Bei „nicht“ fehlt ein Wert — bitte einen Wahrheitswert einsetzen.',
+    'mod_empty_dividend': 'Bei „Rest von“ fehlt eine Zahl — bitte beide Felder füllen.',
+    # 10 — recursion deeper than the robot's own Python allows.
+    'proc_recursion_400': ('Das Programm ist zu tief verschachtelt — eine Funktion '
+                           'ruft sich zu oft selbst auf, oder Blöcke stecken zu tief '
+                           'ineinander.'),
 }
 
 # Cases whose VALUE is random: only „raises or not" is compared.
@@ -217,6 +265,31 @@ def test_corpus_matches_the_preview():
                           + '\n'.join(lines))
     assert not stale, f'INTENTIONAL cases that now agree with the preview (stale): {stale}'
     assert not unused, f'INTENTIONAL entries no case uses: {unused}'
+
+
+def test_every_intentional_refusal_is_the_robots_german_sentence():
+    """An INTENTIONAL cell whose robot side is a refusal is pinned to its exact
+    German sentence (REFUSALS); every other INTENTIONAL cell must keep
+    running. So a refusal that is reverted (the robot computes a value again)
+    or reworded fails here, and a new refusal among the INTENTIONAL cases has
+    to be added to REFUSALS."""
+    cases = {c['name']: c for c in _load_cases()}
+    listed = {name for _reason, case_names in INTENTIONAL.values() for name in case_names}
+    not_intentional = sorted(set(REFUSALS) - listed)
+    assert not not_intentional, f'REFUSALS names cases INTENTIONAL does not list: {not_intentional}'
+    wrong = []
+    for name in sorted(listed):
+        err, got = _run_interpreter(cases[name])
+        if name in REFUSALS:
+            if not isinstance(err, InterpreterError):
+                wrong.append((name, 'expected the German refusal', REFUSALS[name],
+                              'got', f'{type(err).__name__}: {err}' if err else got))
+            elif str(err) != REFUSALS[name]:
+                wrong.append((name, 'expected', REFUSALS[name], 'got', str(err)))
+        elif err is not None:
+            wrong.append((name, 'refuses but is not pinned in REFUSALS',
+                          f'{type(err).__name__}: {err}'))
+    assert not wrong, wrong
 
 
 def test_every_interpreter_refusal_in_the_corpus_is_german():

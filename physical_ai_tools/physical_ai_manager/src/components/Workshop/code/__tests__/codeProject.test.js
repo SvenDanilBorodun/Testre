@@ -31,6 +31,7 @@ import {
   validateProject,
   validateProjectPath,
 } from '../codeProject';
+import { scanCodeAssets } from '../codeAssetUsage';
 
 const KIB = 1024;
 
@@ -275,5 +276,21 @@ describe('the module is pure and reads only robot_api.json', () => {
     const src = fs.readFileSync(path.resolve(__dirname, '..', 'codeProject.js'), 'utf8');
     expect(src).not.toMatch(/from ['"](codemirror|@codemirror\/|@lezer\/)/);
     expect(src).not.toMatch(/import\(/);
+  });
+});
+
+// E1 (Roboter Studio review fixes, review-4 mi-2): RunControls hands the exact
+// scanner's names first (`RunControls.jsx::codeReplayNames`), so a recording
+// called through an alias of `robot` reaches the run although the loose scan
+// never sees `abspielen(`.
+describe('collectCodeReplayNames — with the exact names as RunControls feeds them', () => {
+  const asRunControls = (files) => collectCodeReplayNames(files, [...scanCodeAssets(files, 'python').replay.keys()]);
+
+  test('a function alias of replay is carried', () => {
+    expect(asRunControls({ 'main.py': 'from robot import replay as abspielen\nabspielen("A")\n' })).toEqual(['A']);
+  });
+
+  test('a module alias is carried (the loose scan already finds it: a pin)', () => {
+    expect(asRunControls({ 'main.py': 'import robot as r\nr.replay("A")\n' })).toEqual(['A']);
   });
 });

@@ -24,6 +24,7 @@
 
 import docs from './robot_api_docs.json';
 import { tokenizeCode } from './codeAssetUsage';
+import { aliasKey, pythonRobotAliases, receiverAlternation } from './pythonAliases';
 import { CODE_DE, formatCode } from './codeMessagesDe';
 
 const METHODS = Object.freeze((docs.methods || []).map((m) => Object.freeze(m)));
@@ -249,23 +250,45 @@ export function methodHoverParts(method, language) {
 const ASCII_IDENT_RE = /[A-Za-z0-9_]/;
 const IDENT_CHAR_RE = /[\p{L}\p{N}_]/u;
 // The receiver right before the method name, bounded like an identifier on
-// its left (codeAssetUsage's RECEIVER): `robot.` / `Robot.` / `edubotics.Robot.`.
-const RECEIVER_TAIL_RE = {
-  python: /(?<![\p{L}\p{N}_.])robot\s*\.\s*$/u,
-  java: /(?<![\p{L}\p{N}_.])(?:edubotics\s*\.\s*)?Robot\s*\.\s*$/u,
-};
+// its left (codeAssetUsage's RECEIVER): `robot.` / `Robot.` / `edubotics.Robot.`
+// — in Python also every name the file gives the robot at its top level
+// (`import robot as r` → `r.`; code/pythonAliases.js, E1), built per alias set.
+const JAVA_RECEIVER_TAIL_RE = /(?<![\p{L}\p{N}_.])(?:edubotics\s*\.\s*)?Robot\s*\.\s*$/u;
+const PY_RECEIVER_TAIL_RES = new Map();
+function receiverTailRe(language, aliases) {
+  if (language === 'java') return JAVA_RECEIVER_TAIL_RE;
+  if (language !== 'python') return null;
+  const key = aliasKey(aliases);
+  let re = PY_RECEIVER_TAIL_RES.get(key);
+  if (!re) {
+    re = new RegExp(`(?<![\\p{L}\\p{N}_.])(?:${receiverAlternation(aliases)})\\s*\\.\\s*$`, 'u');
+    if (PY_RECEIVER_TAIL_RES.size >= 64) PY_RECEIVER_TAIL_RES.clear();
+    PY_RECEIVER_TAIL_RES.set(key, re);
+  }
+  return re;
+}
 const RECEIVER_LOOKBACK = 120;
+
+// `text` with its strings and comments blanked, from the segments at hand.
+function codeOnly(text, segs) {
+  let out = '';
+  for (const s of segs) {
+    const part = text.slice(s.start, s.end);
+    out += s.type === 'code' ? part : part.replace(/[^\n]/g, ' ');
+  }
+  return out;
+}
 
 /**
  * The robot method under offset `offset` of `text`: `{from, to, method}` or
  * null. Only an identifier in CODE (never in a string or a comment —
- * tokenizeCode decides), preceded by the receiver (`robot.` in Python,
- * `Robot.` / `edubotics.Robot.` in Java) and naming a public row.
+ * tokenizeCode decides), preceded by the receiver (`robot.` or a top-level
+ * alias of it in Python, `Robot.` / `edubotics.Robot.` in Java) and naming a
+ * public row.
  */
 export function methodAtOffset(text, language, offset) {
   if (typeof text !== 'string' || !Number.isInteger(offset) || offset < 0 || offset > text.length) return null;
-  const receiver = RECEIVER_TAIL_RE[language];
-  if (!receiver) return null;
+  if (language !== 'python' && language !== 'java') return null;
   const segs = tokenizeCode(text, language);
   const seg = segs.find((s) => s.type === 'code' && s.start <= offset && offset <= s.end);
   if (!seg) return null;
@@ -279,6 +302,7 @@ export function methodAtOffset(text, language, offset) {
   if (to < text.length && IDENT_CHAR_RE.test(text[to])) return null;
   const method = methodByName(language, text.slice(from, to));
   if (!method) return null;
+  const receiver = receiverTailRe(language, language === 'python' ? pythonRobotAliases(codeOnly(text, segs)) : null);
   // The receiver must be code too: strings and comments are blanked.
   let before = '';
   for (const s of segs) {

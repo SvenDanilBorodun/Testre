@@ -27,8 +27,10 @@
 //     an f-string, a concatenation; F10 of the 2026-10-18 semantics round): a
 //     run sends only the recordings it can read out of the text
 //     (codeProject.collectCodeReplayNames), so that one never reaches the
-//     robot. Only the robot's own call (`robot.replay` / `Robot.replay`) is
-//     judged — a student's own `replay` function is none of this.
+//     robot. Only the robot's own call is judged: `Robot.replay` in Java (a
+//     student's own static `replay` method is none of this), in Python
+//     `robot.replay`, a bare `replay(` and every top-level alias of either
+//     (`import robot as r`, `from robot import replay as abspielen`; E1).
 //   * HOVER text in German: „Ziel „Ablage“ · x 12,3 cm · y 4,0 cm".
 //
 // The asset lint has its OWN ship switch, `ASSET_LINT_LANGUAGES`, separate
@@ -37,9 +39,12 @@
 // failure is not.
 
 import {
-  ASSET_CALLS, codeDefinedPlaceNames, codeOnlyText, findAssetCalls, scanCodeAssets,
+  ASSET_CALLS, codeDefinedPlaceNames, codeOnlyText, findAssetCalls, pythonAliasesOf, scanCodeAssets,
 } from './codeAssetUsage';
 import { CODE_DE, formatCode } from './codeMessagesDe';
+import {
+  aliasKey, bareNamesOf, escapeRegExp, pythonRobotAliases, receiverAlternation, rowNameOf,
+} from './pythonAliases';
 
 /** The languages the asset warnings are ON for. */
 export const ASSET_LINT_LANGUAGES = Object.freeze(['python', 'java']);
@@ -48,22 +53,40 @@ export const ASSET_LINT_LANGUAGES = Object.freeze(['python', 'java']);
 // string still open — in Python also `name(…, param="…` (the keyword the
 // table gives the asset parameter, review round 2 ni1). The receiver is
 // bounded like an identifier (`Größrobot.`, `ßname(` are not calls of the
-// robot, ni2). Java strings are double-quoted only.
-const PY_CONTEXT_RE = /(?:(?<![\p{L}\p{N}_.])(robot)\s*\.\s*|(?<![\p{L}\p{N}_.]))([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*(?:(?:[^()"'\n]*,\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*)?(["'])([^"'\\]*)$/u;
+// robot, ni2). Java strings are double-quoted only. Python's receivers and
+// bare names are the DOCUMENT's (`robot` and its top-level aliases,
+// code/pythonAliases.js — E1), so its regex is built per alias set.
+const PY_CONTEXT = '(?:(?<![\\p{L}\\p{N}_.])(RECEIVERS)\\s*\\.\\s*|(?<![\\p{L}\\p{N}_.]))([\\p{L}_][\\p{L}\\p{N}_]*)\\s*\\(\\s*(?:(?:[^()"\'\\n]*,\\s*)?([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*)?(["\'])([^"\'\\\\]*)$';
 const JAVA_CONTEXT_RE = /(?:(?<![\p{L}\p{N}_.])((?:edubotics\s*\.\s*)?Robot)\s*\.\s*|(?<![\p{L}\p{N}_.]))([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*()(")([^"\\]*)$/u;
+
+const PY_CONTEXT_RES = new Map();
+function pyContextRe(aliases) {
+  const key = aliasKey(aliases);
+  let re = PY_CONTEXT_RES.get(key);
+  if (!re) {
+    re = new RegExp(PY_CONTEXT.replace('RECEIVERS', receiverAlternation(aliases)), 'u');
+    if (PY_CONTEXT_RES.size >= 64) PY_CONTEXT_RES.clear();
+    PY_CONTEXT_RES.set(key, re);
+  }
+  return re;
+}
 
 /**
  * The asset argument the cursor sits in, from the text of its line before the
  * cursor: `{asset, method, quote, prefix, from}` (`from` = where the name
- * starts in `textBefore`), or null.
+ * starts in `textBefore`), or null. `documentText` (the whole file, Python)
+ * supplies the file's aliases of `robot`; without it only `robot.` and the
+ * rows' own bare names are the robot.
  */
-export function assetArgContext(textBefore, language) {
+export function assetArgContext(textBefore, language, documentText) {
   if (typeof textBefore !== 'string') return null;
   const table = ASSET_CALLS[language];
   if (!table) return null;
-  const m = (language === 'java' ? JAVA_CONTEXT_RE : PY_CONTEXT_RE).exec(textBefore);
+  const aliases = language === 'python' && typeof documentText === 'string'
+    ? pythonAliasesOf(documentText) : null;
+  const m = (language === 'java' ? JAVA_CONTEXT_RE : pyContextRe(aliases)).exec(textBefore);
   if (!m) return null;
-  const hit = table.get(m[2]);
+  const hit = table.get(language === 'python' ? rowNameOf(aliases, m[1], m[2]) : m[2]);
   if (!hit || (m[3] && m[3] !== hit.param)) return null;
   return {
     asset: hit.asset, method: hit.method, quote: m[4], prefix: m[5], from: textBefore.length - m[5].length,
@@ -139,10 +162,31 @@ function missingReason(asset, name, known) {
 
 // The robot's own `replay(` in CODE (strings and comments are blanked first),
 // bounded like an identifier on its left, exactly as codeAssetUsage's RECEIVER.
-const REPLAY_HEAD_RE = {
-  python: /(?<![\p{L}\p{N}_.])robot\s*\.\s*replay\s*\(/gu,
-  java: /(?<![\p{L}\p{N}_.])(?:edubotics\s*\.\s*)?Robot\s*\.\s*replay\s*\(/gu,
-};
+// Python (E1): every receiver of the file × `replay`, plus the bare names that
+// call the replay row there — `replay` itself (after `from robot import
+// replay` or `*`) and each function alias of it; built per alias set. Java:
+// `Robot.replay` only — a student's own static `replay` method is none of
+// this.
+const JAVA_REPLAY_HEAD_RE = /(?<![\p{L}\p{N}_.])(?:edubotics\s*\.\s*)?Robot\s*\.\s*replay\s*\(/gu;
+const PY_REPLAY_HEAD_RES = new Map();
+function replayHeadRe(language, aliases) {
+  if (language === 'java') return JAVA_REPLAY_HEAD_RE;
+  if (language !== 'python') return null;
+  const key = aliasKey(aliases);
+  let re = PY_REPLAY_HEAD_RES.get(key);
+  if (!re) {
+    const bare = bareNamesOf(aliases, 'replay').map(escapeRegExp).join('|');
+    re = new RegExp(
+      `(?<![\\p{L}\\p{N}_.])(?:(?:${receiverAlternation(aliases)})\\s*\\.\\s*replay${bare ? `|${bare}` : ''})\\s*\\(`,
+      'gu',
+    );
+    if (PY_REPLAY_HEAD_RES.size >= 64) PY_REPLAY_HEAD_RES.clear();
+    PY_REPLAY_HEAD_RES.set(key, re);
+  }
+  return re;
+}
+// A `def replay(…)` / `class replay(…)` is a definition, not a call.
+const PY_DEFINITION_TAIL_RE = /(?:^|[^\p{L}\p{N}_])(?:def|class)\s+$/u;
 
 // The top-level arguments of the call whose `(` ends at `open` in blanked
 // code: `{args: [{start, end}], close}` (close -1 when the call never closes).
@@ -179,16 +223,18 @@ function lineOfOffset(text, offset) {
 // first positional argument or, in Python, the keyword the table gives it
 // (`name=`). A call with no name argument, or one still open, is not judged.
 function nonLiteralReplays(content, language) {
-  const re = REPLAY_HEAD_RE[language];
   const hit = ASSET_CALLS[language] && ASSET_CALLS[language].get('replay');
-  if (!re || !hit) return [];
+  if (!hit) return [];
   const code = codeOnlyText(content, language);
+  const re = replayHeadRe(language, language === 'python' ? pythonRobotAliases(code) : null);
+  if (!re) return [];
   const literals = findAssetCalls(content, language)
     .filter((c) => !c.inComment && c.method === 'replay')
     .map((c) => c.valueStart);
   const out = [];
   re.lastIndex = 0;
   for (let m = re.exec(code); m !== null; m = re.exec(code)) {
+    if (language === 'python' && PY_DEFINITION_TAIL_RE.test(code.slice(Math.max(0, m.index - 40), m.index))) continue;
     const { args, close } = callArgs(code, m.index + m[0].length);
     if (close < 0) continue;
     const kwRe = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)/;

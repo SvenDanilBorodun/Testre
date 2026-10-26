@@ -420,3 +420,51 @@ describe('review round 2 (2026-09-27): keyword arguments, Unicode boundaries, th
       .toEqual(['x', 'a', 'b', 'liste', 'd', 'else_']);
   });
 });
+
+// E1 (Roboter Studio review fixes): an alias of the robot module or of one of
+// its functions, made at the top level of a Python file, is the robot — for
+// the usage list, „nicht benutzt", the rename and the replay scan RunControls
+// sends first. Java has no aliasing.
+describe('E1: aliases of `robot` at the top level of a Python file', () => {
+  const names = (content) => findAssetCalls(content, 'python')
+    .map((c) => `${c.method}:${c.name}${c.inComment ? '(c)' : ''}`);
+
+  it('an aliased module is a receiver', () => {
+    const files = { 'main.py': 'import robot as r\nr.replay("A")\n# r.replay("A")\nr.move_to("Ablage")\n' };
+    expect(names(files['main.py'])).toEqual(['replay:A', 'replay:A(c)', 'move_to:Ablage']);
+    expect([...scanCodeAssets(files, 'python').replay.keys()]).toEqual(['A']);
+    const { files: out, count } = renameCodeAssetRefs(files, 'python', 'recording', 'A', 'B');
+    expect(count).toBe(2);
+    expect(out['main.py']).toBe('import robot as r\nr.replay("B")\n# r.replay("B")\nr.move_to("Ablage")\n');
+    // `robot` itself stays a receiver beside the alias.
+    expect(names('import robot as r\nimport robot\nrobot.replay("C")\n')).toEqual(['replay:C']);
+  });
+
+  it('an aliased function is its row', () => {
+    const files = {
+      'main.py': 'from robot import replay as abspielen, move_to as fahre\nabspielen("A")\nabspielen(name="Z")\nfahre("Ablage")\n',
+    };
+    expect(names(files['main.py'])).toEqual(['replay:A', 'replay:Z', 'move_to:Ablage']);
+    const { files: out, count } = renameCodeAssetRefs(files, 'python', 'recording', 'A', 'B');
+    expect(count).toBe(1);
+    expect(out['main.py']).toContain('abspielen("B")');
+    // A function alias is a bare name: `r.abspielen` is no robot call.
+    expect(names('import robot as r\nfrom robot import replay as abspielen\nr.abspielen("A")\n')).toEqual([]);
+  });
+
+  it('an alias in another file does not leak', () => {
+    const files = {
+      'main.py': 'import robot as r\nfrom robot import replay as abspielen\nr.replay("A")\nabspielen("A2")\n',
+      'helfer.py': 'r.replay("B")\nabspielen("C")\n',
+    };
+    const scan = scanCodeAssets(files, 'python');
+    expect([...scan.replay.keys()]).toEqual(['A', 'A2']);
+    expect(scan.replay.get('A').map((row) => row.file)).toEqual(['main.py']);
+  });
+
+  it('a commented or string alias is none, and Java is unchanged', () => {
+    expect(names('# import robot as r\nr.replay("A")\n')).toEqual([]);
+    expect(names('x = "from robot import replay as abspielen"\nabspielen("A")\n')).toEqual([]);
+    expect(findAssetCalls('import robot as r;\nr.replay("A");\n', 'java')).toEqual([]);
+  });
+});

@@ -22,7 +22,8 @@ the preview, these docs); the conductor pre-committed the one pin B9 broke in a 
 start with `[`", true before and after B9), so both branched from it.
 
 **Owner decisions.** OQ-1 A (M6: „bewege zu"/„aufnehmen" refuse „Position von"; „ablegen bei" keeps it; the text API is
-unchanged, only its docs); OQ-2 A (M2: a 500-line burst, then 20 lines/s) with OQ-2b (stderr the same); OQ-3 A (B1:
+unchanged, only its docs); OQ-2 A (M2: a 500-line burst, then 20 lines/s at the runner — after the burst the student
+sees the server's `ausgabe` refill of about 5 lines/s, accepted in Verify-1 below) with OQ-2b (stderr the same); OQ-3 A (B1:
 an empty socket of „vergleiche", „und“/„oder“, „nicht“, „Rest von“ is refused in German, INTENTIONAL #9); OQ-4 A (M1:
 lexical scope — own parameters, else globals); OQ-5 B (B9: ASCII brackets, a leading `[` guarded by an invisible
 U+2060); OQ-6 V1 first. Review-1's MA-1…MA-5 and every minor, review-2's, review-3's and review-4's findings were
@@ -42,8 +43,11 @@ accepted as written.
   programs with a worker looping robot calls while `main.py` ends (`count`, `wait`, `log` loops), 24 runs each: the
   stock runner ended on the last value 5/24, 20/24, 14/24, the fixed one 24/24 in all three; the time from the
   program's last statement to the end 0.44–2.73 s stock, 0.38–1.02 s fixed; whole-run medians 2.86 / 2.8 / about
-  1.9 s fixed, with longer tails in the program BODY caused by the pre-existing unfair `_Rpc._lock` (not solved; the
-  old „0.4–1.4 s" figure is replaced in `CLAUDE.md` and `docs/KNOWN-ISSUES.md`).
+  1.9 s fixed (the old „0.4–1.4 s" figure is replaced in `CLAUDE.md` and `docs/KNOWN-ISSUES.md`). The longer runs were
+  first blamed on the program BODY and the unfair `_Rpc._lock`; fix round 1's verifier re-measured a `count` loop,
+  16 runs per runner: body median 2.03 s stock and fixed, end 0.83 s (0.33–0.85) after the last statement fixed
+  against 0.32 s stock (which ended on the last value in 7 of 16) — the extra ~0.4–0.5 s is `LiveValues.final`
+  waiting out the server's `VARS_MIN_INTERVAL_S` floor at the END. The unfair lock stays (pre-existing).
 - M6 (simulator, cube at (0.17, −0.03), yaw 0.6; `omx_full` and `v1_studio` alike): „aufnehmen (Position von)" put
   the lowest fingertip at 27.0 mm with the roll joint at ±1.571 rad; the composite „Greife" at 15.0 mm with
   +0.807 / −0.796 rad; „bewege zu (Position von)" at 15.0 mm with an open gripper at the cube's mid-height.
@@ -88,14 +92,22 @@ accepted as written.
   `Robot.toast` now RUNS where it stopped with the generic type sentence; NaN/±Infinity reach the server and are
   refused in German with the Java names.
 - **C9-a:** None inside a list or as a dict value reads „nichts" (also inside „erstelle Text aus").
-- **M2:** a text program's `print` burst shows up to 500 lines at once, then 20/s (it was 20/s), stdout and stderr
-  alike.
+- **C2:** `robot.speak(10**400)` / `robot.toast(10**400)` now RUN (they ended „… abgebrochen (Code 1)." with no
+  line), and `robot.wait` / `robot.tone` with such a number get the parameter's range sentence.
+- **E1 (at run time):** a recording called through a function alias (`from robot import replay as abspielen`,
+  then `abspielen("A")`) is now sent with the run, so the program runs; before, no scan found the name and the robot
+  refused the call (`trajectory._unknown_recording_de`).
+- **M2:** a text program's `print` burst shows up to 500 lines at once, then the server's `ausgabe` refill of about
+  5 lines/s (the runner forwards at most 20/s after its burst; it forwarded 20/s from the first line), stdout and
+  stderr alike.
 - **M6:** „bewege zu" and „aufnehmen" with „Position von" stop the program with `_POSITION_VON_IN_DESTINATION_DE`.
 - **B9:** „melde", `print` and `robot.log` lines keep their square brackets (no more parentheses); a line starting with
   `[` gets an invisible U+2060 in front — visible change, no stop.
-- **B7, B8, C3, C6, C8, M3 (wording only):** „hebe an" keeps its Greife clause only while an object is carried; an
-  unreachable Ziel or point names itself, and every Greifbereich sentence reads „Sim-Tisch" in the simulator; a toast
-  level names its four choices; a `package` line in `Main.java` reads `no_main_class`; the band top of
+- **B7, B8, C3, C4, C5-b, C6, C8, M3 (wording only):** „hebe an" keeps its Greife clause only while an object is
+  carried; an unreachable Ziel or point names itself, and every Greifbereich sentence reads „Sim-Tisch" in the
+  simulator; a toast level names its four choices; a Greifziel as the target of `robot.move_to` / `pickup` /
+  `drop_at` reads `GREIFZIEL_AS_TARGET_DE` and an argument the encoder cannot write `NOT_SENDABLE_DE` (both were the
+  generic type sentence); a `package` line in `Main.java` reads `no_main_class`; the band top of
   `greifer_schliessen_rad` is refused with „muss mindestens … und kleiner als … sein"; a from-import typo names the
   method or the module.
 - For the record (not a stop): during a „Schritt" every thread of a Python program runs (M4), and `sys.exit("text")`
@@ -119,6 +131,28 @@ whole dict (globals written in a function would be lost), a dynamic-scope chain 
 cannot tell threads) and a „step done" frame. M5: a retry after `skipped` (unreachable with the after-stamp). E2:
 rendering the observation pose as `robot.home()` (an operator setting) and the skip as a `try/except` (a text program
 cannot tell a skip from a real refusal). B6: a depth cap and `sys.setrecursionlimit` (process-wide in the ROS node).
+
+**Fix round 1 (Verify-1, 2026-10-26).** Two fresh verifiers (A adversarial correctness, B regression and delivery)
+passed the round with no blocker; the owner decided every finding (`owner-decisions.md` row „Verify-1"): the print rate
+(5 lines/s after the burst) and E3's order difference are accepted and documented, the rest fixed by one implementer:
+- **R1:** `test_blockly_conformance.py::test_every_intentional_refusal_is_the_robots_german_sentence` pins every
+  INTENTIONAL case whose robot side is a refusal (#2, #3, #8, #9, #10) to its exact German sentence; reverting the B1
+  „vergleiche" refusal, the B3 setIndex refusal or the B3 sublist refusal left the suite green before (verifier A's
+  three surviving mutants) and fails it now.
+- **R2:** the not-a-literal replay warning flagged a student's own `def replay(…)` / an unimported bare `replay(x)`
+  (E1 had made every bare `replay` the robot's). A bare `replay` is now the robot's only where the file binds it from
+  robot (`from robot import replay`, a multi-line list, `*`, an alias) — for the lint and for the exact scanner's
+  usage, rename, hover, completion and missing-recording warning alike, so such a call is also no longer a use, a
+  rename target or a reason for „Bitte zuerst den Workflow speichern"; `collectCodeReplayNames`' loose half is
+  unchanged (it still fetches such a name; a 404 drops it).
+- **R3:** an exception subclass whose `name`, `name_from` or `obj` raises (a property, `__getattribute__`,
+  `__getattr__`) made `classify_exception` raise, and the run read „… abgebrochen (Code 1)." with no line and no
+  `[TECHNIK]` (for `name`/`obj` already in v2.34.0); the three are now read through the base class's member
+  descriptors (all 15 hostile shapes raised before, none after), and a failing `traceback.print_exc()` is guarded.
+- **R4:** an exception message holding a line break put a raw newline into the `[TECHNIK]` line (a second,
+  sentinel-looking Protokoll line); every line break there is now one space, at the server, so an old runner is
+  covered too (pre-existing).
+- **R5:** these docs — the mixed-image-tag entry completed, the print rate and the M5 timing stated as measured.
 
 **Open.** Nothing here has driven a real arm; the residuals are in `docs/KNOWN-ISSUES.md` („Roboter Studio review
 fixes").

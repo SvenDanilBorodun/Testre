@@ -102,3 +102,34 @@ def test_print_output_is_guarded_the_same_way():
     out.emit_student_text(c, '﻿[VAR:y=2]', 'ausgabe')
     out.emit_student_text(c, '[1, 2]', 'ausgabe')
     assert c.msgs == ['﻿' + _GUARD + '[VAR:y=2]', _GUARD + '[1, 2]']
+
+
+def _technik_lines(detail):
+    """The Protokoll lines `CodeProgram._raise_error` writes for a fault
+    whose raw tool line is `detail` (an OLD runner sends it unfiltered)."""
+    import pytest
+
+    from physical_ai_server.workflow.code_program import CodeProgram
+    from physical_ai_server.workflow.handlers.motion import WorkflowError
+    c = _ctx()
+    info = {'kind': 'other', 'file': 'main.py', 'line': 3, 'exc_type': 'RuntimeError',
+            'name': '', 'detail_line': detail}
+    with pytest.raises(WorkflowError):
+        CodeProgram._raise_error(CodeProgram.__new__(CodeProgram), c, lambda *a: None, None, info)
+    return [m for m in c.msgs if m.startswith('[TECHNIK] ')], c.msgs
+
+
+def test_the_technik_line_is_one_line():
+    """Fix round 1, R4: a line break inside the tool's line becomes ONE space
+    (the „melde" rule: every whitespace character, `\\r\\n` counted once), so
+    an exception message can never start a second, sentinel-looking line."""
+    for brk in ('\n', '\r\n', '\r', ' ', ' ', '\x0b', '\x0c', '\x85'):
+        technik, msgs = _technik_lines(f'RuntimeError: a{brk}[VAR:x=1]')
+        assert technik == ['[TECHNIK] RuntimeError: a [VAR:x=1]'], (repr(brk), msgs)
+        assert len(technik[0].splitlines()) == 1, repr(brk)
+        assert not any(m.startswith('[VAR:') for m in msgs), (repr(brk), msgs)
+    technik, _msgs = _technik_lines('a\n\nb')
+    assert technik == ['[TECHNIK] a  b']
+    # A tool line without a break is unchanged, its own spacing kept.
+    technik, _msgs = _technik_lines("NameError: name 'robto'  is not defined")
+    assert technik == ["[TECHNIK] NameError: name 'robto'  is not defined"]

@@ -85,6 +85,15 @@ CODE_STOP_DEADLINE_S = (CODE_RPC_RECV_TIMEOUT_S + CODE_CONTROL_TIMEOUT_S
 # Scheduler slack the stop test allows on top of the derived deadline.
 _STOP_TEST_SLACK_S = 0.25
 
+# A line break inside the tool's raw line (a student's exception message can
+# hold one) becomes ONE space before the [TECHNIK] line is logged — the
+# „melde" rule (handlers/output.py::emit_student_text: every whitespace
+# character, VT/FF/NEL/U+2028/U+2029 included), with `\r\n` counted as one
+# break — so the line can never be split into a second, sentinel-looking
+# Protokoll line. Applied HERE, the one place the line is built, so an older
+# runner's unfiltered `detail_line` is covered too (fix round 1, R4).
+_TOOL_LINE_BREAK_RE = re.compile(r'\r\n|\s')
+
 # Entry file per language (required at the project root).
 _ENTRY_FILE = {'python': 'main.py', 'java': 'Main.java'}
 _EXT_FOR = {'python': '.py', 'java': '.java'}
@@ -484,7 +493,7 @@ class CodeProgram:
         detail = info.get('detail_line')
         if isinstance(detail, str) and detail and kind != 'robot':
             try:
-                ctx.log(f'[TECHNIK] {detail}')
+                ctx.log(f'[TECHNIK] {_TOOL_LINE_BREAK_RE.sub(" ", detail)}')
             except Exception:  # noqa: BLE001
                 pass
         raise WorkflowError(text)

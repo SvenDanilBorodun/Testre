@@ -389,3 +389,29 @@ def test_type_name_for_rote_banane_and_wuerfel():
     assert stub._type_name(Wuerfelchen) == 'wuerfelchen'
     java = (_REPO / robot_api.GENERATED_PATHS['java_greifobjekt']).read_text(encoding='utf-8')
     assert 'this.name = typeNameFor(label);' in java
+
+
+def test_the_band_top_is_refused_with_an_exclusive_sentence(server):
+    """C8 for an A13 registration: greifer_schliessen_rad at the running
+    profile's band top is refused with „mindestens … und kleiner als …", in
+    the student's attribute name; just below the top is accepted. Every banded
+    profile of the registry."""
+    from physical_ai_server.workflow.object_catalog import _CATALOG_BY_PROFILE
+    banded = [pid for pid in rp.ROBOT_PROFILES if pid in _CATALOG_BY_PROFILE]
+    assert banded
+    for pid in banded:
+        _catalog, (lo, hi) = _CATALOG_BY_PROFILE[pid]
+        ctx = _ctx(pid)
+        ctx.code_language = 'python'
+        session = server.open_run(ctx)
+        r = _register(session, 'banane', 'Banane', [30, 31], 0.04, 0.015, close=hi)
+        assert r['ok'] is False and r['k'] == 'robot', r
+        assert r['e'] == ('Objekt „banane": Feld „greifer_schliessen_rad" muss mindestens '
+                          f'{lo} und kleiner als {hi} sein (Schließwinkel in rad für '
+                          'diesen Greifer).'), r['e']
+        server.close_run(session)
+        ctx = _ctx(pid)
+        session = server.open_run(ctx)
+        r = _register(session, 'banane', 'Banane', [30, 31], 0.04, 0.015, close=hi - 1e-3)
+        assert r['ok'] is True, r
+        server.close_run(session)

@@ -417,10 +417,13 @@ def _parse_type(type_name: str, entry, seen_tags: dict[int, str],
             )
     else:
         lo, hi = float(gripper_close_range[0]), float(gripper_close_range[1])
+        # The top is EXCLUSIVE (on the V1 it is the OPEN command, so a „close"
+        # there closes nothing), and the sentence says so (C8): it used to read
+        # „muss zwischen {lo} und {hi} liegen", which sounds inclusive.
         if not (lo <= gripper_close_rad < hi):
             raise ObjectCatalogError(
-                f'Objekt „{type_name}": Feld „gripper_close_rad" muss zwischen '
-                f'{lo} und {hi} liegen (Schließwinkel in rad für diesen '
+                f'Objekt „{type_name}": Feld „gripper_close_rad" muss mindestens '
+                f'{lo} und kleiner als {hi} sein (Schließwinkel in rad für diesen '
                 'Greifer).'
             )
 

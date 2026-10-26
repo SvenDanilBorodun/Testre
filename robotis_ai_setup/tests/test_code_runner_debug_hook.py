@@ -1265,11 +1265,14 @@ class TheLauncherReportsWhatThePythonProgramDid(unittest.TestCase):
 
     _runner_copy = TheLauncherEndsARunWithTheLastValues._runner_copy
 
-    def _run(self, source):
+    def _run(self, source, files=None):
         runner = self._runner_copy()
         run_dir = tempfile.mkdtemp(prefix='edu-run-')
         with open(os.path.join(run_dir, 'main.py'), 'w', encoding='utf-8') as handle:
             handle.write(source)
+        for rel, text in (files or {}).items():
+            with open(os.path.join(run_dir, rel), 'w', encoding='utf-8') as handle:
+                handle.write(text)
         sock_dir = tempfile.mkdtemp(prefix='edu-sock-')
         robot_srv = _FakeRobot(os.path.join(sock_dir, 'rpc.sock'))
         self.addCleanup(robot_srv.close)
@@ -1302,3 +1305,106 @@ class TheLauncherReportsWhatThePythonProgramDid(unittest.TestCase):
         except AttributeError as exc:
             info = sm.classify_exception(exc, tempfile.gettempdir(), None)
         self.assertEqual((info['kind'], info['name']), ('other', ''))
+
+    # ── M3: a misspelled name in a from-import or a module attribute ──────
+
+    def test_from_robot_import_a_misspelled_name_is_a_robot_method(self):
+        """CPython 3.12 names the MODULE in `exc.name` and the missing name in
+        `exc.name_from`; the robot's own module is the robot_method sentence
+        („robot.mvoe_to gibt es nicht. Meintest du robot.move_to?")."""
+        proc, info = self._run('from robot import mvoe_to\nmvoe_to("A")\n')
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual((info['kind'], info['name'], info['file'], info['line']),
+                         ('robot_method', 'mvoe_to', 'main.py', 1))
+
+    def test_from_math_import_a_misspelled_name_is_a_dotted_name(self):
+        proc, info = self._run('import robot\nfrom math import sqrtt\n')
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual((info['kind'], info['name'], info['line']), ('name', 'math.sqrtt', 2))
+        sm = _load_student_main()
+        try:
+            from collections.abc import Nope  # noqa: F401 — the fault under test
+        except ImportError as exc:
+            info = sm.classify_exception(exc, tempfile.gettempdir(), None)
+        self.assertEqual((info['kind'], info['name']), ('name', 'collections.abc.Nope'))
+
+    def test_from_a_project_module_import_a_missing_name(self):
+        proc, info = self._run('import robot\nfrom helfer import nicht_da\n',
+                               files={'helfer.py': 'da = 1\n'})
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual((info['kind'], info['name'], info['line']), ('name', 'helfer.nicht_da', 2))
+
+    def test_a_module_attribute_typo_is_a_dotted_name(self):
+        proc, info = self._run('import robot, math\nx = math.sqrtt(4)\n')
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual((info['kind'], info['name'], info['line']), ('name', 'math.sqrtt', 2))
+        proc, info = self._run('import robot, helfer\nhelfer.nope()\n',
+                               files={'helfer.py': 'da = 1\n'})
+        self.assertEqual((info['kind'], info['name'], info['line']), ('name', 'helfer.nope', 2))
+
+    def test_a_bare_importerror_is_other(self):
+        proc, info = self._run('import robot\nraise ImportError("x")\n')
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual((info['kind'], info['exc_type'], info['name'], info['line']),
+                         ('other', 'ImportError', '', 2))
+        # A missing MODULE keeps its own kind and names the module.
+        proc, info = self._run('import robot\nimport robbot\n')
+        self.assertEqual((info['kind'], info['name'], info['line']), ('import', 'robbot', 2))
+
+    def test_reading_the_module_name_runs_no_module_getattr(self):
+        """The module's name is read through its __dict__ — never a module-level
+        __getattr__ — and the object an AttributeError names is tested with an
+        EXACT type test: a student class whose __getattribute__ raises once
+        made classify_exception itself raise (review-2 mi-2)."""
+        import types
+        sm = _load_student_main()
+        called = []
+        mod = types.ModuleType('helfer')
+
+        def module_getattr(name):
+            called.append(name)
+            raise RuntimeError('a module __getattr__ ran')
+        mod.__getattr__ = module_getattr
+        exc = AttributeError("module 'helfer' has no attribute 'nope'", name='nope', obj=mod)
+        info = sm.classify_exception(exc, tempfile.gettempdir(), None)
+        self.assertEqual((info['kind'], info['name']), ('name', 'helfer.nope'))
+        self.assertEqual(called, [])
+
+        class Boese:
+            def __getattribute__(self, name):
+                raise RuntimeError('a student __getattribute__ ran')
+        exc = AttributeError("'Boese' object has no attribute 'x'", name='x', obj=Boese())
+        info = sm.classify_exception(exc, tempfile.gettempdir(), None)
+        self.assertEqual((info['kind'], info['exc_type'], info['name']),
+                         ('other', 'AttributeError', ''))
+
+    def test_a_module_without_a_str_name_stays_other(self):
+        """review-3 mi-E: a module that deleted its own __name__ (or set it to
+        something else) is no module name to put in the sentence."""
+        import types
+        sm = _load_student_main()
+        for name in (None, 5):
+            mod = types.ModuleType('helfer')
+            if name is None:
+                del mod.__name__
+            else:
+                mod.__name__ = name
+            exc = AttributeError('x', name='nope', obj=mod)
+            info = sm.classify_exception(exc, tempfile.gettempdir(), None)
+            self.assertEqual((info['kind'], info['exc_type'], info['name']),
+                             ('other', 'AttributeError', ''), name)
+
+    # ── C9-b: sys.exit("…") shows its text ────────────────────────────────
+
+    def test_a_text_exit_code_is_printed(self):
+        """`sys.exit("Fehler!")`'s text went to stderr, which the server never
+        shows; it is program output, so it goes to stdout — the Protokoll —
+        before the exit sentence."""
+        proc, info = self._run('import robot, sys\nsys.exit("Fehler!")\n')
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn('Fehler!', proc.stdout.splitlines())
+        self.assertNotIn('Fehler!', proc.stderr)
+        self.assertEqual(info['kind'], 'ok')
+        # An int and None stay codes, never printed.
+        proc, _info = self._run('import robot, sys\nsys.exit(3)\n')
+        self.assertEqual((proc.returncode, proc.stdout), (3, ''))

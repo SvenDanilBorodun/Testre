@@ -48,6 +48,12 @@ SENTENCES: dict[str, str] = {
                     'braucht überall gleich viele Leerzeichen.'),
     'name': ('Zeile {line} in {file}: „{name}“ ist unbekannt — wurde es vorher '
              'definiert oder anders geschrieben?'),
+    # Chosen by :func:`sentence` for kind `name` with a DOTTED name, never a
+    # wire kind: the launcher reports `from math import sqrtt` and
+    # `math.sqrtt` as `name` = "math.sqrtt" (M3; a NameError's name never
+    # holds a dot). An old server reads the plain `name` sentence for it.
+    'name_in_module': ('Zeile {line} in {file}: „{name}“ gibt es im Modul „{module}“ '
+                       'nicht — ist es anders geschrieben?'),
     'robot_method': ('Zeile {line} in {file}: robot.{name} gibt es nicht. '
                      'Meintest du robot.{suggestion}?'),
     # The name IS a robot call — the runner's stub just does not have it: the
@@ -93,6 +99,11 @@ SENTENCES: dict[str, str] = {
     # `static void main(String[])` (m14). Chosen like 'null'.
     'no_main': ('In Main.java fehlt die Methode „public static void main(String[] '
                 'args)“ — ohne sie kann das Programm nicht starten.'),
+    # The Java launcher's ClassNotFoundException with no position: Main.java
+    # carries a `package` line or no class `Main` (C6). Chosen like 'no_main',
+    # so an old runner gets it too.
+    'no_main_class': ('In Main.java fehlt die Klasse „Main“ — sie muss genau so heißen, '
+                      'und über ihr darf keine „package“-Zeile stehen.'),
 }
 
 # The prefix the position-carrying kinds share; ``robot`` prepends it to the
@@ -104,8 +115,12 @@ def _special_kind(kind: str, file: str, line: int, name: str, exc_type: str) -> 
     """The sentence a fault deserves beyond its wire kind, read from the
     exception the runner named (area C): the null sentence for Java's
     NullPointerException and Python's AttributeError on None, the missing
-    entry point for the Java launcher's position-less NoSuchMethodException.
+    entry point for the Java launcher's position-less NoSuchMethodException
+    and its missing class for a position-less ClassNotFoundException (C6), and
+    the module's sentence for a `name` that carries a dot (M3).
     Everything else keeps its kind."""
+    if kind == 'name' and '.' in name:
+        return 'name_in_module'
     if kind != 'other':
         return kind
     if exc_type == 'NullPointerException' or (exc_type == 'AttributeError'
@@ -113,6 +128,8 @@ def _special_kind(kind: str, file: str, line: int, name: str, exc_type: str) -> 
         return 'null'
     if exc_type == 'NoSuchMethodException' and not (file and line):
         return 'no_main'
+    if exc_type == 'ClassNotFoundException' and not (file and line):
+        return 'no_main_class'
     return kind
 
 
@@ -126,11 +143,21 @@ def sentence(kind: str, *, file: str = '', line: int = 0, name: str = '',
     IS the name (the server knows the call, the runner's stub does not);
     ``robot`` prefixes the relayed (German-by-contract) text with the
     position; ``other`` names the exception CLASS only, unless the exception
-    is a missing value or a missing ``main`` (:func:`_special_kind`). A
-    report with no file or no line drops the position prefix (F2: never
+    is a missing value, a missing ``main`` or a missing class ``Main``
+    (:func:`_special_kind`); ``name`` with a dot names the module
+    (``name_in_module``). A report with no file or no line drops the
+    position prefix (F2: never
     „Zeile 0 in :"). An unknown kind falls back to ``other``.
     """
     kind = _special_kind(kind, file, line, name, exc_type)
+    module = ''
+    if kind == 'name_in_module':
+        # The module part may itself be dotted (collections.abc); an undotted
+        # name has no module to name and reads the plain `name` sentence.
+        if '.' in name:
+            module, name = name.rsplit('.', 1)
+        else:
+            kind = 'name'
     if kind == 'robot_method' and suggestion and suggestion == name:
         template = SENTENCES['robot_method_version']
     elif kind == 'robot_method':
@@ -144,4 +171,4 @@ def sentence(kind: str, *, file: str = '', line: int = 0, name: str = '',
     if not (file and line) and template.startswith(_POSITION_PREFIX):
         template = template[len(_POSITION_PREFIX):]
     return template.format(line=line, file=file, name=name, relayed=relayed,
-                           suggestion=suggestion or '', exc_type=exc_type)
+                           suggestion=suggestion or '', exc_type=exc_type, module=module)

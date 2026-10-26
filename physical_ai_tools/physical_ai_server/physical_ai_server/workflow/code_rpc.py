@@ -186,10 +186,14 @@ CODE_RPC_MAX_HANDLES = 256
 # ctx is rebuilt every start, nothing is persisted, no table (A13).
 CODE_MAX_STUDENT_OBJECTS = 8
 CODE_STATUS_MIN_INTERVAL_S = 0.1
-# Supervisor → server stdout/stderr events are bounded per line and per
-# second (the supervisor enforces them; the server sizes its buffers by them).
+# Supervisor → server stdout/stderr events are bounded per line and by a
+# token bucket of STDOUT_BURST_LINES lines refilled at STDOUT_MAX_LINES_PER_S
+# (the supervisor enforces them; the server sizes its buffers by them). The
+# burst is handlers/output.py::OUTPUT_BURST_LOG: a straight loop of prints is
+# a program, not a flood (M2).
 STDOUT_MAX_LINE_BYTES = 2000
 STDOUT_MAX_LINES_PER_S = 20
+STDOUT_BURST_LINES = 500
 # How long close_run() waits for the worker after draining it.
 CODE_RPC_WORKER_JOIN_S = 1.0
 
@@ -284,12 +288,19 @@ _RANGE_OPEN_DE = '„{p}“ muss größer als {lo} und höchstens {hi} sein.'
 _TOO_LONG_DE = '„{p}“ ist zu lang (höchstens {n} Zeichen).'
 _BAD_CHARS_DE = '„{p}“ enthält ein Zeichen, das hier nicht erlaubt ist.'
 _EMPTY_DE = '„{p}“ darf nicht leer sein.'
+# An enumerated parameter: the value is one of these names (C3).
+_CHOICE_DE = '„{p}“ muss eines davon sein: {choices}.'
 
 _TAG_ID_MAX = 586          # tag36h11's id space
 _TAG_IDS_MAX = 16
 _POINT_ABS_MAX_M = 1.0
 _TARGET_NAME_RE = re.compile(robot_api.DESTINATION_NAME_RE)
 _TARGET_NAME_MAX = 40
+# The table's enumerated patterns → the choices their refusal names (C3:
+# „enthält ein Zeichen, das hier nicht erlaubt ist" for `"warnung"`, and
+# „zu lang (höchstens 7 Zeichen)" for `"information"`, named neither).
+# TOAST_LEVEL_RE is the only enumerated pattern of the table.
+_PATTERN_CHOICES_DE = {robot_api.TOAST_LEVEL_RE: 'info, success, warning oder error'}
 _PATH_RE = re.compile(CODE_PATH_RE)
 _pattern_cache: dict[str, re.Pattern] = {}
 
@@ -381,8 +392,10 @@ def read_frame(sock: socket.socket, max_bytes: int, *,
         raise FrameError('connection closed after the header')
     try:
         obj = json.loads(body.decode('utf-8'))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise FrameError(f'malformed frame body: {exc}') from None
+    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+        # RecursionError: a frame nested ~30 000 deep (C2) — hostile like any
+        # malformed body, never an exception that ends the reader thread.
+        raise FrameError(f'malformed frame body: {type(exc).__name__}') from None
     if not isinstance(obj, dict):
         raise FrameError('frame body is not a JSON object')
     return obj
@@ -405,10 +418,18 @@ def write_frame(sock: socket.socket, obj: Any, max_bytes: int, *,
 # ══════════════════════════════════════════════════════════════════════════
 
 def _is_number(v: Any) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    """An int that is not a bool, or a finite float. An int is judged
+    without ``math.isfinite``, which raises OverflowError for one beyond float
+    range (``robot.wait(10**400)``, C2); every numeric parameter is bounded,
+    so the exact int comparison of the range check is the whole answer."""
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, int):
+        return True
+    return isinstance(v, float) and math.isfinite(v)
 
 
-def _range_error(p: ApiParam, v: float, label: str) -> str | None:
+def _range_error(p: ApiParam, v: int | float, label: str) -> str | None:
     lo, hi = p.lo, p.hi
     if lo is not None and (v < lo or (p.lo_open and v <= lo)):
         return (_RANGE_OPEN_DE if p.lo_open else _RANGE_DE).format(p=label, lo=lo, hi=hi)
@@ -426,12 +447,16 @@ def _text_error(label: str, v: str, *, pattern: str | None, max_len: int | None,
     if any(ord(c) < 0x20 or c == '\x7f' for c in v):
         return _BAD_CHARS_DE.format(p=label)
     if pattern is not None:
-        rx = _pattern_cache.get(pattern)
-        if rx is None:
-            rx = _pattern_cache[pattern] = re.compile(pattern)
-        if not rx.fullmatch(v):
+        if not _compiled(pattern).fullmatch(v):
             return _BAD_CHARS_DE.format(p=label)
     return None
+
+
+def _compiled(pattern: str) -> re.Pattern:
+    rx = _pattern_cache.get(pattern)
+    if rx is None:
+        rx = _pattern_cache[pattern] = re.compile(pattern)
+    return rx
 
 
 def _point_error(label: str, v: Any, sentence: str) -> str | None:
@@ -568,14 +593,22 @@ def validate_value(p: ApiParam, v: Any, *, label: str | None = None) -> str | No
     if kind == 'float':
         if not _is_number(v):
             return _KIND_NUMBER_DE.format(p=name)
-        return _range_error(p, float(v), name)
+        # `v` itself, never float(v): an int beyond float range compares
+        # exactly (C2).
+        return _range_error(p, v, name)
     if kind == 'int':
-        if isinstance(v, bool) or not _is_number(v) or float(v) != int(v):
+        if not _is_number(v) or (isinstance(v, float) and not v.is_integer()):
             return _KIND_INTEGER_DE.format(p=name)
-        return _range_error(p, int(v), name)
+        return _range_error(p, v, name)
     if kind == 'str':
         if not isinstance(v, str):
             return _KIND_TEXT_DE.format(p=name)
+        choices = _PATTERN_CHOICES_DE.get(p.pattern)
+        if choices is not None:
+            # The enumeration FIRST, before the length (review-2 mi-6).
+            if not _compiled(p.pattern).fullmatch(v):
+                return _CHOICE_DE.format(p=name, choices=choices)
+            return None
         return _text_error(name, v, pattern=p.pattern, max_len=p.max_len)
     if kind == 'text':
         if isinstance(v, str):
@@ -803,6 +836,9 @@ class RunSession:
         self._zeige_overflow_said = False
         # __vars' floor (reader thread only).
         self._vars_last_accept = float('-inf')
+        # How many frames' handling raised this run (C2): the first one's
+        # traceback is logged, the rest are counted.
+        self._internal_errors = 0
         self._worker = threading.Thread(target=self._worker_loop, daemon=True,
                                         name=f'code-rpc-worker-{self.token[:8]}')
         self._worker.start()
@@ -911,33 +947,50 @@ class RunSession:
         return self._calls.take(self.closed)
 
     def handle(self, frame: dict) -> dict | None:
-        """One request → its reply, or ``None`` when the run closed meanwhile."""
+        """One request → its reply, or ``None`` when the run closed meanwhile.
+
+        Anything the reader's own code raises for a frame is answered
+        ``internal`` and the connection stays (C2: an exception escaping here
+        ended the reader thread and closed the connection with no reply). The
+        traceback is logged ONCE per run, later ones as a counted debug line —
+        a hostile raw socket must not write 200 tracebacks a second inside the
+        budget, which ``_serve_run`` charged before this call."""
         rid = _request_id(frame)
         method, args = frame.get('m'), frame.get('a')
         if not isinstance(method, str) or not isinstance(args, list):
             return _err(rid, 'protocol', BAD_REQUEST_DE)
-        # Already charged (the reader charges every decoded frame first). A
-        # `__vars` inside the floor is answered at once: nothing validated,
-        # rendered or emitted — and the runner, told so, sends again.
-        if method == '__vars' and not self._vars_floor_ok():
-            return _ok(rid, VARS_REPLY_SKIPPED)
-        call = _lookup(method)
-        if call is None:
-            return _err(rid, 'method', _unknown_method_de(method))
-        refusal = _validate_call(call, args, self.language, obj_hint=self._type_for_label)
-        if refusal is not None:
-            return _err(rid, *refusal)
-        file, line = _position_of(frame)
-        if call.budget == 'perception' and not self._perception.take(self.closed):
-            return None
-        if call.table == 'internal':
-            return self._internal(call, args, rid)
-        job = _Job(call, args, rid, file, line)
-        self._queue.put(job)
-        while not job.done.wait(_JOB_POLL_S):
-            if self.closed.is_set():
+        try:
+            # Already charged (the reader charges every decoded frame first). A
+            # `__vars` inside the floor is answered at once: nothing validated,
+            # rendered or emitted — and the runner, told so, sends again.
+            if method == '__vars' and not self._vars_floor_ok():
+                return _ok(rid, VARS_REPLY_SKIPPED)
+            call = _lookup(method)
+            if call is None:
+                return _err(rid, 'method', _unknown_method_de(method))
+            refusal = _validate_call(call, args, self.language, obj_hint=self._type_for_label)
+            if refusal is not None:
+                return _err(rid, *refusal)
+            file, line = _position_of(frame)
+            if call.budget == 'perception' and not self._perception.take(self.closed):
                 return None
-        return job.reply
+            if call.table == 'internal':
+                return self._internal(call, args, rid)
+            job = _Job(call, args, rid, file, line)
+            self._queue.put(job)
+            while not job.done.wait(_JOB_POLL_S):
+                if self.closed.is_set():
+                    return None
+            return job.reply
+        except Exception:  # noqa: BLE001 — a frame never ends the connection silently
+            self._internal_errors += 1
+            if self._internal_errors == 1:
+                _log.error('code-rpc request %r raised:\n%s', method[:64],
+                           traceback.format_exc())
+            else:
+                _log.debug('code-rpc request %r raised again (%d this run)',
+                           method[:64], self._internal_errors)
+            return _err(rid, 'internal', INTERNAL_ERROR_DE)
 
     # ── the __ methods (reader thread) ───────────────────────────────────
     def _internal(self, call: ApiCall, args: list, rid: int | None) -> dict:
@@ -993,7 +1046,15 @@ class RunSession:
     def _paused(self, file: str, line: int, local_vars: dict) -> str:
         """A breakpoint hit: mirror ``Interpreter._pause_for_breakpoint`` —
         emit the paused status and the locals, set the pause, wait for the
-        manager, and tell the hook what the student pressed."""
+        manager, and tell the hook what the student pressed.
+
+        A „Schritt" is ONE LINE of a text program (M4): the manager's step
+        token re-arms the pause after one Blockly block, so when the answer is
+        ``'step'`` the run's pause is released first — the robot calls of the
+        stepped line pass ``_execute``'s gate, and the hook's next LINE event
+        pauses again. Its cost: during a stepped line EVERY thread of the
+        program runs. „Pause" pressed while a line runs still holds the next
+        robot call of any thread."""
         ctx = self.ctx
         block_id = f'{file}:L{line}'
         try:
@@ -1013,7 +1074,10 @@ class RunSession:
         if ctx.should_stop():
             return 'stop'
         is_paused = getattr(ctx, 'is_paused', None)
-        return 'step' if callable(is_paused) and is_paused() else 'continue'
+        stepping = callable(is_paused) and is_paused()
+        if stepping and callable(set_paused):
+            set_paused(False)   # a step is one LINE: the hook pauses at the next one (M4)
+        return 'step' if stepping else 'continue'
 
     def _vars_floor_ok(self) -> bool:
         """True for a `__vars` frame at least ``VARS_MIN_INTERVAL_S`` after the

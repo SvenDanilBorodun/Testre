@@ -133,7 +133,7 @@ public final class Robot {
         RpcClient.call("close_on_object", new Object[] {RpcClient.handleOf(ziel)}, "call");
     }
 
-    /** Hebt den Greifer gerade nach oben an, so weit der Arm kann. */
+    /** Hebt den Greifer gerade nach oben an — um bis zu 6 cm, weniger, wenn der Arm nicht so hoch kommt. */
     public static void lift() {
         RpcClient.call("lift", new Object[] {}, "call");
     }
@@ -321,7 +321,7 @@ public final class Robot {
         return toGreifziel(r);
     }
 
-    /** Gibt die Position [x, y, z] des Greifziels in Metern zurück. */
+    /** Gibt die Position [x, y, z] des Greifziels in Metern zurück — die Mitte des Objekts in Greifhöhe. Zum Hinfahren robot.move_above, zum Greifen robot.grasp benutzen; robot.move_to oder robot.pickup an diesem Punkt fahren seitlich bzw. greifen blind. */
     public static double[] objectPosition(Greifziel ziel) {
         Object r = RpcClient.call("object_position", new Object[] {RpcClient.handleOf(ziel)}, "perception");
         return RpcClient.asPoint(r);

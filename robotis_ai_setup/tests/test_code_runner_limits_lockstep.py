@@ -10,7 +10,8 @@ What is fenced:
   * the code-project caps, ``RUN_TOKEN_RE`` and ``PAUSED_MAX_LOCALS`` (the
     supervisor re-validates the ``start`` envelope; the hook bounds the
     locals it sends) against the same file;
-  * the two stdout bounds against ``code_rpc.py``;
+  * the three stdout bounds against ``code_rpc.py``, the burst also against
+    ``handlers/output.py::OUTPUT_BURST_LOG``;
   * the live values' and the breakpoint's value bounds, the stand-in for a
     value with no room, the runner's pace and the server's „skipped" answer
     in ``lib/edubotics_debug.py`` against ``robot_api.py`` — and the server's
@@ -44,6 +45,7 @@ _ROBOT_API = _WORKFLOW / 'robot_api.py'
 _CODE_RPC = _WORKFLOW / 'code_rpc.py'
 _CODE_PROGRAM = _WORKFLOW / 'code_program.py'
 _CODE_ERRORS = _WORKFLOW / 'code_errors_de.py'
+_OUTPUT = _WORKFLOW / 'handlers' / 'output.py'
 
 
 def _tree(path):
@@ -126,9 +128,18 @@ class RpcLimitsTwin(unittest.TestCase):
             self.assertEqual(self.runner.get(name), self.api[name], name)
 
     def test_the_stdout_bounds_are_twins_of_code_rpc(self):
-        for name in ('STDOUT_MAX_LINE_BYTES', 'STDOUT_MAX_LINES_PER_S'):
+        for name in ('STDOUT_MAX_LINE_BYTES', 'STDOUT_MAX_LINES_PER_S', 'STDOUT_BURST_LINES'):
             self.assertIn(name, self.rpc, name)
             self.assertEqual(self.runner.get(name), self.rpc[name], name)
+
+    def test_the_output_burst_is_the_servers_melde_burst(self):
+        """M2: the runner's print() bucket starts as full as the server's
+        `ausgabe` bucket, so a burst the runner lets through is one the
+        server shows (handlers/output.py::OUTPUT_BURST_LOG)."""
+        output = _module_constants(_tree(_OUTPUT))
+        self.assertIn('OUTPUT_BURST_LOG', output)
+        self.assertEqual(self.runner.get('STDOUT_BURST_LINES'), output['OUTPUT_BURST_LOG'])
+        self.assertEqual(self.rpc.get('STDOUT_BURST_LINES'), output['OUTPUT_BURST_LOG'])
 
     def test_the_generated_stub_carries_the_same_numbers(self):
         stub = _module_constants(_tree(_STUB))

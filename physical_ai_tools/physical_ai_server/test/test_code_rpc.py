@@ -167,6 +167,7 @@ def test_every_constant_of_the_spec_exists_by_name():
     assert code_rpc.CODE_STATUS_MIN_INTERVAL_S == 0.1
     assert code_rpc.STDOUT_MAX_LINE_BYTES == 2000
     assert code_rpc.STDOUT_MAX_LINES_PER_S == 20
+    assert code_rpc.STDOUT_BURST_LINES == 500
     assert code_rpc.MAX_FRAME_BYTES == _L.MAX_FRAME_BYTES == 65536
     assert code_rpc.CONTROL_MAX_FRAME_BYTES == _L.CONTROL_MAX_FRAME_BYTES == 196608
     assert code_rpc.MAX_CODE_PROJECT_BYTES == robot_api.MAX_CODE_PROJECT_BYTES == 131072
@@ -1031,7 +1032,9 @@ def test_paused_blocks_until_resume_and_emits_vars_and_status(server):
     resume.set()
     t.join(5.0)
     assert reply == {'id': 2, 'ok': True, 'r': 'continue'}
-    # A step leaves the run paused after the wait: the reply says so.
+    # A step (the manager re-armed the pause) answers 'step' AND releases the
+    # pause: a step from a breakpoint is ONE LINE of a text program, so that
+    # line's robot calls must run (M4).
     resume.clear()
     reply.clear()
     t = threading.Thread(target=lambda: reply.update(c.call('__paused', ['main.py', 13, {}])), daemon=True)
@@ -1040,7 +1043,52 @@ def test_paused_blocks_until_resume_and_emits_vars_and_status(server):
     resume.set()                                          # paused stays True
     t.join(5.0)
     assert reply['r'] == 'step'
+    assert paused['v'] is False
     server.close_run(session)
+
+
+def test_a_step_from_a_breakpoint_releases_the_pause_so_the_lines_robot_call_runs(
+        server, monkeypatch):
+    """M4: on the REAL manager's pause primitives a „Schritt" took the step
+    token and re-armed the pause (Blockly's „one block"), so the stepped
+    line's own robot call found the run paused again in `_execute` and waited
+    for the NEXT press — two presses per line, and stuck with a worker thread
+    making robot calls."""
+    from physical_ai_server.workflow.workflow_manager import WorkflowManager
+    mgr = WorkflowManager(publisher=lambda pts: None)
+    monkeypatch.setattr(WorkflowManager, 'is_running', property(lambda self: True))
+    ctx = _ctx(set_paused=mgr._set_paused, wait_for_resume=mgr._wait_for_resume,
+               wait_if_paused=mgr._wait_if_paused,
+               is_paused=lambda: mgr._pause_event.is_set())
+    ctx.code_language = 'python'
+    session = server.open_run(ctx)
+    c = _Client(server.socket_path, session.token)
+    reply = {}
+    t = threading.Thread(target=lambda: reply.update(c.call('__paused', ['main.py', 2, {}])),
+                         daemon=True)
+    t.start()
+    deadline = time.monotonic() + 5.0
+    while not mgr._pause_event.is_set() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert mgr._pause_event.is_set()
+    assert mgr.step()[0] is True
+    t.join(5.0)
+    assert reply.get('r') == 'step'
+    # The stepped line's robot call runs at once — no second press.
+    logged = {}
+    t0 = time.monotonic()
+    t = threading.Thread(target=lambda: logged.update(c.call('log', ['x'])), daemon=True)
+    t.start()
+    t.join(1.0)
+    elapsed = time.monotonic() - t0
+    try:
+        assert logged.get('ok') is True and elapsed < 1.0, (logged, elapsed)
+        assert not mgr._pause_event.is_set()
+    finally:
+        mgr._set_paused(False)          # releases a call still held (main)
+        t.join(5.0)
+        c.close()
+        server.close_run(session)
 
 
 def test_paused_answers_stop_when_the_run_was_stopped(server):
@@ -1177,7 +1225,9 @@ def test_log_takes_a_list_none_and_a_greifziel(server):
     r = c.call('log', [deep])
     assert r['ok'] is False and r['k'] == 'value'
     logs = [m for m in ctx._test_logs if not m.startswith('[')]
-    assert logs[:3] == ['(1, b, (2.5, wahr))', 'nichts', 'Greifziel(0)']
+    # B9: the list keeps its ASCII brackets, guarded by U+2060 at the line
+    # start; the stub's own Greifziel(0) text keeps its parentheses.
+    assert logs[:3] == ['\u2060[1, b, [2.5, wahr]]', 'nichts', 'Greifziel(0)']
     assert len(logs[3]) == out.MAX_LOG_CHARS
     c.close()
     server.close_run(session)
@@ -1210,5 +1260,128 @@ def test_obj_refusal_suggests_the_type_for_a_label(server):
         assert r['e'].endswith('Meintest du "wuerfel"?'), r
         r = c.call('sees', ['Rote Banane'])
         assert 'Meintest du' not in r['e'], r
+        c.close()
+        server.close_run(session)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# C2: a frame the reader cannot judge never ends the connection silently
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_a_huge_int_is_a_range_refusal_not_a_dropped_connection(server):
+    """`robot.wait(10**400)`: `math.isfinite` raised OverflowError for an int
+    beyond float range, which escaped the reader thread and closed the
+    connection with no reply. Every numeric parameter is bounded, so an exact
+    int comparison is the whole answer."""
+    ctx = _ctx()
+    ctx.code_language = 'python'
+    session = server.open_run(ctx)
+    c = _Client(server.socket_path, session.token)
+    r = c.call('wait', [10 ** 400])
+    assert r['ok'] is False and r['k'] == 'value', r
+    assert r['e'] == 'robot.wait: „seconds“ muss zwischen 0.0 und 300.0 liegen.'
+    r = c.call('wait', [-10 ** 400])
+    assert r['e'] == 'robot.wait: „seconds“ muss zwischen 0.0 und 300.0 liegen.'
+    r = c.call('toast', ['x', 'info', 10 ** 400])
+    assert r['e'] == 'robot.toast: „seconds“ muss zwischen 1 und 15 liegen.', r
+    r = c.call('move_to', [[10 ** 400, 0, 0]])
+    assert r['ok'] is False and r['k'] == 'value', r
+    # The connection survived: the next call is served.
+    assert c.call('log', ['weiter'])['ok'] is True
+    assert 'weiter' in ctx._test_logs
+    c.close()
+    server.close_run(session)
+
+
+def test_validate_value_takes_a_huge_int_without_raising():
+    seconds = robot_api.ROBOT_API_BY_NAME['wait'].params[0]
+    assert code_rpc._is_number(10 ** 400) is True
+    assert code_rpc._is_number(float('inf')) is False
+    assert code_rpc._is_number(float('nan')) is False
+    assert code_rpc._is_number(True) is False
+    assert validate_value(seconds, 10 ** 400) == '„seconds“ muss zwischen 0.0 und 300.0 liegen.'
+    assert validate_value(seconds, 2) is None
+    toast_s = robot_api.ROBOT_API_BY_NAME['toast'].params[2]
+    assert validate_value(toast_s, 10 ** 400) == '„seconds“ muss zwischen 1 und 15 liegen.'
+    assert validate_value(toast_s, 2.5) == '„seconds“ muss eine ganze Zahl sein.'
+    assert validate_value(toast_s, 3.0) is None
+
+
+def test_a_deeply_nested_frame_is_a_bad_frame(server):
+    """A frame nested ~30 000 deep made `json.loads` raise RecursionError —
+    not a ValueError — on the reader thread: no reply, the thread gone. It is
+    a hostile frame like any malformed one: BAD_FRAME_DE, then close."""
+    a, b = socket.socketpair()
+    body = ('{"id":1,"m":"log","a":[' + '[' * 30000 + ']' * 30000 + ']}').encode('utf-8')
+    assert len(body) < _L.MAX_FRAME_BYTES
+    # A writer thread: the frame is larger than a socketpair's buffer.
+    writer = threading.Thread(target=a.sendall, args=(struct.pack('>I', len(body)) + body,),
+                              daemon=True)
+    writer.start()
+    with pytest.raises(FrameError):
+        read_frame(b, _L.MAX_FRAME_BYTES, timeout_s=2.0)
+    writer.join(5.0)
+    a.close()
+    b.close()
+    session = server.open_run(_ctx())
+    c = _Client(server.socket_path, session.token)
+    c.sock.sendall(struct.pack('>I', len(body)) + body)
+    r = c.recv()
+    assert r is not None and r['ok'] is False and r['k'] == 'protocol', r
+    assert r['e'] == code_rpc.BAD_FRAME_DE
+    assert _peer_closed(c.sock)
+    c.close()
+    # The listener lives on: another connection of the run is served.
+    c2 = _Client(server.socket_path, session.token)
+    assert c2.hello_reply['ok'] is True
+    assert c2.call('log', ['x'])['ok'] is True
+    c2.close()
+    server.close_run(session)
+
+
+def test_an_unexpected_handler_side_exception_keeps_the_connection(server, monkeypatch, caplog):
+    """Anything the reader's own code raises for a frame is an `internal`
+    answer and the connection stays; the traceback is logged ONCE per run
+    (a hostile raw socket could otherwise write 200 tracebacks a second)."""
+    def boom(*_a, **_k):
+        raise RuntimeError('validator bug')
+    session = server.open_run(_ctx())
+    c = _Client(server.socket_path, session.token)
+    monkeypatch.setattr(code_rpc, '_validate_call', boom)   # after the hello
+    with caplog.at_level('DEBUG', logger=code_rpc.__name__):
+        for _ in range(2):
+            r = c.call('log', ['x'])
+            assert r['ok'] is False and r['k'] == 'internal', r
+            assert r['e'] == code_rpc.INTERNAL_ERROR_DE
+            assert 'validator bug' not in json.dumps(r)
+    tracebacks = [rec for rec in caplog.records if 'Traceback' in rec.getMessage()]
+    assert len(tracebacks) == 1, [rec.getMessage() for rec in caplog.records]
+    monkeypatch.undo()
+    assert c.call('log', ['x'])['ok'] is True
+    c.close()
+    server.close_run(session)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# C3: an enumerated parameter names its choices
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_a_toast_level_outside_the_four_names_them(server):
+    """`robot.toast("x", "warnung")` read „… enthält ein Zeichen, das hier
+    nicht erlaubt ist." (and "information" „zu lang"): the level is one of
+    four names, and the sentence says which."""
+    for language, method in (('python', 'robot.toast'), ('java', 'Robot.toast')):
+        ctx = _ctx()
+        ctx.code_language = language
+        session = server.open_run(ctx)
+        c = _Client(server.socket_path, session.token)
+        for level in ('warnung', 'INFO', 'information', 'critical', ''):
+            r = c.call('toast', ['x', level, 3])
+            assert r['ok'] is False and r['k'] == 'value', (level, r)
+            assert r['e'] == (f'{method}: „level“ muss eines davon sein: info, success, '
+                              'warning oder error.'), (level, r)
+        assert c.call('toast', ['x', 'warning', 3])['ok'] is True
+        r = c.call('toast', ['x', 5, 3])
+        assert r['e'] == f'{method}: „level“ muss ein Text sein.', r
         c.close()
         server.close_run(session)

@@ -24,6 +24,12 @@ the Blockly rows and the unit fences run in ci.yml::python-tests.
 3. The Python put-back case on a calibrated-rig emulation (Q8): `while True:
    grasp; drop_at` with ONE cube a student puts back twice after 6 s — three
    grasps, and Stopp ends the wait inside the RPC.
+4. The Python debugger and the live values with the real runner (M4, M5): a
+   „Schritt" from a breakpoint over a line that calls the robot reaches the
+   next line with ONE press (also while a worker thread makes robot calls),
+   „Fortsetzen" then finishes with no further pause, and a program whose
+   worker thread loops robot calls while `main.py` ends shows its last value
+   in every run.
 
 The rig-emulation fixture is the checkout's
 physical_ai_tools/physical_ai_server/test/rig_emulation.py, mounted NEXT TO
@@ -124,9 +130,19 @@ _TYPE_DE = 'Ein Aufruf hat falsche oder fehlende Angaben — bitte die Werte pr�
 _GREIFZIEL_DE = robot_api.NOT_A_GREIFZIEL_DE
 _OBJ_LABEL_DE = ('„obj“ muss ein Objekt-Name aus Buchstaben ohne Umlaute (a–z), Ziffern und _ '
                  'sein (höchstens 24 Zeichen). Meintest du "wuerfel"?')
+# B9: a student line keeps its ASCII brackets; a leading `[` gets U+2060.
+_G = '\u2060'
+_WAIT_RANGE_DE = 'robot.wait: „seconds“ muss zwischen 0.0 und 300.0 liegen.'
+_NOT_SENDABLE_DE = robot_api.NOT_SENDABLE_DE
+_HUNDRED = [str(i) for i in range(100)]
+# The two drop notices of program output: the runner's and the server's. A row
+# in _NO_DROP_NOTICE must show neither (M2: a burst of 500 lines passes).
+_DROP_NOTICES = ('Zu viele Ausgabe-Zeilen auf einmal', 'Sehr viele Ausgabe-Zeilen')
+_NO_DROP_NOTICE = {'py_print_100_lines', 'java_print_100_lines', 'py_from_robot_import_typo',
+                   'py_from_math_import_typo'}
 
 # name → (language, files, phase, error or None, a [TECHNIK] fragment or None,
-#         log lines that must appear)
+#         log lines that must appear[, extra run keywords])
 MATRIX = {
     'java_pkgprivate_ok': ('java', {'Main.java': _I + 'class Main {\n    public static void main('
                                     'String[] args) {\n        Robot.log("ok");\n    }\n}\n'},
@@ -224,7 +240,7 @@ MATRIX = {
     'java_log_values': ('java', _java_main('        Robot.log(java.util.List.of(1, "b"));\n'
                                            '        Robot.log(new int[] {1, 2});\n'
                                            '        Robot.log((Object) null);'),
-                        'finished', None, None, ['(1, b)', '(1, 2)', 'nichts']),
+                        'finished', None, None, [_G + '[1, b]', _G + '[1, 2]', 'nichts']),
     'java_greifobjekt_name': ('java', _java_main('        edubotics.Greifobjekt g = new '
                                                  'edubotics.Greifobjekt("Rote Banane", new int[] '
                                                  '{30, 31}, 0.040, 0.015);\n'
@@ -245,7 +261,7 @@ MATRIX = {
     'py_none_ziel': ('python', {'main.py': 'import robot\nrobot.move_above(None)\n'},
                      'error', f'Zeile 2 in main.py: {_GREIFZIEL_DE}', None, []),
     'py_log_values': ('python', {'main.py': 'import robot\nrobot.log([1, "b"])\nrobot.log(None)\n'},
-                      'finished', None, None, ['(1, b)', 'nichts']),
+                      'finished', None, None, [_G + '[1, b]', 'nichts']),
     'py_sees_label': ('python', {'main.py': 'import robot\nrobot.sees("Würfel")\n'},
                       'error', f'Zeile 2 in main.py: robot.sees: {_OBJ_LABEL_DE}', None, []),
     'py_greifobjekt_attributes': ('python', {'main.py': 'import robot\nclass Würfelchen('
@@ -256,13 +272,70 @@ MATRIX = {
                                   '(hoehe_m=0.03) sein.', None, []),
     'py_exit_3': ('python', {'main.py': 'import sys\nsys.exit(3)\n'},
                   'error', 'Das Programm ist mit einem Fehler abgebrochen (Code 3).', None, []),
+    # ── the review-fix round (spec 2026-10-25, section 4) ─────────────────
+    # M2: 100 print lines arrive whole, with neither drop notice.
+    'py_print_100_lines': ('python', {'main.py': 'import robot\nfor i in range(100):\n'
+                                      '    print(i)\n'},
+                           'finished', None, None, _HUNDRED),
+    'java_print_100_lines': ('java', _java_main('        for (int i = 0; i < 100; i++) {\n'
+                                                '            System.out.println(i);\n'
+                                                '        }'),
+                             'finished', None, None, _HUNDRED),
+    # M3: a misspelled name in a from-import names the robot method / module.
+    'py_from_robot_import_typo': ('python', {'main.py': 'from robot import mvoe_to\n'},
+                                  'error', 'Zeile 1 in main.py: robot.mvoe_to gibt es nicht. '
+                                  'Meintest du robot.move_to?', None, []),
+    'py_from_math_import_typo': ('python', {'main.py': 'import robot\nfrom math import sqrtt\n'},
+                                 'error', 'Zeile 2 in main.py: „sqrtt“ gibt es im Modul „math“ '
+                                 'nicht — ist es anders geschrieben?', None, []),
+    # C4: a Greifziel where a Ziel or a point is expected.
+    'py_greifziel_as_target': ('python', {'main.py': 'import robot\n'
+                                          'robot.move_to(robot.find("wuerfel"))\n'},
+                               'error', 'Zeile 2 in main.py: ' + robot_api.GREIFZIEL_AS_TARGET_DE,
+                               None, [], {'objects': [rig_mod.cube(0.18, 0.0)]}),
+    # C2: an int beyond float range is the range refusal at its line …
+    'py_wait_huge_int': ('python', {'main.py': 'import robot\nrobot.wait(10**400)\n'},
+                         'error', f'Zeile 2 in main.py: {_WAIT_RANGE_DE}', None, []),
+    # … and the connection survives it: the following call arrives.
+    'py_wait_huge_int_then_log': ('python', {'main.py': 'import robot\ntry:\n'
+                                             '    robot.wait(10**400)\n'
+                                             'except robot.RobotError as e:\n'
+                                             '    robot.log(str(e))\nrobot.log("weiter")\n'},
+                                  'finished', None, None, [_WAIT_RANGE_DE, 'weiter']),
+    # C3: an enumerated parameter names its choices.
+    'py_toast_level': ('python', {'main.py': 'import robot\nrobot.toast("x", "warnung")\n'},
+                       'error', 'Zeile 2 in main.py: robot.toast: „level“ muss eines davon sein: '
+                       'info, success, warning oder error.', None, []),
+    # C5: Java NaN reaches the robot and is refused in German; a char is text;
+    # an unencodable argument is refused in German before anything is sent.
+    'java_wait_nan': ('java', _java_main('        Robot.waitSeconds(Double.NaN);'),
+                      'error', 'Zeile 4 in Main.java: Robot.waitSeconds: „seconds“ muss eine '
+                      'Zahl sein.', None, []),
+    'java_speak_char': ('java', _java_main("        Robot.speak('a');"),
+                        'finished', None, None, ['[SPEAK:a]']),
+    'java_speak_scanner': ('java', _java_main('        Robot.speak(new java.util.Scanner("x"));'),
+                           'error', f'Zeile 4 in Main.java: {_NOT_SENDABLE_DE}', None, []),
+    'py_speak_bytes': ('python', {'main.py': 'import robot\nrobot.speak(b"x")\n'},
+                       'error', f'Zeile 2 in main.py: {_NOT_SENDABLE_DE}', None, []),
+    # C6: Main.java with a package line has no class Main the launcher can find.
+    'java_package_main': ('java', {'Main.java': 'package projekt;\n\n' + _I + 'public class Main {\n'
+                                   '    public static void main(String[] args) {\n'
+                                   '        Robot.log("nie");\n    }\n}\n'},
+                          'error', 'In Main.java fehlt die Klasse „Main“ — sie muss genau so '
+                          'heißen, und über ihr darf keine „package“-Zeile stehen.', None, []),
+    # C9-b: sys.exit("…")'s text is shown.
+    'py_exit_text': ('python', {'main.py': 'import sys\nsys.exit("Fehler!")\n'},
+                     'error', 'Das Programm ist mit einem Fehler abgebrochen (Code 1).', None,
+                     ['Fehler!']),
 }
 
 
 def run_matrix(server):
     failures = {}
-    for name, (language, files, want_phase, want_error, technik, want_logs) in MATRIX.items():
-        phase, errors, logs, _rig = _run(server, language, files, timeout=90.0)
+    for name, row in MATRIX.items():
+        language, files, want_phase, want_error, technik, want_logs, *extra = row
+        phase, errors, logs, _rig = _run(server, language, files, timeout=90.0,
+                                         **(extra[0] if extra else {}))
         problems = []
         if phase != want_phase:
             problems.append(f'phase {phase}')
@@ -276,6 +349,10 @@ def run_matrix(server):
         for line in want_logs:
             if line not in logs:
                 problems.append(f'no log line {line!r}')
+        if name in _NO_DROP_NOTICE:
+            notices = [line for line in logs if any(n in line for n in _DROP_NOTICES)]
+            if notices:
+                problems.append(f'drop notice {notices!r}')
         if problems:
             failures[name] = problems
     return {'cases': len(MATRIX), 'failures': failures}
@@ -377,6 +454,98 @@ def run_putback(server):
                                                    'logs': logs[-6:]}}}
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# 4. the Python debugger and the live values (M4, M5)
+# ══════════════════════════════════════════════════════════════════════════
+
+STEP_PAUSE_WITHIN_S = 5.0
+LIVE_VALUE_RUNS = 4
+_STEP_PROGRAM = ('import robot\nx = 0\nrobot.home()\nx = 1\nrobot.home()\nx = 2\n')
+_STEP_WORKER_PROGRAM = ('import robot, threading\n'
+                        'def w():\n'
+                        '    while True:\n'
+                        '        robot.count("wuerfel")\n'
+                        'threading.Thread(target=w, daemon=True).start()\n'
+                        'x = 0\n'
+                        'x = 1\n'
+                        'x = 2\n')
+_LIVE_WORKER_PROGRAM = ('import robot, threading\nstop = False\ndef w():\n'
+                        '    while not stop:\n        robot.count("wuerfel")\n'
+                        't = threading.Thread(target=w, daemon=True)\nt.start()\n'
+                        'for i in range(3):\n    wert = i\n    robot.wait(0.3)\n'
+                        'wert = 99\nstop = True\n')
+
+
+def _pauses(rig, since=0):
+    return [s['current_block_id'] for s in rig.statuses[since:]
+            if isinstance(s, dict) and s.get('phase') == 'paused' and s.get('current_block_id')]
+
+
+def _wait_for_pause(rig, since, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        found = _pauses(rig, since)
+        if found:
+            return found[0]
+        if rig.done.is_set():
+            return None
+        time.sleep(0.05)
+    return None
+
+
+def _step_once(server, program, breakpoint, objects=()):
+    """Start ``program`` with one breakpoint, press „Schritt" ONCE at it, then
+    „Fortsetzen": (first pause, pause after the step, pauses after the resume,
+    final phase)."""
+    patches = _Patches()
+    try:
+        rig = rig_mod.Rig(patches, PID, objects=list(objects), simulated=True, code_rpc=server)
+        rig.mgr.set_breakpoints([breakpoint])
+        rig.start(_payload('python', {'main.py': program}))
+        try:
+            first = _wait_for_pause(rig, 0, 30.0)
+            mark = len(rig.statuses)
+            stepped = rig.mgr.step()[0]
+            second = _wait_for_pause(rig, mark, STEP_PAUSE_WITHIN_S)
+            mark = len(rig.statuses)
+            rig.mgr.resume()
+            ended = rig.done.wait(30.0)
+            later = _pauses(rig, mark)
+            phase = rig.final['phase'] if ended and rig.final else 'TIMEOUT'
+        finally:
+            if not rig.done.is_set():
+                rig.mgr.stop()
+                rig.done.wait(15.0)
+        return {'first': first, 'stepped': stepped, 'after_step': second,
+                'after_resume': later, 'phase': phase}
+    finally:
+        patches.undo()
+
+
+def run_debugger(server):
+    failures = {}
+    # M4: one press per line, the line's robot call included.
+    r = _step_once(server, _STEP_PROGRAM, 'main.py:L3')
+    if (r['first'], r['stepped'], r['after_step'], r['after_resume'], r['phase']) != \
+            ('main.py:L3', True, 'main.py:L4', [], 'finished'):
+        failures['step_over_a_robot_call'] = r
+    # M4: a worker thread making robot calls never wedges the step.
+    r = _step_once(server, _STEP_WORKER_PROGRAM, 'main.py:L6', objects=[CUBE])
+    if (r['first'], r['stepped'], r['after_step'], r['phase']) != \
+            ('main.py:L6', True, 'main.py:L7', 'finished'):
+        failures['step_with_a_worker_thread'] = r
+    # M5: the last live value arrives although a worker loops robot calls.
+    finals = []
+    for _ in range(LIVE_VALUE_RUNS):
+        phase, errors, logs, _rig = _run(server, 'python', {'main.py': _LIVE_WORKER_PROGRAM},
+                                         objects=[CUBE], timeout=60.0)
+        values = [line for line in logs if line.startswith('[VAR:wert=')]
+        finals.append((phase, values[-1] if values else None))
+    if any(f != ('finished', '[VAR:wert=99]') for f in finals):
+        failures['live_values_worker_thread'] = finals
+    return {'cases': 3, 'live_value_runs': finals, 'failures': failures}
+
+
 def main():
     if not _wait_for_runner():
         print(json.dumps({'ok': False, 'error': f'no {RUNNER_SOCKET} after {RUNNER_WAIT_S} s'}))
@@ -385,7 +554,7 @@ def main():
     t0 = time.monotonic()
     try:
         result = {'matrix': run_matrix(server), 'examples': run_examples(server),
-                  'putback': run_putback(server)}
+                  'putback': run_putback(server), 'debugger': run_debugger(server)}
     finally:
         server.close()
     ok = all(not part['failures'] for part in result.values())

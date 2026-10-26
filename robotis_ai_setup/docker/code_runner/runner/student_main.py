@@ -38,6 +38,7 @@ import runpy
 import sys
 import threading
 import traceback
+import types
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _LIB = os.path.join(_HERE, 'lib')
@@ -73,8 +74,37 @@ def classify_exception(exc: BaseException, project_root: str, robot_module) -> d
         # `ziel.x` with ziel None: the server words it „Hier ist kein Wert da
         # (None bzw. null)" (code_errors_de, chosen from exc_type + this name).
         name = 'None'
+    elif isinstance(exc, AttributeError) and type(getattr(exc, 'obj', None)) is types.ModuleType:
+        # `math.sqrtt`, `helfer.nope` (M3): kind `name` with `module.attr` —
+        # the server words a dotted name „„sqrtt“ gibt es im Modul „math“
+        # nicht" (code_errors_de 'name_in_module'). An EXACT type test, never
+        # isinstance (which reads `obj.__class__`, i.e. a student class's own
+        # __getattribute__ — review-2 mi-2), and the module's name read from its
+        # __dict__, which never runs a module-level __getattr__. A module whose
+        # __name__ is not a str stays `other` (review-3 mi-E).
+        module = exc.obj.__dict__.get('__name__')
+        attr = getattr(exc, 'name', None)
+        if type(module) is str and module and module != 'robot' \
+                and type(attr) is str and attr:
+            kind, name = 'name', f'{module}.{attr}'
     elif isinstance(exc, ImportError):
-        kind, name = 'import', str(getattr(exc, 'name', '') or '')
+        # CPython 3.12: `from X import Y` names the MODULE in exc.name and the
+        # missing NAME in exc.name_from (M3). `from robot import mvoe_to` is
+        # the robot_method sentence; any other module a dotted `name` (a
+        # NameError's name never holds a dot, so the dot is the signal); a
+        # missing module keeps `import`; a program's own bare ImportError is
+        # `other` (no module to name).
+        module = getattr(exc, 'name', None)
+        name_from = getattr(exc, 'name_from', None)
+        if type(name_from) is str and name_from:
+            if module == 'robot':
+                kind, name = 'robot_method', name_from
+            elif type(module) is str and module:
+                kind, name = 'name', f'{module}.{name_from}'
+            else:
+                kind, name = 'name', name_from
+        elif type(module) is str and module:
+            kind, name = 'import', module
     elif isinstance(exc, TypeError):
         kind = 'type'
     elif isinstance(exc, ZeroDivisionError):
@@ -232,7 +262,10 @@ def main(argv: list[str]) -> int:
         elif isinstance(exc.code, int):
             code = exc.code
         else:
-            sys.stderr.write(f'{exc.code}\n')
+            # `sys.exit("Fehler!")`: the text is the program's own output —
+            # stdout reaches the Protokoll before the exit sentence, stderr is
+            # never shown (C9-b).
+            print(exc.code, flush=True)
             code = 1
     except BaseException as exc:  # noqa: BLE001 — every fault is reported
         namespaces = edubotics_debug.project_namespaces(exc.__traceback__, run_dir)

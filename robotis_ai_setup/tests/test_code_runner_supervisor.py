@@ -424,10 +424,15 @@ class FramingRoundTrip(_Base):
 class OutputPump(_Base):
     """The pump is driven with bytes directly — no process, no uid."""
 
-    def _pump(self):
+    def _pump(self, clock=None):
         emitted, drops = [], []
-        pump = self.S._LinePump(None, emitted.extend, lambda: drops.append(1))
+        kw = {} if clock is None else {'clock': clock}
+        pump = self.S._LinePump(None, emitted.extend, lambda: drops.append(1), **kw)
         return pump, emitted, drops
+
+    @staticmethod
+    def _lines(n, start=0):
+        return b''.join(b'%d\n' % i for i in range(start, start + n))
 
     def test_lines_are_split_and_decoded_with_replacement(self):
         pump, emitted, _ = self._pump()
@@ -448,15 +453,75 @@ class OutputPump(_Base):
         self.assertLessEqual(len(emitted[0].encode('utf-8')), self.L.STDOUT_MAX_LINE_BYTES + 4)
         self.assertEqual(emitted[1], 'next')
 
-    def test_the_per_second_budget_drops_the_surplus_and_reports_once(self):
-        pump, emitted, drops = self._pump()
-        many = b''.join(b'%d\n' % i for i in range(self.L.STDOUT_MAX_LINES_PER_S + 15))
-        pump._feed(many)
-        self.assertEqual(len(emitted), self.L.STDOUT_MAX_LINES_PER_S)
+    def test_the_bucket_drops_the_surplus_and_reports_every_cut(self):
+        """M2 (owner decision OQ-2 A): a token bucket of STDOUT_BURST_LINES
+        refilled at STDOUT_MAX_LINES_PER_S — beyond the burst the surplus of a
+        batch is dropped and reported; an empty bucket drops every later line
+        and says so (the Run reports the notice once per run)."""
+        clock = [0.0]
+        pump, emitted, drops = self._pump(lambda: clock[0])
+        pump._feed(self._lines(self.L.STDOUT_BURST_LINES + 15))
+        self.assertEqual(len(emitted), self.L.STDOUT_BURST_LINES)
         self.assertEqual(len(drops), 1)
         pump._feed(b'more\n')
-        self.assertEqual(len(emitted), self.L.STDOUT_MAX_LINES_PER_S)
-        self.assertEqual(len(drops), 2, 'a full window drops every later line and says so')
+        self.assertEqual(len(emitted), self.L.STDOUT_BURST_LINES)
+        self.assertEqual(len(drops), 2, 'an empty bucket drops every later line and says so')
+
+    def test_a_burst_of_500_lines_passes_whole(self):
+        """M2: 100 (or 500) print()s in a row are a program, not a flood — the
+        old fixed window of 20 lines a second cut the 21st."""
+        self.assertEqual(self.L.STDOUT_BURST_LINES, 500)
+        clock = [0.0]
+        pump, emitted, drops = self._pump(lambda: clock[0])
+        pump._feed(self._lines(100))
+        self.assertEqual(emitted, [str(i) for i in range(100)])
+        pump._feed(self._lines(400, start=100))
+        self.assertEqual(emitted, [str(i) for i in range(500)])
+        self.assertEqual(drops, [])
+
+    def test_beyond_the_burst_the_refill_rate_holds(self):
+        """Fake clock: 520 lines at t = 0 → 500 and one drop; one second later
+        STDOUT_MAX_LINES_PER_S (20) more pass, the 21st is dropped."""
+        self.assertEqual(self.L.STDOUT_MAX_LINES_PER_S, 20)
+        clock = [0.0]
+        pump, emitted, drops = self._pump(lambda: clock[0])
+        pump._feed(self._lines(520))
+        self.assertEqual(len(emitted), 500)
+        self.assertEqual(emitted[-1], '499')
+        self.assertEqual(len(drops), 1)
+        clock[0] = 1.0
+        pump._feed(self._lines(25, start=1000))
+        self.assertEqual(emitted[500:], [str(i) for i in range(1000, 1020)])
+        self.assertEqual(len(drops), 2)
+        # The refill never exceeds the burst: an hour of silence buys 500.
+        clock[0] = 3600.0
+        pump._feed(self._lines(600, start=2000))
+        self.assertEqual(len(emitted), 520 + 500)
+        self.assertEqual(len(drops), 3)
+
+    def test_the_stderr_pump_has_the_same_bucket(self):
+        """OQ-2b: stdout and stderr share ONE rule — both pumps are this
+        class, the stderr one with the quiet drop handler."""
+        fn = _function(self.tree, '_execute', cls='Run')
+        pumps = [ast.unparse(node.func) for node in ast.walk(fn)
+                 if isinstance(node, ast.Call) and ast.unparse(node.func).endswith('_LinePump')]
+        self.assertEqual(pumps, ['_LinePump', '_LinePump'])
+        clock = [0.0]
+        emitted = []
+        pump = self.S._LinePump(None, emitted.extend, self.S._drop_quietly,
+                                clock=lambda: clock[0])
+        pump._feed(self._lines(520))
+        self.assertEqual(len(emitted), 500)
+
+    def test_the_kept_lines_are_emitted_before_the_drop_notice(self):
+        """review-2 mi-4: the notice must never appear before the batch's
+        last kept lines."""
+        clock = [0.0]
+        events = []
+        pump = self.S._LinePump(None, lambda lines: events.append(('lines', len(lines))),
+                                lambda: events.append(('drop',)), clock=lambda: clock[0])
+        pump._feed(self._lines(520))
+        self.assertEqual(events, [('lines', 500), ('drop',)])
 
     def test_the_drop_notice_is_german(self):
         import importlib.util as iu

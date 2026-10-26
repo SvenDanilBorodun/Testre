@@ -202,8 +202,8 @@
       "table": "statement",
       "budget": "call",
       "returns": "none",
-      "doc_de": "Hebt den Greifer gerade nach oben an, so weit der Arm kann.",
-      "doc_de_block": "Hebt den Greifer gerade nach oben an, so weit der Arm kann.",
+      "doc_de": "Hebt den Greifer gerade nach oben an — um bis zu 6 cm, weniger, wenn der Arm nicht so hoch kommt.",
+      "doc_de_block": "Hebt den Greifer gerade nach oben an — um bis zu 6 cm, weniger, wenn der Arm nicht so hoch kommt.",
       "params": []
     },
     {
@@ -611,8 +611,8 @@
       "table": "value",
       "budget": "perception",
       "returns": "point",
-      "doc_de": "Gibt die Position [x, y, z] des Greifziels in Metern zurück.",
-      "doc_de_block": "Gibt die Position (x, y, z) des Greifziels in Metern zurück.",
+      "doc_de": "Gibt die Position [x, y, z] des Greifziels in Metern zurück — die Mitte des Objekts in Greifhöhe. Zum Hinfahren robot.move_above, zum Greifen robot.grasp benutzen; robot.move_to oder robot.pickup an diesem Punkt fahren seitlich bzw. greifen blind.",
+      "doc_de_block": "Gibt die Position (x, y, z) des Greifziels in Metern zurück — gedacht für „ablegen bei“. Zum Hinfahren „fahre über“, zum Greifen „Greife“ benutzen.",
       "params": [
         {
           "name": "ziel",

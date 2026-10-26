@@ -25,11 +25,16 @@ final class EduJson {
         return sb.toString();
     }
 
+    // A value this encoder cannot write throws IllegalArgumentException, which
+    // RpcClient turns into the German NOT_SENDABLE_DE (C5-b).
     private static void write(StringBuilder sb, Object value) {
         if (value == null) {
             sb.append("null");
         } else if (value instanceof String) {
             writeString(sb, (String) value);
+        } else if (value instanceof Character || value instanceof CharSequence) {
+            // A char (Robot.speak('a') boxes it) or a StringBuilder is its text (C5).
+            writeString(sb, value.toString());
         } else if (value instanceof Boolean) {
             sb.append(((Boolean) value).booleanValue() ? "true" : "false");
         } else if (value instanceof Integer || value instanceof Long
@@ -37,10 +42,16 @@ final class EduJson {
             sb.append(((Number) value).longValue());
         } else if (value instanceof Number) {
             double d = ((Number) value).doubleValue();
-            if (Double.isNaN(d) || Double.isInfinite(d)) {
-                throw new IllegalArgumentException("non-finite number");
+            if (Double.isNaN(d)) {
+                // CPython's json.dumps tokens, read by the server's json.loads:
+                // the robot then refuses the value in German, with the Java
+                // names, exactly as it refuses Python's float('nan') (C5).
+                sb.append("NaN");
+            } else if (Double.isInfinite(d)) {
+                sb.append(d > 0 ? "Infinity" : "-Infinity");
+            } else {
+                sb.append(d);
             }
-            sb.append(d);
         } else if (value instanceof Map) {
             writeMap(sb, (Map<?, ?>) value);
         } else if (value instanceof Iterable) {

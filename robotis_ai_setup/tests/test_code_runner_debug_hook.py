@@ -882,6 +882,81 @@ class LiveValuesThroughTheStub(unittest.TestCase):
         self.assertEqual([c[1][2] for c in rpc.calls if c[0] == '__vars'], [{'punkte': 4}])
 
 
+class TheSendStampCountsFromTheReply(unittest.TestCase):
+    """M5: `_send_if_changed` stamped `_last_send` BEFORE its `__vars` call,
+    and that call first waits for the stub's RPC lock (held by another
+    thread's robot call) — so the frame left up to one robot call after its
+    stamp, `final` waited too little and the server's floor answered the last
+    values `skipped`. The stamp is now taken inside the RPC-lock hold, after
+    the reply."""
+
+    class _Rpc:
+        """The stub's surface: `call` runs under `_lock`, as the real one does."""
+
+        def __init__(self, now, round_trip_s=0.0):
+            self._lock = threading.RLock()
+            self._now = now
+            self._round_trip_s = round_trip_s
+            self.calls = []
+
+        def call(self, method, args, kind):
+            with self._lock:
+                self.calls.append((method, self._now[0]))
+                self._now[0] += self._round_trip_s
+            return None
+
+    def test_the_send_stamp_is_taken_after_the_lock_wait(self):
+        dbg = _load_hook()
+        now = [0.0]
+        rpc = self._Rpc(now)
+        # This test file is the „project": a frame of it is a program frame.
+        live = dbg.LiveValues(rpc, str(pathlib.Path(__file__).resolve().parent),
+                              clock=lambda: now[0], sleep=lambda _s: None)
+        held = threading.Event()
+        released = []
+
+        def long_robot_call():
+            with rpc._lock:
+                held.set()
+                time.sleep(0.3)
+                now[0] = 10.0
+                released.append(now[0])
+        holder = threading.Thread(target=long_robot_call, daemon=True)
+        holder.start()
+        self.assertTrue(held.wait(2.0))
+
+        def program_thread_before_its_call():
+            live.before_call()
+        checker = threading.Thread(target=program_thread_before_its_call, daemon=True)
+        checker.start()
+        checker.join(5.0)
+        holder.join(5.0)
+        self.assertTrue(live.enabled)
+        self.assertEqual([m for m, _t in rpc.calls], ['__vars'])
+        self.assertGreaterEqual(live._last_send, released[0],
+                                'the stamp is taken after the lock was released')
+
+    def test_final_waits_out_the_floor_counted_from_the_reply(self):
+        dbg = _load_hook()
+        now = [0.0]
+
+        def sleep(seconds):
+            now[0] += seconds
+        # A frame takes 0.3 s from the stamp to the reply (the lock wait and
+        # the round trip): the server accepted it no earlier than... its reply.
+        rpc = self._Rpc(now, round_trip_s=0.3)
+        live = dbg.LiveValues(rpc, tempfile.mkdtemp(prefix='edu-final-'), interval_s=0.5,
+                              clock=lambda: now[0], sleep=sleep)
+        live._send_if_changed(('main.py', 1), {'wert': 1})
+        first_reply = now[0]
+        live.final([{'wert': 99}], ('main.py', 0))
+        sends = [t for m, t in rpc.calls if m == '__vars']
+        self.assertEqual(len(sends), 2)
+        # code_rpc.VARS_MIN_INTERVAL_S (0.4), counted from the server's accept
+        # of the previous frame, which is no later than its reply.
+        self.assertGreaterEqual(sends[1] - first_reply, 0.4)
+
+
 class TheLastValuesAndExitShareOneHoldOfTheRpcLock(unittest.TestCase):
     """Review round 5 (md7). Round 4 (mc3) bounded `final`'s wait for the
     stub's RPC lock and SKIPPED the last values when another thread held it
@@ -1265,11 +1340,14 @@ class TheLauncherReportsWhatThePythonProgramDid(unittest.TestCase):
 
     _runner_copy = TheLauncherEndsARunWithTheLastValues._runner_copy
 
-    def _run(self, source):
+    def _run(self, source, files=None):
         runner = self._runner_copy()
         run_dir = tempfile.mkdtemp(prefix='edu-run-')
         with open(os.path.join(run_dir, 'main.py'), 'w', encoding='utf-8') as handle:
             handle.write(source)
+        for rel, text in (files or {}).items():
+            with open(os.path.join(run_dir, rel), 'w', encoding='utf-8') as handle:
+                handle.write(text)
         sock_dir = tempfile.mkdtemp(prefix='edu-sock-')
         robot_srv = _FakeRobot(os.path.join(sock_dir, 'rpc.sock'))
         self.addCleanup(robot_srv.close)
@@ -1302,3 +1380,106 @@ class TheLauncherReportsWhatThePythonProgramDid(unittest.TestCase):
         except AttributeError as exc:
             info = sm.classify_exception(exc, tempfile.gettempdir(), None)
         self.assertEqual((info['kind'], info['name']), ('other', ''))
+
+    # ── M3: a misspelled name in a from-import or a module attribute ──────
+
+    def test_from_robot_import_a_misspelled_name_is_a_robot_method(self):
+        """CPython 3.12 names the MODULE in `exc.name` and the missing name in
+        `exc.name_from`; the robot's own module is the robot_method sentence
+        („robot.mvoe_to gibt es nicht. Meintest du robot.move_to?")."""
+        proc, info = self._run('from robot import mvoe_to\nmvoe_to("A")\n')
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual((info['kind'], info['name'], info['file'], info['line']),
+                         ('robot_method', 'mvoe_to', 'main.py', 1))
+
+    def test_from_math_import_a_misspelled_name_is_a_dotted_name(self):
+        proc, info = self._run('import robot\nfrom math import sqrtt\n')
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual((info['kind'], info['name'], info['line']), ('name', 'math.sqrtt', 2))
+        sm = _load_student_main()
+        try:
+            from collections.abc import Nope  # noqa: F401 — the fault under test
+        except ImportError as exc:
+            info = sm.classify_exception(exc, tempfile.gettempdir(), None)
+        self.assertEqual((info['kind'], info['name']), ('name', 'collections.abc.Nope'))
+
+    def test_from_a_project_module_import_a_missing_name(self):
+        proc, info = self._run('import robot\nfrom helfer import nicht_da\n',
+                               files={'helfer.py': 'da = 1\n'})
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual((info['kind'], info['name'], info['line']), ('name', 'helfer.nicht_da', 2))
+
+    def test_a_module_attribute_typo_is_a_dotted_name(self):
+        proc, info = self._run('import robot, math\nx = math.sqrtt(4)\n')
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual((info['kind'], info['name'], info['line']), ('name', 'math.sqrtt', 2))
+        proc, info = self._run('import robot, helfer\nhelfer.nope()\n',
+                               files={'helfer.py': 'da = 1\n'})
+        self.assertEqual((info['kind'], info['name'], info['line']), ('name', 'helfer.nope', 2))
+
+    def test_a_bare_importerror_is_other(self):
+        proc, info = self._run('import robot\nraise ImportError("x")\n')
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual((info['kind'], info['exc_type'], info['name'], info['line']),
+                         ('other', 'ImportError', '', 2))
+        # A missing MODULE keeps its own kind and names the module.
+        proc, info = self._run('import robot\nimport robbot\n')
+        self.assertEqual((info['kind'], info['name'], info['line']), ('import', 'robbot', 2))
+
+    def test_reading_the_module_name_runs_no_module_getattr(self):
+        """The module's name is read through its __dict__ — never a module-level
+        __getattr__ — and the object an AttributeError names is tested with an
+        EXACT type test: a student class whose __getattribute__ raises once
+        made classify_exception itself raise (review-2 mi-2)."""
+        import types
+        sm = _load_student_main()
+        called = []
+        mod = types.ModuleType('helfer')
+
+        def module_getattr(name):
+            called.append(name)
+            raise RuntimeError('a module __getattr__ ran')
+        mod.__getattr__ = module_getattr
+        exc = AttributeError("module 'helfer' has no attribute 'nope'", name='nope', obj=mod)
+        info = sm.classify_exception(exc, tempfile.gettempdir(), None)
+        self.assertEqual((info['kind'], info['name']), ('name', 'helfer.nope'))
+        self.assertEqual(called, [])
+
+        class Boese:
+            def __getattribute__(self, name):
+                raise RuntimeError('a student __getattribute__ ran')
+        exc = AttributeError("'Boese' object has no attribute 'x'", name='x', obj=Boese())
+        info = sm.classify_exception(exc, tempfile.gettempdir(), None)
+        self.assertEqual((info['kind'], info['exc_type'], info['name']),
+                         ('other', 'AttributeError', ''))
+
+    def test_a_module_without_a_str_name_stays_other(self):
+        """review-3 mi-E: a module that deleted its own __name__ (or set it to
+        something else) is no module name to put in the sentence."""
+        import types
+        sm = _load_student_main()
+        for name in (None, 5):
+            mod = types.ModuleType('helfer')
+            if name is None:
+                del mod.__name__
+            else:
+                mod.__name__ = name
+            exc = AttributeError('x', name='nope', obj=mod)
+            info = sm.classify_exception(exc, tempfile.gettempdir(), None)
+            self.assertEqual((info['kind'], info['exc_type'], info['name']),
+                             ('other', 'AttributeError', ''), name)
+
+    # ── C9-b: sys.exit("…") shows its text ────────────────────────────────
+
+    def test_a_text_exit_code_is_printed(self):
+        """`sys.exit("Fehler!")`'s text went to stderr, which the server never
+        shows; it is program output, so it goes to stdout — the Protokoll —
+        before the exit sentence."""
+        proc, info = self._run('import robot, sys\nsys.exit("Fehler!")\n')
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn('Fehler!', proc.stdout.splitlines())
+        self.assertNotIn('Fehler!', proc.stderr)
+        self.assertEqual(info['kind'], 'ok')
+        # An int and None stay codes, never printed.
+        proc, _info = self._run('import robot, sys\nsys.exit(3)\n')
+        self.assertEqual((proc.returncode, proc.stdout), (3, ''))

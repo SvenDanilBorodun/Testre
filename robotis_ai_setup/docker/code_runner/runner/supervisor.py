@@ -322,17 +322,25 @@ def run_helper(action: str, run_dir: str, payload: bytes | None = None) -> tuple
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# The output pump — bounded lines, a per-second budget, one notice on drop
+# The output pump — bounded lines, a token bucket, one notice on drop
 # ══════════════════════════════════════════════════════════════════════════
 
 class _LinePump(threading.Thread):
     """Reads one pipe, splits it into lines, bounds every line, and hands
     batches to ``emit``. A line over ``STDOUT_MAX_LINE_BYTES`` is cut there
-    and the rest of it dropped; beyond ``STDOUT_MAX_LINES_PER_S`` lines in
-    one second the surplus is dropped and ``on_drop`` called once."""
+    and the rest of it dropped. The lines themselves pass a token bucket of
+    ``STDOUT_BURST_LINES`` (starting full) refilled at
+    ``STDOUT_MAX_LINES_PER_S`` (M2, owner decision OQ-2 A: a straight loop of
+    100 prints is a program, not a flood); what the bucket cannot take is
+    dropped and ``on_drop`` called — AFTER the kept lines of that batch were
+    emitted, so a notice never appears before them. The same class serves the
+    stderr pump (OQ-2b), whose ``on_drop`` says nothing. One batch is the
+    lines of ONE 4096-byte read plus at most one carried partial line, so
+    every frame stays far below ``CONTROL_MAX_FRAME_BYTES``."""
 
     def __init__(self, stream, emit: Callable[[list[str]], None],
-                 on_drop: Callable[[], None]) -> None:
+                 on_drop: Callable[[], None], *,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         super().__init__(name='pump', daemon=True)
         # The Popen keeps the pipe object alive; this thread reads its fd
         # and closes it at EOF (a second close on a closed pipe is a no-op).
@@ -341,8 +349,9 @@ class _LinePump(threading.Thread):
         self._on_drop = on_drop
         self._partial = bytearray()
         self._overflowed = False
-        self._window_start = time.monotonic()
-        self._window_count = 0
+        self._clock = clock
+        self._tokens = float(L.STDOUT_BURST_LINES)
+        self._last = clock()
 
     def run(self) -> None:
         fd = self._stream.fileno()
@@ -396,19 +405,17 @@ class _LinePump(threading.Thread):
         return text
 
     def _deliver(self, lines: list[str]) -> None:
-        now = time.monotonic()
-        if now - self._window_start >= 1.0:
-            self._window_start = now
-            self._window_count = 0
-        room = L.STDOUT_MAX_LINES_PER_S - self._window_count
-        if room <= 0:
-            self._on_drop()
-            return
+        now = self._clock()
+        self._tokens = min(float(L.STDOUT_BURST_LINES),
+                           self._tokens + max(0.0, now - self._last) * L.STDOUT_MAX_LINES_PER_S)
+        self._last = now
+        room = int(self._tokens)
         kept = lines[:room]
-        self._window_count += len(kept)
+        self._tokens -= len(kept)
+        if kept:
+            self._emit(kept)
         if len(kept) < len(lines):
             self._on_drop()
-        self._emit(kept)
 
 
 def _drop_quietly() -> None:

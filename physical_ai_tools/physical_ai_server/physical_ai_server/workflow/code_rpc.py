@@ -186,10 +186,14 @@ CODE_RPC_MAX_HANDLES = 256
 # ctx is rebuilt every start, nothing is persisted, no table (A13).
 CODE_MAX_STUDENT_OBJECTS = 8
 CODE_STATUS_MIN_INTERVAL_S = 0.1
-# Supervisor → server stdout/stderr events are bounded per line and per
-# second (the supervisor enforces them; the server sizes its buffers by them).
+# Supervisor → server stdout/stderr events are bounded per line and by a
+# token bucket of STDOUT_BURST_LINES lines refilled at STDOUT_MAX_LINES_PER_S
+# (the supervisor enforces them; the server sizes its buffers by them). The
+# burst is handlers/output.py::OUTPUT_BURST_LOG: a straight loop of prints is
+# a program, not a flood (M2).
 STDOUT_MAX_LINE_BYTES = 2000
 STDOUT_MAX_LINES_PER_S = 20
+STDOUT_BURST_LINES = 500
 # How long close_run() waits for the worker after draining it.
 CODE_RPC_WORKER_JOIN_S = 1.0
 

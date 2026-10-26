@@ -167,6 +167,7 @@ def test_every_constant_of_the_spec_exists_by_name():
     assert code_rpc.CODE_STATUS_MIN_INTERVAL_S == 0.1
     assert code_rpc.STDOUT_MAX_LINE_BYTES == 2000
     assert code_rpc.STDOUT_MAX_LINES_PER_S == 20
+    assert code_rpc.STDOUT_BURST_LINES == 500
     assert code_rpc.MAX_FRAME_BYTES == _L.MAX_FRAME_BYTES == 65536
     assert code_rpc.CONTROL_MAX_FRAME_BYTES == _L.CONTROL_MAX_FRAME_BYTES == 196608
     assert code_rpc.MAX_CODE_PROJECT_BYTES == robot_api.MAX_CODE_PROJECT_BYTES == 131072

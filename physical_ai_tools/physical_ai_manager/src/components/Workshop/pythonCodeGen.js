@@ -168,31 +168,55 @@ function rowGenerator(row, generator, Order) {
 
 // The hats of the workspace being generated (generateWorkspace sets it before
 // any block is generated): the function names per broadcast message, so a
-// „sende Nachricht" calls the hats that wait for it.
-let currentHats = { byEvent: new Map() };
+// „sende Nachricht" starts the hats that wait for it; `threaded` records that
+// a send did, so the module imports `threading`.
+let currentHats = { byEvent: new Map(), threaded: false };
+
+// The loop variable of a counted „Solange … sichtbar" (a reserved word, so a
+// student's variable never takes it).
+const WHILE_VISIBLE_PASS_VAR = '_durchgang';
 
 function registerForBlocks(generator, Order) {
   const F = generator.forBlock;
   for (const row of ROWS) F[row.block_type] = rowGenerator(row, generator, Order);
 
   // ── Events (Ereignisse) ────────────────────────────────────────────────
-  // A broadcast has no text-API row: a text program uses functions. In the
-  // preview it CALLS the hats that wait for its message (defined above it as
-  // `def when_…():`); on the robot they run in their own thread.
+  // A broadcast has no text-API row: a text program uses functions. On the
+  // robot every hat runs in its own thread and a send goes on at once (E3 of
+  // the Roboter Studio review fixes), so the preview STARTS each hat that
+  // waits for the message (defined above it as `def when_…():`) in a thread.
   F.edubotics_broadcast = (b) => {
     const name = String(b.getFieldValue('EVENT_NAME') == null ? '' : b.getFieldValue('EVENT_NAME')).trim();
     const fns = currentHats.byEvent.get(name) || [];
     if (!fns.length) return `pass  # Nachricht „${commentText(name)}“ — kein „wenn“-Block wartet darauf\n`;
-    return fns.map((fn) => `${fn}()  # Nachricht „${commentText(name)}“\n`).join('');
+    currentHats.threaded = true;
+    return fns
+      .map((fn) => `threading.Thread(target=${fn}).start()  # Nachricht „${commentText(name)}“ — der „wenn“-Block läuft nebenher\n`)
+      .join('');
   };
 
   // ── Control (Logik) ────────────────────────────────────────────────────
-  // C-block: repeat the body while the object stays visible. (The optional
-  // „höchstens N Mal" MAX_REPS cap is a runtime backstop and is not rendered
-  // in this preview.)
+  // C-block: repeat the body while the object stays visible (E2 of the
+  // Roboter Studio review fixes). „höchstens N Mal" (MAX_REPS > 0) renders a
+  // counted loop that ends early when nothing is seen; 0 keeps the `while`.
+  // One German comment above it states what a text loop cannot show: the
+  // observation pose before every look, the skip of an object the body could
+  // not grasp, the end without progress. (Rendering the pose as robot.home()
+  // or the skip as a try/except was rejected: the pose is an operator
+  // setting, and a text program cannot tell a skip from a real refusal.)
   F.edubotics_while_visible = (b, g) => {
     const body = g.statementToCode(b, 'DO') || g.PASS;
-    return `while robot.sees(${pyStr(b.getFieldValue('OBJECT_TYPE'))}):\n${body}`;
+    const type = pyStr(b.getFieldValue('OBJECT_TYPE'));
+    const comment = `# „Solange ${commentText(fieldText(b, 'OBJECT_TYPE'))} sichtbar": vor jedem Blick fährt der Arm in `
+      + 'die Beobachtungsstellung; ein Objekt, das nicht gegriffen werden kann, wird übersprungen; ohne Fortschritt '
+      + 'endet die Schleife von selbst.\n';
+    const raw = Number(b.getFieldValue('MAX_REPS'));
+    const reps = Number.isFinite(raw) ? Math.max(0, Math.trunc(raw)) : 0;
+    if (reps === 0) return `${comment}while robot.sees(${type}):\n${body}`;
+    // The body is the loop's own (statementToCode indents it one level),
+    // beside the `if`, never under its `break`.
+    return `${comment}for ${WHILE_VISIBLE_PASS_VAR} in range(${reps}):\n`
+      + `${g.INDENT}if not robot.sees(${type}):\n${g.INDENT}${g.INDENT}break\n${body}`;
   };
   F.edubotics_forever = (b, g) => {
     const body = g.statementToCode(b, 'DO') || g.PASS;
@@ -302,7 +326,7 @@ function generateWorkspace(workspace, generator) {
       byEvent.get(name).push(fn);
     }
   }
-  currentHats = { byEvent };
+  currentHats = { byEvent, threaded: false };
   const defs = [];
   const main = [];
   try {
@@ -316,8 +340,19 @@ function generateWorkspace(workspace, generator) {
       }
       if (code) main.push(code);
     }
+    // A send started a hat in a thread: `import threading` right after
+    // `import robot` (which stays the first import), before any import a
+    // built-in block added while it was generated.
+    if (currentHats.threaded) {
+      const before = generator.definitions_;
+      const after = Object.create(null);
+      after.import_robot = before.import_robot;
+      after.import_threading = 'import threading';
+      for (const key of Object.keys(before)) if (!(key in after)) after[key] = before[key];
+      generator.definitions_ = after;
+    }
   } finally {
-    currentHats = { byEvent: new Map() };
+    currentHats = { byEvent: new Map(), threaded: false };
   }
   let code = [...defs, ...main].join('\n');
   code = generator.finish(code);
@@ -338,10 +373,12 @@ function load() {
     _ready = import('blockly/python').then((mod) => {
       const generator = mod.pythonGenerator;
       const Order = mod.Order;
-      // Keep a student's `robot` variable from shadowing our API in the
-      // generated preview (the generator would otherwise rename it).
+      // Keep a student's variable from shadowing our API in the generated
+      // preview (the generator renames a variable that takes a reserved
+      // word): `robot`, the `threading` a send starts its hats with, and the
+      // pass counter of a counted „Solange … sichtbar".
       if (typeof generator.addReservedWords === 'function') {
-        generator.addReservedWords('robot');
+        generator.addReservedWords(`robot,threading,${WHILE_VISIBLE_PASS_VAR}`);
       }
       registerForBlocks(generator, Order);
       return { generator, Order };

@@ -258,10 +258,11 @@ describe('pythonCodeGen — output + counters', () => {
 
 describe('pythonCodeGen — events + control', () => {
   // Intent kept (F8): a broadcast reaches its hat. The text API has no
-  // broadcast (a text program uses functions), so the preview CALLS the hat's
-  // function; the hat keeps today's `def when_…():` name and says in German
+  // broadcast (a text program uses functions), so the preview STARTS the hat's
+  // function in a thread, as the robot runs it (E3; pythonCodeGen.broadcast.
+  // test.js); the hat keeps today's `def when_…():` name and says in German
   // that it runs by itself.
-  test('broadcast calls the when_broadcast hat function', async () => {
+  test('broadcast starts the when_broadcast hat function', async () => {
     const code = await gen([
       { type: 'edubotics_broadcast', fields: { EVENT_NAME: 'start' } },
       {
@@ -272,7 +273,7 @@ describe('pythonCodeGen — events + control', () => {
     ]);
     expect(code).not.toContain('robot.broadcast');
     expect(code).toMatch(/# Läuft von selbst, sobald die Nachricht „start“ gesendet wird\.\ndef when_start\(\):\n {2}robot\.home\(\)/);
-    expect(code).toContain('when_start()  # Nachricht „start“');
+    expect(code).toContain('threading.Thread(target=when_start).start()  # Nachricht „start“');
   });
 
   test('when_counter_gt hat with empty body emits pass', async () => {

@@ -3301,6 +3301,15 @@ _LIFT_NOT_SOLVABLE_HOME_DE = (
     _LIFT_NOT_SOLVABLE_DE + ' „hebe an" gehört hinter „Greife" oder „schließe '
     'um"; aus der Grundstellung heraus gibt es nichts anzuheben.'
 )
+# B7: „hebe an" that cannot rise any further. The „Greife" clause is said only
+# while an object is carried (``ctx.carried_tag``): right after „Greife" the
+# hover is already the top, so it explains the no-op; in a program that never
+# grasped it described an object that is not there.
+_LIFT_AT_TOP_DE = (
+    '[WARNUNG] „hebe an" hat den Arm nicht bewegt — über dieser Stelle ist er '
+    'schon so hoch, wie er kommt.'
+)
+_LIFT_AT_TOP_CARRYING_DE = _LIFT_AT_TOP_DE + ' „Greife" hebt das Objekt bereits vom Tisch ab.'
 # „In the Grundstellung" for N8's wording: every arm joint within this of HOME
 # (the same 0.01 rad the manual home glide calls „steht bereits in der
 # Grundstellung").
@@ -3388,11 +3397,9 @@ def lift(ctx, args: dict[str, Any]) -> None:
     if rise_m <= _MIN_APPROACH_CLEARANCE_M:
         # Nothing to gain — say so plainly and publish NOTHING (the old code
         # published a zero-length move and warned about the wrong thing).
-        ctx.log(
-            '[WARNUNG] „hebe an" hat den Arm nicht bewegt — über dieser Stelle '
-            'ist er schon so hoch, wie er kommt. „Greife" hebt das Objekt '
-            'bereits vom Tisch ab.'
-        )
+        ctx.log(_LIFT_AT_TOP_CARRYING_DE
+                if getattr(ctx, 'carried_tag', None) is not None
+                else _LIFT_AT_TOP_DE)
         ctx.last_arm_joints = list(cur[:_n(ctx)])
         return
     if rise_m < _APPROACH_WARN_FRAC * DEFAULT_APPROACH_HEIGHT_M:

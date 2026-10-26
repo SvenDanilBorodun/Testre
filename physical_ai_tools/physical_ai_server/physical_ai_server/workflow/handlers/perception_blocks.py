@@ -289,12 +289,21 @@ def _poll_until(ctx, predicate, timeout_s: float, label: str,
             # called from a non-hat path (e.g. test harness).
             released = False
     try:
-        while time.monotonic() < deadline:
+        # LOOK FIRST, and take the last look AT the deadline (C1). The loop
+        # used to be ``while monotonic() < deadline``: a timeout of 0 never
+        # evaluated the predicate (so „warte bis Greifer hält (max 0 s)" answered
+        # falsch while the gripper held), and a positive timeout could take its
+        # last look up to 0.2 s before the deadline. ``math.inf`` (the Q8 grasp
+        # wait) keeps polling every 0.2 s until Stopp, as before.
+        while True:
             if ctx.should_stop():
                 raise WorkflowError('Workflow wurde gestoppt.')
             if predicate():
                 return True
-            time.sleep(0.2)
+            now = time.monotonic()
+            if now >= deadline:
+                break
+            time.sleep(min(0.2, deadline - now))
         if raise_on_timeout:
             raise WorkflowError(f'Timeout: {label} nicht erkannt.')
         return False

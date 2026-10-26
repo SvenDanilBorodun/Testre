@@ -39,6 +39,7 @@ import logging
 import math
 import os
 import random
+import threading
 import time
 from typing import Any, Callable, Iterable
 
@@ -251,6 +252,10 @@ _BLOCK_LABEL_DE: dict[str, str] = {
 }
 
 
+_TOO_DEEP_DE = ('Das Programm ist zu tief verschachtelt — eine Funktion ruft sich '
+                'zu oft selbst auf, oder Blöcke stecken zu tief ineinander.')
+
+
 def _block_label_de(btype: Any) -> str:
     return _BLOCK_LABEL_DE.get(btype, str(btype or '?'))
 
@@ -261,6 +266,13 @@ def _unexpected_block_error(btype: Any, exc: BaseException, *, value: bool) -> '
     Python's own text (English, and naming internals) is logged for the
     maintainer and never reaches the student."""
     _logger.warning('block %s failed: %s: %s', btype, type(exc).__name__, exc)
+    if isinstance(exc, RecursionError):
+        # A function that calls itself too often runs out of Python's stack
+        # (about 100 to 160 levels in a program thread, depending on the
+        # blocks). Say THAT, not „Der Block „Funktionsaufruf" konnte nicht …"
+        # (B6). No depth cap of our own (it would refuse programs that run
+        # today) and no sys.setrecursionlimit (process-wide in the ROS node).
+        return InterpreterError(_TOO_DEEP_DE)
     verb = 'ausgewertet' if value else 'ausgeführt'
     return InterpreterError(
         f'Der Block „{_block_label_de(btype)}" konnte nicht {verb} werden.')
@@ -406,6 +418,13 @@ class Interpreter:
         # never sees an empty registry, and so the parameter ids it discovers
         # are available to _read_variable_name from the first block onwards.
         self._procedures: dict[str, dict[str, Any]] = self._build_procedure_registry()
+        # One stack of „Funktion" frames PER THREAD (M1, owner decision OQ-4 A):
+        # a call binds its parameters in a frame of its own instead of the one
+        # shared ``ctx.variables`` dict, so a hat thread and the main stack
+        # calling the same function never read each other's arguments, and a
+        # global of the same name as a parameter is never touched. Created on
+        # first push (``_call_procedure``).
+        self._frames = threading.local()
 
     # ------------------------------------------------------------------
     # Construction + validation
@@ -1687,15 +1706,27 @@ class Interpreter:
         except Exception:  # noqa: BLE001 — observability never breaks a run
             pass
 
+    def _innermost_frame(self) -> dict[str, Any] | None:
+        """This thread's innermost „Funktion" frame, or None outside a call."""
+        stack = getattr(self._frames, 'stack', None)
+        return stack[-1] if stack else None
+
     def _set_variable(self, ctx, name: str, value: Any) -> None:
-        # Audit §A1: serialize all variable writes via ctx.var_lock so
-        # hat handlers and the main stack don't tear the dict.
-        lock = getattr(ctx, 'var_lock', None)
-        if lock is not None:
-            with lock:
-                ctx.variables[name] = value
+        # Inside a „Funktion" a parameter is that call's own binding (M1): the
+        # write stays in this thread's innermost frame. Every other name is the
+        # global.
+        frame = self._innermost_frame()
+        if frame is not None and name in frame:
+            frame[name] = value
         else:
-            ctx.variables[name] = value
+            # Audit §A1: serialize all variable writes via ctx.var_lock so
+            # hat handlers and the main stack don't tear the dict.
+            lock = getattr(ctx, 'var_lock', None)
+            if lock is not None:
+                with lock:
+                    ctx.variables[name] = value
+            else:
+                ctx.variables[name] = value
         # Emit a [VAR:name=json] sentinel so the React variable
         # inspector (debugger panel) can mirror the change. Failures
         # here must not raise — variables are best-effort observability.
@@ -1721,8 +1752,13 @@ class Interpreter:
         except Exception:
             pass
 
-    @staticmethod
-    def _read_variable(ctx, name: str) -> Any:
+    def _read_variable(self, ctx, name: str) -> Any:
+        """A name inside a „Funktion" is that call's parameter, else the global
+        — lexical scope, exactly the preview's ``global`` declarations (OQ-4 A):
+        a nested call does NOT see its caller's parameters."""
+        frame = self._innermost_frame()
+        if frame is not None and name in frame:
+            return frame[name]
         lock = getattr(ctx, 'var_lock', None)
         if lock is not None:
             with lock:
@@ -2009,31 +2045,31 @@ class Interpreter:
         spec = self._procedures.get(name)
         if spec is None:
             raise InterpreterError(f'Unbekannte Funktion: {name}')
-        # Save+restore caller's variable scope so procedure params don't
-        # leak out. (Block-style procedures share globals for non-param
-        # writes — that's documented Blockly behaviour.)
-        saved: dict[str, Any] = {}
+        # A call has its OWN frame (M1, owner decision OQ-4 A): the parameters
+        # are bound in a dict pushed onto THIS thread's stack and popped in the
+        # finally, never written into the shared ``ctx.variables``. The old
+        # save → overwrite → restore of the shared dict let a hat thread and
+        # the main stack calling the same function read each other's argument
+        # (the first restore popped the other call's binding), and overwrote a
+        # global of the same name for the whole call. A write to a NON-parameter
+        # inside the body still goes to the global (Blockly's own semantics: the
+        # generator declares every other workspace variable ``global``).
+        #
+        # The arguments are already evaluated, in the caller's frame, by
+        # _read_call_args; nothing here evaluates a block, so the frame adds no
+        # Python frame to the evaluation chain (the recursion-depth pin of
+        # test_interpreter_procedure_frames).
         param_names = spec.get('params') or []
-        # Move the param-shadow setup *inside* the try/finally so a
-        # partial failure (e.g., args[i] eval throws) doesn't leave the
-        # caller's scope half-overwritten. Audit §B4.
         proc_block = spec['block']
         body = self._get_statement_block(proc_block, 'STACK')
         return_value: Any = None
+        frame = {pname: (args[i] if i < len(args) else None)
+                 for i, pname in enumerate(param_names) if pname}
+        stack = getattr(self._frames, 'stack', None)
+        if stack is None:
+            stack = self._frames.stack = []
+        stack.append(frame)
         try:
-            lock = getattr(ctx, 'var_lock', None)
-            for i, pname in enumerate(param_names):
-                if not pname:
-                    continue
-                if lock is not None:
-                    with lock:
-                        if pname in ctx.variables:
-                            saved[pname] = ctx.variables[pname]
-                        ctx.variables[pname] = args[i] if i < len(args) else None
-                else:
-                    if pname in ctx.variables:
-                        saved[pname] = ctx.variables[pname]
-                    ctx.variables[pname] = args[i] if i < len(args) else None
             if body is not None:
                 self._exec_chain(body, ctx, on_block_change)
             if spec.get('has_return'):
@@ -2042,23 +2078,7 @@ class Interpreter:
         except _ProcedureReturn as early:
             return_value = early.value
         finally:
-            # Restore param-shadowed variables. Use the same lock for
-            # consistency with the setup path above.
-            lock = getattr(ctx, 'var_lock', None)
-            for pname in param_names:
-                if not pname:
-                    continue
-                if lock is not None:
-                    with lock:
-                        if pname in saved:
-                            ctx.variables[pname] = saved[pname]
-                        else:
-                            ctx.variables.pop(pname, None)
-                else:
-                    if pname in saved:
-                        ctx.variables[pname] = saved[pname]
-                    else:
-                        ctx.variables.pop(pname, None)
+            stack.pop()
         return return_value
 
     def _exec_procedure_call(

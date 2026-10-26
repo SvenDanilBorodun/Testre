@@ -6,6 +6,123 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### The next release, 2026-10-26 — Roboter Studio review fixes
+
+**Why.** A review of v2.34.0 (`main` 593d7e71) RAN the shipped code — the arm64 images `physical-ai-server-opi:2.34.0`
+and `code-runner-opi:2.34.0`, real headless Blockly, `test/rig_emulation.py::Rig`, CPython 3.12 and javac 21 — and
+found six major defects (M1–M6), nine Blockly built-in deviations (B1–B9), nine code-suite defects (C1–C9) and three
+editor/preview gaps (E1–E3), none of them in `docs/KNOWN-ISSUES.md`; M1–M6 were reproduced a second time by the
+conductor. The spec (`docs/plans/2026-10-25-studio-review-fixes/spec.md`, gitignored) was re-derived from the code by
+an architect and reviewed four times (review-1: MA-1…MA-5; review-2: MJ-1, MJ-2; review-3: MJ-A, MJ-B, MJ-C; review-4:
+MAJ-1), each fold accepted by the owner, and rebased onto `main` 47aea6fa when the V1 (v2.35.0) merged first (OQ-6):
+every edu id became `v1_studio` or a registry lookup, every finding was re-verified there. Three implementers worked
+on disjoint files (A: the Blockly interpreter and handlers; B: the code path, `robot_api.py`, the runner; C: the editor,
+the preview, these docs); the conductor pre-committed the one pin B9 broke in a file A owns
+(`test_rs_impl_b.py::test_melde_strips_newlines_so_a_fehler_line_cannot_be_forged` now asserts „no newline, does not
+start with `[`", true before and after B9), so both branched from it.
+
+**Owner decisions.** OQ-1 A (M6: „bewege zu"/„aufnehmen" refuse „Position von"; „ablegen bei" keeps it; the text API is
+unchanged, only its docs); OQ-2 A (M2: a 500-line burst, then 20 lines/s) with OQ-2b (stderr the same); OQ-3 A (B1:
+an empty socket of „vergleiche", „und“/„oder“, „nicht“, „Rest von“ is refused in German, INTENTIONAL #9); OQ-4 A (M1:
+lexical scope — own parameters, else globals); OQ-5 B (B9: ASCII brackets, a leading `[` guarded by an invisible
+U+2060); OQ-6 V1 first. Review-1's MA-1…MA-5 and every minor, review-2's, review-3's and review-4's findings were
+accepted as written.
+
+**Measured.**
+- M1, the race: `probes/verify/f1b.py` (a hat and the main stack both calling `fahre(ziel)`) logged `Ablage, MAIN-ENDE`,
+  then the hat's own call failed „„Wenn Ereignis empfangen": Block hat kein Ziel erhalten." — main's restore had popped
+  its binding — and the arm never reached „Start". The forced three-Event test read `{'A': ['Start', 'Ablage'],
+  'B': ['Ablage', None]}` on main (`{'A': ['Start', 'Start'], 'B': ['Ablage', 'Ablage']}` after); concurrent recursion
+  sum(6)/sum(10) gave 26 and 50 on main, 21 and 55 after; a Barrier form passed 20/20 on main and is not used.
+- M4, the step: program `x = 0 / robot.home() / x = 1 / …`, breakpoint L2: on main step 1 → L3, step 2 → nothing for
+  2 s, step 3 → L4 (the line's robot call met the re-armed pause); after the fix L2 → L3 → L4 → L5, one press each.
+  With a worker thread making robot calls the stock debugger was stuck after one step in 0 of 8 runs reaching the next
+  line, 8 of 8 after.
+- M5, the last values: stale in 2/6 (architect) and 6/8 (review-1) runs on main. In the rebuilt arm64 image, three
+  programs with a worker looping robot calls while `main.py` ends (`count`, `wait`, `log` loops), 24 runs each: the
+  stock runner ended on the last value 5/24, 20/24, 14/24, the fixed one 24/24 in all three; the time from the
+  program's last statement to the end 0.44–2.73 s stock, 0.38–1.02 s fixed; whole-run medians 2.86 / 2.8 / about
+  1.9 s fixed, with longer tails in the program BODY caused by the pre-existing unfair `_Rpc._lock` (not solved; the
+  old „0.4–1.4 s" figure is replaced in `CLAUDE.md` and `docs/KNOWN-ISSUES.md`).
+- M6 (simulator, cube at (0.17, −0.03), yaw 0.6; `omx_full` and `v1_studio` alike): „aufnehmen (Position von)" put
+  the lowest fingertip at 27.0 mm with the roll joint at ±1.571 rad; the composite „Greife" at 15.0 mm with
+  +0.807 / −0.796 rad; „bewege zu (Position von)" at 15.0 mm with an open gripper at the cube's mid-height.
+- B1–B6, the built-ins: the review's 232 real-Blockly programs through `test_blockly_conformance`'s own runners
+  (`architect-probes/blockly/compare_builtins.py`): 44 disagreements on main, 39 after — every remaining one an
+  INTENTIONAL entry (#2, #7, #9, #10) or the corpus' `umlaut_var` harness artefact.
+- B6, the recursion depth, each recursion in a FRESH thread under pytest: statement-call recursion 140 levels,
+  value-call recursion 98, the corpus' `tief` shape (`1 + tief(a − 1)`, the call inside a math socket) 163 — on main
+  and on the frame-free design alike; a socket helper with one extra frame drops `tief` to 140 and leaves the other two
+  unchanged, so only the `tief` pin (≥ 155) catches a helper frame (in pytest's main thread the numbers are 136 / 95).
+  The pins: ≥ 135 / ≥ 95 / ≥ 155; depth 2000 reads `_TOO_DEEP_DE`. A depth cap of 60 was rejected (it refused the
+  corpus' `proc_depth_100`, which main runs).
+- B7: one „hebe an" over a table Ziel rose 0.15 → 0.204 m on the OMX and 0.11 → 0.136 m on the V1, then published
+  nothing; the no-op warning ended „„Greife" hebt das Objekt bereits vom Tisch ab." in every program.
+- B8: the composite „Greife" out of reach and `move_to` an unreachable Ziel said „markierten Greifbereich" / „bitte
+  das Objekt …" on both profiles, rig and simulator.
+- C2: `robot.wait(10**400)` raised `OverflowError` in `math.isfinite` on the reader thread and dropped the
+  connection; C5-b: CPython 3.12's C encoder gives up between 5 000 and 10 000 nesting levels.
+
+**Saved-program and visible behaviour changes** (each a deliberate change, by name):
+- **M1 / OQ-4:** a „Funktion" that read a parameter of its CALLER now reads the global — a saved program can drive
+  elsewhere or stop with „Block hat kein Ziel erhalten."; concurrent calls of one function no longer read each other's
+  arguments, and a global of a parameter's name is no longer overwritten during a call.
+- **OQ-3 (B1):** an empty socket of „vergleiche" (every operator), „und“/„oder“, „nicht“ or „Rest von“ stops the
+  program with a German sentence; „beschränke" with an EMPTY upper socket has no upper bound (`inf`, as the preview;
+  it was 0 — the corpus case `constrain_empty_high` read 1 on the robot and 50 in the preview).
+- **B2:** an empty VALUE (a variable never set) in any number socket, „wiederhole" included, stops the program with
+  „Hier wird eine Zahl gebraucht — der Wert ist leer (hat die Variable schon einen Wert bekommen?)."; „ändere um 1" on a
+  variable holding wahr gives 2 (wahr counts as 1; it gave 1).
+- **B3:** element 0 in „füge ein … von hinten" and „nimm Teilliste" (either end) stops the program.
+- **B4:** a text in „hole Element" (GET) and „nimm Teilliste" now RUNS — it answers a character / a sub-text — where it
+  stopped or answered `[]`; „nimm Teilliste" of anything else that is not a list (a tuple included) stops the program.
+- **B5:** a fractional count in „erzeuge Liste mit … Mal" and fractional or infinite bounds of „Zufallszahl" stop the
+  program (they were truncated).
+- **B6:** a too-deep recursion reads „Das Programm ist zu tief verschachtelt — eine Funktion ruft sich zu oft selbst
+  auf, oder Blöcke stecken zu tief ineinander." instead of „Der Block „Funktionsaufruf" konnte nicht ausgewertet
+  werden.".
+- **C1:** a timeout of 0 in „warte bis … sichtbar" / „warte bis Greifer hält" (and `wait_until_seen` /
+  `wait_until_held`) looks once instead of never, and a positive timeout takes its last look AT the deadline (a
+  condition that turns true in the last 0.2 s is seen).
+- **C5:** a Java program passing a `char` or a `CharSequence` (e.g. a `StringBuilder`) to `Robot.speak` /
+  `Robot.toast` now RUNS where it stopped with the generic type sentence; NaN/±Infinity reach the server and are
+  refused in German with the Java names.
+- **C9-a:** None inside a list or as a dict value reads „nichts" (also inside „erstelle Text aus").
+- **M2:** a text program's `print` burst shows up to 500 lines at once, then 20/s (it was 20/s), stdout and stderr
+  alike.
+- **M6:** „bewege zu" and „aufnehmen" with „Position von" stop the program with `_POSITION_VON_IN_DESTINATION_DE`.
+- **B9:** „melde", `print` and `robot.log` lines keep their square brackets (no more parentheses); a line starting with
+  `[` gets an invisible U+2060 in front — visible change, no stop.
+- **B7, B8, C3, C6, C8, M3 (wording only):** „hebe an" keeps its Greife clause only while an object is carried; an
+  unreachable Ziel or point names itself, and every Greifbereich sentence reads „Sim-Tisch" in the simulator; a toast
+  level names its four choices; a `package` line in `Main.java` reads `no_main_class`; the band top of
+  `greifer_schliessen_rad` is refused with „muss mindestens … und kleiner als … sein"; a from-import typo names the
+  method or the module.
+- For the record (not a stop): during a „Schritt" every thread of a Python program runs (M4), and `sys.exit("text")`
+  now prints its text (C9-b).
+
+**How the merged code differs from the spec** (documented as the code is): C2's once-per-run traceback is a counter,
+`RunSession._internal_errors`, not a flag; C5-b's 2 000-deep list REACHES the server and is refused with the
+parameter's own sentence — only a list beyond the encoder's 5 000–10 000 levels is `NOT_SENDABLE_DE`; the launcher's
+student-value checks are `type(x) is str`; the `robot.wait(10**400)` smoke is two rows (`py_wait_huge_int`,
+`py_wait_huge_int_then_log`); `object_position`'s `doc_de_block` closes „ablegen bei“ with U+201C; E1's Python call
+regexes take a Unicode call name (so a non-ASCII function alias is found), its replay lint skips a `def replay(` /
+`class replay(` head, and `CodeEditor.jsx::assetCompletionSource` passes the whole document to `assetArgContext`
+(a file outside the spec's list, owner-accepted under review-1 MA-5); E2's comment closes its quote with U+201C like
+the preview's other comments; the preview reserves `threading` and `_durchgang`. Found by implementer A and left as a
+residual: an unreachable table Ziel in „bewege zu" still logs `table_ziel_hover`'s „Anfahrhöhe … reduziert" warning
+before the new refusal.
+
+**Rejected, for the record.** M1: a lock held for the whole call (serialises hats with main), copy-on-call of the
+whole dict (globals written in a function would be lost), a dynamic-scope chain (OQ-4 B). M3: a new exit-dict key
+(`module`; it failed two lockstep tests) and `import_cycle`. M4: skipping the gate for main-thread calls (the server
+cannot tell threads) and a „step done" frame. M5: a retry after `skipped` (unreachable with the after-stamp). E2:
+rendering the observation pose as `robot.home()` (an operator setting) and the skip as a `try/except` (a text program
+cannot tell a skip from a real refusal). B6: a depth cap and `sys.setrecursionlimit` (process-wide in the ROS node).
+
+**Open.** Nothing here has driven a real arm; the residuals are in `docs/KNOWN-ISSUES.md` („Roboter Studio review
+fixes").
+
 ### v2.35.0, 2026-10-25 — the V1 replaces `edu6_studio` and `edu1_studio`
 
 **Why.** The owner replaced both EduBotics Feetech arms with one new 5-DOF arm, the V1 (Roboter Studio only,

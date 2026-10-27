@@ -7,6 +7,8 @@ boot-home) are tested via ast-extraction so importing them needs no rclpy.
 """
 
 import ast
+import copy
+import hashlib
 import io
 import math
 import os
@@ -4258,6 +4260,105 @@ class TestCommandedGoalEdgeClamp(unittest.TestCase):
         read = set(re.findall(r'EDUBOTICS_[A-Z0-9_]+', driver))
         self.assertIn('EDUBOTICS_FEETECH_GOAL_EDGE_MARGIN_TICKS', read)
         self.assertEqual(read - set(forwarded), set())
+
+
+def _strip_docstring(fn):
+    """A copy of ``fn`` without its leading docstring (comments never reach the
+    AST, so what remains is exactly the logic)."""
+    fn = copy.deepcopy(fn)
+    first = fn.body[0] if fn.body else None
+    if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)):
+        fn.body = fn.body[1:]
+    return fn
+
+
+def _driver_function(source, name):
+    """A module-level function, or a method of FeetechArmNode, by name."""
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+        if isinstance(node, ast.ClassDef) and node.name == 'FeetechArmNode':
+            for sub in node.body:
+                if isinstance(sub, ast.FunctionDef) and sub.name == name:
+                    return sub
+    raise AssertionError(f'{name} not found in the driver')
+
+
+def _logic_hash(fn):
+    return hashlib.sha256(
+        ast.unparse(_strip_docstring(fn)).encode('utf-8')).hexdigest()
+
+
+class TestEdgeGuardLogicIsFrozen(unittest.TestCase):
+    """The three wrap guards (edge refusal, post-energise abort, commanded-goal
+    clamp), their parsers, messages and constants are Rule §2 safety code and
+    LOGICALLY FROZEN at base 26b2a004. A change to any of them is a Rule §2
+    decision, never a side effect of an unrelated edit, so each function is
+    pinned by the sha256 of its ``ast.unparse`` with the docstring removed
+    (comments and docstrings may change; logic, names and literals may not).
+    Identical under CPython 3.11–3.14."""
+
+    _BASE = {
+        'set_torque':
+            'd6fbdd447dd9fd4e277c8a8c84f1b0c7887ad8ab9dc2dead9d0024a2532c94cc',
+        '_verify_after_energise_locked':
+            '6fe4bff846238fb75a528297f25e0c506810c9ce065cd8defeedb22c229ea732',
+        'edge_parked_joints':
+            '2e485b745d23b3a1b3da9112bd2c450f2fdca2a63fc384f0543289b111e8ef39',
+        'wrong_way_joints':
+            '153a5e4363572b5074d39dcdd4ab6b5b0c03e74b55d2e3459528eb25ad66dc34',
+        '_parse_edge_margin':
+            '4a775ceec2c1255513e3021ccf05fc2e181848a636803235d2e5c5082b81bcdf',
+        '_parse_torque_abort_ticks':
+            'd7505325acd562b2255f8ee44e1f255e8937d48ce3e1cc941f4319a5d12c9a48',
+        '_parse_boot_pos_tolerance':
+            '209db54615b9c64411ef9868b42ef0846e1ac5eecea4d79d286c3d3eb4d15096',
+        'edge_refusal_message':
+            '77c63fbe6c4be621c8b6d6ea51243b898a2b98623a5c2371e9bbca671f4d61d1',
+        'wrong_way_abort_message':
+            'd02f56ff7386d0e6d50eaf52e79471704ce97346e86acdc8f447682bbf119837',
+    }
+
+    def setUp(self):
+        self.src = open(os.path.join(_DOCKER, 'feetech_arm_node.py'),
+                        encoding='utf-8').read()
+
+    def test_the_guards_are_byte_for_byte_base(self):
+        changed = {name: _logic_hash(_driver_function(self.src, name))
+                   for name in self._BASE}
+        self.assertEqual(changed, self._BASE)
+
+    def test_the_fence_has_teeth(self):
+        old = 'if min(tick, TICKS_PER_REV - 1 - tick) < margin:'
+        self.assertEqual(self.src.count(old), 1)
+        mutated = self.src.replace(
+            old, 'if min(tick, TICKS_PER_REV - 1 - tick) <= margin:')
+        self.assertNotEqual(
+            _logic_hash(_driver_function(mutated, 'edge_parked_joints')),
+            self._BASE['edge_parked_joints'])
+
+    def test_the_constants_are_unchanged(self):
+        want = {
+            '_DEFAULT_EDGE_REFUSE_MARGIN_TICKS': '40',
+            '_EDGE_MARGIN_MAX_TICKS': 'TICKS_PER_REV // 2',
+            '_DEFAULT_TORQUE_ABORT_ERROR_TICKS': 'TICKS_PER_REV // 2',
+            '_TORQUE_ABORT_MIN_TICKS':
+                '_DEFAULT_BOOT_POSITION_TOLERANCE_TICKS + 1',
+            '_TORQUE_ABORT_MAX_TICKS': 'TICKS_PER_REV - 1',
+            '_DEFAULT_GOAL_EDGE_MARGIN_TICKS': '128',
+            '_GOAL_EDGE_MARGIN_MAX_TICKS': '130',
+            '_DEFAULT_BOOT_POSITION_TOLERANCE_TICKS': '400',
+            'POST_ENERGISE_READ_ATTEMPTS': '2',
+            'SEED_SPEED_STEPS': '200',
+        }
+        found = {}
+        for node in ast.parse(self.src).body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id in want:
+                        found[target.id] = ast.unparse(node.value)
+        self.assertEqual(found, want)
 
 
 class TestProvisionArmIdentityIsThreadedNotAssumed(unittest.TestCase):

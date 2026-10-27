@@ -61,12 +61,20 @@ def _ocp():
     from OCP.BRepTools import BRepTools
     from OCP.GProp import GProp_GProps
     from OCP.IFSelect import IFSelect_RetDone
+    from OCP.Message import Message, Message_Gravity
     from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer
     from OCP.StlAPI import StlAPI_Writer
     from OCP.TopAbs import TopAbs_IN, TopAbs_ON, TopAbs_SOLID
     from OCP.TopExp import TopExp_Explorer
     from OCP.gp import gp_Ax1, gp_Ax2, gp_Dir, gp_Pnt, gp_Trsf, gp_Vec
     return types.SimpleNamespace(**{k: v for k, v in locals().items()})
+
+
+def _quiet(o):
+    """Keep OCP's STEP translator statistics off the console (failures still print)."""
+    printers = o.Message.DefaultMessenger_s().Printers()
+    for i in range(1, printers.Length() + 1):
+        printers.Value(i).SetTraceLevel(o.Message_Gravity.Message_Fail)
 
 
 class _Geo:
@@ -498,6 +506,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     o = _ocp()
+    _quiet(o)
     g = _Geo(o)
     caps = {cap: build_cap(g, cap, gp.CAP_DESIGN_SEAT_N) for cap in gp.CAP_IDS}
     cradle = build_cradle(g, with_bumps=True)

@@ -135,11 +135,13 @@ class Worker:
         """``(message, result)`` of one job; refusals raise."""
         kind, p = action.kind, action.params
         if kind == 'connect':
+            port = p['port']
             try:
-                fb.FeetechBus(p['port'], timeout_s=0.2).close()
+                fb.FeetechBus(port, timeout_s=0.2).close()
             except OSError as e:
-                raise core.refusal('PORT_OPEN_FAILED', port=p['port'], reason=str(e)[:120]) from None
-            self.port = p['port']
+                log.warning('cannot open %s: %s', port, e)
+                raise core.refusal('PORT_OPEN_FAILED', port=port) from None
+            self.port = port
             return T.CONNECTED.format(port=self.port), None
         if kind == 'sign_in':
             password = p.pop('password', '')      # out of the shared Action at once: memory only, once

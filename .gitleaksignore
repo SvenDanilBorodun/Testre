@@ -58,3 +58,9 @@ fa39bebd7759dac794dd5685516502aec97f7814:robotis_ai_setup/tests/test_pod_key_che
 # 6. Entry 5's first wording quoted the case-name tuple itself and was flagged
 #    in this file (commit fccbeb92); reworded since. Not a credential.
 fccbeb9287d684040604fbebded142f5dd3dd5ce:.gitleaksignore:generic-api-key:52
+#
+# 7. The Servo-Station cloud test's made-up admin password (V1 Servo-Station,
+#    2026-10-27): the fake Supabase in test_servo_station_cloud.py accepts it and
+#    the tests prove it is never logged or stored. Not a credential. The literal
+#    is a plain low-entropy word now; this line covers the commit that added it.
+c4e72e2e8cc7df6559225f46e008b983687d8ec3:robotis_ai_setup/tests/test_servo_station_cloud.py:generic-api-key:28

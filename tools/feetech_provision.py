@@ -222,9 +222,13 @@ _IMAGE_STEP_SKIP = frozenset({
     fb.REG_ANGULAR_RESOLUTION, fb.REG_25})
 
 
-def _circular_deviation(tick: int, target: int) -> int:
-    """Signed short-way distance from ``target`` to ``tick``."""
-    return ((tick - target + 2048) % fb.TICKS_PER_REV) - 2048
+def _jig_reads(present: int, t0: int) -> bool:
+    """The jigged servo reads its T0: inside the register's 0–4095 and within
+    the tolerance, compared LINEARLY like the boot probe. Never round the
+    circle: a firmware that does not fold Present reads T0 ± 4096 after an
+    offset across the seam, which the boot probe refuses."""
+    return (0 <= present < fb.TICKS_PER_REV
+            and abs(present - t0) <= JIG_POSE_TOLERANCE_TICKS)
 
 
 def provision(bus, serial: str, spec: dict, *, servo_spec=fss.V1,
@@ -438,12 +442,11 @@ def provision(bus, serial: str, spec: dict, *, servo_spec=fss.V1,
             # that silent 2×-offset-skew hole.
             present_after = fb.decode_sign_magnitude(
                 bus.read_u16(sid, fb.REG_PRESENT_POSITION), 15)
-            if (fb.circular_distance(present_after, joint.t0)
-                    > JIG_POSE_TOLERANCE_TICKS):
+            if not _jig_reads(present_after, joint.t0):
                 raise SystemExit(
                     f'[FEHLER] Servo {sid}: Jig-Position liest nach dem '
                     f'Offset-Schreiben {present_after} statt {joint.t0} '
-                    f'(Abweichung {_circular_deviation(present_after, joint.t0)}'
+                    f'(Abweichung {present_after - joint.t0}'
                     ' Ticks) — Homing-Offset/Vorzeichen prüfen und erneut '
                     'provisionieren.')
 
@@ -497,10 +500,10 @@ def provision(bus, serial: str, spec: dict, *, servo_spec=fss.V1,
             t0 = designed_zero_tick(i, servo_spec)
             present = fb.decode_sign_magnitude(
                 bus.read_u16(sid, fb.REG_PRESENT_POSITION), 15)
-            if fb.circular_distance(present, t0) > JIG_POSE_TOLERANCE_TICKS:
+            if not _jig_reads(present, t0):
                 raise SystemExit(
                     f'[FEHLER] Jig-Endkontrolle: Servo {sid} liest {present} '
-                    f'statt {t0} (Abweichung {_circular_deviation(present, t0)} '
+                    f'statt {t0} (Abweichung {present - t0} '
                     'Ticks) — den Arm im Jig belassen und die '
                     'Provisionierung erneut ausführen.')
         print(f'[OK] Jig-Endkontrolle: alle {len(SERVO_IDS)} Servos lesen '

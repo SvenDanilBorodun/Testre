@@ -46,7 +46,9 @@ The snippet goes into the **dev-pin commit** on a branch from the release tag �
 VR5 and the overcurrent check on the pilot. That branch is never merged, gets no PR and no tag; the
 owner pushes it alone (no workflow fires on a non-`main` push) and runs it on the pilot arm below.
 P0 also settles what nothing here could: the 40-byte block read at address 0, the broadcast-ping
-answer window, the odd baud rates and Lock persistence across a power cycle.
+answer window, the odd baud rates, Lock persistence across a power cycle and whether Present stays inside
+0–4095 after an offset that crosses the seam (`docs/servo-station.md` §5: a firmware that does not fold it makes
+Kalibrieren refuse every servo whose offset crosses, with `OFFSET_CHECK`, since the boot probe would refuse it).
 
 ## Pilot — unreleased arm software on the pilot arm  *(P1–P6, VR3 (= P3), VR5, overcurrent)*
 
@@ -54,12 +56,14 @@ The owner, in PowerShell on the Windows pilot PC; the released step-1 version in
 once, so its four images are present. **Nothing is pushed.**
 
 ```powershell
-# 0. The branch from step 3, checked out with the repository's exact bytes, as CI builds it: Git for Windows'
-#    default autocrlf would give every *.py (text=auto) CRLF, and the Dockerfile strips CR only from the scripts it
-#    lists, not from the launch overlays. `clone -c` writes the setting into the new clone before its checkout.
+# 0. The branch from step 3, checked out with the repository's exact LF bytes, so the pilot builds exactly what CI
+#    builds: Git for Windows' default autocrlf, and with it off a native core.eol, would check every text=auto file
+#    out CRLF. The image would survive either way (the arm Dockerfile CR-strips every file it copies: its plain COPYs
+#    by name, every overlay in apply_overlay); the station and every other file would not be CI's bytes.
+#    `clone -c` writes both settings into the new clone before its checkout.
 #    A fresh window: a per-machine tag or registry override would make $rel / $reg below differ from what the GUI uses.
 if ($env:EDUBOTICS_IMAGE_TAG -or $env:EDUBOTICS_REGISTRY) { throw 'use a PowerShell window without EDUBOTICS_IMAGE_TAG / EDUBOTICS_REGISTRY' }
-git clone -c core.autocrlf=false --branch <pilot-branch> https://github.com/SvenDanilBorodun/Testre.git C:\EduBotics-Pilot
+git clone -c core.autocrlf=false -c core.eol=lf --branch <pilot-branch> https://github.com/SvenDanilBorodun/Testre.git C:\EduBotics-Pilot
 $sha = git -C C:\EduBotics-Pilot rev-parse --short=12 HEAD
 $tag = "pilot-$sha"
 $reg = 'ghcr.io/svendanilborodun'

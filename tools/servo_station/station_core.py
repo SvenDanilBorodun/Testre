@@ -11,9 +11,10 @@ rules here are load-bearing:
 * Kalibrieren never writes Goal_Position, speed or acceleration (addr 41–47) and
   writes the position limits (9–12) only in step I, after the offset;
 * the ONLY Goal_Position writes are the Wareneingang / „Fahrzeit messen" motion
-  test, which refuses a shaft parked within 40 ticks of 0/4095 (the driver's
-  edge-guard rule: the position loop is not wrap-aware) and ends with torque
-  off and the Torque_Limit restored in a ``finally``;
+  test, which refuses a servo outside position mode and a shaft parked within
+  40 ticks of 0/4095 (the driver's edge-guard rule: the position loop is not
+  wrap-aware), seeds Goal = Present before any other goal write and ends with
+  torque off and the Torque_Limit restored in a ``finally``;
 * a calibration is committed only by its record, written after step K proved a
   REAL power-on (Torque_Limit 48 = Max_Torque − 1 before the pull, Max_Torque
   after it) with the EEPROM block unchanged;
@@ -141,7 +142,8 @@ class Link:
         try:
             self.bus = self._env.open_bus(baud)
         except OSError as e:
-            raise refusal('PORT_OPEN_FAILED', port=self._env.port, reason=str(e)[:120]) from e
+            log.warning('cannot open %s: %s', self._env.port, e)
+            raise refusal('PORT_OPEN_FAILED', port=self._env.port) from e
         self.baud = baud
         return self.bus
 
@@ -232,23 +234,40 @@ def _edge_parked(present):
     return min(present, fb.TICKS_PER_REV - 1 - present) < EDGE_MARGIN_TICKS
 
 
+def _reads(present, tick):
+    """A Present read after an offset reads ``tick``: inside the register's
+    0–4095 and within ±2 of ``tick``, compared LINEARLY like the driver's boot
+    probe. Never round the circle: a firmware that does not fold Present reads
+    ``tick`` ± 4096 after an offset across the seam, which the boot probe
+    refuses."""
+    return 0 <= present < fb.TICKS_PER_REV and abs(present - tick) <= POSITION_TOLERANCE_TICKS
+
+
 # ── A: discovery ─────────────────────────────────────────────────────────────
 def discover(link):
-    """Step A: a broadcast PING per baud, 1 Mbit/s first; the FIRST baud where
-    anything answers decides (review 2, minor 9): exactly one clean reply is
-    the servo, ≥ 2 replies or any junk is MULTIPLE — never fall through to a
-    later baud, where a lone servo would be re-baud'ed and re-ID'd on top of
-    the others."""
+    """Step A: a broadcast PING at EVERY baud, 1 Mbit/s first. The first baud
+    where anything answers must hold exactly one clean reply — the servo; ≥ 2
+    replies or any junk is MULTIPLE, never a fall-through to a later baud
+    (review 2, minor 9: a lone servo there would be re-baud'ed and re-ID'd on
+    top of the others). Anything answering at a later baud is MULTIPLE too: a
+    second servo at another baud (one fresh at 1 Mbit/s beside the one in the
+    gauge) would otherwise be calibrated in its place. The link ends open at
+    the servo's baud."""
+    found = None
     for baud in fb.BAUD_RATES:
         bus = link.open(baud)
         replies, junk = bus.broadcast_ping()
         if not replies and not junk:
             continue
-        if len(replies) == 1 and junk == 0:
-            return Found(baud, replies[0][0])
+        if found is None and len(replies) == 1 and junk == 0:
+            found = Found(baud, replies[0][0])
+            continue
         log.info('discovery at %d: %d replies, %d junk bytes', baud, len(replies), junk)
         raise StationError('MULTIPLE', T.MULTIPLE)
-    raise StationError('NO_SERVO', T.NO_SERVO)
+    if found is None:
+        raise StationError('NO_SERVO', T.NO_SERVO)
+    link.open(found.baud)
+    return found
 
 
 # ── B: identification ────────────────────────────────────────────────────────
@@ -380,7 +399,7 @@ def write_offset(env, bus, sid, mark_tick):
         raise StationError('OFFSET_EDGE', T.OFFSET_EDGE) from None
     _write_verify(bus, sid, fb.REG_HOMING_OFFSET, 2, fb.encode_homing_offset(offset))
     present_after = _present(bus, sid)
-    if fb.circular_distance(present_after, mark_tick) > POSITION_TOLERANCE_TICKS:
+    if not _reads(present_after, mark_tick):
         raise refusal('OFFSET_CHECK', present=present_after, mark=mark_tick)
     return raw, offset, present_after
 
@@ -440,23 +459,31 @@ def wait_for_replug(env, ping, other=None):
     raise StationError('REPLUG_TIMEOUT', T.REPLUG_TIMEOUT)
 
 
-def power_cycle_proof(env, bus, sid, old_id, joint, block_j):
+def power_cycle_proof(env, link, sid, old_id, old_baud, joint, block_j):
     """Step K (S18): Torque_Limit (RAM 48) = Max_Torque − 1 before the pull;
     the firmware loads 48 from Max_Torque (EEPROM 16) at power-on, so reading
     Max_Torque afterwards proves a REAL power-on and that 16 persisted.
-    Decided in this order: a changed block → NOT_PERSISTED; 48 still
-    Max_Torque − 1 → NO_REAL_RESTART; any other 48 → RESTART_UNCLEAR (the
-    vendor-table assumption failed, not the servo)."""
+    Decided in this order: the servo answering as it was before the run (its
+    old id at 1 Mbit/s, or anything at its old baud) → NOT_PERSISTED at once;
+    a changed block → NOT_PERSISTED; 48 still Max_Torque − 1 →
+    NO_REAL_RESTART; any other 48 → RESTART_UNCLEAR (the vendor-table
+    assumption failed, not the servo)."""
     max_torque = joint.image[fb.REG_MAX_TORQUE_LIMIT]
-    _write_verify(bus, sid, fb.REG_TORQUE_LIMIT, 2, max_torque - 1)
+    _write_verify(link.bus, sid, fb.REG_TORQUE_LIMIT, 2, max_torque - 1)
     env.notify('prompt', T.REPLUG_PULL)
+
+    def answers(baud, *ids):
+        bus = link.bus if link.baud == baud else link.open(baud)
+        return any(bus.ping(i, timeout_s=REPLUG_PING_TIMEOUT_S) for i in ids)
     other = None
-    if old_id != sid:
+    if old_id != sid or old_baud != fb.BAUD_RATES[0]:
         def other():
-            return bus.ping(old_id, timeout_s=REPLUG_PING_TIMEOUT_S)
-    came_back = wait_for_replug(env, lambda: bus.ping(sid, timeout_s=REPLUG_PING_TIMEOUT_S), other)
+            return ((old_id != sid and answers(fb.BAUD_RATES[0], old_id))
+                    or (old_baud != fb.BAUD_RATES[0] and answers(old_baud, old_id, sid)))
+    came_back = wait_for_replug(env, lambda: answers(fb.BAUD_RATES[0], sid), other)
     if came_back == 'other':
         raise StationError('NOT_PERSISTED', T.NOT_PERSISTED)
+    bus = link.bus if link.baud == fb.BAUD_RATES[0] else link.open(fb.BAUD_RATES[0])
     env.sleep(REPLUG_SETTLE_S)
     torque_limit = _u16(bus, sid, fb.REG_TORQUE_LIMIT)
     _err, block = bus.read(sid, fb.EEPROM_BLOCK_ADDR, fb.EEPROM_BLOCK_LEN)
@@ -468,15 +495,30 @@ def power_cycle_proof(env, bus, sid, old_id, joint, block_j):
         raise StationError('NO_REAL_RESTART', T.NO_REAL_RESTART)
     if torque_limit != max_torque:
         raise refusal('RESTART_UNCLEAR', found=torque_limit, want=max_torque)
-    if fb.circular_distance(present, joint.t0) > POSITION_TOLERANCE_TICKS:
+    if not _reads(present, joint.t0):
         raise refusal('OFFSET_CHECK', present=present, mark=joint.t0)
     return block, present
+
+
+def _require_same_servo(incoming, ident, serial):
+    """A Wareneingang recorded on another servo model — or another firmware,
+    when it names one — is another unit's (owner R5-1): the label or the
+    Wareneingang belongs to another servo. Refused before any write."""
+    model, firmware = incoming.get('model_number'), incoming.get('firmware')
+    if model != ident.model or firmware not in (None, ident.firmware):
+        raise refusal('INCOMING_MISMATCH', serial=serial,
+                      incoming=T.SERVO_IDENTITY.format(model=fb.STS_MODEL_NAMES.get(model, model or '?'),
+                                                       fw=firmware or '?'),
+                      servo=T.SERVO_IDENTITY.format(model=fb.STS_MODEL_NAMES[ident.model], fw=ident.firmware))
 
 
 def kalibrieren(env, store, *, serial, joint_index, cap_label, operator, gauge_check_at=None,
                 warnings=(), spec=fss.V1, host='unknown', tool_commit='unknown'):
     """The Kalibrieren run, steps A–L. Returns ``(record, path)``; the record
-    file is the commit point and is written only after K passed."""
+    file is the commit point and is written only after K passed. A previous
+    record of the serial moves to ``history/`` right before the run's first
+    write, so a run that fails after it leaves the serial NOT calibrated (the
+    servo may already carry the new offset); a refusal before it keeps it."""
     _require_pinned(spec)
     joint = spec.joints[joint_index]
     if cap_type_of(cap_label) != joint.cap:
@@ -495,6 +537,9 @@ def kalibrieren(env, store, *, serial, joint_index, cap_label, operator, gauge_c
         bus, sid = link.bus, found.servo_id
         env.step('B')
         ident = identify(env, bus, sid, spec, joint)
+        if incoming is not None:
+            _require_same_servo(incoming, ident, serial)
+        store.retire_record(serial)
         env.step('C')
         open_for_writing(bus, sid)
         if found.baud != fb.BAUD_RATES[0]:
@@ -516,7 +561,7 @@ def kalibrieren(env, store, *, serial, joint_index, cap_label, operator, gauge_c
         env.step('J')
         block_j, image_warnings = lock_and_compare(bus, sid, joint, offset)
         env.step('K')
-        block_k, present_k = power_cycle_proof(env, bus, sid, old_id, joint, block_j)
+        block_k, present_k = power_cycle_proof(env, link, sid, old_id, found.baud, joint, block_j)
     env.step('L')
     record = records.finalize_record({
         'servo_serial': serial, 'profile_id': fss.PROFILE_ID, 'joint': joint.name,
@@ -586,10 +631,16 @@ def motion_test(env, bus, sid, block):
     """Energise at Torque_Limit 300, Goal = Present (the STS switches torque on
     with a goal write — intended here), then ±512 ticks and back, each move
     polled every 10 ms until ±8 ticks or 1.0 s. RAM writes only, each read back.
-    A shaft parked within 40 ticks of 0/4095 is refused before any write: a
-    goal there can make the non-wrap-aware loop run the long way at full speed.
-    ``finally``: torque off and the Torque_Limit read before restored."""
+    Refused before any write: a servo outside position mode (Operating_Mode 33
+    ≠ 0: in wheel or step mode a goal write turns the shaft without end) and a
+    shaft parked within 40 ticks of 0/4095 (a goal there can make the
+    non-wrap-aware loop run the long way at full speed). Before Goal = Present
+    only torque off and the 300 limit are written — neither moves the shaft
+    nor switches torque on — so no write can energise the servo toward a stale
+    goal. ``finally``: torque off and the Torque_Limit read before restored."""
     await_status = block[fb.REG_RESPONSE_STATUS_LEVEL] == 1
+    if block[fb.REG_OPERATING_MODE] != 0:
+        raise refusal('MOTION_MODE', mode=block[fb.REG_OPERATING_MODE])
     present = _present(bus, sid)
     if _edge_parked(present):
         raise refusal('EDGE_PARKED', p=present)
@@ -601,9 +652,9 @@ def motion_test(env, bus, sid, block):
     try:
         _ram_write(bus, sid, fb.REG_TORQUE_ENABLE, 1, fb.TORQUE_ENABLE_OFF, await_status)
         _ram_write(bus, sid, fb.REG_TORQUE_LIMIT, 2, MOTION_TORQUE_LIMIT, await_status)
+        _ram_write(bus, sid, fb.REG_GOAL_POSITION, 2, present, await_status)
         _ram_write(bus, sid, fb.REG_ACCELERATION, 1, 0, await_status)
         _ram_write(bus, sid, fb.REG_GOAL_SPEED, 2, 0, await_status)
-        _ram_write(bus, sid, fb.REG_GOAL_POSITION, 2, present, await_status)
         _ram_write(bus, sid, fb.REG_TORQUE_ENABLE, 1, fb.TORQUE_ENABLE_ON, await_status)
         out = _move(env, bus, sid, target, await_status)
         back = _move(env, bus, sid, present, await_status) if out.arrived else None
@@ -806,7 +857,7 @@ def pruefen(env, store, *, serial, spec=fss.V1):
                                            found=model, want=joint.model))
     refused, _warned = fss.compare_block(block, joint)
     findings += [_deviation_text(d) for d in refused]
-    if fb.circular_distance(present, joint.t0) > POSITION_TOLERANCE_TICKS:
+    if not _reads(present, joint.t0):
         findings.append(T.CHECK_POSITION.format(present=present, mark=joint.t0).rstrip('.'))
     if record is None:
         env.notify('note', T.CHECK_NO_RECORD.format(serial=serial))
@@ -859,7 +910,7 @@ def lehre_pruefen(env, store, *, serial, cap_label, local_date, spec=fss.V1):
         present = _present(link.bus, found.servo_id)
     if bytes(block).hex() != record.get('eeprom_image_hex'):
         raise refusal('MASTER_WRONG_SERVO', serial=serial)
-    passed = fb.circular_distance(present, want) <= POSITION_TOLERANCE_TICKS
+    passed = _reads(present, want)
     store.append_gauge_check(at=env.utc_iso(), local_date=local_date, cap_label=cap_label, cap_type=cap_type,
                              master_serial=serial, present=present, want=want, passed=passed)
     if not passed:

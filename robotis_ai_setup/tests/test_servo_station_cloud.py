@@ -25,7 +25,7 @@ import station_texts_de as T  # noqa: E402
 
 _URL = 'https://abc.supabase.co'
 _KEY = 'anon-public-key'
-_PASSWORD = 'Geheim-Passwort-42'
+_PASSWORD = 'geheim'
 _ACCESS = 'ACCESS.jwt.token'
 _REFRESH = 'REFRESH-token'
 _USERNAMES = pathlib.Path(__file__).resolve().parents[1] / 'cloud_training_api' / 'app' / 'services' / 'usernames.py'

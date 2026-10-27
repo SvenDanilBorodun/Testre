@@ -34,13 +34,14 @@ class _Harness:
     """One bench: fake servos on a fake port, a fake clock, a temp data dir and
     a notify recorder that can act like the operator on a prompt."""
 
-    def __init__(self, servos, clock, tmp, on_prompt=None, noise_by_baud=None):
+    def __init__(self, servos, clock, tmp, on_prompt=None, noise_by_baud=None, on_step=None):
         self.clock = clock
         self.port = FakePort(servos, noise_by_baud)
         self.events = []
         self.step_marks = {}
         self.servos = self.port.servos
         self.on_prompt = on_prompt or {}
+        self.on_step = on_step or {}
         self.store = records.Store(pathlib.Path(tmp))
         self.env = core.Env(self.port, clock=clock, sleep=clock.sleep,
                             notify=self._notify, utcnow=lambda: _UTC)
@@ -49,6 +50,8 @@ class _Harness:
         self.events.append((kind, text, data))
         if kind == 'step' and data.get('state') == 'running':
             self.step_marks[data['step']] = sum(len(s.writes) for s in self.servos)
+            if data['step'] in self.on_step:
+                self.on_step[data['step']]()
         if kind == 'prompt' and text in self.on_prompt:
             self.on_prompt[text]()
 
@@ -79,11 +82,36 @@ class TestDiscovery(_TmpCase):
         finally:
             link.close()
 
-    def test_a_servo_at_57600_is_found_there(self):
+    def test_a_servo_at_57600_is_found_there_after_every_baud_was_asked(self):
         servo = FakeServo(baud_index=fb.BAUD_RATES.index(57_600), clock=self.clock)
-        found, h = self._discover([servo])
-        self.assertEqual(found, core.Found(57_600, 1))
-        self.assertEqual(h.port.opened, list(fb.BAUD_RATES[:fb.BAUD_RATES.index(57_600) + 1]))
+        h = _Harness([servo], self.clock, self.tmp)
+        link = core.Link(h.env)
+        try:
+            found = core.discover(link)
+            self.assertEqual(found, core.Found(57_600, 1))
+            self.assertEqual(link.baud, 57_600)          # the run goes on at the servo's baud
+        finally:
+            link.close()
+        self.assertEqual(h.port.opened, list(fb.BAUD_RATES) + [57_600])
+        self.assertEqual(servo.writes, [])
+
+    def test_a_second_servo_at_a_later_baud_is_multiple(self):
+        # a fresh servo at 1 Mbit/s on the bench, the one in the gauge at 500 kbit/s
+        loose = FakeServo(fb.STS3250_MODEL_NUMBER, raw=700, clock=self.clock)
+        gauged = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1834, baud_index=1, clock=self.clock)
+        h = _Harness([loose, gauged], self.clock, self.tmp)
+        _passed_incoming(h.store, 'V1S-000123', fb.STS3250_MODEL_NUMBER)
+        with self.assertRaises(core.StationError) as ctx:
+            _kalibrieren(h)
+        self.assertEqual(ctx.exception.code, 'MULTIPLE')
+        self.assertEqual((loose.writes, gauged.writes), ([], []))
+        self.assertIsNone(h.store.load_record('V1S-000123'))
+
+    def test_junk_at_a_later_baud_is_multiple(self):
+        servo = FakeServo(clock=self.clock)
+        with self.assertRaises(core.StationError) as ctx:
+            self._discover([servo], noise_by_baud={38_400: 7})
+        self.assertEqual(ctx.exception.code, 'MULTIPLE')
 
     def test_two_servos_are_multiple(self):
         servos = [FakeServo(servo_id=1, clock=self.clock), FakeServo(servo_id=2, clock=self.clock)]
@@ -118,6 +146,22 @@ class TestDiscovery(_TmpCase):
         link.close()
         self.assertEqual(ctx.exception.code, 'MULTIPLE')
         self.assertEqual(h.port.opened, [1_000_000])
+
+
+class TestLink(_TmpCase):
+    def test_a_port_that_will_not_open_names_no_exception_text_and_logs_it(self):
+        def open_bus(_baud):
+            raise OSError("could not open port 'COM7': PermissionError(13, 'Access is denied.')")
+        env = core.Env(open_bus, clock=self.clock, sleep=self.clock.sleep, port='COM7')
+        link = core.Link(env)
+        with self.assertLogs('servo_station', level='WARNING') as logs:
+            with self.assertRaises(core.StationError) as ctx:
+                link.open(1_000_000)
+        self.assertEqual(ctx.exception.code, 'PORT_OPEN_FAILED')
+        self.assertEqual(ctx.exception.message_de, T.PORT_OPEN_FAILED.format(port='COM7'))
+        for english in ('could not open', 'Access is denied', 'PermissionError'):
+            self.assertNotIn(english, ctx.exception.message_de)
+        self.assertTrue(any('Access is denied' in line for line in logs.output))
 
 
 def _passed_incoming(store, serial, model):
@@ -442,6 +486,305 @@ class TestKalibrieren(_TmpCase):
         self.assertEqual(ctx.exception.code, 'WRITE_FAILED')
         self.assertIn('Schutzstrom (Register 28)', ctx.exception.message_de)
         self.assertIsNone(h.store.load_record('V1S-000123'))
+
+
+class TestKalibrierenRefusals(_TmpCase):
+    """Every refusal of a Kalibrieren run fenced by a test that fails without
+    it (the fix round's mutation sweep, V1-F1): what is refused, in which step,
+    and that no record is written."""
+
+    def _bench(self, servo, pull=None):
+        action = pull or (lambda: servo.pull_power(off_polls=5))
+        return _Harness([servo], self.clock, self.tmp, on_prompt={T.REPLUG_PULL: action})
+
+    def _refused(self, h, **kw):
+        with self.assertRaises(core.StationError) as ctx:
+            _kalibrieren(h, **kw)
+        self.assertIsNone(h.store.load_record(kw.get('serial', 'V1S-000123')))
+        return ctx.exception
+
+    def test_identity_refusals_come_before_any_write(self):
+        cases = {
+            'UNKNOWN_MODEL': dict(model=1234),
+            'MAX_VOLTAGE': dict(setup=lambda s: s.mem.__setitem__(fb.REG_MAX_VOLTAGE, 130)),
+            'VOLTAGE': dict(voltage_dv=105),
+            'HOT': dict(temperature_c=45),
+            'STATUS': dict(status=fb.ERR_OVERLOAD),
+        }
+        for code, case in cases.items():
+            with self.subTest(code=code):
+                setup = case.pop('setup', None)
+                servo = FakeServo(case.pop('model', fb.STS3250_MODEL_NUMBER), raw=1834, clock=self.clock, **case)
+                if setup:
+                    setup(servo)
+                h = _Harness([servo], self.clock, tempfile.mkdtemp(dir=self.tmp))
+                err = self._refused(h)
+                self.assertEqual(err.code, code)
+                self.assertEqual(servo.writes, [])
+
+    def test_the_supply_window_and_the_heat_limit_are_the_specs(self):
+        for kw, refused in ((dict(voltage_dv=110), False), (dict(voltage_dv=128), False),
+                            (dict(voltage_dv=129), True), (dict(temperature_c=44), False)):
+            with self.subTest(**kw):
+                servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1834, clock=self.clock, **kw)
+                h = _Harness([servo], self.clock, tempfile.mkdtemp(dir=self.tmp),
+                             on_prompt={T.REPLUG_PULL: lambda s=servo: s.pull_power(off_polls=5)})
+                try:
+                    _kalibrieren(h)
+                    code = None
+                except core.StationError as e:
+                    code = e.code
+                self.assertEqual(code is not None, refused, code)
+
+    def test_a_cap_of_the_wrong_type_refuses_before_the_bus(self):
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1834, clock=self.clock)
+        h = self._bench(servo)
+        err = self._refused(h, cap='KAPPE-GR-A')
+        self.assertEqual(err.code, 'CAP_MISMATCH')
+        self.assertEqual(h.port.opened, [])
+
+    def test_a_status_level_that_will_not_become_1_refuses(self):
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1834, clock=self.clock)
+        servo.mem[fb.REG_RESPONSE_STATUS_LEVEL] = 0
+        original = servo.write
+
+        def write(addr, data):
+            if addr == fb.REG_RESPONSE_STATUS_LEVEL:
+                servo.writes.append((addr, bytes(data)))
+                return
+            original(addr, data)
+        servo.write = write
+        err = self._refused(self._bench(servo))
+        self.assertEqual(err.code, 'LEVEL')
+
+    def test_a_baud_change_the_servo_ignores_is_write_failed(self):
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1834, clock=self.clock, baud_index=4)
+        original = servo.write
+
+        def write(addr, data):
+            if addr == fb.REG_BAUD_RATE:
+                servo.writes.append((addr, bytes(data)))
+                return
+            original(addr, data)
+        servo.write = write
+        err = self._refused(self._bench(servo))
+        self.assertEqual(err.code, 'WRITE_FAILED')
+        self.assertIn(T.NO_ANSWER, err.message_de)
+
+    def test_a_baud_register_that_reads_back_the_old_index_is_write_failed(self):
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1834, clock=self.clock, baud_index=4)
+        original = servo.read
+
+        def read(addr, length):
+            out = bytearray(original(addr, length))
+            if addr <= fb.REG_BAUD_RATE < addr + length:
+                out[fb.REG_BAUD_RATE - addr] = 4
+            return bytes(out)
+        servo.read = read
+        err = self._refused(self._bench(servo))
+        self.assertEqual(err.code, 'WRITE_FAILED')
+        self.assertIn('(4 statt 0)', err.message_de)
+
+    def test_each_half_of_the_id_check_refuses(self):
+        def silent_at_the_new_id(servo):            # takes the id, answers no ping there
+            original = servo._on_ping
+
+            def on_ping():
+                return original() and servo.servo_id == 1
+            servo._on_ping = on_ping
+
+        def misread_id(servo):
+            original = servo.read
+
+            def read(addr, length):
+                out = bytearray(original(addr, length))
+                if length == 1 and addr == fb.REG_ID:
+                    out[0] = 1
+                return bytes(out)
+            servo.read = read
+        cases = {'new id silent': (silent_at_the_new_id, {}), 'old id still answers': (None, {'keeps_old_id': True}),
+                 'register reads the old id': (misread_id, {})}
+        for name, (setup, kw) in cases.items():
+            with self.subTest(name):
+                servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1834, clock=self.clock, **kw)
+                if setup:
+                    setup(servo)
+                h = _Harness([servo], self.clock, tempfile.mkdtemp(dir=self.tmp))
+                err = self._refused(h)
+                self.assertEqual(err.code, 'ID_FAILED')
+                self.assertNotIn(fb.REG_HOMING_OFFSET, servo.written_addrs())
+
+    def test_a_moving_horn_is_unstable_before_the_offset(self):
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1834, clock=self.clock)
+        servo.hand_ticks_per_s = 20.0          # 10 ticks over the 0.5 s of step G
+        err = self._refused(self._bench(servo))
+        self.assertEqual(err.code, 'UNSTABLE')
+        self.assertNotIn(fb.REG_HOMING_OFFSET, servo.written_addrs())
+
+    def _refused_in_step_h(self, servo, raw_present):
+        h = self._bench(servo)
+        err = self._refused(h)
+        self.assertEqual(err.code, 'OFFSET_CHECK')
+        self.assertEqual(err.message_de, T.OFFSET_CHECK.format(present=raw_present, mark=1024))
+        self.assertNotIn(T.REPLUG_PULL, h.texts('prompt'))           # refused in H, not in K
+        self.assertFalse(servo.written_addrs() & {9, 10, 11, 12})
+
+    def test_a_firmware_that_adds_the_offset_ends_in_offset_check(self):
+        # Present = raw + offset: 1834 + 810, not the mark 1024
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1834, clock=self.clock, adds_offset=True)
+        self._refused_in_step_h(servo, 1834 + 810)
+
+    def test_a_firmware_that_does_not_fold_present_ends_in_offset_check(self):
+        # raw 3500 → offset −1620: Present reads T0 + 4096 = 5120 unfolded, which the
+        # boot probe judges linearly against the window 1024–3072
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=3500, clock=self.clock, folds_present=False)
+        self._refused_in_step_h(servo, 5120)
+
+    def test_a_folding_firmware_at_the_same_raw_tick_calibrates(self):
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=3500, clock=self.clock)
+        record, _path = _kalibrieren(self._bench(servo))
+        self.assertEqual(record['calibration']['homing_offset'], -1620)
+        self.assertEqual(record['calibration']['present_after_power_cycle'], 1024)
+
+    def test_a_horn_turned_during_the_replug_is_offset_check_in_step_k(self):
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1834, clock=self.clock)
+
+        def pull():
+            servo.raw += 100
+            servo.pull_power(off_polls=5)
+        h = self._bench(servo, pull=pull)
+        err = self._refused(h)
+        self.assertEqual(err.code, 'OFFSET_CHECK')
+        self.assertEqual(err.message_de, T.OFFSET_CHECK.format(present=1124, mark=1024))
+        self.assertEqual(servo.power_cycles, 1)
+
+    def test_present_unfolded_after_the_power_on_is_offset_check_in_step_k(self):
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=3500, clock=self.clock)
+
+        def pull():
+            servo.folds_present = False
+            servo.pull_power(off_polls=5)
+        err = self._refused(self._bench(servo, pull=pull))
+        self.assertEqual(err.code, 'OFFSET_CHECK')
+        self.assertEqual(err.message_de, T.OFFSET_CHECK.format(present=5120, mark=1024))
+        self.assertEqual(servo.power_cycles, 1)
+
+    def test_a_block_that_changes_before_step_j_is_block_mismatch(self):
+        def mode(servo):
+            servo.mem[fb.REG_OPERATING_MODE] = 1
+
+        def offset(servo):
+            servo.mem[31:33] = fb.le16(fb.encode_homing_offset(811))
+        for name, change in (('mode', mode), ('offset', offset)):
+            with self.subTest(name):
+                servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1834, clock=self.clock)
+                h = _Harness([servo], self.clock, tempfile.mkdtemp(dir=self.tmp),
+                             on_step={'J': lambda s=servo, c=change: c(s)})
+                err = self._refused(h)
+                self.assertEqual(err.code, 'BLOCK_MISMATCH')
+                self.assertNotIn(T.REPLUG_PULL, h.texts('prompt'))
+
+    def test_a_baud_change_that_did_not_persist_is_not_persisted_not_a_timeout(self):
+        # Lock 0 never commits: after the replug the servo is back at 115200 with id 1
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1834, baud_index=fb.BAUD_RATES.index(115_200),
+                          honours_unlock=False, clock=self.clock)
+        h = self._bench(servo)
+        start = self.clock()
+        err = self._refused(h)
+        self.assertEqual(err.code, 'NOT_PERSISTED')
+        self.assertLess(self.clock() - start, 30)
+        self.assertEqual(servo.power_cycles, 1)
+
+    def test_a_baud_change_that_persisted_still_calibrates(self):
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1834, baud_index=fb.BAUD_RATES.index(115_200),
+                          clock=self.clock)
+        record, _path = _kalibrieren(self._bench(servo))
+        self.assertEqual(servo.committed[fb.REG_BAUD_RATE], 0)
+        self.assertEqual(record['calibration']['present_after_power_cycle'], 1024)
+
+
+class TestKalibrierenIncomingAndRecord(_TmpCase):
+    """A Wareneingang of another servo is refused (owner R5-1), and a
+    re-calibration retires the previous record before its first write (V1-F6)."""
+
+    def _bench(self, servo):
+        return _Harness([servo], self.clock, self.tmp,
+                        on_prompt={T.REPLUG_PULL: lambda: servo.pull_power(off_polls=5)})
+
+    def test_a_wareneingang_of_another_model_refuses_before_any_write(self):
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1834, clock=self.clock)
+        h = self._bench(servo)
+        _passed_incoming(h.store, 'V1S-000123', fb.STS3215_MODEL_NUMBER)
+        with self.assertRaises(core.StationError) as ctx:
+            _kalibrieren(h)
+        self.assertEqual(ctx.exception.code, 'INCOMING_MISMATCH')
+        self.assertIn('STS3215', ctx.exception.message_de)
+        self.assertIn('STS3250', ctx.exception.message_de)
+        self.assertIn('V1S-000123', ctx.exception.message_de)
+        self.assertEqual(servo.writes, [])
+        self.assertIsNone(h.store.load_record('V1S-000123'))
+
+    def test_a_wareneingang_with_another_firmware_refuses_before_any_write(self):
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1834, clock=self.clock, firmware=(3, 10))
+        h = self._bench(servo)
+        _passed_incoming(h.store, 'V1S-000123', fb.STS3250_MODEL_NUMBER)
+        incoming = h.store.load_incoming('V1S-000123')
+        incoming['firmware'] = '3.9'
+        h.store.save_incoming(incoming)
+        with self.assertRaises(core.StationError) as ctx:
+            _kalibrieren(h)
+        self.assertEqual(ctx.exception.code, 'INCOMING_MISMATCH')
+        self.assertIn('3.9', ctx.exception.message_de)
+        self.assertIn('3.10', ctx.exception.message_de)
+        self.assertEqual(servo.writes, [])
+
+    def test_a_wareneingang_without_a_firmware_is_judged_by_its_model(self):
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1834, clock=self.clock)
+        h = self._bench(servo)
+        _passed_incoming(h.store, 'V1S-000123', fb.STS3250_MODEL_NUMBER)
+        incoming = h.store.load_incoming('V1S-000123')
+        incoming['firmware'] = None
+        h.store.save_incoming(incoming)
+        record, _path = _kalibrieren(h)
+        self.assertEqual(record['incoming_test'], incoming)
+
+    def _calibrated_once(self, h):
+        first, _path = _kalibrieren(h)
+        self.assertEqual(list(h.store.history_dir.glob('*.json')), [])
+        self.clock.sleep(5)
+        return first
+
+    def test_a_recalibration_that_fails_after_its_first_write_leaves_no_record(self):
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1834, clock=self.clock)
+        pulls = {'on': True}
+
+        def pull():
+            if pulls['on']:
+                servo.pull_power(off_polls=5)
+        h = _Harness([servo], self.clock, self.tmp, on_prompt={T.REPLUG_PULL: pull})
+        first = self._calibrated_once(h)
+        servo.raw += 164                       # the horn one spline tooth off in the gauge
+        pulls['on'] = False                    # and the operator never pulls the plug
+        with self.assertRaises(core.StationError) as ctx:
+            _kalibrieren(h)
+        self.assertEqual(ctx.exception.code, 'REPLUG_TIMEOUT')
+        self.assertIsNone(h.store.load_record('V1S-000123'))
+        (moved,) = h.store.history_dir.glob('V1S-000123-*.json')
+        self.assertEqual(json.loads(moved.read_text(encoding='utf-8')), first)
+        self.assertEqual(h.store.pending_records(), [])
+
+    def test_a_refusal_before_any_write_keeps_the_record(self):
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1834, clock=self.clock)
+        h = self._bench(servo)
+        first = self._calibrated_once(h)
+        servo.writes.clear()
+        servo.ram_temperature_c = 50
+        with self.assertRaises(core.StationError) as ctx:
+            _kalibrieren(h)
+        self.assertEqual(ctx.exception.code, 'HOT')
+        self.assertEqual(servo.writes, [])
+        self.assertEqual(h.store.load_record('V1S-000123'), first)
+        self.assertEqual(list(h.store.history_dir.glob('*.json')), [])
 
 
 def _motion_servo(clock, raw=1000, **kw):
@@ -946,6 +1289,178 @@ class TestSameImageAsProvision(_TmpCase):
                 cap = 'KAPPE-GR-A' if i == 5 else 'KAPPE-J15-A'
                 _kalibrieren(h, serial=f'V1S-00010{i}', joint_index=i, cap=cap)
                 self.assertEqual(servo.block(), jigged[i].block())
+
+
+_GOAL_BLOCK = frozenset(range(fb.REG_ACCELERATION, fb.REG_TORQUE_LIMIT))       # 41..47
+
+
+class TestMotionTestRefusals(_TmpCase):
+    """The motion test (Wareneingang, „Fahrzeit messen") energises a servo: it
+    refuses a servo outside position mode, seeds Goal_Position = Present before
+    any other goal write or torque-on, and every refusal is fenced (V1-F1, F8)."""
+
+    def _wareneingang(self, servo):
+        h = _Harness([servo], self.clock, self.tmp)
+        with self.assertRaises(core.StationError) as ctx:
+            core.wareneingang(h.env, h.store, serial='V1S-000200', spec=SPEC_A)
+        return h, ctx.exception
+
+    def test_a_servo_outside_position_mode_is_refused_with_zero_writes(self):
+        for mode in (1, 2, 3):
+            with self.subTest(mode=mode):
+                servo = _motion_servo(self.clock)
+                servo.mem[fb.REG_OPERATING_MODE] = mode
+                h, err = self._wareneingang(servo)
+                self.assertEqual(err.code, 'MOTION_MODE')
+                self.assertEqual(err.message_de, T.MOTION_MODE.format(mode=mode))
+                self.assertEqual(servo.writes, [])
+                self.assertIsNone(h.store.load_incoming('V1S-000200'))
+
+    def test_fahrzeit_messen_refuses_a_servo_outside_position_mode(self):
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1000, clock=self.clock)
+        h = _Harness([servo], self.clock, self.tmp)
+        path, _dump = core.referenz_lesen(h.env, h.store)
+        servo.mem[fb.REG_OPERATING_MODE] = 1
+        with self.assertRaises(core.StationError) as ctx:
+            core.fahrzeit_messen(h.env, h.store, path)
+        self.assertEqual(ctx.exception.code, 'MOTION_MODE')
+        self.assertEqual(servo.writes, [])
+
+    def test_goal_position_equals_present_is_the_first_goal_write_and_precedes_torque_on(self):
+        servo = _motion_servo(self.clock, raw=1000)
+        h = _Harness([servo], self.clock, self.tmp)
+        core.wareneingang(h.env, h.store, serial='V1S-000200', spec=SPEC_A)
+        energising = [n for n, (addr, data) in enumerate(servo.writes)
+                      if set(range(addr, addr + len(data))) & _GOAL_BLOCK
+                      or (addr == fb.REG_TORQUE_ENABLE and data == bytes([fb.TORQUE_ENABLE_ON]))]
+        first = servo.writes[energising[0]]
+        self.assertEqual(first, (fb.REG_GOAL_POSITION, fb.le16(1000)))
+        before = servo.writes[:energising[0]]
+        self.assertEqual([addr for addr, _d in before], [fb.REG_TORQUE_ENABLE, fb.REG_TORQUE_LIMIT])
+        self.assertEqual(before[0][1], bytes([fb.TORQUE_ENABLE_OFF]))
+
+    def test_a_servo_that_never_arrives_is_motion_not_arrived(self):
+        servo = _motion_servo(self.clock, ticks_per_s=400.0)       # 512 ticks take 1.28 s
+        h, err = self._wareneingang(servo)
+        self.assertEqual(err.code, 'MOTION_NOT_ARRIVED')
+        self.assertEqual(h.store.load_incoming('V1S-000200')['reason_code'], 'MOTION_NOT_ARRIVED')
+        self.assertEqual(servo.mem[fb.REG_TORQUE_ENABLE], 0)
+
+    def test_a_ram_write_that_does_not_stick_refuses_and_ends_limp(self):
+        servo = _motion_servo(self.clock)
+        original = servo.write
+
+        def write(addr, data):
+            if addr == fb.REG_TORQUE_LIMIT and data != fb.le16(1000):
+                servo.writes.append((addr, bytes(data)))
+                return
+            original(addr, data)
+        servo.write = write
+        h, err = self._wareneingang(servo)
+        self.assertEqual(err.code, 'WRITE_FAILED')
+        self.assertIn('Drehmomentgrenze (Register 48)', err.message_de)
+        self.assertEqual(servo.mem[fb.REG_TORQUE_ENABLE], 0)
+        self.assertNotIn(fb.REG_GOAL_POSITION, {a for a, _d in servo.writes})
+
+    def test_another_servo_than_the_reference_is_refused(self):
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, raw=1000, clock=self.clock)
+        h = _Harness([servo], self.clock, self.tmp)
+        path, _dump = core.referenz_lesen(h.env, h.store)
+        other = FakeServo(fb.STS3215_MODEL_NUMBER, raw=1000, clock=self.clock)
+        h.port.servos[:] = [other]
+        for run in (core.fahrzeit_messen, core.drehrichtung_messen):
+            with self.subTest(run=run.__name__):
+                with self.assertRaises(core.StationError) as ctx:
+                    run(h.env, h.store, path)
+                self.assertEqual(ctx.exception.code, 'NEED_REFERENCE')
+                self.assertEqual(other.writes, [])
+
+
+class TestReadOnlyChecksJudgeTheRawRegister(_CalibratedCase):
+    """Prüfen and „Lehre prüfen" compare Present linearly inside 0–4095, as the
+    boot probe does: a firmware that does not fold Present (T0 + 4096) never
+    passes (V1-F2). And their remaining refusals are fenced (V1-F1)."""
+
+    def test_pruefen_lists_an_unfolded_position(self):
+        servo, h = self._calibrated(raw=3500)
+        servo.folds_present = False
+        with self.assertRaises(core.StationError) as ctx:
+            core.pruefen(h.env, h.store, serial='V1S-000123', spec=SPEC_A)
+        self.assertEqual(ctx.exception.code, 'CHECK_FAILED')
+        self.assertIn('Position 5120 statt 1024', ctx.exception.message_de)
+
+    def test_pruefen_refuses_an_id_of_no_joint(self):
+        servo = FakeServo(fb.STS3250_MODEL_NUMBER, servo_id=9, raw=1834, clock=self.clock)
+        h = _Harness([servo], self.clock, self.tmp)
+        with self.assertRaises(core.StationError) as ctx:
+            core.pruefen(h.env, h.store, serial='V1S-000123', spec=SPEC_A)
+        self.assertEqual(ctx.exception.code, 'CHECK_FAILED')
+        self.assertIn(T.CHECK_BAD_ID.format(id=9), ctx.exception.message_de)
+
+    def _check(self, h, serial='V1S-000123', cap='KAPPE-J15-A'):
+        return core.lehre_pruefen(h.env, h.store, serial=serial, cap_label=cap,
+                                  local_date='2026-10-27', spec=SPEC_A)
+
+    def test_the_master_reading_an_unfolded_tick_fails_the_gauge(self):
+        servo, h = self._calibrated(raw=3500)
+        self._check(h)
+        servo.folds_present = False
+        with self.assertRaises(core.StationError) as ctx:
+            self._check(h)
+        self.assertEqual(ctx.exception.code, 'GAUGE_FAILED')
+        self.assertEqual([r['passed'] for r in records.read_csv(h.store.gauge_checks_csv)], ['0'])
+
+    def test_a_cap_label_of_no_cap_type_is_refused(self):
+        h = _Harness([], self.clock, self.tmp)
+        with self.assertRaises(core.StationError) as ctx:
+            self._check(h, cap='KAPPE-XX-1')
+        self.assertEqual(ctx.exception.code, 'BAD_CAP')
+        self.assertEqual(h.port.opened, [])
+
+    def test_the_master_without_its_record_is_refused(self):
+        servo, h = self._calibrated()
+        self._check(h)
+        h.store.record_path('V1S-000123').unlink()
+        with self.assertRaises(core.StationError) as ctx:
+            self._check(h)
+        self.assertEqual(ctx.exception.code, 'MASTER_NEEDS_RECORD')
+        self.assertEqual(records.read_csv(h.store.gauge_checks_csv), [])
+
+
+class TestProvisionJudgesTheRawRegister(_TmpCase):
+    """tools/feetech_provision.py's two jig checks compare Present linearly
+    inside 0–4095 (V1-F2): a firmware that does not fold reads T0 + 4096 on a
+    joint whose offset crosses the seam, and the boot probe would refuse it."""
+
+    RAWS = (1500, 3500, 2500, 3000, 700, 2200)       # only joint 2 crosses the seam (offset −1620)
+
+    def _provision(self, servo_class=FakeServo, **kw):
+        spec = importlib.util.spec_from_file_location('feetech_provision_raw', sf.PROVISION_PATH)
+        prov = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(prov)
+        prov.apply_arm_spec('v1')
+        servos = [servo_class(fss.MODELS[i], servo_id=i + 1, raw=self.RAWS[i], clock=self.clock, **kw)
+                  for i in range(6)]
+        bus = sf.FakeServoBus(servos, 1_000_000)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as ctx:
+                prov.provision(bus, 'V1-0001', prov._ARM_SPECS['v1'], servo_spec=SPEC_A)
+        return str(ctx.exception)
+
+    def test_the_offset_postcondition_refuses_an_unfolded_present(self):
+        message = self._provision(folds_present=False)
+        self.assertIn('Servo 2', message)
+        self.assertIn('5120 statt 1024', message)
+
+    def test_the_final_jig_check_refuses_an_unfolded_present(self):
+        class _UnfoldsAfterLock(FakeServo):
+            def write(self, addr, data):
+                super().write(addr, data)
+                if addr == fb.REG_LOCK and bytes(data) == b'\x01':
+                    self.folds_present = False
+        message = self._provision(_UnfoldsAfterLock)
+        self.assertIn('Jig-Endkontrolle', message)
+        self.assertIn('Servo 2 liest 5120 statt 1024', message)
 
 
 if __name__ == '__main__':

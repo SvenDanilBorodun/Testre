@@ -1,7 +1,8 @@
 -- Behavioural assertions for migration 052 (servo_calibration_records: RLS on,
 -- no policy, no request-role privilege; submit_servo_calibration_record is
--- SECURITY DEFINER, admin only, EXECUTE for authenticated + service_role, and
--- never overwrites a newer record), run BY HAND against a fresh LOCAL database —
+-- SECURITY DEFINER, admin only, EXECUTE for authenticated + service_role,
+-- never overwrites a newer record and replaces an older one), run BY HAND
+-- against a fresh LOCAL database —
 -- never CI, never the linked project (it seeds rows).
 --
 -- The squashed baseline does NOT replay on a fresh database as shipped
@@ -14,11 +15,13 @@
 --   psql <local db url> -f supabase/tests/052_servo_calibration_records_assertions.sql
 -- A PostgREST request is simulated the way PostgREST runs it (the 044 idiom):
 -- the JWT claims as settings plus SET LOCAL ROLE authenticated inside a DO block.
--- ASSUMPTION (not yet run): calling a function GRANTED to authenticated under SET
--- ROLE is fine — the signal-11 crash in docs/KNOWN-ISSUES.md concerns calling a
--- service-role-only function; every DENIAL of a privilege is asserted with
--- has_table_privilege / has_function_privilege, never by calling.
--- Expected: 11 PASS, 0 FAIL/ERROR (T1..T10, T2 with a/b halves).
+-- Calling a function GRANTED to authenticated under SET ROLE works (run on a local
+-- supabase/postgres:17.6.1.106 with every migration through 052 applied) — the
+-- signal-11 crash in docs/KNOWN-ISSUES.md concerns calling a service-role-only
+-- function; every DENIAL of a privilege is asserted with has_table_privilege /
+-- has_function_privilege, never by calling. Two CONCURRENT first uploads (the
+-- race the one-statement upsert closes) need two sessions and are not in here.
+-- Expected: 12 PASS, 0 FAIL/ERROR (T1..T11, T2 with a/b halves).
 \set ON_ERROR_STOP off
 \pset pager off
 
@@ -103,7 +106,11 @@ BEGIN
   PERFORM pg_temp.claims_admin();
   SET LOCAL ROLE authenticated;
   v := public.submit_servo_calibration_record(pg_temp.rec('V1S-052002', '2026-10-27T10:00:00Z'));
-  RAISE NOTICE 'T7 answer %', v;
+  IF v->>'stored' = 'true' AND v->>'replaced' = 'false' THEN
+    RAISE NOTICE 'T7 answer %', v;
+  ELSE
+    RAISE NOTICE 'FAIL T7 (answer %)', v;
+  END IF;
 EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'FAIL T7 (%: %)', SQLSTATE, SQLERRM; END $$;
 SELECT CASE WHEN uploaded_by = 'b5200002-0000-0000-0000-000000000002'
              AND joint = 'joint2' AND servo_id = 2 AND model_number = 2825
@@ -147,3 +154,21 @@ DO $$ BEGIN
   RAISE NOTICE 'FAIL T10 (no error)';
 EXCEPTION WHEN SQLSTATE '23514' THEN RAISE NOTICE 'PASS T10 (23514)';
           WHEN OTHERS THEN RAISE NOTICE 'FAIL T10 (%: %)', SQLSTATE, SQLERRM; END $$;
+
+\echo '=== T11 a NEWER record for the same serial replaces the stored one ==='
+DO $$
+DECLARE v jsonb;
+BEGIN
+  PERFORM pg_temp.claims_admin();
+  SET LOCAL ROLE authenticated;
+  v := public.submit_servo_calibration_record(
+         jsonb_set(pg_temp.rec('V1S-052002', '2026-10-28T10:00:00Z'), '{checksum}', to_jsonb(repeat('d', 64))));
+  IF v->>'stored' = 'true' AND v->>'replaced' = 'true' THEN
+    RAISE NOTICE 'T11 answer %', v;
+  ELSE
+    RAISE NOTICE 'FAIL T11 (answer %)', v;
+  END IF;
+EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'FAIL T11 (%: %)', SQLSTATE, SQLERRM; END $$;
+SELECT CASE WHEN calibrated_at = '2026-10-28T10:00:00Z'::timestamptz AND record_sha256 = repeat('d', 64)
+            THEN 'PASS T11' ELSE 'FAIL T11 (row not replaced)' END
+  FROM public.servo_calibration_records WHERE servo_serial = 'V1S-052002';

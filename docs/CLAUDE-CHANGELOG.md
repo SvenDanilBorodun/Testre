@@ -6,6 +6,49 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### 2026-10-27 — V1 Servo-Station fix round: what two independent verifiers found
+
+**Why.** After the three work packages, two zero-trust verifiers checked the branch (verifier 1 by attack scripts
+against the fakes and a mutation run, verifier 2 by the CI gates and a local database). The owner decided every
+finding (round 5 in the gitignored plan folder); one implementer fixed them test-first.
+
+**What was wrong, and why the rule now reads as it does.**
+- *Untested refusals (V1-F1).* Neutralising either OFFSET_CHECK, UNSTABLE, MAX_VOLTAGE, VOLTAGE, HOT, STATUS or
+  the „old id still answers" half of the id check left all 143 station tests green; the fakes encode the
+  station's own offset sign, so a firmware applying it the other way round was invisible. A mutation sweep over
+  every refusal of `station_core.py` (21 of 51 sites missed before) is now fenced: each one turns a test red.
+- *The circle (V1-F2).* The post-offset checks compared Present circularly, so T0 ± 4096 passed, while the boot
+  probe compares linearly and would refuse that servo. Whether the firmware folds Present after an offset across
+  the seam is a P0 question now; the station and the provision tool compare linearly inside 0–4095.
+- *Discovery (V1-F3).* It stopped at the first baud that answered: a fresh servo at 1 Mbit/s beside the gauged one
+  at 500 kbit/s was calibrated in its place. Every baud is asked now (about 6.6 s more per run, unmeasured).
+- *A Wareneingang of another servo (V1-F4, owner R5-1: refuse).* Kalibrieren copied an STS3215's incoming record
+  into an STS3250's calibration under the same serial; another model or firmware is `INCOMING_MISMATCH` now.
+- *The race in 052 (V1-F5).* `SELECT … FOR UPDATE` before the upsert locks nothing on a first insert: measured on a
+  local postgres, two concurrent first uploads both answered `stored: true` and the OLDER record stayed. One
+  conditional upsert decides now (`DO UPDATE … WHERE r.calibrated_at <= EXCLUDED.calibrated_at`, the answer from
+  whether a row was written); re-measured: the newer row stays and the older caller gets `newer_record_exists`.
+- *A stale record (V1-F6).* A re-calibration failing after step H left the old record (old offset) beside a
+  servo carrying the new one; the record now moves to `history/` before the first write.
+- *A baud that did not persist (V1-F7)* came back at its old baud after the replug and waited 120 s for
+  REPLUG_TIMEOUT; step K now asks the old baud too and answers NOT_PERSISTED at once.
+- *The motion test (V1-F8)* energised without checking Operating_Mode (in wheel or step mode a goal write turns
+  the shaft without end) and wrote acceleration and goal speed before Goal = Present; `MOTION_MODE` refuses and
+  the seed comes first among the goal registers.
+- *Rule §1 (V2-F4).* PORT_OPEN_FAILED spliced the OS's English error into the German sentence; it goes to
+  `station.log` now, and a source fence keeps an exception's own text out of every station sentence.
+- *Docs and CI (V2-F1–F3).* gitleaks' full-history scan flagged the cloud test's made-up password (fingerprinted,
+  the literal now a plain word); only the generators' STL files are byte-reproducible (STEP headers carry a
+  timestamp, the manifests hash the STEPs); the pilot clone needs `core.eol=lf` as well, because with
+  `autocrlf=false` a Windows checkout still writes `text=auto` files CRLF (the image survives, the arm Dockerfile
+  CR-strips every file it copies; the point is CI's exact bytes).
+
+**052, measured.** Verifier 2 ran the hand assertions on a local `supabase/postgres:17.6.1.106` with every migration
+applied (11 PASS) and drove every answer the station maps through a real PostgREST v14.10 and
+`CloudSession.submit` (admin stored; older → `newer_record_exists`; student 403/42501; anon 401/42501;
+22023/23514 → 400; a missing RPC 404 PGRST202). After the race fix the assertions gained T11 (a newer record
+replaces, `replaced: true`) and ran again on the same image: 12 PASS. The remote project is still unproven.
+
 ### 2026-10-27 — V1 Servo-Station: one servo spec, centred windows, the station, the gauge and the marked parts
 
 **Why.** The V1 (v2.35.0) was provisioned whole-arm on a fold jig by `tools/feetech_provision.py`, with the

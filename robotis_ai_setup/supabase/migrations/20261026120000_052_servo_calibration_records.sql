@@ -23,7 +23,10 @@
 --
 -- A record whose calibrated_at is OLDER than the stored one is not written
 -- (answer stored=false, reason newer_record_exists): a queued upload from a
--- station that was offline can never overwrite a later re-calibration.
+-- station that was offline can never overwrite a later re-calibration. The one
+-- upsert decides it (its DO UPDATE runs only WHERE the stored row is not
+-- newer), so two concurrent FIRST uploads of one serial serialise on the
+-- primary key and the newer one wins whatever the order.
 --
 -- Rollback: rollback/20261026120000_052_servo_calibration_records_rollback.sql
 -- (refuses while rows exist; stop uploading from the Servo-Station first).
@@ -98,7 +101,6 @@ DECLARE
     v_spec     text;
     v_checksum text;
     v_at       timestamptz;
-    v_stored   timestamptz;
     v_replaced boolean;
 BEGIN
     IF NOT public.rls_is_admin() THEN
@@ -127,20 +129,14 @@ BEGIN
         RAISE EXCEPTION 'malformed servo calibration record' USING ERRCODE = '22023';
     END IF;
 
-    -- 3. A stored row that is NEWER wins: a queued upload never overwrites a
-    --    later re-calibration of the same servo.
-    SELECT r.calibrated_at INTO v_stored
-      FROM public.servo_calibration_records r
-     WHERE r.servo_serial = v_serial
-       FOR UPDATE;
-    v_replaced := FOUND;
-    IF v_replaced AND v_stored > v_at THEN
-        RETURN jsonb_build_object('stored', false, 'reason', 'newer_record_exists',
-                                  'servo_serial', v_serial);
-    END IF;
-
-    -- 4. Upsert. The CHECK constraints refuse a bad serial, joint, id/model pair
-    --    or hash with 23514.
+    -- 3. Upsert, unless a stored row is NEWER: a queued upload never
+    --    overwrites a later re-calibration of the same servo. ONE statement
+    --    decides, because its WHERE is evaluated on the conflicting row it has
+    --    locked: a SELECT … FOR UPDATE before it finds nothing to lock on a
+    --    first insert, and two concurrent first uploads both stored (the older
+    --    one last). No row written = the stored one is newer. xmax <> 0 on the
+    --    written row = it replaced one. The CHECK constraints refuse a bad
+    --    serial, joint, id/model pair or hash with 23514.
     INSERT INTO public.servo_calibration_records AS r
         (servo_serial, joint, servo_id, model_number, spec_sha256, record_sha256,
          calibrated_at, record, uploaded_by)
@@ -155,7 +151,13 @@ BEGIN
         record_sha256  = EXCLUDED.record_sha256,
         calibrated_at  = EXCLUDED.calibrated_at,
         record         = EXCLUDED.record,
-        uploaded_by    = auth.uid();
+        uploaded_by    = auth.uid()
+      WHERE r.calibrated_at <= EXCLUDED.calibrated_at
+    RETURNING (r.xmax <> 0) INTO v_replaced;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('stored', false, 'reason', 'newer_record_exists',
+                                  'servo_serial', v_serial);
+    END IF;
 
     RETURN jsonb_build_object('stored', true, 'replaced', v_replaced,
                               'servo_serial', v_serial, 'calibrated_at', v_at);

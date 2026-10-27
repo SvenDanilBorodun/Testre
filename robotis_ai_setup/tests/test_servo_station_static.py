@@ -7,7 +7,8 @@ can see, because CI has no display and this suite imports no tkinter.
   ``german_detail_lint.TRANSLITERATIONS`` over every string constant — CI's
   german-strings-lint does not scan ``tools/``);
 * every ``T.NAME`` and every refusal code a module uses exists in
-  ``station_texts_de``;
+  ``station_texts_de``, and no exception's own (English) text is spliced into
+  one of those German sentences — it goes to ``station.log`` only;
 * Goal_Position, speed and acceleration are written ONLY by the motion test;
   the re-datum value 128 is never named;
 * no service-role key and no logged password or token anywhere;
@@ -139,6 +140,33 @@ class TestGermanText(unittest.TestCase):
                         and node.args[0].value not in T.STEP_NAMES):
                     missing.append((path.name, node.args[0].value))
         self.assertEqual(missing, [])
+
+    def test_no_exception_text_reaches_a_german_sentence(self):
+        """Rule §1: inside ``except … as e`` the name ``e`` itself (``str(e)``,
+        ``e`` as an argument, an f-string, ``e.args``) never reaches
+        ``refusal``, ``StationError`` or a ``.format`` call; our own codes and
+        German sentences (``e.code``, ``e.message_de``, …) may."""
+        own = {'code', 'message_de', 'kind', 'status', 'data'}
+
+        def bare_uses(node, name):
+            parents = {child: parent for parent in ast.walk(node) for child in ast.iter_child_nodes(parent)}
+            return [n for n in ast.walk(node) if isinstance(n, ast.Name) and n.id == name
+                    and not (isinstance(parents.get(n), ast.Attribute) and parents[n].attr in own)]
+        offenders = []
+        for path in _PY:
+            for handler in ast.walk(_tree(path)):
+                if not (isinstance(handler, ast.ExceptHandler) and handler.name):
+                    continue
+                for call in ast.walk(ast.Module(body=handler.body, type_ignores=[])):
+                    if not isinstance(call, ast.Call):
+                        continue
+                    callee = getattr(call.func, 'id', getattr(call.func, 'attr', None))
+                    if callee not in ('refusal', 'StationError', 'format'):
+                        continue
+                    for arg in [*call.args, *(k.value for k in call.keywords)]:
+                        if bare_uses(arg, handler.name):
+                            offenders.append((path.name, call.lineno, callee))
+        self.assertEqual(offenders, [])
 
 
 class TestSafetyFences(unittest.TestCase):

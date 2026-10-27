@@ -130,6 +130,15 @@ Nach allen Servos **„P0-Bericht"**: Er schreibt `reference/p0_report.json` und
 Stimmen die Referenzen eines Modells nicht überein (Werkswerte, Drehrichtung) oder wurde ein Register einzeln
 statt im Block gelesen, schlägt der Bericht nichts vor.
 
+**Am Prüfstand außerdem (Eigentümer, je Modell, an einem Servo, der keine Referenz mehr wird):** Bleibt die
+Position nach einem Nullpunkt, der über die Naht 0/4095 geht, innerhalb von 0–4095? Dazu mit dem
+Hersteller-Programm FD einen Homing-Offset schreiben, der die gelesene Position über 4095 (oder unter 0)
+schieben würde, und die Position lesen. Liest der Servo den Wert umgebrochen (0–4095), ist alles in Ordnung.
+Liest er ihn **nicht** umgebrochen (über 4095 oder negativ), verweigert „Kalibrieren" später jeden Servo, dessen
+Nullpunkt über die Naht geht (`OFFSET_CHECK`; bei Gelenk 2 und 3 etwa jeder vierte, beim Greifer etwa jeder
+achte, bei Gelenk 1, 4 und 5 keiner), weil der Arm-Treiber einen solchen Servo beim Start ablehnen würde – das
+vor dem Festlegen der Werte klären.
+
 **Werte festlegen (Eigentümer).** Der Ausschnitt aus `p0_pin_snippet.txt` kommt in einen eigenen Commit auf
 einem Zweig vom Release (nie gemergt, kein PR, kein Tag): `TICK_DIRECTION`, `FACTORY`,
 `MOTION_TEST_WINDOW_MS` in `feetech_servo_spec.py`, `PROVISIONAL_NAMES` leer, die zwei Stolperdrähte in
@@ -143,11 +152,15 @@ kalibrierten Servo beim Start scheitern.
 Betriebsart „Wareneingang": Servo ohne Lehre, frei drehbar, anschließen und die Seriennummer scannen. Die
 Station prüft Modell, Spannung, Temperatur und Fehlerbits und fährt einen Bewegungstest (45° hin und zurück,
 Fahrzeit im Fenster des Modells). Steht die Welle zu nah am Rand des Messbereichs, verweigert sie den Test
-(„Die Abtriebswelle steht zu nah an der Grenze …" – Welle ein Stück weiterdrehen und neu starten).
+(„Die Abtriebswelle steht zu nah an der Grenze …" – Welle ein Stück weiterdrehen und neu starten). Einen Servo,
+der nicht im Positionsmodus steht, bewegt sie nicht („… nicht im Positionsmodus …"); „Kalibrieren" stellt den
+Positionsmodus ein.
 
 Der Wareneingang ist **freiwillig**: Ohne ihn kalibriert die Station mit einem Hinweis, der Datensatz vermerkt
 `incoming_test: null`. **Ein nicht bestandener Wareneingang sperrt das Kalibrieren dieses Servos**, bis ein
-neuer Wareneingang besteht.
+neuer Wareneingang besteht. Gehört der Wareneingang einer Seriennummer zu einem anderen Servo (anderes Modell
+oder andere Firmware als der Servo in der Lehre), verweigert „Kalibrieren" den Start, bevor es etwas schreibt:
+Etikett neu scannen oder den Wareneingang wiederholen.
 
 ## 7. Kalibrieren
 
@@ -159,7 +172,8 @@ abgelehnt (ein Greifer-Servo mit der Kappe J15 wäre um 8° falsch markiert).
 
 1. Horn aufsetzen, Servo in die Wiege legen, Kappe aufsetzen (Stifte in die Hornlöcher, Schlitz über den
    Stahlstift), Servo-Kabel anstecken.
-2. Seriennummer scannen. Die Station arbeitet die Schritte ab und zeigt jeden an: A „Servo suchen", B „Servo
+2. Seriennummer scannen. Die Station arbeitet die Schritte ab und zeigt jeden an: A „Servo suchen" (fragt jede
+   Baudrate ab, damit ein zweiter Servo am Bus auffällt), B „Servo
    erkennen" (Modell der Charge, 12-V-Variante, Phase-Byte), C „Schreibschutz öffnen", C2 „Baudrate setzen",
    D „ID setzen", E „Abbildungs-Register", F „Werkswerte schreiben", G „Ruhe prüfen", H „Nullpunkt schreiben",
    I „Positionsgrenzen", J „Sperren und Abbild prüfen".
@@ -167,6 +181,11 @@ abgelehnt (ein Greifer-Servo mit der Kappe J15 wäre um 8° falsch markiert).
    einzustecken (nicht das USB-Kabel). Sie erkennt einen echten Neustart daran, dass ein Register, das sie vorher
    verstellt hat, danach wieder den Wert aus dem EEPROM trägt; erst dann gilt das Abbild als gespeichert.
 4. L „Datensatz speichern" – jetzt ist der Servo kalibriert.
+
+   **Neu kalibrieren:** Ein vorhandener Datensatz dieser Seriennummer wandert direkt vor dem ersten
+   Schreibzugriff auf den Servo nach `records\history\`. Bricht der Lauf danach ab, gilt der Servo als **nicht
+   kalibriert** (er trägt womöglich schon den neuen Nullpunkt) – erneut kalibrieren. Bricht er vorher ab (etwa
+   „zu warm"), bleibt der alte Datensatz gültig.
 5. M „Markieren": **ein Pinselstrich in der Gelenkfarbe durch den Schlitz der Kappe**. Danach den nächsten
    Servo scannen oder Enter drücken.
 
@@ -182,7 +201,9 @@ Jeder Datensatz wird nach dem Speichern hochgeladen, wenn ein Admin angemeldet i
 („… Datensätze warten auf das Hochladen") bis „Jetzt hochladen". Die Datenbank-Funktion
 (`submit_servo_calibration_record`, Migration 052) nimmt nur Admin-Anmeldungen an und überschreibt nie einen
 neueren Datensatz. Ein abgelehnter Datensatz wird nicht wieder gesendet und erscheint als „abgelehnt".
-**Maßgeblich ist immer die Datei auf dem Prüf-PC**, die Cloud hält eine Kopie.
+**Maßgeblich ist immer die Datei auf dem Prüf-PC**, die Cloud hält eine Kopie. Nach einer abgebrochenen
+Neu-Kalibrierung zeigt die Cloud noch die frühere Kalibrierung, bis der nächste erfolgreiche Datensatz dieses
+Servos hochgeladen ist.
 
 ## 10. Meldungen und was zu tun ist
 
@@ -190,20 +211,23 @@ neueren Datensatz. Ein abgelehnter Datensatz wird nicht wieder gesendet und ersc
 |---|---|---|
 | Spezifikation nicht festgelegt (`SPEC_NOT_PINNED`) | vor P0 | nur „Referenz lesen" |
 | Kein Servo gefunden (`NO_SERVO`) / mehr als ein Servo (`MULTIPLE`) | Bus leer oder nicht allein | Stecker und 12 V prüfen; nur EINEN Servo anschließen |
-| Port lässt sich nicht öffnen (`PORT_OPEN_FAILED`) | COM-Port belegt oder weg | anderes Programm schließen, Port neu wählen |
+| Port lässt sich nicht öffnen (`PORT_OPEN_FAILED`) | COM-Port belegt oder weg (Einzelheiten in `station.log`) | anderes Programm schließen, Port neu wählen |
 | Servo antwortet nicht mehr richtig (`BUS_ERROR`) | Störung mitten im Ablauf | Kabel und 12 V prüfen, neu starten |
 | USB-Verbindung weg (`USB_LOST`) | USB statt 12 V gezogen | nur den 12-V-Stecker ziehen |
 | Falsches Modell / 7,4-V-Servo / Max-Spannung / Phase-Byte | nicht der Servo der Charge | Servo aussortieren |
 | Spannung, Temperatur, Fehlerbits | Netzteil oder Servo | Netzteil prüfen; abkühlen lassen |
 | Servo bewegt sich (`UNSTABLE`) | Kappe sitzt nicht | Lehre richtig aufsetzen |
 | Horn einen Zahn versetzt (`OFFSET_EDGE`) | Horn ungünstig verzahnt | Horn einen Zahn versetzt aufsetzen, neu starten |
+| Nullpunkt stimmt nach dem Schreiben nicht (`OFFSET_CHECK`) | Horn verrutscht, oder der Servo liest die Position außerhalb von 0–4095 (P0) | Horn prüfen, neu kalibrieren; passiert es wieder, melden |
 | Kein Neustart erkannt (`REPLUG_TIMEOUT`, `NO_REAL_RESTART`) | Strom nicht wirklich weg | 12-V-Stecker ziehen, 3 s warten, einstecken |
 | Neustart nicht eindeutig (`RESTART_UNCLEAR`) | Register 48 zeigt keinen der erwarteten Werte | noch einmal; bleibt es so, notieren und melden (Prüfstand P2) – der Servo ist deswegen nicht defekt |
-| EEPROM hat nicht gespeichert (`NOT_PERSISTED`) | Schreibschutz | neu kalibrieren; passiert es wieder, aussortieren |
+| EEPROM hat nicht gespeichert (`NOT_PERSISTED`) | Schreibschutz; der Servo meldet sich nach dem Neustart mit alter ID oder alter Baudrate | neu kalibrieren; passiert es wieder, aussortieren |
 | Welle zu nah an der Grenze (`EDGE_PARKED`) | Bewegungstest würde den falschen Weg fahren | Welle ein Stück weiterdrehen |
+| Nicht im Positionsmodus (`MOTION_MODE`) | Bewegungstest würde den Servo ohne Ende drehen | kein Bewegungstest; „Kalibrieren" stellt den Positionsmodus ein |
 | Kein fabrikneuer Servo (`P0_NOT_FRESH`) | für P0 untauglich | nur fabrikneue Servos für die Referenz |
 | Lehre nicht geprüft / verstellt | „Lehre prüfen" fehlt oder misslang | Meister prüfen; bei „verstellt" nicht kalibrieren |
 | Wareneingang nicht bestanden (`INCOMING_FAILED`) | gesperrt | Servo aussortieren oder Wareneingang wiederholen |
+| Wareneingang gehört zu einem anderen Servo (`INCOMING_MISMATCH`) | anderes Modell oder andere Firmware als der Servo in der Lehre | Etikett neu scannen oder Wareneingang wiederholen |
 
 ## 11. Die markierten Arm-Teile
 

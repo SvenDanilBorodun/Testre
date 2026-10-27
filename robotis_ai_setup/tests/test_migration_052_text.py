@@ -2,7 +2,7 @@
 rollback, read as text.
 
 The behaviour is proven by hand on a local stack by
-``supabase/tests/052_servo_calibration_records_assertions.sql`` (11 PASS); what is
+``supabase/tests/052_servo_calibration_records_assertions.sql`` (12 PASS); what is
 pinned here, deps-free and in CI, is the shape a careless edit would break (Rule
 §4): the table's CHECKs, RLS on with no policy and every request-role privilege
 revoked, the RPC SECURITY DEFINER with a pinned search_path whose FIRST statement
@@ -133,11 +133,27 @@ class Function052(unittest.TestCase):
     def test_a_malformed_record_is_22023_and_an_older_one_is_not_stored(self):
         self.assertIn("'edubotics.servo_calibration.v1'", self.body)
         self.assertIn("ERRCODE = '22023'", self.body)
-        self.assertIn('FOR UPDATE', self.body)
         self.assertIn("'newer_record_exists'", self.body)
         self.assertIn('ON CONFLICT (servo_serial) DO UPDATE', self.body)
         self.assertRegex(self.body, r'uploaded_by\s*=\s*auth\.uid\(\)')
         self.assertIn("p_record->>'checksum'", self.body)
+
+    def test_newer_wins_is_decided_by_the_one_upsert(self):
+        """V1-F5: a SELECT … FOR UPDATE before the upsert locks nothing on a
+        FIRST insert, so two concurrent first uploads both answered stored and
+        the older one won. The upsert itself decides: its DO UPDATE runs only
+        WHERE the stored row is not newer, and the answer follows whether a row
+        was written."""
+        upsert = self.body[self.body.index('INSERT INTO public.servo_calibration_records'):]
+        self.assertNotIn('FROM public.servo_calibration_records', self.body)
+        self.assertNotIn('FOR UPDATE', self.body)
+        self.assertRegex(upsert, r'uploaded_by = auth\.uid\(\) WHERE r\.calibrated_at <= EXCLUDED\.calibrated_at '
+                                 r'RETURNING \(r\.xmax <> 0\) INTO v_replaced;')
+        not_found = upsert.index('IF NOT FOUND THEN')
+        self.assertLess(not_found, upsert.index("'newer_record_exists'"))
+        self.assertLess(upsert.index("'newer_record_exists'"), upsert.index("'stored', true"))
+        self.assertIn("RETURN jsonb_build_object('stored', true, 'replaced', v_replaced, "
+                      "'servo_serial', v_serial, 'calibrated_at', v_at);", upsert)
 
     def test_execute_only_for_authenticated_and_service_role(self):
         self.assertIn(f'REVOKE ALL ON FUNCTION {_FN_SIG} FROM PUBLIC, anon;', self.code)

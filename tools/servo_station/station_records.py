@@ -5,8 +5,9 @@ servo without ``records/<serial>.json`` is not calibrated, whatever its EEPROM
 says; the cloud copy (migration 052) is only a copy. So every JSON file is
 written atomically (temp file in the same directory → flush → fsync →
 ``os.replace``), a re-calibration moves the previous record to ``history/``
-first and nothing is ever deleted, and the CSV logs are append-only (UTF-8 with
-BOM and CRLF, so a double click opens them in a German Excel).
+before its first write to the servo and nothing is ever deleted, and the CSV
+logs are append-only (UTF-8 with BOM and CRLF, so a double click opens them in
+a German Excel).
 
 Data dir layout::
 
@@ -201,21 +202,29 @@ class Store:
     def load_record(self, serial: str):
         return _read_json(self.record_path(serial))
 
+    def retire_record(self, serial: str) -> None:
+        """Move the serial's record to ``history/`` (nothing is deleted); from
+        then on the serial reads as not calibrated. No record: nothing to do."""
+        serial = _safe(serial)
+        path = self.record_path(serial)
+        if not path.exists():
+            return
+        previous = _read_json(path) or {}
+        stamp = _compact_stamp(previous.get('calibrated_at', '')) or 'unknown'
+        self.history_dir.mkdir(parents=True, exist_ok=True)
+        target = self.history_dir / f'{serial}-{stamp}.json'
+        n = 2
+        while target.exists():
+            target = self.history_dir / f'{serial}-{stamp}-{n}.json'
+            n += 1
+        os.replace(path, target)
+
     def save_record(self, record: dict) -> pathlib.Path:
         """Move a previous record to ``history/`` (nothing is deleted), write
         the new one atomically, then log it in ``calibrations.csv``."""
         serial = _safe(record['servo_serial'])
+        self.retire_record(serial)
         path = self.record_path(serial)
-        if path.exists():
-            previous = _read_json(path) or {}
-            stamp = _compact_stamp(previous.get('calibrated_at', '')) or 'unknown'
-            self.history_dir.mkdir(parents=True, exist_ok=True)
-            target = self.history_dir / f'{serial}-{stamp}.json'
-            n = 2
-            while target.exists():
-                target = self.history_dir / f'{serial}-{stamp}-{n}.json'
-                n += 1
-            os.replace(path, target)
         atomic_write_json(path, record)
         cal = record.get('calibration') or {}
         append_csv(self.calibrations_csv, CALIBRATIONS_HEADER, (

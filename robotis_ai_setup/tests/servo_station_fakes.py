@@ -14,6 +14,11 @@
   then back — after a real power-on, or with RAM kept;
 * Present = (raw − Homing_Offset) mod 4096 with the offset decoded per the
   vendor's CHINESE table (0x1805 = −2053), so a foreign encoding is modelled;
+  ``adds_offset=True`` models a firmware applying the offset with the opposite
+  sign (raw + offset), ``folds_present=False`` one that does not fold Present
+  into 0–4095 (raw − offset as is, sign-magnitude on the wire);
+  ``keeps_old_id`` makes a ping of its previous id still answer after an id
+  change;
 * it answers only at its own baud; level 0 sends no WRITE reply; a Goal write
   while torque is off switches torque on; a goal moves Present toward it at
   ``ticks_per_s`` per fake second (linear in tick space — the real position
@@ -78,8 +83,13 @@ class FakeServo:
                  baud_index=0, firmware=(3, 10), lock_default=0,
                  copies_torque_limit=True, torque_limit_on_power_up=1000,
                  honours_unlock=True, clock=None, ticks_per_s=3000.0,
-                 voltage_dv=120, temperature_c=26, status=0, max_torque=1000):
+                 voltage_dv=120, temperature_c=26, status=0, max_torque=1000,
+                 adds_offset=False, folds_present=True, keeps_old_id=False):
         self.model = model
+        self.adds_offset = adds_offset
+        self.folds_present = folds_present
+        self.keeps_old_id = keeps_old_id
+        self.previous_ids = set()
         self.clock = clock if clock is not None else FakeClock()
         self.ticks_per_s = float(ticks_per_s)
         self.lock_default = lock_default
@@ -138,7 +148,8 @@ class FakeServo:
 
     def present(self):
         self._advance()
-        return int(round(self.raw - self.offset())) % fb.TICKS_PER_REV
+        value = int(round(self.raw + (self.offset() if self.adds_offset else -self.offset())))
+        return value % fb.TICKS_PER_REV if self.folds_present else value
 
     def u16(self, addr):
         return fb.from_le16(self.mem[addr], self.mem[addr + 1])
@@ -215,7 +226,7 @@ class FakeServo:
             raise fb.FeetechBusError('fake: garbled reply while moving')
         out = bytearray(self.mem[addr:addr + length])
         dynamic = {
-            fb.REG_PRESENT_POSITION: fb.le16(self.present()),
+            fb.REG_PRESENT_POSITION: fb.le16(fb.encode_sign_magnitude(self.present(), 15)),
             fb.REG_PRESENT_VOLTAGE: bytes([self.ram_voltage_dv]),
             fb.REG_PRESENT_TEMPERATURE: bytes([self.ram_temperature_c]),
             fb.REG_STATUS: bytes([self.ram_status | (self.status_while_moving if self._moving() else 0)]),
@@ -236,6 +247,8 @@ class FakeServo:
     def write(self, addr, data):
         self._advance()
         self.writes.append((addr, bytes(data)))
+        if self.keeps_old_id and addr <= fb.REG_ID < addr + len(data):
+            self.previous_ids.add(self.servo_id)
         for k, byte in enumerate(data):
             a = addr + k
             if a < fb.EEPROM_BLOCK_LEN:
@@ -282,7 +295,9 @@ class FakeServoBus:
         return found[0]
 
     def ping(self, servo_id, timeout_s=None):
-        answers = [s._on_ping() for s in self._at(servo_id)]
+        servos = self._at(servo_id) + [s for s in self.servos if s.baud == self._baud
+                                       and servo_id in s.previous_ids and s.servo_id != servo_id]
+        answers = [s._on_ping() for s in servos]
         return answers.count(True) == 1
 
     def broadcast_ping(self, wait_s=None):

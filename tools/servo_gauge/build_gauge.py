@@ -7,8 +7,9 @@
 numpy; both are imported only inside functions, so CI compiles this file
 without them. Writes ``cradle.step/.stl``, ``cap_J15.step/.stl``,
 ``cap_GR.step/.stl`` and ``gauge_manifest.json`` (every parameter, the sha256 of
-each STL, the servo spec digest, the commit). The outputs are not
-byte-reproducible (STEP headers carry a timestamp) and are never committed;
+each STEP and STL, the servo spec digest, the commit). The STL files are
+byte-reproducible; the STEP files are not (each STEP header carries a
+timestamp), nor is the manifest, which hashes them. Nothing is ever committed;
 the default location ``tools/servo_gauge/out/`` is gitignored.
 
 The cradle holds one STS3215/STS3250 case on three bottom pads, two side pads

@@ -6,6 +6,86 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### 2026-10-27 — V1 Servo-Station: one servo spec, centred windows, the station, the gauge and the marked parts
+
+**Why.** The V1 (v2.35.0) was provisioned whole-arm on a fold jig by `tools/feetech_provision.py`, with the
+2048-zero tick map, all-+1 default signs overridable per rig, and a boot probe that fingerprinted only the
+position window and the operating mode. A design round (`docs/plans/2026-10-26-v1-servo-station/`, gitignored:
+design, three spec revisions, two zero-trust reviews, owner rounds 1–4) moved calibration to the vendor's
+bench: every servo is calibrated ONCE at a Servo-Station, in a printed gauge, marked with its joint colour,
+and the arm is assembled at printed marks. Three work packages, run one at a time on disjoint files: WP1 the
+servo spec, the centred tick map, the EEPROM-image boot probe and the provision-tool rebase; WP2 the station
+and migration 052; WP3 the gauge and marked-parts generators and these documents.
+
+**What the probes found (the reasons behind the rules).**
+- *Centring.* With the 2048-zero map the joint2/joint3 windows ended exactly at tick 4095 (q = +π), so a limp
+  arm lying on its +π stop sat on the seam of the non-wrap-aware STS position loop, and the torque-on edge
+  refusal was a routine bench event (rig gate VR6). `centred_t0` puts the middle of each URDF range on tick
+  2048: the windows become 1024–3072 (joints 1/2/3/5), 796–3300 (joint 4), 1536–2560 (claw), identical for
+  every tick direction, the closest URDF-limit tick 795 ticks from a register end, and joint3's analytic
+  ceiling 1155/1156 ticks from it instead of 131 (p06, p08, p13). The edge guards stay, logic hash-fenced.
+- *Signs.* A wrong tick direction mirrors joints 2/3/claw (T0 1024 vs 3072) and no window can see it (the
+  windows are direction-independent, p06), so the signs became a spec constant, `OUTPUT_AXIS_VS_URDF ×
+  TICK_DIRECTION[model]`, the output-axis directions measured from the CAD and the tick direction left
+  UNPINNED until P0 measures it on fabrikneue servos. The env var became an assertion.
+- *The offset formula (p09).* The old provision formula `new_off = actual − designed` was not wrap-aware: at the
+  centred T0s 1024/3072 it refused raw readings near the seam. The rebased tool and the station write a
+  wrap-aware offset (raw 1834, mark 1024 → 810; raw = mark ± 2048 refused).
+- *Register 31 (p07).* The vendor's ENGLISH table mistranslates the third range of the sign-magnitude
+  Homing_Offset; per the Chinese table 4096–6143 means +2048…+4095, so `0x1805` is −2053, where the old decode
+  read −5. The codec follows the Chinese table, and a Homing_Offset with bits 12–15 set is a foreign encoding
+  the boot probe refuses.
+- *310 on the STS3250 (p10).* The old tool wrote `PROTECTION_CURRENT = 310` (≈2 A) into every servo, the
+  STS3250 included (rated 3.8 A ≈ 585). The protection current is now per model in the spec (500 / 585,
+  provisional until the overcurrent check on the pilot).
+- *The probe.* The old probe booted an STS3250 carrying 310, a resolution of 2 and a Phase byte of 0x81 (p10). It now
+  reads each servo's whole EEPROM block once and compares it with the spec image; Angular_Resolution and the
+  Phase byte refuse, warn-class registers warn, and every student-facing sentence ends „Bitte die Lehrkraft
+  fragen: der Servo muss bei EduBotics neu eingestellt werden." — no colour check, because the id travels
+  with the servo (review 2).
+
+**The bench.** Step K proves a REAL power-on through Torque_Limit (RAM 48), which the firmware loads from
+Max_Torque at power-on (vendor table): written to `Max_Torque − 1` before the operator pulls the 12-V plug, it
+must read `Max_Torque` after — „silent, then answers" would pass a servo kept alive by its capacitors (review 1,
+M2). The bench PC holds no service-role key (S9): the station signs in as an admin and uploads through 052's
+SECURITY DEFINER RPC, admin-gated by `rls_is_admin()`; the JWT lives in memory, the password nowhere.
+**052 is not in the API's boot schema probe** (owner R4-2): the API never reads the table or calls the RPC,
+and a probe entry would make every `main` push race W2's `/health` gate against W1 (review 2, minor 4); the
+counts stay 19 / 18 / 46.
+
+**The gauge.** The owner chose a floating cap (OQ8) and a stepped one (M1): it rests on the horn top, two pins
+in two opposite horn holes (never the marked one) locate it, one dowel on the w = 0 line locks rotation (a
+dowel off that line turns every 1 mm of axis offset along r into 1.07°; on it, an r-offset turns nothing —
+review 1, m6), and the marking arm steps down past the horn rim so the land beside the 1.0 mm throat sits
+0.30 mm above the case strip: one stroke paints horn top, rim and case. The cradle sits on measured B-rep
+faces (p30, p31: the r 24 spot of an earlier draft lay on a 0.15 mm recessed label field). Built with OCP,
+because the guard hook blocked installing CadQuery. Measured on the build machine: `--self-check` passes in
+3 s (reach horn ×16, case ×22 J15 / ×9 GR; land 0.30, 1.30 on the GR cap's 5.70 CAD seat; no interference;
+0.000 mm³ shared with the case envelope; every STL watertight), and a scratch mutation (a step 0.2 lower, the
+pins on the reference pair, P3 0.2 higher) fails with interference, „Kappenmaterial im markierten Hornloch" and
+1.41 mm³ shared — nothing written. The first reference-hole check only tested the hole's centre point, which
+the throat had cut free; it now tests the hole's volume.
+
+**The marked parts.** The owner chose to generate the arrows and colour dots from his STEP (R2-1) instead of
+drawing them in SolidWorks; the outputs are derived and never committed (accepted: the marks are not in the
+SolidWorks history). Review 2 (M3) found the hole in that: every arrow is placed relative to the reference
+horn hole of its servo frame, so a STEP exported with a joint turned would cut every downstream arrow at the
+wrong hole while all eight cut checks pass. Hence the zero-pose check (three checks per joint, s03), which no
+flag overrides, and the placement fence: an outcome outside `EXPECTED` refuses unless `--accept-placements`
+(R4-3). Measured on the owner's STEP: 111 s, all 13 marks at their `EXPECTED` placements, V1–V8 true, ten
+watertight STLs at 0.005 mm. Teeth, against STEP copies written in the scratch area: the claw's horn and gear
+turned 5° fail checks (1) and (2), turned 180° fail (2), and every instance but the base group turned 90°
+about joint 1 passes joint 1's own checks and fails (3) on all five downstream joints — each refused with and
+without `--accept-placements`, nothing written; an unmodified round-trip copy passes. With `EXPECTED` shifted
+in a scratch copy the run refuses without the flag and, with it, writes everything, prints the paste-ready
+block and records `accepted_placements: true`. The previews colour the marks per triangle: p20's per-face
+test painted a whole wall face whose nodes crowd on the dot's circle, and J1's white dot needed a dark
+background.
+
+**Not provable here** (`docs/KNOWN-ISSUES.md`, P0–P8): real servos under Windows, the case and horn against
+the CAD, step K's power-on copy, the gauge's printability, the 052 assertions (not run), the pilot recipe's
+Windows half.
+
 ### v2.36.0, 2026-10-26 — Roboter Studio review fixes
 
 **Why.** A review of v2.34.0 (`main` 593d7e71) RAN the shipped code — the arm64 images `physical-ai-server-opi:2.34.0`

@@ -25,34 +25,37 @@ from the register end. Here the extremum is found by BISECTING the reach
 boundary with ``solve()`` itself and walking inward in 5 µm steps, so no grid
 pitch has to be trusted.
 
-WHAT IS PINNED
+WHAT IS PINNED (since the 2026-10 centring: every joint's encoder zero T0 puts
+the middle of its URDF range on tick 2048, see ``feetech_servo_spec.py``; the
+tick direction is not measured yet, so every one of the four combinations is
+checked with the spec's own signs and T0)
   * q3 = _G_OFFSET − g exactly (g ≥ 0 on the elbow-up branch, the only one ever
     returned), so q3 has an UNCONDITIONAL analytic bound q3 ≤ _G_OFFSET =
-    2.938642 rad ⇒ tick 3964, 131 ticks from the 4095 end. The driver's ceiling
-    (130, owner decision b1) must sit strictly below it.
-  * The measured minimum over the operating envelope (target at or above the
-    base plane, z ≥ 0) IS that bound: full extension is reachable at z = 0.
-  * The documented SCOPE of the bit-identity claim: a joint CAN be driven onto
-    the seam, but only for targets far BELOW the base plane, which the
-    workspace floor refuses long before IK is consulted.
+    2.938642 rad ⇒ 1156 ticks from a register end when joint3's sign is −1,
+    1155 when it is +1. The driver's ceiling (130, owner decision b1) sits far
+    below both.
+  * The measured minimum over the operating envelope (z ≥ 0) is joint4 at its
+    limit: 795 ticks (777 ticks rise CCW) or 796 (CW).
+  * No solution at ANY height comes within the ceiling of a register end — the
+    seam the old 2048-zero map put at joint2's +π is gone.
 """
 
 from __future__ import annotations
 
 import ast
+import importlib
 import math
+import sys
 import textwrap
 from pathlib import Path
-
-import pytest
 
 from physical_ai_server.workflow import v1_ik as ik
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_DRIVER_PY = (_REPO_ROOT / 'robotis_ai_setup' / 'docker' / 'open_manipulator'
-              / 'feetech_arm_node.py')
+_DRIVER_DIR = _REPO_ROOT / 'robotis_ai_setup' / 'docker' / 'open_manipulator'
+_DRIVER_PY = _DRIVER_DIR / 'feetech_arm_node.py'
 
-_WANT_CONSTS = ('TICKS_PER_REV', 'CENTER_TICK', 'RAD_PER_TICK',
+_WANT_CONSTS = ('TICKS_PER_REV', 'RAD_PER_TICK',
                 'JOINT_LIMITS_RAD', '_GOAL_EDGE_MARGIN_MAX_TICKS',
                 '_DEFAULT_GOAL_EDGE_MARGIN_TICKS')
 _WANT_FUNCS = ('rad_to_tick', 'rad_to_command_tick')
@@ -88,7 +91,23 @@ def _driver_namespace():
     return ns
 
 
+def _servo_specs():
+    """The four pinned tick-direction combinations of the driver's servo spec
+    (``feetech_servo_spec.py``, plain Python next to the driver), keyed by
+    ``(777 direction, 2825 direction)``."""
+    sys.path.insert(0, str(_DRIVER_DIR))
+    try:
+        fss = importlib.import_module('feetech_servo_spec')
+    finally:
+        sys.path.remove(str(_DRIVER_DIR))
+    return {(a, b): fss.build_spec({777: a, 2825: b}, fss.FACTORY,
+                                   fss.MOTION_TEST_WINDOW_MS, fss.MAX_TORQUE,
+                                   frozenset())
+            for a in (1, -1) for b in (1, -1)}
+
+
 _D = _driver_namespace()
+_SPECS = _servo_specs()
 _LAST_TICK = _D['TICKS_PER_REV'] - 1
 _CEILING = _D['_GOAL_EDGE_MARGIN_MAX_TICKS']
 _DEFAULT = _D['_DEFAULT_GOAL_EDGE_MARGIN_TICKS']
@@ -99,13 +118,19 @@ def _edge(tick: int) -> int:
     return min(tick, _LAST_TICK - tick)
 
 
-def _analytic_q3_bound_ticks() -> int:
+def _tick(spec, joint_index: int, rad: float) -> int:
+    """The driver's own rad→tick map with the spec's sign and T0."""
+    return _D['rad_to_tick'](rad, spec.signs[joint_index],
+                             t0=spec.t0[joint_index])
+
+
+def _analytic_q3_bound_ticks(spec) -> int:
     """``solve()`` sets q3 = _G_OFFSET − g with g ≥ 0 on the elbow-up branch
     (identity pinned below), so the LARGEST q3 any solution can carry is
     _G_OFFSET at full extension. Derived from the solver's OWN import-time
     ``_G_OFFSET`` through the DRIVER's OWN tick map — no hardcoded angle, no
     sweep. Returned as the distance to the register end it approaches."""
-    return _edge(_D['rad_to_tick'](ik._G_OFFSET, 1))
+    return _edge(_tick(spec, 2, ik._G_OFFSET))
 
 
 # ── the sweep (module-level, computed once — a few thousand solve() calls) ────
@@ -146,29 +171,10 @@ def _reachable_seed(z: float) -> float | None:
     return None
 
 
-def _sweep():
-    """``(worst, per_joint, seam_zs)`` over the operating envelope z >= 0.
-
-    ``worst`` is ``(edge_distance, record)`` for the tightest approach to a
-    register end, a record being ``(edge, joint_1based, radians, tick, r, z)``;
-    ``per_joint`` the same keyed by joint; ``seam_zs`` the heights at which ANY
-    solution lands within the fenced ceiling of an end."""
-    worst = (10 ** 9, None)
-    per_joint: dict[int, tuple] = {}
-    seam_zs: list[float] = []
-
-    def note(joints, r, z):
-        nonlocal worst
-        for i, v in enumerate(joints):
-            tick = _D['rad_to_tick'](v, 1)
-            e = _edge(tick)
-            rec = (e, i + 1, v, tick, r, z)
-            if e < worst[0]:
-                worst = (e, rec)
-            if e < per_joint.get(i + 1, (10 ** 9,))[0]:
-                per_joint[i + 1] = rec
-            if e <= _CEILING:
-                seam_zs.append(z)
+def _solutions():
+    """Every solution ``(joints, r, z)`` of the sweep over the operating
+    envelope z >= 0."""
+    found = []
 
     # A) coarse global grid over the envelope — nothing outside the reach
     #    boundaries can be tighter, but this is what makes that falsifiable.
@@ -178,7 +184,7 @@ def _sweep():
             r = 0.02 + 0.40 * ir / 80
             j = _solve_rz(r, z)
             if j:
-                note(j, r, z)
+                found.append((j, r, z))
 
     # B) the razor edge: bisect BOTH reach boundaries at a ladder of heights
     #    and walk 1 mm inward in 5 µm steps.
@@ -195,11 +201,36 @@ def _sweep():
                 r = b - k * 5e-6 if outward else b + k * 5e-6
                 j = _solve_rz(r, z)
                 if j:
-                    note(j, r, z)
+                    found.append((j, r, z))
+    return found
+
+
+def _sweep(spec, solutions):
+    """``(worst, per_joint, seam_zs)`` of ``solutions`` under ``spec``'s map.
+
+    ``worst`` is ``(edge_distance, record)`` for the tightest approach to a
+    register end, a record being ``(edge, joint_1based, radians, tick, r, z)``;
+    ``per_joint`` the same keyed by joint; ``seam_zs`` the heights at which ANY
+    solution lands within the fenced ceiling of an end."""
+    worst = (10 ** 9, None)
+    per_joint: dict[int, tuple] = {}
+    seam_zs: list[float] = []
+    for joints, r, z in solutions:
+        for i, v in enumerate(joints):
+            tick = _tick(spec, i, v)
+            e = _edge(tick)
+            rec = (e, i + 1, v, tick, r, z)
+            if e < worst[0]:
+                worst = (e, rec)
+            if e < per_joint.get(i + 1, (10 ** 9,))[0]:
+                per_joint[i + 1] = rec
+            if e <= _CEILING:
+                seam_zs.append(z)
     return worst, per_joint, seam_zs
 
 
-_WORST, _PER_JOINT, _SEAM_ZS = _sweep()
+_SOLUTIONS = _solutions()
+_SWEEPS = {key: _sweep(spec, _SOLUTIONS) for key, spec in _SPECS.items()}
 
 
 # ── the cross-seam premise ───────────────────────────────────────────────────
@@ -263,103 +294,93 @@ def test_no_returned_solution_exceeds_the_analytic_bound():
 
 def test_the_ceiling_is_strictly_below_the_analytic_q3_bound():
     """THE guard. Raising ``_GOAL_EDGE_MARGIN_MAX_TICKS`` back to the 246 of
-    an earlier arm — or to anything at or above 131 — fails here, because a
-    margin >= the bound lets a legal override shift a real solver solution.
-
-    Derived from the solver's ``_G_OFFSET`` and the driver's own rad→tick map,
-    NOT from a sweep and NOT from a hardcoded angle."""
-    bound = _analytic_q3_bound_ticks()
-    assert bound == 131, (
-        'the analytic q3 bound moved — re-derive the ceiling from _G_OFFSET, '
-        f'got {bound}')
-    assert _D['rad_to_tick'](ik._G_OFFSET, 1) == 3964
+    an earlier arm is still refused (owner decision b1), and the analytic q3
+    bound — derived from the solver's ``_G_OFFSET`` and the driver's own
+    rad→tick map with the spec's sign and T0, NOT from a sweep and NOT from a
+    hardcoded angle — sits far above it in every combination."""
     assert _CEILING == 130
-    assert _CEILING < bound, (
-        f'_GOAL_EDGE_MARGIN_MAX_TICKS={_CEILING} is at or above the analytic '
-        f'q3 bound of {bound} ticks: a legal margin would shift autonomous '
-        f'grasp solutions. Set it below {bound}.')
-    # A fence below the shipped default would make the default itself illegal.
     assert _DEFAULT <= _CEILING
-    # At sign −1 the same q3 lands 132 ticks from tick 0 — never tighter.
-    assert _edge(_D['rad_to_tick'](ik._G_OFFSET, -1)) == 132
+    for (_d777, d2825), spec in _SPECS.items():
+        bound = _analytic_q3_bound_ticks(spec)
+        # joint3's sign is −1 × the 2825 direction (its output axis is
+        # mirrored against the URDF axis)
+        assert spec.signs[2] == -d2825
+        assert bound == (1156 if spec.signs[2] == -1 else 1155), (d2825, bound)
+        assert _CEILING < bound, (
+            f'_GOAL_EDGE_MARGIN_MAX_TICKS={_CEILING} is at or above the '
+            f'analytic q3 bound of {bound} ticks: a legal margin would shift '
+            f'autonomous grasp solutions.')
 
 
-def test_the_measured_minimum_over_the_operating_envelope_is_the_bound():
-    """The densest MEASURED value, for the record and as a cross-check on the
-    analytic bound: full extension (g = 0) is reachable at z = 0, so the
-    tightest approach to a register end IS the bound — 131 ticks, joint3.
-
-    Bisected, not gridded."""
-    e, joint, rad, tick, r, z = _WORST[0], *_WORST[1][1:]
-    assert (e, joint, tick) == (131, 3, 3964), _WORST
-    assert rad == pytest.approx(ik._G_OFFSET, abs=1e-6)
-    assert r == pytest.approx(0.370821, abs=1e-5)
-    assert z == pytest.approx(0.0, abs=1e-6)
-    assert _CEILING < e, (
-        f'ceiling {_CEILING} >= measured minimum {e}: some real grasp '
-        f'solution would be shifted')
-    assert e == _analytic_q3_bound_ticks()
-    # joint2 stays well clear (284 ticks at that corner).
-    assert _PER_JOINT[2][0] > 2 * _CEILING
+def test_the_measured_minimum_over_the_operating_envelope_is_joint4_at_its_limit():
+    """The densest MEASURED value over z >= 0, bisected and not gridded: the
+    tightest approach to a register end is joint4 at its URDF limit — 795 ticks
+    when 777 ticks rise CCW (tick 3300), 796 when they rise CW (tick 796) —
+    and per joint joint2 1024 / 1023 and joint3 1156 / 1155 (2825 CCW / CW)."""
+    for (d777, d2825), (worst, per_joint, _seam) in _SWEEPS.items():
+        e, joint, _rad, tick, _r, _z = worst[1]
+        assert (e, joint, tick) == ((795, 4, 3300) if d777 == 1
+                                    else (796, 4, 796)), (d777, d2825, worst)
+        assert per_joint[2][0] == (1024 if d2825 == 1 else 1023), per_joint[2]
+        assert per_joint[3][0] == (1156 if d2825 == 1 else 1155), per_joint[3]
+        assert per_joint[3][0] == _analytic_q3_bound_ticks(_SPECS[(d777, d2825)])
+        assert _CEILING < e
 
 
 def test_no_swept_solution_moves_at_the_fenced_maximum_margin():
     """BEHAVIOUR, through the driver's own ``rad_to_command_tick``: at the
     ceiling — the largest margin an operator can legally set — every joint of
-    every solution the sweep found is commanded bit-identically."""
+    every solution the sweep found is commanded bit-identically, in every
+    combination, with each joint's own sign and T0."""
     rct, rt = _D['rad_to_command_tick'], _D['rad_to_tick']
-    for rec in _PER_JOINT.values():
-        _e, _j, rad, tick, _r, _z = rec
-        for margin in (_DEFAULT, _CEILING):
-            assert rct(rad, 1, margin) == rt(rad, 1) == tick, (rec, margin)
+    for key, spec in _SPECS.items():
+        for joints, _r, _z in _SOLUTIONS:
+            for i, rad in enumerate(joints):
+                sign, t0 = spec.signs[i], spec.t0[i]
+                plain = rt(rad, sign, t0=t0)
+                for margin in (_DEFAULT, _CEILING):
+                    assert rct(rad, sign, margin, t0=t0) == plain, (key, i, rad)
 
 
-def test_the_first_margin_that_shifts_the_bound_tick_is_two_above_the_ceiling():
+def test_the_first_margin_that_shifts_the_bound_tick_is_one_above_the_bound():
     """Why the fence is a fence and not advice — stated precisely, because the
-    off-by-one here is easy to get wrong: ``max(m, min(4095 − m, t))`` leaves
-    ``t == 4095 − m`` alone, so a margin AT the analytic bound (131) still does
-    not shift the bound tick; the first value that does is 132.
-
-    The ceiling is 130 rather than 131 so that every commandable solver tick
-    lies STRICTLY inside the band and the fence does not lean on that inclusive
-    boundary."""
+    off-by-one here is easy to get wrong: ``max(m, min(4095 − m, t))`` leaves a
+    tick ``bound`` ticks from its end alone at ``m == bound`` (the band
+    boundary is inclusive); the first margin that moves it is ``bound + 1``."""
     rct = _D['rad_to_command_tick']
-    bound = _analytic_q3_bound_ticks()
     rad = ik._G_OFFSET                          # the bound pose itself
-    bound_tick = _LAST_TICK - bound
-    assert _D['rad_to_tick'](rad, 1) == bound_tick
-    assert rct(rad, 1, _CEILING) == bound_tick
-    assert _CEILING < bound                     # strictly inside
-    assert rct(rad, 1, bound) == bound_tick     # inclusive boundary, unshifted
-    assert rct(rad, 1, bound + 1) == bound_tick - 1   # the first margin that bites
+    for key, spec in _SPECS.items():
+        sign, t0 = spec.signs[2], spec.t0[2]
+        bound = _analytic_q3_bound_ticks(spec)
+        tick = _tick(spec, 2, rad)
+        assert _edge(tick) == bound
+        assert rct(rad, sign, _CEILING, t0=t0) == tick
+        assert rct(rad, sign, bound, t0=t0) == tick, key    # inclusive, unshifted
+        moved = rct(rad, sign, bound + 1, t0=t0)
+        assert moved != tick and abs(moved - tick) == 1, key  # the first that bites
 
 
-def test_the_shipped_default_clamps_above_the_bound():
-    """The default 128 clamps at tick 3967 = 2.94371 rad, 3.3 ticks of headroom
-    above the 2.938642-rad bound: the default and normal motion are unchanged."""
-    clamp_tick = _LAST_TICK - _DEFAULT
-    assert clamp_tick == 3967
-    clamp_rad = (clamp_tick - _D['CENTER_TICK']) * _D['RAD_PER_TICK']
-    assert clamp_rad == pytest.approx(2.94371, abs=1e-5)
-    assert clamp_rad > ik._G_OFFSET
-    assert (clamp_rad - ik._G_OFFSET) / _D['RAD_PER_TICK'] == pytest.approx(3.3, abs=0.05)
+def test_the_clamp_band_contains_every_centred_window():
+    """The default 128 clamps commands into [128, 3967]; every centred EEPROM
+    window lies inside that band, so the default never shortens a window."""
+    assert (_DEFAULT, _LAST_TICK - _DEFAULT) == (128, 3967)
+    for spec in _SPECS.values():
+        for lo, hi in spec.windows:
+            assert _DEFAULT <= lo and hi <= _LAST_TICK - _DEFAULT, (lo, hi)
 
 
 # ── the SCOPE of the bit-identity claim ──────────────────────────────────────
 
-def test_the_seam_is_reached_only_far_below_the_base_plane():
-    """The caveat that makes the claim honest, stated as a test so it cannot
-    quietly stop being true. joint2's upper limit is +π, which maps onto the
-    register end, and ``solve()`` CAN return it — but only for targets deep
-    below the arm's base plane, where the workspace floor refuses long before
-    IK is consulted. Within z >= 0 the sweep never gets within the ceiling of
-    an end at all."""
-    assert not _SEAM_ZS, (
-        'a target at or above the base plane came within the fenced ceiling '
-        f'of a register end: {sorted(set(_SEAM_ZS))[:5]}')
-    deepest = first_in_band = None
-    for iz in range(121):
-        z = -0.30 + 0.30 * iz / 120
+def test_no_solution_comes_within_the_ceiling_of_a_register_end_at_any_height():
+    """Before the centring joint2's +π limit mapped onto the register end and
+    ``solve()`` returned it for targets deep below the base plane (the caveat
+    the old claim needed). Now no solution at ANY height in z ∈ [−0.30, 0.16]
+    comes within the fenced ceiling of a register end, in any combination."""
+    for _key, (_worst, _per, seam) in _SWEEPS.items():
+        assert not seam, sorted(set(seam))[:5]
+    checked = 0
+    for iz in range(185):
+        z = -0.30 + 0.46 * iz / 184
         seed = _reachable_seed(z)
         if seed is None:
             continue
@@ -367,11 +388,8 @@ def test_the_seam_is_reached_only_far_below_the_base_plane():
             j = _solve_rz(seed + 0.4 * k / 119, z)
             if j is None:
                 continue
-            edges = [_edge(_D['rad_to_tick'](v, 1)) for v in j]
-            if min(edges) == 0:
-                deepest = z if deepest is None else max(deepest, z)
-            if min(edges) <= _CEILING:
-                first_in_band = z if first_in_band is None else max(first_in_band, z)
-    assert deepest is not None, 'expected the seam to be reachable below z=0'
-    assert deepest < -0.20, deepest
-    assert first_in_band is not None and first_in_band < -0.10, first_in_band
+            checked += 1
+            for key, spec in _SPECS.items():
+                edges = [_edge(_tick(spec, i, v)) for i, v in enumerate(j)]
+                assert min(edges) > _CEILING, (key, z, j, edges)
+    assert checked > 1000, checked

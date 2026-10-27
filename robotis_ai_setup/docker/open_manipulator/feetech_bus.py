@@ -112,7 +112,8 @@ HOMING_OFFSET_MAX = 2047
 # Vendor text (identical in both official memory tables): „对传感器最小分辨角度
 # （度/步）的放大系数，修改此值可以扩展控制圈数" — an amplification factor on the
 # sensor's minimum resolution angle (degrees per step), whose purpose is to extend
-# the number of controllable TURNS. EEPROM, 1 byte, factory default 1, range 1..3.
+# the number of controllable TURNS. EEPROM, 1 byte, factory default 1, range 1..3
+# (OLD table) or 1..128 (NEW table).
 #
 # WHY IT BELONGS IN THE BOOT FINGERPRINT: this whole driver rests on ONE fixed
 # tick↔angle map (TICKS_PER_REV = 4096, _RAD_PER_TICK). The vendor names two
@@ -129,8 +130,10 @@ HOMING_OFFSET_MAX = 2047
 #    per-tick precision degrades ×N — so either way ≠1 breaks the fixed map.
 #  * The vendor documents this register as working TOGETHER with Phase bit 4
 #    („多圈控制时需修改地址0x12参数BIT4置1"), which probe_bus already refuses. So a
-#    lone resolution ≠ 1 may well be INERT on this firmware. That is exactly why
-#    the boot check WARNS rather than refuses — see FeetechArmNode.probe_bus.
+#    lone resolution ≠ 1 may well be INERT on this firmware. The boot check
+#    nevertheless REFUSES it: the Servo-Station and the provision tool write the
+#    value, so a calibrated servo carries one the probe can predict, and the
+#    whole EEPROM block is compared with the servo spec's image.
 # LeRobot carries the same address (`"Angular_Resolution": (30, 1)`) and never
 # reads or writes it, relying on a hardcoded 4096 instead — i.e. upstream has the
 # identical un-checked assumption.
@@ -166,10 +169,11 @@ _RAD_PER_TICK = 2.0 * math.pi / TICKS_PER_REV
 # register 40.
 #
 # What makes this a silent-corruption hazard rather than a mere footgun: the
-# driver's provisioning fingerprint would still PASS afterwards. probe_bus checks
-# the Min/Max_Position_Limit windows, Operating_Mode, Phase and (now) the angular
-# resolution — a re-datum touches NONE of them. Every angle the arm reports and
-# accepts would simply be wrong, in a frame nothing on the rig can detect.
+# driver's boot fingerprint would still PASS afterwards. probe_bus compares the
+# whole EEPROM block with the servo spec's image, but the image does not fix the
+# Homing_Offset (only its encoding), and that is the one register a re-datum
+# rewrites. Every angle the arm reports and accepts would simply be wrong, in a
+# frame nothing on the rig can detect.
 #
 # Two things deliberately NOT claimed here, because the source review could not
 # establish them: whether the re-datum survives a power-cycle (register 40 itself
@@ -370,16 +374,19 @@ def parse_status_stream(buf: bytes) -> tuple[list[tuple[int, int, bytes]], int]:
     return packets, n - used
 
 
-def position_limit_window(lo_rad: float, hi_rad: float, sign: int) -> tuple[int, int]:
+def position_limit_window(lo_rad: float, hi_rad: float, sign: int, *,
+                          t0: int) -> tuple[int, int]:
     """Designed URDF limit pair → the servo's EEPROM ``Min/Max_Position_Limit``
-    window around the designed zero (``CENTER_TICK``), sign-aware: a −1
-    direction convention mirrors the window and re-orders lo ≤ hi. Clamped to
-    the single-turn register range [0, TICKS_PER_REV−1]. ONE shared
-    implementation for the provisioning tool (which WRITES the window) and the
-    driver node's boot probe (which VERIFIES it against the plugged arm) —
-    the two must never drift (audit H1)."""
-    a = CENTER_TICK + int(round(lo_rad * sign / _RAD_PER_TICK))
-    b = CENTER_TICK + int(round(hi_rad * sign / _RAD_PER_TICK))
+    window around ``t0`` (the joint's encoder zero, from the servo spec),
+    sign-aware: a −1 direction convention mirrors the window and re-orders
+    lo ≤ hi. Clamped to the single-turn register range [0, TICKS_PER_REV−1].
+    ONE shared implementation for the servo spec (which defines the window the
+    provisioning tool and the Servo-Station WRITE) and the driver node's boot
+    probe band — the two must never drift (audit H1). ``t0`` is keyword-only
+    and required, so a forgotten call site raises instead of silently
+    assuming 2048."""
+    a = t0 + int(round(lo_rad * sign / _RAD_PER_TICK))
+    b = t0 + int(round(hi_rad * sign / _RAD_PER_TICK))
     lo, hi = (a, b) if a <= b else (b, a)
     return max(0, lo), min(TICKS_PER_REV - 1, hi)
 

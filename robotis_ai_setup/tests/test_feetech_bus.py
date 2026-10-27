@@ -25,6 +25,7 @@ _DOCKER = os.path.join(_HERE, '..', 'docker', 'open_manipulator')
 sys.path.insert(0, _DOCKER)
 
 import feetech_bus as fb  # noqa: E402
+import feetech_servo_spec as fss  # noqa: E402
 
 
 class TestFraming(unittest.TestCase):
@@ -160,28 +161,34 @@ class TestErrorByteIsNeverSilent(unittest.TestCase):
 
 class TestPositionLimitWindow(unittest.TestCase):
     """fb.position_limit_window — the ONE shared window implementation the
-    provisioning tool writes with and the driver's boot probe verifies with
-    (audit H1 no-drift)."""
+    servo spec defines the written window with and the driver's boot probe
+    band verifies with (audit H1 no-drift)."""
 
     def test_symmetric_and_asymmetric_windows(self):
-        self.assertEqual(fb.position_limit_window(-1.5708, 1.5708, 1),
+        self.assertEqual(fb.position_limit_window(-1.5708, 1.5708, 1, t0=2048),
                          (1024, 3072))
         # joint5's relieved asymmetric window.
-        self.assertEqual(fb.position_limit_window(-1.5708, 1.9199, 1),
+        self.assertEqual(fb.position_limit_window(-1.5708, 1.9199, 1, t0=2048),
                          (1024, 3300))
+        # joint2/joint3 (0..π) centred: T0 1024 at sign +1, 3072 at sign −1 —
+        # the same window either way, 1023 ticks clear of both register ends.
+        self.assertEqual(fb.position_limit_window(0.0, 3.1416, 1, t0=1024),
+                         (1024, 3072))
+        self.assertEqual(fb.position_limit_window(0.0, 3.1416, -1, t0=3072),
+                         (1024, 3072))
 
     def test_negative_sign_mirrors_and_reorders(self):
         # Mirror identity on an UNCLAMPED window (the ±π ends clamp 4096→4095,
         # which breaks the naive identity by one tick — that clamp is pinned
         # separately below).
-        lo_p, hi_p = fb.position_limit_window(-1.5708, 1.9199, 1)
-        lo_n, hi_n = fb.position_limit_window(-1.5708, 1.9199, -1)
+        lo_p, hi_p = fb.position_limit_window(-1.5708, 1.9199, 1, t0=2048)
+        lo_n, hi_n = fb.position_limit_window(-1.5708, 1.9199, -1, t0=2048)
         self.assertEqual(lo_n, 2 * fb.CENTER_TICK - hi_p)
         self.assertEqual(hi_n, 2 * fb.CENTER_TICK - lo_p)
         self.assertLessEqual(lo_n, hi_n)
 
     def test_clamped_to_register_range(self):
-        self.assertEqual(fb.position_limit_window(-3.1416, 3.1416, 1),
+        self.assertEqual(fb.position_limit_window(-3.1416, 3.1416, 1, t0=2048),
                          (0, 4095))
 
 
@@ -551,7 +558,7 @@ def _load_node_functions():
     source = open(path, encoding='utf-8').read()
     tree = ast.parse(source)
     ns = {
-        'math': __import__('math'), 'os': os, 'fb': fb,
+        'math': __import__('math'), 'os': os, 'fb': fb, 'fss': fss,
         # The driver's whole-link box model, imported by feetech_arm_node as
         # `fg` and consumed by the boot-home table-floor pre-check. Pure Python,
         # so this deps-free suite can hold the REAL module rather than a stub —
@@ -560,26 +567,29 @@ def _load_node_functions():
         'time': __import__('time'), 'threading': __import__('threading'),
         'CENTER_TICK': 2048, 'TICKS_PER_REV': 4096,
     }
-    # Deterministic JOINT_SIGNS regardless of the dev machine's env: the env
-    # parse path itself is pinned by test_parse_signs.
-    env_backup = os.environ.pop('EDUBOTICS_FEETECH_JOINT_SIGNS', None)
+    # Deterministic knobs regardless of the dev machine's env. (The joint signs
+    # come from the servo spec; the env value is an assertion probe_bus reads at
+    # CALL time, see _without_signs_env.)
     tol_backup = os.environ.pop('EDUBOTICS_FEETECH_BOOT_POS_TOL_TICKS', None)
     edge_backup = os.environ.pop('EDUBOTICS_FEETECH_EDGE_MARGIN_TICKS', None)
     abort_backup = os.environ.pop('EDUBOTICS_FEETECH_TORQUE_ABORT_TICKS', None)
     goal_backup = os.environ.pop('EDUBOTICS_FEETECH_GOAL_EDGE_MARGIN_TICKS', None)
     home_tol_backup = os.environ.pop('EDUBOTICS_HOME_FLOOR_TOL_M', None)
     wanted = {'rad_to_tick', 'tick_to_rad', 'interpolate_trajectory',
-              'build_boot_home', '_parse_signs', 'boot_home_verify_decision',
+              'build_boot_home', 'signs_env_refusal',
+              'model_refusal_message', 'eeprom_refusal_message',
+              'eeprom_warning_note', 'boot_home_verify_decision',
               '_parse_boot_pos_tolerance', '_parse_edge_margin',
               'edge_parked_joints', 'edge_refusal_message',
               '_parse_torque_abort_ticks', 'wrong_way_joints',
               'wrong_way_abort_message', 'post_energise_read_failure_message',
               '_parse_goal_edge_margin', 'rad_to_command_tick',
-              'firmware_fingerprint_notes', 'angular_resolution_note',
+              'firmware_fingerprint_notes',
               '_parse_home_floor_tol', 'boot_home_floor_decision'}
     consts = {'RAD_PER_TICK', 'HOME_JOINTS_RAD', 'GRIPPER_OPEN_RAD',
               'LOOP_HZ', 'BOOT_HOME_DURATION_S', 'SERVO_IDS', 'JOINT_NAMES',
-              'JOINT_LIMITS_RAD', '_DEFAULT_SIGNS', 'JOINT_SIGNS',
+              'JOINT_LIMITS_RAD', 'SERVO_SPEC', 'JOINT_SIGNS', 'JOINT_T0',
+              'JOINT_WINDOWS', 'SPEC_NOT_PINNED_DE', 'REMEDY_EXCHANGE_DE',
               'BOOT_TORQUE_ON_ATTEMPTS', 'BOOT_TORQUE_ON_RETRY_S',
               'SEED_SPEED_STEPS', 'PRESENT_LOAD_FULLSCALE',
               'GOAL_SPEED_CAP_STEPS', 'WRITE_ACCELERATION',
@@ -628,8 +638,6 @@ def _load_node_functions():
                 if isinstance(sub, ast.FunctionDef) and sub.name in methods:
                     src = textwrap.dedent(ast.get_source_segment(source, sub))
                     exec(compile(src, path, 'exec'), ns)  # noqa: S102
-    if env_backup is not None:
-        os.environ['EDUBOTICS_FEETECH_JOINT_SIGNS'] = env_backup
     if tol_backup is not None:
         os.environ['EDUBOTICS_FEETECH_BOOT_POS_TOL_TICKS'] = tol_backup
     if edge_backup is not None:
@@ -647,22 +655,93 @@ _N = _load_node_functions()
 # The V1's servo ids (1..6), read from the driver rather than restated.
 _SIDS = tuple(_N['SERVO_IDS'])
 
+# The shipped spec is UNPINNED (the driver then refuses to boot a V1), so every
+# behavioural test binds an explicitly pinned spec. A = both models' ticks rise
+# counter-clockwise, B = both clockwise, MIX = 777 CCW and 2825 CW, MIX2 the
+# reverse.
+_SPEC_A = fss.build_spec({777: 1, 2825: 1}, fss.FACTORY,
+                         fss.MOTION_TEST_WINDOW_MS, fss.MAX_TORQUE, frozenset())
+_SPEC_B = fss.build_spec({777: -1, 2825: -1}, fss.FACTORY,
+                         fss.MOTION_TEST_WINDOW_MS, fss.MAX_TORQUE, frozenset())
+_SPEC_MIX = fss.build_spec({777: 1, 2825: -1}, fss.FACTORY,
+                           fss.MOTION_TEST_WINDOW_MS, fss.MAX_TORQUE,
+                           frozenset())
+_SPEC_MIX2 = fss.build_spec({777: -1, 2825: 1}, fss.FACTORY,
+                            fss.MOTION_TEST_WINDOW_MS, fss.MAX_TORQUE,
+                            frozenset())
+_ALL_SPECS = (_SPEC_A, _SPEC_B, _SPEC_MIX, _SPEC_MIX2)
+
+
+def _bind(ns, spec):
+    """Point the driver namespace at ``spec`` (what `SERVO_SPEC = fss.V1`
+    and its three derived names do in the shipped module)."""
+    ns['SERVO_SPEC'] = spec
+    ns['JOINT_SIGNS'] = spec.signs
+    ns['JOINT_T0'] = spec.t0
+    ns['JOINT_WINDOWS'] = spec.windows
+
+
+def _spec_bound(spec):
+    """``patch.dict`` that binds ``spec`` for the duration of a block."""
+    return patch.dict(_N, {'SERVO_SPEC': spec, 'JOINT_SIGNS': spec.signs,
+                           'JOINT_T0': spec.t0,
+                           'JOINT_WINDOWS': spec.windows})
+
+
+_bind(_N, _SPEC_A)
+
+
+def _without_signs_env(test):
+    """probe_bus reads EDUBOTICS_FEETECH_JOINT_SIGNS at CALL time, so a value
+    in the developer's shell must not decide a test."""
+    patcher = patch.dict(os.environ)
+    patcher.start()
+    test.addCleanup(patcher.stop)
+    os.environ.pop('EDUBOTICS_FEETECH_JOINT_SIGNS', None)
+
+
+_T0S = (1024, 1536, 2048, 2560, 3072)
+
 
 class TestNodePureFunctions(unittest.TestCase):
     def test_tick_conversion_round_trip(self):
-        for rad in (-1.5, -0.5, 0.0, 0.7, 1.9):
-            for sign in (1, -1):
-                tick = _N['rad_to_tick'](rad, sign)
-                back = _N['tick_to_rad'](tick, sign)
-                self.assertAlmostEqual(back, rad, delta=2 * 3.1416 / 4096)
+        for t0 in _T0S:
+            for rad in (-1.5, -0.5, 0.0, 0.7, 1.9):
+                for sign in (1, -1):
+                    tick = _N['rad_to_tick'](rad, sign, t0=t0)
+                    if tick in (0, 4095):
+                        continue          # register-clamped, not a round trip
+                    back = _N['tick_to_rad'](tick, sign, t0=t0)
+                    self.assertAlmostEqual(back, rad,
+                                           delta=2 * 3.1416 / 4096)
 
     def test_tick_center_is_zero(self):
-        self.assertEqual(_N['rad_to_tick'](0.0, 1), 2048)
-        self.assertEqual(_N['tick_to_rad'](2048, 1), 0.0)
+        # q = 0 reads the joint's encoder zero T0, for either sign.
+        for t0 in _T0S:
+            for sign in (1, -1):
+                self.assertEqual(_N['rad_to_tick'](0.0, sign, t0=t0), t0)
+                self.assertEqual(_N['tick_to_rad'](t0, sign, t0=t0), 0.0)
 
     def test_tick_clamps_to_register_range(self):
-        self.assertEqual(_N['rad_to_tick'](10.0, 1), 4095)
-        self.assertEqual(_N['rad_to_tick'](-10.0, 1), 0)
+        for t0 in _T0S:
+            for sign in (1, -1):
+                self.assertEqual(_N['rad_to_tick'](10.0 * sign, sign, t0=t0),
+                                 4095)
+                self.assertEqual(_N['rad_to_tick'](-10.0 * sign, sign, t0=t0),
+                                 0)
+
+    def test_t0_is_required_everywhere(self):
+        # Keyword-only and required: a forgotten call site raises instead of
+        # silently assuming 2048, and a positional third argument can never be
+        # re-bound as t0 (rad_to_command_tick's third parameter is the margin).
+        with self.assertRaises(TypeError):
+            _N['rad_to_tick'](0.0, 1)
+        with self.assertRaises(TypeError):
+            _N['tick_to_rad'](2048, 1)
+        with self.assertRaises(TypeError):
+            _N['rad_to_command_tick'](0.0, 1, 128)
+        with self.assertRaises(TypeError):
+            fb.position_limit_window(0, 1, 1)
 
     def test_interpolate_holds_ends(self):
         pts = [([0.0] * 7, 0.1), ([1.0] * 7, 1.1)]
@@ -708,19 +787,32 @@ class TestNodePureFunctions(unittest.TestCase):
         self.assertEqual(f(None, home, 0.30, 0, 1)[0], 'nodata')
         self.assertEqual(f([0.0, 0.0], home, 0.30, 0, 1)[0], 'nodata')
 
-    def test_parse_signs(self):
-        self.assertEqual(_N['_parse_signs'](None), _N['_DEFAULT_SIGNS'])
-        self.assertEqual(_N['_parse_signs'](''), _N['_DEFAULT_SIGNS'])
-        self.assertEqual(_N['_parse_signs']('1,-1,1,1,-1,1'),
-                         (1, -1, 1, 1, -1, 1))
-        self.assertEqual(_N['_parse_signs']('1,2,3'), _N['_DEFAULT_SIGNS'])
-        self.assertEqual(_N['_parse_signs']('0,0,0,0,0,0'),
-                         _N['_DEFAULT_SIGNS'])
-        # A setting of the wrong LENGTH (e.g. one left over from a 7-servo
-        # bench) is rejected, never silently mis-applied.
-        self.assertEqual(_N['_parse_signs']('1,1,1,1,1,1,1'),
-                         _N['_DEFAULT_SIGNS'])
-        self.assertEqual(_N['_DEFAULT_SIGNS'], (1, 1, 1, 1, 1, 1))
+    def test_signs_env_refusal_pure(self):
+        # The env knob is an ASSERTION on the spec's signs, never a source of
+        # them: unset/blank says nothing, an equal value is silent, anything
+        # else refuses the boot naming the variable and the remedy.
+        f = _N['signs_env_refusal']
+        spec_signs = _SPEC_A.signs
+        self.assertEqual(spec_signs, (-1, 1, -1, -1, -1, 1))
+        self.assertIsNone(f(None, spec_signs))
+        self.assertIsNone(f('', spec_signs))
+        self.assertIsNone(f('   ', spec_signs))
+        self.assertIsNone(f('-1,1,-1,-1,-1,1', spec_signs))
+        self.assertIsNone(f(' -1, 1,-1,-1,-1, 1 ', spec_signs))
+        # nothing to assert against while the spec is unpinned
+        self.assertIsNone(f('1,1,1,1,1,1', None))
+        for malformed in ('abc', '1,2,3', '0,0,0,0,0,0', '1,1,1,1,1,1,1',
+                          '-1,1,-1,-1,-1'):
+            msg = f(malformed, spec_signs)
+            self.assertIsNotNone(msg, malformed)
+            self.assertIn('[FEHLER]', msg)
+            self.assertIn('EDUBOTICS_FEETECH_JOINT_SIGNS', msg)
+            self.assertIn('kein gültiger Wert', msg)
+            self.assertIn('Lehrkraft', msg)
+        different = f('1,1,1,1,1,1', spec_signs)
+        self.assertIn('EDUBOTICS_FEETECH_JOINT_SIGNS=1,1,1,1,1,1', different)
+        self.assertIn('passt nicht zu diesem Arm', different)
+        self.assertIn('Lehrkraft', different)
 
     def test_node_constants_mirror_profile(self):
         # No-drift vs the server registry (mirrors the OMX no-drift family).
@@ -741,15 +833,23 @@ class TestNodePureFunctions(unittest.TestCase):
         self.assertLessEqual(_N['GRIPPER_OPEN_RAD'], limits[5][1])
 
     def test_the_v1_eeprom_windows(self):
-        """The provisioning fingerprint the boot probe verifies (sign +1):
-        joint1 1024–3072, joint2/joint3 2048–4095, joint4 796–3300, joint5
-        1024–3072, claw 2048–3072. An arm provisioned with another window (an
-        older arm with joint4 at ±115°: 740–3356) refuses to boot."""
-        windows = [fb.position_limit_window(*lim, 1)
-                   for lim in _N['JOINT_LIMITS_RAD']]
-        self.assertEqual(windows, [(1024, 3072), (2048, 4095), (2048, 4095),
-                                   (796, 3300), (1024, 3072), (2048, 3072)])
-        self.assertNotEqual(windows[3], (740, 3356))
+        """The EEPROM windows the boot probe verifies, centred and therefore
+        the same for every tick-direction combination: joint1/2/3/5
+        1024–3072, joint4 796–3300, claw 1536–2560. The pre-centring 2048-zero
+        windows (joint2/joint3 2048–4095, claw 2048–3072) appear nowhere, and
+        an arm provisioned with another window (an older arm with joint4 at
+        ±115°: 740–3356) refuses to boot."""
+        want = [(1024, 3072), (1024, 3072), (1024, 3072), (796, 3300),
+                (1024, 3072), (1536, 2560)]
+        for spec in _ALL_SPECS:
+            windows = [fb.position_limit_window(*lim, s, t0=t0)
+                       for lim, s, t0 in zip(_N['JOINT_LIMITS_RAD'],
+                                             spec.signs, spec.t0)]
+            self.assertEqual(windows, want)
+            self.assertEqual(list(spec.windows), want)
+            self.assertNotIn((2048, 4095), windows)
+            self.assertNotIn((2048, 3072), windows)
+            self.assertNotEqual(windows[3], (740, 3356))
 
     def test_the_services_and_the_geometry_spec(self):
         self.assertEqual(_N['TORQUE_SERVICE'], '/v1/set_torque')
@@ -759,10 +859,14 @@ class TestNodePureFunctions(unittest.TestCase):
 
 
 class TestProbeBusGate(unittest.TestCase):
-    """probe_bus provisioning-fingerprint gate (audit H1+H2), extracted
-    deps-free: an unprovisioned / RMA-swapped / wheel-mode / signs-drifted
-    arm must refuse to boot in German instead of boot-homing in a wrong
-    coordinate frame at factory torque."""
+    """probe_bus's EEPROM-image gate, extracted deps-free: an unpinned spec,
+    a factory-fresh, RMA-swapped, wheel-mode, foreign-calibrated or wrongly
+    placed servo must refuse to boot in German instead of boot-homing in a
+    wrong coordinate frame. Every servo's 40-byte EEPROM block is compared with
+    the spec's golden image (fss.compare_block)."""
+
+    def setUp(self):
+        _without_signs_env(self)
 
     @staticmethod
     def _probe():
@@ -770,50 +874,62 @@ class TestProbeBusGate(unittest.TestCase):
         return pb.__func__ if isinstance(pb, staticmethod) else pb
 
     class _RegBus:
+        """A calibrated arm by default: per servo a 40-byte EEPROM block built
+        from the BOUND spec's golden image. Strict — anything but the model
+        read, the block read and the position read raises."""
+
         def __init__(self, windows=None, mode=0, alive=None, models=None,
-                     phase=0, present=None, firmware=None, resolution=None):
-            self.mode = mode
-            self.phase = phase
+                     phase=None, present=None, firmware=None, resolution=None,
+                     regs=None, offset_raw=None):
+            spec = _N['SERVO_SPEC']
             self.alive = set(alive if alive is not None else _N['SERVO_IDS'])
-            self.models = models or {}
-            # Uniform firmware 3.10 and Angular_Resolution at the factory 1:
-            # the DEFAULT fake is a healthy provisioned arm and must stay
-            # completely silent.
-            self.firmware = dict(firmware or {})
-            self.resolution = dict(resolution or {})
-            if windows is None:
-                windows = {
-                    sid: fb.position_limit_window(
-                        *_N['JOINT_LIMITS_RAD'][i], 1)
-                    for i, sid in enumerate(_N['SERVO_IDS'])
-                }
-            self.windows = windows
-            # CENTER_TICK sits inside every designed window, so the default arm
-            # is plausible on all 6 joints.
+            self.models = {j.servo_id: j.model for j in spec.joints}
+            self.models.update(models or {})
             self.present = dict(present or {})
+            self.windows = {j.servo_id: j.window for j in spec.joints}
+            self.windows.update(windows or {})
+            self.calls = []
+            self.blocks = {}
+            sizes = {addr: size for addr, size, _n, _c in fss.LAYOUT}
+            for joint in spec.joints:
+                sid = joint.servo_id
+                block = bytearray(fb.EEPROM_BLOCK_LEN)
+                for addr, value in joint.image.items():
+                    if sizes[addr] == 2:
+                        block[addr:addr + 2] = fb.le16(value)
+                    else:
+                        block[addr] = value
+                block[0:2] = bytes((firmware or {}).get(sid, (3, 10)))
+                block[3:5] = fb.le16(self.models[sid])
+                lo, hi = self.windows[sid]
+                block[9:11] = fb.le16(lo)
+                block[11:13] = fb.le16(hi)
+                if phase is not None:
+                    block[18] = phase
+                block[30] = (resolution or {}).get(sid, 1)
+                block[33] = mode
+                block[31:33] = fb.le16((offset_raw or {}).get(sid, 0))
+                for addr, value in (regs or {}).get(sid, {}).items():
+                    if value > 255:
+                        block[addr:addr + 2] = fb.le16(value)
+                    else:
+                        block[addr] = value
+                self.blocks[sid] = bytes(block)
 
         def ping(self, sid, timeout_s=None):
+            self.calls.append(('ping', sid))
             return sid in self.alive
 
         def read(self, sid, addr, length):
-            if addr == fb.REG_OPERATING_MODE:
-                return 0, bytes([self.mode])
-            if addr == fb.REG_PHASE:
-                return 0, bytes([self.phase])
-            if addr == fb.REG_FIRMWARE_MAJOR and length == 2:
-                return 0, bytes(self.firmware.get(sid, (3, 10)))
-            if addr == fb.REG_ANGULAR_RESOLUTION:
-                return 0, bytes([self.resolution.get(
-                    sid, fb.ANGULAR_RESOLUTION_SINGLE_TURN)])
-            raise AssertionError(f'unexpected read addr {addr}')
+            self.calls.append(('read', sid, addr, length))
+            if (addr, length) == (fb.EEPROM_BLOCK_ADDR, fb.EEPROM_BLOCK_LEN):
+                return 0, self.blocks[sid]
+            raise AssertionError(f'unexpected read addr {addr} len {length}')
 
         def read_u16(self, sid, addr):
+            self.calls.append(('read_u16', sid, addr))
             if addr == fb.REG_MODEL_NUMBER:
-                return self.models.get(sid, fb.STS3215_MODEL_NUMBER)
-            if addr == fb.REG_MIN_POSITION_LIMIT:
-                return self.windows[sid][0]
-            if addr == fb.REG_MAX_POSITION_LIMIT:
-                return self.windows[sid][1]
+                return self.models[sid]
             if addr == fb.REG_PRESENT_POSITION:
                 return self.present.get(sid, 2048)
             raise AssertionError(f'unexpected read_u16 addr {addr}')
@@ -827,13 +943,28 @@ class TestProbeBusGate(unittest.TestCase):
         def warning(self, text):
             self.warnings.append(text)
 
+    # ── the unpinned spec: no V1 boots before rig gate P0 ────────────────────
+    def test_the_shipped_spec_refuses_boot_until_P0(self):
+        class _NoBus:
+            def __getattr__(self, name):
+                raise AssertionError(f'the probe touched the bus: {name}')
+
+        with patch.dict(_N, {'SERVO_SPEC': fss.V1, 'JOINT_SIGNS': None,
+                             'JOINT_T0': None,
+                             'JOINT_WINDOWS': fss.V1.windows}):
+            ok, msg = self._probe()(_NoBus())
+        self.assertFalse(ok)
+        self.assertEqual(msg, _N['SPEC_NOT_PINNED_DE'])
+        self.assertIn('freigegeben', msg)
+        self.assertIn('[FEHLER]', msg)
+
     def test_provisioned_arm_passes(self):
         ok, msg = self._probe()(self._RegBus())
         self.assertTrue(ok)
         self.assertEqual(msg, '')
 
     def test_the_reference_arm_boots_completely_silently(self):
-        # Uniform firmware 3.10, Angular_Resolution at the factory 1.
+        # Uniform firmware 3.10, the golden image on every servo.
         # A boot advisory on a healthy arm is log noise that trains operators to
         # ignore the channel, so silence here is load-bearing.
         log = self._CaptureLogger()
@@ -842,36 +973,206 @@ class TestProbeBusGate(unittest.TestCase):
         self.assertEqual(msg, '')
         self.assertEqual(log.warnings, [])
 
-    # ── Angular_Resolution (register 30) — WARN, never refuse ────────────────
-    def test_a_rescaled_angular_resolution_warns_but_STILL_BOOTS(self):
-        # THE brick-avoidance test. An arm provisioned before register 30 was
-        # known about carries no record of it; a hard gate on a value we cannot
-        # predict would refuse „Umgebung starten" on such an arm, with no env
-        # knob to escape with. If someone later promotes
-        # this to `return False`, THIS is the test that must be consciously
-        # rewritten rather than quietly deleted.
-        log = self._CaptureLogger()
-        bus = self._RegBus(resolution={3: 2})
-        ok, msg = self._probe()(bus, logger=log)
+    def test_a_matching_station_calibrated_arm_boots_silently(self):
+        # Every tick-direction combination: the centred windows, the per-model
+        # protection current, mixed models — a calibrated arm boots silently.
+        for spec in _ALL_SPECS:
+            with _spec_bound(spec):
+                log = self._CaptureLogger()
+                ok, msg = self._probe()(self._RegBus(), logger=log)
+            self.assertEqual((ok, msg), (True, ''), spec.tick_direction)
+            self.assertEqual(log.warnings, [], spec.tick_direction)
+
+    def test_the_probe_reads_exactly_the_block_and_present(self):
+        bus = self._RegBus()
+        ok, msg = self._probe()(bus)
         self.assertTrue(ok, msg)
-        self.assertEqual(msg, '')
-        self.assertEqual(len(log.warnings), 1)
-        note = log.warnings[0]
-        self.assertIn('[WARNUNG]', note)
-        self.assertIn('Servo 3', note)
-        self.assertIn('30', note)                 # names the register
-        self.assertIn('feetech_provision', note)  # and the remedy
 
-    def test_the_resolution_note_names_every_offender(self):
-        f = _N['angular_resolution_note']
-        self.assertEqual(f([]), '')
-        both = f([(2, 3), (5, 2)])
-        self.assertIn('Servo 2', both)
-        self.assertIn('Servo 5', both)
+        def is_model_read(call):
+            return call[0] == 'read_u16' and call[2] == fb.REG_MODEL_NUMBER
 
+        rest = [c for c in bus.calls if c[0] != 'ping' and not is_model_read(c)]
+        want = []
+        for sid in _SIDS:
+            want += [('read', sid, fb.EEPROM_BLOCK_ADDR, fb.EEPROM_BLOCK_LEN),
+                     ('read_u16', sid, fb.REG_PRESENT_POSITION)]
+        self.assertEqual(rest, want)
+        # every model read happens before the first block read
+        last_model = max(i for i, c in enumerate(bus.calls) if is_model_read(c))
+        first_block = min(i for i, c in enumerate(bus.calls) if c[0] == 'read')
+        self.assertLess(last_model, first_block)
+
+    # ── the block image: refusals ─────────────────────────────────────────────
+    def test_an_old_2048_zero_window_is_refused(self):
+        # An arm provisioned before the centring carries joint2 at 2048–4095.
+        ok, msg = self._probe()(self._RegBus(windows={2: (2048, 4095)}))
+        self.assertFalse(ok)
+        self.assertIn('Servo 2', msg)
+        self.assertIn('Positionsgrenzen', msg)
+        self.assertIn('[2048, 4095]', msg)
+        self.assertIn('[1024, 3072]', msg)
+        self.assertIn('Lehrkraft', msg)
+
+    def test_factory_limits_refused_as_unprovisioned(self):
+        ok, msg = self._probe()(self._RegBus(windows={2: (0, 4095)}))
+        self.assertFalse(ok)
+        self.assertIn('Servo 2', msg)
+        self.assertIn('Positionsgrenzen', msg)
+        self.assertIn('Lehrkraft', msg)
+
+    def test_a_wrong_protection_current_refuses(self):
+        # The old provisioning wrote 310 (≈2 A) on every servo, the STS3250
+        # included; the spec's per-model value is the only one that boots.
+        ok, msg = self._probe()(self._RegBus(regs={2: {28: 310}}))
+        self.assertFalse(ok)
+        self.assertIn('Servo 2', msg)
+        self.assertIn('Schutzstrom', msg)
+        self.assertIn('Register 28', msg)
+        self.assertIn('310', msg)
+
+    def test_a_rescaled_angular_resolution_REFUSES(self):
+        # Rewritten consciously (it used to WARN and still boot): the station
+        # and the provision tool write register 30, so a calibrated servo has a
+        # value the probe can predict, and a rescaled map is wrong in a frame
+        # nothing else on the rig can detect.
+        log = self._CaptureLogger()
+        ok, msg = self._probe()(self._RegBus(resolution={3: 2}), logger=log)
+        self.assertFalse(ok)
+        self.assertIn('Servo 3', msg)
+        self.assertIn('Winkelauflösung', msg)
+        self.assertIn('Register 30', msg)
+        self.assertEqual(log.warnings, [])
+
+    def test_a_phase_byte_differing_from_the_reference_refuses(self):
+        # Bit 4 has its own sentence; the REST of the Phase byte (motor-drive
+        # configuration — a flipped bit can mirror the direction) must equal
+        # the reference image too.
+        image18 = _N['SERVO_SPEC'].joints[0].image[fb.REG_PHASE]
+        phase = image18 ^ 0x01
+        self.assertEqual(phase & 0x10, 0)
+        ok, msg = self._probe()(self._RegBus(phase=phase))
+        self.assertFalse(ok)
+        self.assertIn('Phase', msg)
+        self.assertIn('Register 18', msg)
+
+    def test_a_foreign_offset_encoding_refuses(self):
+        ok, msg = self._probe()(self._RegBus(offset_raw={4: 0x1805}))
+        self.assertFalse(ok)
+        self.assertIn('Servo 4', msg)
+        self.assertIn('fremden Werkzeug', msg)
+        self.assertIn('6149', msg)
+
+    def test_a_wrong_model_at_a_joint_refuses(self):
+        # An STS3215 where the STS3250 belongs (joint 2). The id travels WITH
+        # the servo, so this is a servo calibrated for another place — no
+        # colour check can fix it, the remedy is the exchange.
+        ok, msg = self._probe()(self._RegBus(models={2: 777}))
+        self.assertFalse(ok)
+        self.assertIn('Servo 2', msg)
+        self.assertIn('STS3215', msg)
+        self.assertIn('STS3250', msg)
+        self.assertIn('EduBotics', msg)
+        self.assertNotIn('Farbe', msg)
+
+    def test_the_eeprom_refusal_message_names_every_refused_register(self):
+        f = _N['eeprom_refusal_message']
+        dev = fss.Deviation
+        two = f(3, 'Gelenk 3 – Ellbogen',
+                [dev(28, 2, 'Schutzstrom', 310, 585),
+                 dev(30, 1, 'Winkelauflösung', 2, 1)],
+                (1024, 3072), (1024, 3072))
+        self.assertIn('[FEHLER] Servo 3 (Gelenk 3 – Ellbogen)', two)
+        self.assertIn('Schutzstrom (Register 28) ist 310, erwartet 585', two)
+        self.assertIn('Winkelauflösung (Register 30) ist 2, erwartet 1', two)
+        self.assertTrue(two.endswith(_N['REMEDY_EXCHANGE_DE']))
+        limits = f(2, 'Gelenk 2 – Schulter',
+                   [dev(9, 2, 'Min-Position', 2048, 1024)],
+                   (2048, 3072), (1024, 3072))
+        self.assertIn('Positionsgrenzen [2048, 3072] statt [1024, 3072]',
+                      limits)
+        self.assertIn('nicht für diese Stelle des V1', limits)
+        offset = f(4, 'Gelenk 4 – Handgelenk',
+                   [dev(31, 2, 'Homing-Offset', 0x1805, None)],
+                   (796, 3300), (796, 3300))
+        self.assertIn('fremden Werkzeug', offset)
+        self.assertIn('Rohwert 6149', offset)
+        for msg in (two, limits, offset):
+            self.assertTrue(msg.endswith(_N['REMEDY_EXCHANGE_DE']), msg)
+
+    def test_wheel_mode_refused(self):
+        ok, msg = self._probe()(self._RegBus(mode=1))
+        self.assertFalse(ok)
+        self.assertIn('Betriebsmodus', msg)
+
+    def test_multiturn_phase_bit_refused(self):
+        # A factory-reset / RMA servo shipping Phase bit 4 (multi-turn) would
+        # feed overflowed angles into the fixed tick↔angle map; calibration
+        # clears it, the boot probe must refuse it (else boot-home runs skewed).
+        ok, msg = self._probe()(self._RegBus(phase=(1 << 4)))
+        self.assertFalse(ok)
+        self.assertIn('Servo 1', msg)
+        self.assertIn('Phase-Bit 4', msg)
+
+    # ── warn-class deviations boot ────────────────────────────────────────────
+    def test_warn_class_deviations_boot_with_one_warning_per_servo(self):
+        log = self._CaptureLogger()
+        bus = self._RegBus(regs={1: {21: 16}, 5: {7: 250}})
+        ok, msg = self._probe()(bus, logger=log)
+        self.assertEqual((ok, msg), (True, ''))
+        self.assertEqual(len(log.warnings), 2, log.warnings)
+        self.assertIn('[WARNUNG] Servo 1', log.warnings[0])
+        self.assertIn('P-Anteil (Register 21) 16 statt 32', log.warnings[0])
+        self.assertIn('[WARNUNG] Servo 5', log.warnings[1])
+        self.assertIn('Antwortverzögerung', log.warnings[1])
+        self.assertIn('startet trotzdem', log.warnings[0])
+
+    # ── the signs env knob is an assertion ────────────────────────────────────
+    def test_a_differing_signs_env_refuses_naming_the_knob(self):
+        os.environ['EDUBOTICS_FEETECH_JOINT_SIGNS'] = '1,1,1,1,1,1'
+        ok, msg = self._probe()(self._RegBus())
+        self.assertFalse(ok)
+        self.assertIn('EDUBOTICS_FEETECH_JOINT_SIGNS', msg)
+        self.assertIn('Lehrkraft', msg)
+
+    def test_an_equal_signs_env_is_silent(self):
+        os.environ['EDUBOTICS_FEETECH_JOINT_SIGNS'] = '-1,1,-1,-1,-1,1'
+        self.assertEqual(self._probe()(self._RegBus()), (True, ''))
+
+    def test_a_malformed_signs_env_refuses(self):
+        os.environ['EDUBOTICS_FEETECH_JOINT_SIGNS'] = 'abc'
+        ok, msg = self._probe()(self._RegBus())
+        self.assertFalse(ok)
+        self.assertIn('EDUBOTICS_FEETECH_JOINT_SIGNS', msg)
+
+    # ── student-facing texts ──────────────────────────────────────────────────
+    def test_no_student_facing_probe_text_names_a_vendor_tool(self):
+        src = open(os.path.join(_DOCKER, 'feetech_arm_node.py'),
+                   encoding='utf-8').read()
+        tree = ast.parse(src)
+        texts = []
+        names = ('probe_bus', 'signs_env_refusal', 'model_refusal_message',
+                 'eeprom_refusal_message', 'eeprom_warning_note',
+                 'edge_refusal_message', 'firmware_fingerprint_notes')
+        for name in names:
+            fn = _strip_docstring(_driver_function(src, name))
+            texts += [n.value for n in ast.walk(fn)
+                      if isinstance(n, ast.Constant)
+                      and isinstance(n.value, str)]
+        for name in ('SPEC_NOT_PINNED_DE', 'REMEDY_EXCHANGE_DE'):
+            texts.append(_N[name])
+        texts += list(_N['BOOT_PHYSICAL_REMEDY_DE'].values())
+        self.assertGreater(len(texts), 20)
+        for text in texts:
+            for word in ('Station', 'feetech_provision', 'Werkbank'):
+                self.assertNotIn(word, text)
+        defined = {t.id for n in tree.body if isinstance(n, ast.Assign)
+                   for t in n.targets if isinstance(t, ast.Name)}
+        self.assertNotIn('REMEDY_PLACEMENT_DE', defined)
+        self.assertNotIn('REMEDY_PLACEMENT_DE', src)
+
+    # ── firmware fingerprint — WARN, never refuse ────────────────────────────
     def test_resolution_is_read_from_register_30_not_guessed(self):
-        # A strict fake: _RegBus raises AssertionError on any address it does not
-        # model, so this fails loudly if the probe ever reads a different register.
+        # The block read covers register 30; the layout must not have moved.
         self.assertEqual(fb.REG_ANGULAR_RESOLUTION, 30)
         self.assertEqual(fb.ANGULAR_RESOLUTION_SINGLE_TURN, 1)
         # …and 30 must not collide with its neighbours (28-29 protection current,
@@ -880,7 +1181,6 @@ class TestProbeBusGate(unittest.TestCase):
                          fb.REG_ANGULAR_RESOLUTION)
         self.assertEqual(fb.REG_ANGULAR_RESOLUTION + 1, fb.REG_HOMING_OFFSET)
 
-    # ── firmware fingerprint — WARN, never refuse ────────────────────────────
     def test_a_nonuniform_firmware_bus_warns_but_STILL_BOOTS(self):
         log = self._CaptureLogger()
         bus = self._RegBus(firmware={4: (3, 7)})
@@ -949,8 +1249,9 @@ class TestProbeBusGate(unittest.TestCase):
         self.assertIn('71', doc)
 
     def test_a_dead_bus_still_reports_a_cable_fault_not_a_firmware_fault(self):
-        # The firmware/resolution reads live in the SAME try as the EEPROM reads,
-        # so a read failure must keep its existing „Verkabelung" verdict.
+        # The firmware lives in the SAME block read as every other EEPROM
+        # register, so a read failure must keep its existing „Verkabelung"
+        # verdict.
         class _Dead(TestProbeBusGate._RegBus):
             def read(self, sid, addr, length):
                 if addr == fb.REG_FIRMWARE_MAJOR:
@@ -961,19 +1262,6 @@ class TestProbeBusGate(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('Verkabelung', msg)
         self.assertNotIn('Firmware', msg)
-
-    def test_factory_limits_refused_as_unprovisioned(self):
-        bus = self._RegBus()
-        bus.windows[2] = (0, 4095)   # factory window on joint2
-        ok, msg = self._probe()(bus)
-        self.assertFalse(ok)
-        self.assertIn('Servo 2', msg)
-        self.assertIn('rovision', msg)   # provisioniert/Provisionierung
-
-    def test_wheel_mode_refused(self):
-        ok, msg = self._probe()(self._RegBus(mode=1))
-        self.assertFalse(ok)
-        self.assertIn('Betriebsmodus', msg)
 
     def test_mixed_sts3250_joints_pass(self):
         # Joints 2/3 = STS3250 (2825) by design — a provisioned mixed arm boots.
@@ -986,43 +1274,16 @@ class TestProbeBusGate(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('Servomodell', msg)
 
-    def test_signs_drift_refused_naming_the_env_knob(self):
-        # Provisioned with sign −1 on joint 2 (mirrored EEPROM window) while
-        # the runtime signs say +1 → refuse and name the knob: commanding
-        # through mismatched windows freezes/clamps the joint at hardware
-        # level (CLAUDE.md: a sign flip requires re-provisioning).
-        bus = self._RegBus()
-        bus.windows[2] = fb.position_limit_window(
-            *_N['JOINT_LIMITS_RAD'][1], -1)
-        ok, msg = self._probe()(bus)
-        self.assertFalse(ok)
-        self.assertIn('EDUBOTICS_FEETECH_JOINT_SIGNS', msg)
-
     def test_dead_servos_still_named_first(self):
         ok, msg = self._probe()(self._RegBus(alive={1, 2, 3}))
         self.assertFalse(ok)
         self.assertIn('[4, 5, 6]', msg)
 
-    def test_multiturn_phase_bit_refused(self):
-        # A factory-reset / RMA servo shipping Phase bit 4 (multi-turn) would
-        # feed overflowed angles into the fixed tick↔angle map; provisioning
-        # clears it, the boot probe must refuse it (else boot-home runs skewed).
-        ok, msg = self._probe()(self._RegBus(phase=(1 << 4)))
-        self.assertFalse(ok)
-        self.assertIn('Servo 1', msg)
-        self.assertIn('Phase-Bit 4', msg)
-
-    def test_phase_bit_other_than_4_ignored(self):
-        # Only bit 4 is the multi-turn flag — other Phase bits are motor-drive
-        # config the probe must NOT reject (a provisioned arm can carry them).
-        ok, msg = self._probe()(self._RegBus(phase=0b0000_1011))
-        self.assertTrue(ok, msg)
-
     def test_wrapped_position_refused(self):
         # Hand-guiding is torque-OFF, so a student can push a joint past ±180°
         # of its zero; the encoder then reports the OTHER side of the tick<->angle
         # map (a 360° error) and boot-home would drive it the long way into its
-        # stop. joint2's window is [2048,4095]; a wrapped reading lands near 0.
+        # stop. joint2's window is [1024, 3072]; a wrapped reading lands near 0.
         ok, msg = self._probe()(self._RegBus(present={2: 5}))
         self.assertFalse(ok)
         self.assertIn('Servo 2', msg)
@@ -1037,13 +1298,8 @@ class TestProbeBusGate(unittest.TestCase):
         # >= 30° of slop: the original 10° band would have refused a limp
         # joint5 settling 11° past its −90° stop (2026-07-25 sizing decision).
         self.assertGreaterEqual(tol, 342)
-        # Every reading here is a POSSIBLE one, i.e. inside the 12-bit register:
-        # joint2 resting `tol−1` ticks below its 2048 minimum and joint5 the same
-        # distance below its 1024 minimum. (The upper stops of joint2/joint3 sit
-        # AT a register end, so "just past" is unrepresentable there — that is the
-        # known-accepted blindness the edge guard covers, not something the band
-        # can be tested against with an out-of-register tick.)
-        bus = self._RegBus(present={2: 2048 - tol + 1, 3: 2048,
+        # joint2 and joint5 resting `tol−1` ticks below their 1024 minimum.
+        bus = self._RegBus(present={2: 1024 - tol + 1, 3: 2048,
                                     5: 1024 - tol + 1})
         ok, msg = self._probe()(bus)
         self.assertTrue(ok, msg)
@@ -1051,33 +1307,22 @@ class TestProbeBusGate(unittest.TestCase):
     def test_band_still_catches_a_wrap_on_every_detectable_joint(self):
         # Widening the band must not cost DETECTION. A hand-turn past ±180° of
         # a joint's zero makes the encoder report from the other side of the
-        # tick↔angle map, which lands the reading at tick ≈0 or ≈4095. For each
-        # joint with a detectable (non-full-circle) window, BOTH wrap landings
-        # must still be refused at the shipped band width.
+        # tick↔angle map, which lands the reading at tick ≈0 or ≈4095. Since the
+        # centring no window touches a register end, so BOTH wrap landings are
+        # refused on ALL SIX joints, in every tick-direction combination.
         tol = _N['BOOT_POSITION_TOLERANCE_TICKS']
-        limits = _N['JOINT_LIMITS_RAD']
-        checked = 0
-        for idx in range(len(_N['SERVO_IDS'])):
-            lo, hi = fb.position_limit_window(*limits[idx], 1)
-            # The V1 has no full-circle joint: every window is detectable.
-            self.assertNotEqual((lo, hi), (0, 4095))
-            checked += 1
-            # A window that TOUCHES a register end cannot see the wrap landing
-            # on that side at ANY band width — joint2 and joint3 end at 4095.
-            # That is a property of the designed window, not of the band, so
-            # only the genuinely-outside landings are required.
-            detectable = [t for t in (0, 4095) if t < lo or t > hi]
-            self.assertTrue(detectable, f'joint{idx + 1} detects no wrap at all')
-            for landing in detectable:
-                self.assertFalse(
-                    lo - tol <= landing <= hi + tol,
-                    f'joint{idx + 1} window [{lo},{hi}] with band {tol} no '
-                    f'longer detects a wrap landing at tick {landing}')
-                ok, msg = self._probe()(
-                    self._RegBus(present={idx + 1: landing}))
-                self.assertFalse(ok, f'joint{idx + 1} @ {landing}')
-                self.assertIn(f'Servo {idx + 1}', msg)
-        self.assertEqual(checked, 6)          # joints 1-5 + the claw
+        for spec in _ALL_SPECS:
+            with _spec_bound(spec):
+                for idx, (lo, hi) in enumerate(spec.windows):
+                    sid = idx + 1
+                    for landing in (0, 4095):
+                        self.assertFalse(lo - tol <= landing <= hi + tol,
+                                         (sid, landing))
+                        ok, msg = self._probe()(
+                            self._RegBus(present={sid: landing}))
+                        self.assertFalse(ok, f'joint{sid} @ {landing}')
+                        self.assertIn(f'Servo {sid}', msg)
+                        self.assertIn('von Hand', msg)
 
     def test_boot_pos_tolerance_env_parse(self):
         # Bench knob for rig gate VR6: retunable per rig without an image
@@ -1095,31 +1340,28 @@ class TestProbeBusGate(unittest.TestCase):
         self.assertEqual(f('abc'), default)
         self.assertEqual(f('-5'), default)
 
-    def test_the_register_end_of_joint2_and_joint3_is_band_blind_but_edge_guarded(self):
-        # joint2/joint3's windows end AT tick 4095 (q = +π), so a reading there
-        # is IN-window and the plausibility BAND can never fire on it. The
-        # torque-on edge guard covers it instead: the STS position loop is not
-        # wrap-aware, so a reading ON the map edge is refused. Both halves are
-        # pinned together so neither can be lost while the other looks fine.
+    def test_no_window_touches_a_register_end_so_the_band_refuses_every_wrap(self):
+        # Before the centring joint2/joint3 ended AT tick 4095, so a reading
+        # there was IN-window and only the edge guard saw it. Now both windows
+        # are (1024, 3072) and the plausibility band itself refuses every
+        # near-edge reading, at both ends.
         band = _N['BOOT_POSITION_TOLERANCE_TICKS']
         for sid in (2, 3):
             lo, hi = fb.position_limit_window(
-                *_N['JOINT_LIMITS_RAD'][sid - 1], 1)
-            self.assertEqual((lo, hi), (2048, 4095))
-            self.assertTrue(lo - band <= 4095 <= hi + band)   # band inert
-            # A mid-range reading boots…
+                *_N['JOINT_LIMITS_RAD'][sid - 1], _N['JOINT_SIGNS'][sid - 1],
+                t0=_N['JOINT_T0'][sid - 1])
+            self.assertEqual((lo, hi), (1024, 3072))
             ok, msg = self._probe()(self._RegBus(present={sid: 3000}))
             self.assertTrue(ok, msg)
-            # …tick 4055 (40 from the end) still boots, tick 4056 ⇔
-            # q ≥ 3.0802 rad (e.g. a limp arm lying on its +π stop) is refused
-            # by the edge guard.
-            ok, msg = self._probe()(self._RegBus(present={sid: 4055}))
-            self.assertTrue(ok, msg)
-            for tick in (4056, 4095):
+            for tick in (0, 39, 4056, 4095):
+                self.assertFalse(lo - band <= tick <= hi + band)
                 ok, msg = self._probe()(self._RegBus(present={sid: tick}))
                 self.assertFalse(ok, f'servo {sid} @ {tick}')
-                self.assertIn('Positionsbereichs', msg)
-        self.assertAlmostEqual(_N['tick_to_rad'](4056, 1), 3.0802, places=4)
+                self.assertIn('von Hand', msg)
+        # tick 4056 on joint2 (sign +1, T0 1024) is +4.651 rad — far past the
+        # +π stop, not a reading a healthy joint can produce.
+        self.assertAlmostEqual(_N['tick_to_rad'](4056, 1, t0=1024), 4.6510,
+                               places=4)
 
 
 class _TorqueFakeBus:
@@ -1288,10 +1530,14 @@ class TestTorqueOnEdgeGuard(unittest.TestCase):
     wrap-aware — it computes `goal − present` naively over 0..4095, so a goal
     seeded on a joint resting ON the map edge drives a FULL REVOLUTION the wrong
     way (a joint at tick 12 with goal 4090 drove the wrong way until the bench
-    tool cut torque). On the V1 that edge is the +π stop of joint2/joint3, whose
-    windows end at tick 4095. set_torque seeds `Goal = Present` read milliseconds earlier, so
-    one tick of sensor dither at the boundary is enough. The guard refuses EVERY
-    torque-on in that state; torque-OFF is never blocked."""
+    tool cut torque). Since the centring no V1 window touches that edge, so a
+    joint resting there has been hand-turned far past a designed limit.
+    set_torque seeds `Goal = Present` read milliseconds earlier, so one tick of
+    sensor dither at the boundary is enough. The guard refuses EVERY torque-on
+    in that state; torque-OFF is never blocked."""
+
+    def setUp(self):
+        _without_signs_env(self)
 
     def _node(self, ticks=None, missing=(), post_ticks=None, missing_at=None):
         bus = _TorqueFakeBus(ticks, missing, post_ticks, missing_at)
@@ -1364,8 +1610,9 @@ class TestTorqueOnEdgeGuard(unittest.TestCase):
 
     def test_the_guard_only_judges_the_OFF_to_ON_transition(self):
         # The server asserts torque ON defensively on EVERY WorkshopJog call, so
-        # judging an already-locked arm made any jog beyond +176.5° on
-        # joint2/joint3 — inside the URDF window the jog accepts — fail, and
+        # judging an already-locked arm made any jog of a joint parked near the
+        # register edge fail (history: before the 2026-10 centring that was
+        # joint2/joint3 beyond +176.5°, inside their URDF window), and
         # three of those in a row produce „Arm konnte wiederholt nicht verriegelt
         # werden … Umgebung neu starten": a misdiagnosis (the arm IS locked)
         # whose remedy probe_bus then refuses at the same tick.
@@ -1437,14 +1684,12 @@ class TestTorqueOnEdgeGuard(unittest.TestCase):
         self.assertNotIn('Positionsbereichs', resp.message)
 
     def test_guard_covers_EVERY_joint_not_a_full_circle_subset(self):
-        # The guard judges all 6 servos. The joints whose designed window is
-        # clear of both register ends (joint1, joint4, joint5, claw) cannot reach
-        # a near-edge reading innocently — at the shipped 40-tick margin such a
-        # reading is 756+ ticks OUTSIDE the window, i.e. 66°+ past a designed
-        # limit — so covering them costs nothing and the boot band already
-        # refuses them. joint2 and joint3 (hi = 4095) are the joints this ADDS
-        # at the service re-torque path: their windows TOUCH a register end, so
-        # a near-edge reading there is IN-window and the band is blind to it.
+        # The guard judges all 6 servos. Since the centring every window is
+        # clear of both register ends, so no joint reaches a near-edge reading
+        # innocently — at the shipped 40-tick margin such a reading is 756+
+        # ticks OUTSIDE the window, i.e. 66°+ past a designed limit — and the
+        # boot band already refuses each of them. On the service re-torque path
+        # (no band) the guard refuses exactly those states.
         margin = _N['EDGE_REFUSE_MARGIN_TICKS']
         for sid in _N['SERVO_IDS']:
             for tick in (0, margin - 1, 4096 - margin, 4095):
@@ -1457,20 +1702,25 @@ class TestTorqueOnEdgeGuard(unittest.TestCase):
             self.assertFalse(node.set_torque(True), f'servo {sid}')
             self.assertIn(f'Gelenk {sid}', node.errors[0])
             self.assertEqual(bus.writes, [])
-        # Redundancy proof for the non-touching windows: every near-edge reading
-        # there lands outside the designed window by more than the boot band, so
-        # nothing the edge guard refuses at BOOT was previously accepted.
+        # Redundancy proof: every near-edge reading lands outside the designed
+        # window by more than the boot band (by at least 756 ticks, joint4), so
+        # nothing the edge guard refuses at BOOT was previously accepted — and
+        # the set of IN-window near-edge readings is empty for every joint.
         band = _N['BOOT_POSITION_TOLERANCE_TICKS']
-        for idx, sid in enumerate(_N['SERVO_IDS']):
-            lo, hi = fb.position_limit_window(*_N['JOINT_LIMITS_RAD'][idx], 1)
-            for tick in (margin - 1, 4096 - margin):
-                if lo <= tick <= hi:
-                    # in-window: joint2/joint3 at the 4095 end — the band CANNOT
-                    # see this, which is exactly why the edge guard exists.
-                    self.assertIn(sid, (2, 3), f'servo {sid} @ {tick}')
-                    continue
-                outside = lo - tick if tick < lo else tick - hi
-                self.assertGreater(outside, band, f'servo {sid} @ {tick}')
+        near_edge = list(range(margin)) + list(range(4096 - margin, 4096))
+        for spec in _ALL_SPECS:
+            in_window = []
+            closest = 4096
+            for idx, (lo, hi) in enumerate(spec.windows):
+                for tick in near_edge:
+                    if lo <= tick <= hi:
+                        in_window.append((idx + 1, tick))
+                        continue
+                    outside = lo - tick if tick < lo else tick - hi
+                    closest = min(closest, outside)
+                    self.assertGreater(outside, band, (idx + 1, tick))
+            self.assertEqual(in_window, [])
+            self.assertEqual(closest, 756)          # joint4 at tick 4056
 
     def test_a_trimmed_window_is_NOT_immunised_by_the_eeprom_clamp(self):
         # The 2026-07-26 correction. The earlier derivation exempted any joint
@@ -1480,7 +1730,7 @@ class TestTorqueOnEdgeGuard(unittest.TestCase):
         # a trimmed joint. Arithmetic pinned here so the false claim cannot come
         # back as a "simplification".
         trimmed = (-2.9671, 2.9671)                          # ±170°
-        lo, hi = fb.position_limit_window(*trimmed, 1)
+        lo, hi = fb.position_limit_window(*trimmed, 1, t0=2048)
         self.assertEqual((lo, hi), (114, 3982))
         parked, crossed_to = 4095, 2                 # dither across the seam
         clamped_goal = min(max(parked, lo), hi)
@@ -1614,23 +1864,28 @@ class TestTorqueOnEdgeGuard(unittest.TestCase):
         # probe_bus runs BEFORE any ROS entity exists and main() retries it every
         # 5 s, so this is the copy that self-heals — and the copy that keeps the
         # refusal from surfacing in start_boot_home, which runs exactly once.
+        # With the band switched off (its documented rollback) the edge guard
+        # alone refuses every near-edge reading on every joint…
         probe = TestProbeBusGate._probe()
-        # joint2 and joint3 (hi = 4095) at their top end: IN-window readings the
-        # plausibility band cannot see — the readings only this guard judges.
-        for sid, tick in ((2, 4094), (3, 4095), (2, 4056), (3, 4060)):
-            reg = TestProbeBusGate._RegBus(present={sid: tick})
-            lo, hi = reg.windows[sid]
-            self.assertTrue(lo <= tick <= hi,
-                            f'servo {sid} @ {tick} must be IN-window for this '
-                            f'test to prove the band cannot see it')
-            ok, msg = probe(reg)
-            self.assertFalse(ok, f'servo {sid} @ {tick}')
-            self.assertIn(f'Gelenk {sid}', msg)
-            self.assertIn('Positionsbereichs', msg)     # the edge wording…
-            self.assertIn('von selbst weiter', msg)     # …+ the 5 s retry promise
-        # …and the same joints mid-range still boot.
+        with patch.dict(_N, {'BOOT_POSITION_TOLERANCE_TICKS': 4096}):
+            for sid in _SIDS:
+                for tick in (0, 39, 4056, 4095):
+                    ok, msg = probe(
+                        TestProbeBusGate._RegBus(present={sid: tick}))
+                    self.assertFalse(ok, f'servo {sid} @ {tick}')
+                    self.assertIn(f'Gelenk {sid}', msg)
+                    self.assertIn('Positionsbereichs', msg)   # the edge wording…
+                    self.assertIn('von selbst weiter', msg)   # …+ the 5 s retry
+        # …and with the default band the same readings are refused one step
+        # earlier, by the band (no window touches a register end any more).
+        for sid in _SIDS:
+            for tick in (0, 39, 4056, 4095):
+                ok, msg = probe(TestProbeBusGate._RegBus(present={sid: tick}))
+                self.assertFalse(ok, f'servo {sid} @ {tick}')
+                self.assertIn('von Hand', msg)
+        # …while HOME (spec A) still boots.
         ok, msg = probe(TestProbeBusGate._RegBus(
-            present={2: 2465, 3: 3013, 4: 2635, 6: 2048}))
+            present={2: 1441, 3: 2107, 4: 1461, 6: 2123}))
         self.assertTrue(ok, msg)
 
     def test_edge_margin_env_parse(self):
@@ -1780,23 +2035,22 @@ class TestPostEnergiseWrongWayAbort(unittest.TestCase):
         # The ONE legitimate non-zero error: the servo clamps Goal_Position into
         # its EEPROM window, so a joint resting OUTSIDE that window is genuinely
         # pulled to the window edge. Enumerated over every reading the edge guard
-        # permits, the worst such distance is 2008 ticks; with the edge guard
-        # DISABLED (margin 0 — the documented rollback) the supremum is exactly
-        # 2048, which the STRICT `>` still does not abort. That is what makes the
-        # threshold structurally free of false aborts rather than merely
+        # permits, the worst such distance is 1496 ticks (the claw at tick 40);
+        # with the edge guard DISABLED (margin 0 — the documented rollback) it is
+        # 1536 (the claw at tick 0). Both stay under the STRICT `>` threshold, so
+        # the threshold is structurally free of false aborts rather than merely
         # well-separated.
         margin = _N['EDGE_REFUSE_MARGIN_TICKS']
         threshold = _N['TORQUE_ABORT_ERROR_TICKS']
         worst_guarded = worst_unguarded = 0
-        for idx in range(len(_N['SERVO_IDS'])):
-            lo, hi = fb.position_limit_window(*_N['JOINT_LIMITS_RAD'][idx], 1)
+        for lo, hi in _N['SERVO_SPEC'].windows:
             for present in range(4096):
                 pull = abs(max(lo, min(hi, present)) - present)
                 worst_unguarded = max(worst_unguarded, pull)
                 if min(present, 4095 - present) >= margin:
                     worst_guarded = max(worst_guarded, pull)
-        self.assertEqual(worst_guarded, 2008)
-        self.assertEqual(worst_unguarded, 2048)
+        self.assertEqual(worst_guarded, 1496)
+        self.assertEqual(worst_unguarded, 1536)
         self.assertLess(worst_guarded, threshold)
         self.assertLessEqual(worst_unguarded, threshold)   # strict `>` saves it
         # …and the boot band bounds it far tighter than either on the boot path.
@@ -1867,11 +2121,12 @@ class TestPostEnergiseWrongWayAbort(unittest.TestCase):
     # ── the abort itself ───────────────────────────────────────────────────
     def test_a_wrapped_error_after_energising_de_energises_the_arm(self):
         # Tick 4055 is the INNERMOST high reading the pre-torque edge guard
-        # permits (4095 − 4055 = 40 = the margin) — on joint3, whose window ends
-        # at 4095 — so this scenario is exactly the one the edge guard cannot
-        # see: it passes the park, and the joint then crosses the seam to tick 12
-        # inside the read→write window. That is the measured runaway signature,
-        # and only the post-energise check catches it.
+        # permits (4095 − 4055 = 40 = the margin), and on the service re-torque
+        # path no plausibility band runs — so this scenario is exactly the one
+        # the edge guard cannot see: it passes the park, and the joint then
+        # crosses the seam to tick 12 inside the read→write window. That is the
+        # measured runaway signature, and only the post-energise check catches
+        # it (the servo's goal is joint3's clamped window end, 3072).
         node, bus = self._node({3: 4055}, post_ticks={3: 12})
         self.assertFalse(node.set_torque(True))
         # Torque_Enable really was written 1 and then 0 — the abort reached the
@@ -1899,7 +2154,8 @@ class TestPostEnergiseWrongWayAbort(unittest.TestCase):
         # to the cables.
         self.assertIn('[FEHLER]', resp.message)
         self.assertIn('Gelenk 3', resp.message)
-        self.assertIn('Ziel 4055', resp.message)        # the evidence
+        # the evidence: the EFFECTIVE goal (joint3's window end), not the park
+        self.assertIn('Ziel 3072', resp.message)
         self.assertIn('Ist 12', resp.message)
         self.assertIn('falsche Richtung', resp.message)
         self.assertIn('ausgeschaltet', resp.message)    # says what it DID
@@ -1966,7 +2222,10 @@ class TestPostEnergiseWrongWayAbort(unittest.TestCase):
         # abort must accept it too or „Umgebung starten" would refuse a healthy
         # arm every time it collapsed a little past a stop.
         band = _N['BOOT_POSITION_TOLERANCE_TICKS']
-        lo, _hi = fb.position_limit_window(*_N['JOINT_LIMITS_RAD'][0], 1)
+        lo, _hi = fb.position_limit_window(*_N['JOINT_LIMITS_RAD'][0],
+                                           _N['JOINT_SIGNS'][0],
+                                           t0=_N['JOINT_T0'][0])
+        self.assertEqual(lo, 1024)
         parked = lo - (band - 1)
         node, bus = self._node({1: parked})
         self.assertTrue(node.set_torque(True), node.errors)
@@ -2193,17 +2452,19 @@ class TestPostEnergiseWrongWayAbort(unittest.TestCase):
         self.assertIn('fb.position_limit_window(', seed)
         probe = src.split('def probe_bus', 1)[1].split('\n    def ', 1)[0]
         self.assertIn('fb.position_limit_window(', probe)
-        # Behaviour: the claw's window is [2048, 3072]. A claw reading of 2000
-        # is BELOW it, so the servo will hold 2048 — a 48-tick pull-in, not the
+        # Behaviour: the claw's window is [1536, 2560]. A claw reading of 1400
+        # is BELOW it, so the servo will hold 1536 — a 136-tick pull-in, not the
         # 0 a "goal == what we wrote" model would compute.
-        node, _ = self._node({6: 2000})
+        node, _ = self._node({6: 1400})
         goals = None
         with node._bus_lock:
             goals = node._seed_goal_from_present_locked()
-        self.assertEqual(goals[6], 2048)
+        self.assertEqual(goals[6], 1536)
         self.assertEqual(goals[1], 2048)             # in-window: unchanged
-        lo, hi = fb.position_limit_window(*_N['JOINT_LIMITS_RAD'][5], 1)
-        self.assertEqual((lo, hi), (2048, 3072))
+        lo, hi = fb.position_limit_window(*_N['JOINT_LIMITS_RAD'][5],
+                                          _N['JOINT_SIGNS'][5],
+                                          t0=_N['JOINT_T0'][5])
+        self.assertEqual((lo, hi), (1536, 2560))
 
     # ── env knob ───────────────────────────────────────────────────────────
     def test_abort_threshold_env_parse(self):
@@ -2776,8 +3037,10 @@ class TestUrdfDriverNoDrift(unittest.TestCase):
 
 class TestV1ArmSpec(unittest.TestCase):
     """The V1's arm constants are PLAIN module-level literals: no robot-type
-    override, no second arm. Everything after them iterates SERVO_IDS /
-    JOINT_LIMITS_RAD / JOINT_SIGNS and is arm-agnostic."""
+    override, no second arm. The per-joint servo facts (signs, encoder zero,
+    windows) come from the servo spec. Everything after them iterates
+    SERVO_IDS / JOINT_LIMITS_RAD / JOINT_SIGNS / JOINT_T0 and is
+    arm-agnostic."""
 
     def _source(self):
         return open(os.path.join(_DOCKER, 'feetech_arm_node.py'),
@@ -2792,7 +3055,7 @@ class TestV1ArmSpec(unittest.TestCase):
         self.assertEqual(ids, tuple(range(1, len(ids) + 1)))
         self.assertEqual(len(ids), len(_N['JOINT_NAMES']))
         self.assertEqual(len(ids), len(_N['JOINT_LIMITS_RAD']))
-        self.assertEqual(len(ids), len(_N['_DEFAULT_SIGNS']))
+        self.assertEqual(len(ids), len(_N['SERVO_SPEC'].joints))
         self.assertEqual(len(ids), len(_N['_TORQUE_OFF_PAYLOAD']))
 
     def test_claw_open_command_is_inside_the_driver_band(self):
@@ -2817,10 +3080,10 @@ class TestV1ArmSpec(unittest.TestCase):
         self.assertNotIn('ROBOT_TYPE', defined)
         self.assertNotIn('EDUBOTICS_ROBOT_TYPE', source)
 
-    def test_every_arm_constant_is_defined_before_the_signs_are_parsed(self):
-        """`_parse_signs` validates against len(SERVO_IDS) and falls back to
-        `_DEFAULT_SIGNS`, both read at CALL time — so JOINT_SIGNS must be
-        computed AFTER every arm constant it depends on."""
+    def test_every_arm_constant_is_defined_before_the_spec_binding(self):
+        """The deps-free loader executes the module-level assignments in
+        order, so the spec binding must follow every arm literal, and the three
+        names derived from it must follow the binding."""
         body = ast.parse(self._source()).body
 
         def assign_index(name):
@@ -2829,12 +3092,19 @@ class TestV1ArmSpec(unittest.TestCase):
                             isinstance(t, ast.Name) and t.id == name
                             for t in n.targets))
 
-        signs = assign_index('JOINT_SIGNS')
+        spec = assign_index('SERVO_SPEC')
         for name in ('SERVO_IDS', 'JOINT_NAMES', 'HOME_JOINTS_RAD',
-                     'GRIPPER_OPEN_RAD', 'JOINT_LIMITS_RAD', '_DEFAULT_SIGNS',
+                     'GRIPPER_OPEN_RAD', 'JOINT_LIMITS_RAD',
                      'TORQUE_SERVICE', 'HOME_SERVICE', 'GEOMETRY_SPEC',
                      'N_ARM_JOINTS'):
-            self.assertLess(assign_index(name), signs, name)
+            self.assertLess(assign_index(name), spec, name)
+        for name in ('JOINT_SIGNS', 'JOINT_T0', 'JOINT_WINDOWS'):
+            self.assertGreater(assign_index(name), spec, name)
+        src = self._source()
+        self.assertIn('SERVO_SPEC = fss.V1', src)
+        for gone in ('_parse_signs', '_DEFAULT_SIGNS',
+                     'angular_resolution_note'):
+            self.assertNotIn(gone, src)
 
     def test_the_boot_home_floor_check_is_arm_agnostic(self):
         """It slices by the derived joint count and passes the arm's spec,
@@ -2860,14 +3130,17 @@ class TestShippedWiring(unittest.TestCase):
         self.assertIn('COPY feetech_bus.py /usr/local/bin/feetech_bus.py', df)
         self.assertIn(
             'COPY feetech_arm_node.py /usr/local/bin/feetech_arm_node.py', df)
+        self.assertIn('COPY feetech_servo_spec.py '
+                      '/usr/local/bin/feetech_servo_spec.py', df)
         # BOTH the CRLF-strip and chmod lists (a Windows checkout otherwise
         # ships them corrupt — exactly what that RUN exists to prevent).
         sed_line = [line for line in df.splitlines() if "sed -i 's/\\r$//'" in line]
         chmod_line = [line for line in df.splitlines() if 'chmod +x' in line]
-        self.assertTrue(any('feetech_arm_node.py' in ln and 'feetech_bus.py' in ln
-                            for ln in sed_line), sed_line)
-        self.assertTrue(any('feetech_arm_node.py' in ln and 'feetech_bus.py' in ln
-                            for ln in chmod_line), chmod_line)
+        trio = ('feetech_arm_node.py', 'feetech_bus.py', 'feetech_servo_spec.py')
+        self.assertTrue(any(all(f in ln for f in trio) for ln in sed_line),
+                        sed_line)
+        self.assertTrue(any(all(f in ln for f in trio) for ln in chmod_line),
+                        chmod_line)
 
     def test_entrypoint_branches_and_keeps_cameras(self):
         ep = self._read('docker', 'open_manipulator', 'entrypoint_omx.sh')
@@ -2952,6 +3225,9 @@ class TestShippedWiring(unittest.TestCase):
         self.assertIn('feetech_arm_node.py', parity)
         self.assertIn('feetech_geometry.py', parity)
         self.assertIn('feetech_bus.py', parity)
+        loop = next(line for line in parity.splitlines()
+                    if line.strip().startswith('for f in feetech_arm_node.py'))
+        self.assertIn('feetech_servo_spec.py', loop.split())
 
     def test_identify_arm_speaks_both_protocols(self):
         ia = self._read('docker', 'open_manipulator', 'identify_arm.py')
@@ -3043,21 +3319,18 @@ class TestGuiDetectionSeam(unittest.TestCase):
                 raise _Reached
 
         with self.assertRaises(_Reached):
-            prov.provision(_Bus(), 'V1-0001', (1, 1, 1, 1, 1, 1), good,
-                           dry_run=True)
+            prov.provision(_Bus(), 'V1-0001', good, dry_run=True)
 
         mismatched_ids = dict(good, servo_ids=(1, 2, 3, 4, 5, 6, 7))
         with self.assertRaises(SystemExit) as ids:
-            prov.provision(_Bus(), 'V1-0001', (1, 1, 1, 1, 1, 1),
-                           mismatched_ids, dry_run=True)
+            prov.provision(_Bus(), 'V1-0001', mismatched_ids, dry_run=True)
         self.assertIn('Servo-Liste', str(ids.exception))
 
         widened = list(good['joint_limits_rad'])
         widened[3] = (-3.1416, 3.1416)
         mismatched_limits = dict(good, joint_limits_rad=tuple(widened))
         with self.assertRaises(SystemExit) as lim:
-            prov.provision(_Bus(), 'V1-0001', (1, 1, 1, 1, 1, 1),
-                           mismatched_limits, dry_run=True)
+            prov.provision(_Bus(), 'V1-0001', mismatched_limits, dry_run=True)
         self.assertIn('Gelenkgrenzen', str(lim.exception))
 
     def test_list_arm_devices_filters_by_family(self):
@@ -3171,28 +3444,36 @@ class TestProvisionTool(unittest.TestCase):
         spec.loader.exec_module(cls.prov)
 
     def test_limits_to_ticks_positive_sign(self):
-        # joint4 (index 3): the ±110° = ±1.9198 window, 796–3300.
-        lo, hi = self.prov.limits_to_ticks(3, (1,) * 6)
+        # joint4 (index 3): the ±110° = ±1.9198 window around T0 2048, 796–3300.
+        lo, hi = self.prov.limits_to_ticks(3, _SPEC_A)
         self.assertEqual(lo, 2048 + round(-1.9198 / (2 * 3.141592653589793 / 4096)))
         self.assertEqual(hi, 2048 + round(1.9198 / (2 * 3.141592653589793 / 4096)))
         self.assertEqual((lo, hi), (796, 3300))
-        # joint2/joint3 (index 1/2): 0..π, the window ENDS at tick 4095.
-        self.assertEqual(self.prov.limits_to_ticks(1, (1,) * 6), (2048, 4095))
-        self.assertEqual(self.prov.limits_to_ticks(2, (1,) * 6), (2048, 4095))
+        # every joint gets its centred window
+        self.assertEqual([self.prov.limits_to_ticks(i, _SPEC_A)
+                          for i in range(6)],
+                         [(1024, 3072), (1024, 3072), (1024, 3072),
+                          (796, 3300), (1024, 3072), (1536, 2560)])
+        self.assertEqual(self.prov.designed_zero_tick(1, _SPEC_A), 1024)
+        self.assertEqual(self.prov.designed_zero_tick(2, _SPEC_A), 3072)
 
     def test_limits_to_ticks_negative_sign_mirrors(self):
-        lo_p, hi_p = self.prov.limits_to_ticks(3, (1,) * 6)
-        lo_n, hi_n = self.prov.limits_to_ticks(3, (1, 1, 1, -1, 1, 1))
-        # mirrored around the centre AND re-ordered lo<=hi.
-        self.assertEqual(lo_n, 2 * 2048 - hi_p)
-        self.assertEqual(hi_n, 2 * 2048 - lo_p)
-        self.assertLessEqual(lo_n, hi_n)
+        # The centred window is the same for both tick directions; only T0
+        # mirrors (joint2: 1024 under A, 3072 under B).
+        for i in range(6):
+            self.assertEqual(self.prov.limits_to_ticks(i, _SPEC_A),
+                             self.prov.limits_to_ticks(i, _SPEC_B))
+        self.assertEqual(self.prov.designed_zero_tick(1, _SPEC_B), 3072)
+        # unpinned: no encoder zero to calibrate to
+        with self.assertRaises(ValueError):
+            self.prov.designed_zero_tick(1, fss.V1)
 
     def test_limits_clamped_to_register_range(self):
-        for i in range(6):
-            lo, hi = self.prov.limits_to_ticks(i, (1,) * 6)
-            self.assertGreaterEqual(lo, 0)
-            self.assertLessEqual(hi, 4095)
+        for spec in (_SPEC_A, _SPEC_B):
+            for i in range(6):
+                lo, hi = self.prov.limits_to_ticks(i, spec)
+                self.assertGreaterEqual(lo, 0)
+                self.assertLessEqual(hi, 4095)
 
     def test_record_checksum_stable_and_sensitive(self):
         entries = [{'id': 1, 'homing_offset': 5}]
@@ -3212,9 +3493,11 @@ class TestProvisionTool(unittest.TestCase):
         self.assertNotEqual(a, e)
 
     def test_gripper_gets_the_pinch_floor_torque(self):
-        self.assertEqual(self.prov.GRIPPER_MAX_TORQUE, 150)  # claw pinch floor
-        self.assertGreater(self.prov.ARM_MAX_TORQUE,
-                           self.prov.GRIPPER_MAX_TORQUE)
+        self.assertEqual(fss.MAX_TORQUE[5], 150)  # claw pinch floor
+        self.assertGreater(fss.MAX_TORQUE[0], fss.MAX_TORQUE[5])
+        for gone in ('ARM_MAX_TORQUE', 'GRIPPER_MAX_TORQUE',
+                     'PROTECTION_CURRENT', 'OVERLOAD_TORQUE', 'RETURN_DELAY'):
+            self.assertFalse(hasattr(self.prov, gone), gone)
 
     def test_limits_match_the_driver_node(self):
         # No-drift: the provision tool and feetech_arm_node must write/enforce the
@@ -3226,27 +3509,41 @@ class TestProvisionTool(unittest.TestCase):
 class _ProvFakeBus:
     """Register-model fake bus for the feetech_provision end-to-end tests.
 
-    Byte-addressable EEPROM/RAM per servo; Present_Position is COMPUTED as
-    (actual − Homing_Offset) on every read, so writing the offset changes what
-    the still-jigged arm reports — which is exactly what the new jig-pose
+    Byte-addressable EEPROM/RAM per servo, seeded with the spec's FACTORY
+    image of the servo's model (a vendor-fresh servo: its own id, baud 0,
+    firmware 3.9, Lock 1). Present_Position is COMPUTED as (actual −
+    Homing_Offset) on every read, so writing the offset changes what the
+    still-jigged arm reports — which is exactly what the jig-pose
     postcondition re-read depends on. Every write is logged so the ordering /
     endurance-skip / commit-point pins can be asserted."""
 
-    def __init__(self, actual_ticks, phase=0x10, return_delay=250, model=None,
-                 mode=0, response_level=1, torque=1, models=None):
+    def __init__(self, actual_ticks, phase_bit4=True, phase_override=None,
+                 return_delay=250, model=None, mode=0, response_level=1,
+                 torque=1, models=None):
         self.actual = dict(actual_ticks)
         self.writes = []          # (sid, addr, bytes) in call order
         self.closed = False
         self.mem = {}
-        default_model = fb.STS3215_MODEL_NUMBER if model is None else model
+        sizes = {addr: size for addr, size, _n, _c in fss.LAYOUT}
         for sid in actual_ticks:
             m = bytearray(256)
+            sid_model = (models or {}).get(
+                sid, model if model is not None else fss.MODELS[sid - 1])
+            factory = fss.FACTORY.get(sid_model, fss.FACTORY[777])
+            for addr, value in factory.items():
+                if sizes[addr] == 2:
+                    m[addr:addr + 2] = fb.le16(value)
+                else:
+                    m[addr] = value
             m[fb.REG_FIRMWARE_MAJOR] = 3
             m[fb.REG_FIRMWARE_MAJOR + 1] = 9
-            sid_model = (models or {}).get(sid, default_model)
             m[fb.REG_MODEL_NUMBER] = sid_model & 0xFF
             m[fb.REG_MODEL_NUMBER + 1] = (sid_model >> 8) & 0xFF
-            m[fb.REG_PHASE] = phase              # bit 4 set → provision clears it
+            m[fb.REG_ID] = sid
+            phase = factory[18]
+            m[fb.REG_PHASE] = (phase | 0x10) if phase_bit4 else (phase & ~0x10)
+            if phase_override and sid in phase_override:
+                m[fb.REG_PHASE] = phase_override[sid]
             m[fb.REG_LOCK] = 1                   # protected → provision writes 0
             m[fb.REG_RETURN_DELAY] = return_delay
             m[fb.REG_OPERATING_MODE] = mode      # 0 = position (factory)
@@ -3316,11 +3613,12 @@ class TestProvisionEndToEnd(unittest.TestCase):
     def test_full_provision_order_and_commit(self):
         actual = {sid: 2048 + sid for sid in range(1, 7)}  # nonzero offsets
         bus = _ProvFakeBus(actual)
-        record = self.prov.provision(bus, 'V1-0001', (1,) * 6, self.V1_SPEC)
+        record = self.prov.provision(bus, 'V1-0001', self.V1_SPEC,
+                                     servo_spec=_SPEC_A)
         # Record built ONLY after all 6 servos verified (the commit point).
         self.assertEqual(len(record['servos']), 6)
         self.assertEqual(record['arm_serial'], 'V1-0001')
-        self.assertEqual(record['signs'], [1] * 6)
+        self.assertEqual(record['signs'], list(_SPEC_A.signs))
         self.assertEqual(record['profile_id'], 'v1_studio')
         for sid in range(1, 7):
             w = bus.writes_for(sid)
@@ -3351,7 +3649,8 @@ class TestProvisionEndToEnd(unittest.TestCase):
         # the same map the runtime uses. Writing it AFTER the offset would bake the
         # offset under one scale and run under another.
         bus = _ProvFakeBus({sid: 2048 + sid for sid in range(1, 7)})
-        self.prov.provision(bus, 'V1-0001', (1,) * 6, self.V1_SPEC)
+        self.prov.provision(bus, 'V1-0001', self.V1_SPEC,
+                            servo_spec=_SPEC_A)
         for sid in range(1, 7):
             addrs = [a for a, _ in bus.writes_for(sid)]
             self.assertIn(fb.REG_ANGULAR_RESOLUTION, addrs)
@@ -3369,14 +3668,16 @@ class TestProvisionEndToEnd(unittest.TestCase):
         for sid in range(1, 7):
             bus.mem[sid][fb.REG_ANGULAR_RESOLUTION] = \
                 fb.ANGULAR_RESOLUTION_SINGLE_TURN
-        self.prov.provision(bus, 'V1-0002', (1,) * 6, self.V1_SPEC)
+        self.prov.provision(bus, 'V1-0002', self.V1_SPEC,
+                            servo_spec=_SPEC_A)
         for sid in range(1, 7):
             self.assertNotIn(fb.REG_ANGULAR_RESOLUTION,
                              [a for a, _ in bus.writes_for(sid)])
 
     def test_the_record_carries_resolution_and_the_shared_firmware_spelling(self):
         bus = _ProvFakeBus({sid: 2048 for sid in range(1, 7)})
-        record = self.prov.provision(bus, 'V1-0003', (1,) * 6, self.V1_SPEC)
+        record = self.prov.provision(bus, 'V1-0003', self.V1_SPEC,
+                                     servo_spec=_SPEC_A)
         for entry in record['servos']:
             self.assertEqual(entry['angular_resolution'], 1)
             # _ProvFakeBus seeds firmware 3.9; the ONE shared formatter must keep
@@ -3386,8 +3687,10 @@ class TestProvisionEndToEnd(unittest.TestCase):
 
     def test_phase_bit4_not_touched_when_clear(self):
         # Phase bit-4 read-modify-write is only-when-set.
-        bus = _ProvFakeBus({sid: 2048 + sid for sid in range(1, 7)}, phase=0x00)
-        self.prov.provision(bus, 'V1-0002', (1,) * 6, self.V1_SPEC)
+        bus = _ProvFakeBus({sid: 2048 + sid for sid in range(1, 7)},
+                           phase_bit4=False)
+        self.prov.provision(bus, 'V1-0002', self.V1_SPEC,
+                            servo_spec=_SPEC_A)
         for sid in range(1, 7):
             self.assertNotIn(fb.REG_PHASE, [a for a, _ in bus.writes_for(sid)])
 
@@ -3414,8 +3717,8 @@ class TestProvisionEndToEnd(unittest.TestCase):
         # Bench 2026-07-24: J5 jigged with raw tick 23 (near the 0 boundary)
         # under a legacy +85 offset reads Present 4034; the naive
         # `present + current_off` = 4119 computes a +2071 offset that
-        # false-overflows. The mod-4096 fix must recover raw 23 → offset −2025
-        # and provision cleanly, then re-read the jig pose as the designed tick.
+        # false-overflows. The wrap-aware formula must recover raw 23 and land
+        # every joint on ITS centred T0 (2048, 1024, 3072 or 1536 under A).
         bus = _ProvFakeBus({sid: 23 for sid in range(1, 7)})
         # seed the legacy +85 homing offset the bench arm actually carried
         for sid in range(1, 7):
@@ -3424,11 +3727,16 @@ class TestProvisionEndToEnd(unittest.TestCase):
             bus.mem[sid][fb.REG_HOMING_OFFSET + 1] = (off >> 8) & 0xFF
         # sanity: the pre-provision Present is the WRAPPED 4034, not 23−85
         self.assertEqual(bus._present_raw(1), (23 - 85) % 4096)
-        record = self.prov.provision(bus, 'V1-WRAP', (1,) * 6, self.V1_SPEC)
+        record = self.prov.provision(bus, 'V1-WRAP', self.V1_SPEC,
+                                     servo_spec=_SPEC_A)
         by_id = {e['id']: e for e in record['servos']}
         self.assertEqual(by_id[1]['homing_offset'], 23 - 2048)   # −2025
         # After the write the still-jigged pose reads the designed centre tick.
         self.assertEqual(bus._present_raw(1), 2048)
+        for sid, offset, reads in ((2, -1001, 1024), (3, 1047, 3072),
+                                   (6, -1513, 1536)):
+            self.assertEqual(by_id[sid]['homing_offset'], offset, sid)
+            self.assertEqual(bus._present_raw(sid), reads, sid)
 
     def test_jig_postcondition_catches_offset_skew(self):
         # The jig post-condition guard: after the offset write, the still-jigged arm must
@@ -3439,7 +3747,8 @@ class TestProvisionEndToEnd(unittest.TestCase):
                 return self.actual[sid] + self._homing_offset(sid)  # WRONG sign
         bus = _SkewBus({sid: 2148 for sid in range(1, 7)})
         with self.assertRaises(SystemExit) as ctx:
-            self.prov.provision(bus, 'V1-0003', (1,) * 6, self.V1_SPEC)
+            self.prov.provision(bus, 'V1-0003', self.V1_SPEC,
+                                servo_spec=_SPEC_A)
         self.assertIn('Jig-Position', str(ctx.exception))
 
     def test_mixed_sts3250_arm_records_actual_models(self):
@@ -3449,7 +3758,8 @@ class TestProvisionEndToEnd(unittest.TestCase):
         models = {sid: (fb.STS3250_MODEL_NUMBER if sid in (2, 3)
                         else fb.STS3215_MODEL_NUMBER) for sid in range(1, 7)}
         bus = _ProvFakeBus({sid: 2048 for sid in range(1, 7)}, models=models)
-        record = self.prov.provision(bus, 'V1-MIX', (1,) * 6, self.V1_SPEC)
+        record = self.prov.provision(bus, 'V1-MIX', self.V1_SPEC,
+                                     servo_spec=_SPEC_A)
         by_id = {e['id']: e for e in record['servos']}
         self.assertEqual(by_id[2]['model_number'], fb.STS3250_MODEL_NUMBER)
         self.assertEqual(by_id[2]['model_name'], 'STS3250')
@@ -3460,7 +3770,8 @@ class TestProvisionEndToEnd(unittest.TestCase):
     def test_unknown_model_refused(self):
         bus = _ProvFakeBus({sid: 2048 for sid in range(1, 7)}, model=1234)
         with self.assertRaises(SystemExit) as ctx:
-            self.prov.provision(bus, 'V1-BAD', (1,) * 6, self.V1_SPEC)
+            self.prov.provision(bus, 'V1-BAD', self.V1_SPEC,
+                                servo_spec=_SPEC_A)
         self.assertIn('Modell 1234', str(ctx.exception))
 
     def test_wheel_mode_is_normalized_to_position(self):
@@ -3468,7 +3779,8 @@ class TestProvisionEndToEnd(unittest.TestCase):
         # turns boot-home into a continuous-rotation runaway — provisioning
         # must leave it write-verified in position mode.
         bus = _ProvFakeBus({sid: 2048 for sid in range(1, 7)}, mode=1)
-        self.prov.provision(bus, 'V1-0005', (1,) * 6, self.V1_SPEC)
+        self.prov.provision(bus, 'V1-0005', self.V1_SPEC,
+                            servo_spec=_SPEC_A)
         for sid in range(1, 7):
             self.assertIn((fb.REG_OPERATING_MODE, b'\x00'),
                           bus.writes_for(sid))
@@ -3480,7 +3792,8 @@ class TestProvisionEndToEnd(unittest.TestCase):
         # awaited write could time out against a mute servo.
         bus = _ProvFakeBus({sid: 2048 for sid in range(1, 7)},
                            response_level=0)
-        self.prov.provision(bus, 'V1-0006', (1,) * 6, self.V1_SPEC)
+        self.prov.provision(bus, 'V1-0006', self.V1_SPEC,
+                            servo_spec=_SPEC_A)
         for sid in range(1, 7):
             w = bus.writes_for(sid)
             self.assertEqual(w[0], (fb.REG_LOCK, b'\x00'))
@@ -3506,18 +3819,20 @@ class TestProvisionEndToEnd(unittest.TestCase):
                 return raw + 10 if self.skew else raw
         bus = _LateSkewBus({sid: 2048 for sid in range(1, 7)})
         with self.assertRaises(SystemExit) as ctx:
-            self.prov.provision(bus, 'V1-0007', (1,) * 6, self.V1_SPEC)
+            self.prov.provision(bus, 'V1-0007', self.V1_SPEC,
+                                servo_spec=_SPEC_A)
         self.assertIn('Jig-Endkontrolle', str(ctx.exception))
 
     def test_limits_to_ticks_delegates_to_shared_window(self):
         # Audit H1: provision writes and the driver probe verifies via ONE
         # implementation — the wrapper must be byte-identical to it.
-        for signs in ((1,) * 6, (1, -1, 1, 1, -1, 1)):
+        for spec in (_SPEC_A, _SPEC_B):
             for i in range(6):
                 self.assertEqual(
-                    self.prov.limits_to_ticks(i, signs),
+                    self.prov.limits_to_ticks(i, spec),
                     fb.position_limit_window(
-                        *self.prov.JOINT_LIMITS_RAD[i], signs[i]))
+                        *self.prov.JOINT_LIMITS_RAD[i], spec.signs[i],
+                        t0=spec.t0[i]))
 
     def test_no_record_when_a_servo_fails(self):
         # A verify mismatch on servo 4 aborts BEFORE servos 5-6 are touched and
@@ -3531,9 +3846,100 @@ class TestProvisionEndToEnd(unittest.TestCase):
                 return 0
         bus = _FailServo4({sid: 2048 + sid for sid in range(1, 7)})
         with self.assertRaises(SystemExit):
-            self.prov.provision(bus, 'V1-0004', (1,) * 6, self.V1_SPEC)
+            self.prov.provision(bus, 'V1-0004', self.V1_SPEC,
+                                servo_spec=_SPEC_A)
         touched = {sid for sid, _a, _d in bus.writes}
         self.assertFalse({5, 6} & touched)
+
+    # ── the servo spec decides what is written ──────────────────────────────
+    def test_centred_joints_land_on_their_T0(self):
+        bus = _ProvFakeBus({sid: 23 for sid in range(1, 7)})
+        record = self.prov.provision(bus, 'V1-T0', self.V1_SPEC,
+                                     servo_spec=_SPEC_A)
+        self.assertEqual([e['homing_offset'] for e in record['servos']],
+                         [-2025, -1001, 1047, -2025, -2025, -1513])
+        self.assertEqual([bus._present_raw(sid) for sid in range(1, 7)],
+                         [2048, 1024, 3072, 2048, 2048, 1536])
+
+    def test_protection_current_is_per_model(self):
+        bus = _ProvFakeBus({sid: 2048 for sid in range(1, 7)})
+        record = self.prov.provision(bus, 'V1-PC', self.V1_SPEC,
+                                     servo_spec=_SPEC_A)
+        for sid in range(1, 7):
+            model = 2825 if sid in (2, 3) else 777
+            self.assertEqual(
+                fb.from_le16(bus.mem[sid][28], bus.mem[sid][29]),
+                fss.FACTORY[model][28], sid)
+            self.assertEqual(record['servos'][sid - 1]['protection_current'],
+                             fss.FACTORY[model][28])
+        self.assertNotIn(310, [e['protection_current']
+                               for e in record['servos']])
+
+    def test_refuses_to_write_while_the_spec_is_unpinned(self):
+        bus = _ProvFakeBus({sid: 2048 for sid in range(1, 7)})
+        with self.assertRaises(SystemExit) as ctx:
+            self.prov.provision(bus, 'V1-UNPINNED', self.V1_SPEC,
+                                servo_spec=fss.V1)
+        self.assertIn('P0', str(ctx.exception))
+        self.assertIn('--dry-run', str(ctx.exception))
+        self.assertEqual(bus.writes, [])
+
+    def test_an_unpinned_dry_run_reports_without_t0(self):
+        bus = _ProvFakeBus({sid: 2048 for sid in range(1, 7)})
+        record = self.prov.provision(bus, 'V1-DRY', self.V1_SPEC,
+                                     servo_spec=fss.V1, dry_run=True)
+        self.assertEqual(bus.writes, [])
+        self.assertIsNone(record['signs'])
+        self.assertNotIn('checksum', record)
+        self.assertEqual(record['tick_direction'],
+                         {'777': None, '2825': None})
+        self.assertEqual(record['spec_sha256'], fss.V1.digest)
+        for entry in record['servos']:
+            self.assertIsNone(entry['homing_offset'])
+            self.assertEqual(len(entry['eeprom_hex']), 80)
+
+    def test_the_whole_golden_image_is_written(self):
+        bus = _ProvFakeBus({sid: 2048 + sid for sid in range(1, 7)})
+        record = self.prov.provision(bus, 'V1-IMG', self.V1_SPEC,
+                                     servo_spec=_SPEC_A)
+        sizes = {a: size for a, size, _n, _c in fss.LAYOUT}
+        for joint in _SPEC_A.joints:
+            sid = joint.servo_id
+            for addr, _size, name, cls in fss.LAYOUT:
+                if cls not in ('refuse', 'warn'):
+                    continue
+                if sizes[addr] == 2:
+                    found = fb.from_le16(bus.mem[sid][addr],
+                                         bus.mem[sid][addr + 1])
+                else:
+                    found = bus.mem[sid][addr]
+                self.assertEqual(found, joint.image[addr], (sid, name))
+            block = bytes(bus.mem[sid][0:40])
+            self.assertEqual(fss.compare_block(block, joint), ([], []), sid)
+            entry = record['servos'][sid - 1]
+            self.assertEqual(entry['eeprom_hex'], block.hex())
+            self.assertEqual(entry['tick_direction'], joint.tick_direction)
+        self.assertEqual(record['tick_direction'], {'777': 1, '2825': 1})
+        self.assertEqual(record['spec_sha256'], _SPEC_A.digest)
+
+    def test_phase_reference_mismatch_refuses(self):
+        bus = _ProvFakeBus({sid: 2048 for sid in range(1, 7)},
+                           phase_override={1: 0x0D})
+        with self.assertRaises(SystemExit) as ctx:
+            self.prov.provision(bus, 'V1-PHASE', self.V1_SPEC,
+                                servo_spec=_SPEC_A)
+        self.assertIn('Phase-Byte', str(ctx.exception))
+        self.assertEqual(bus.writes, [])
+
+    def test_a_7v4_servo_is_refused_before_any_write(self):
+        bus = _ProvFakeBus({sid: 2048 for sid in range(1, 7)})
+        bus.mem[3][fb.REG_MAX_VOLTAGE] = 80
+        with self.assertRaises(SystemExit) as ctx:
+            self.prov.provision(bus, 'V1-7V4', self.V1_SPEC,
+                                servo_spec=_SPEC_A)
+        self.assertIn('7,4-V', str(ctx.exception))
+        self.assertIn('Servo 3', str(ctx.exception))
+        self.assertEqual(bus.writes, [])
 
 
 def _feetech_bus_of(length, model=None):
@@ -4032,94 +4438,84 @@ class TestFamilyVidProbe(unittest.TestCase):
 class TestCommandedGoalEdgeClamp(unittest.TestCase):
     """The commanded-goal edge clamp (Rule §2 sign-off, 2026-07-26): every tick
     written as ``Goal_Position`` is kept clear of the tick-0/4095 position-map
-    edge, because the STS position loop is NOT wrap-aware and two of the ten
-    arm-joint limit bounds (joint2 and joint3 at +π) land EXACTLY on that edge —
-    so a command AT one of them would pin the goal on the seam, where one encoder
-    sample across the boundary commits the joint to a full revolution and
-    NEITHER torque-on guard fires."""
+    edge, because the STS position loop is NOT wrap-aware, so a goal pinned ON
+    the seam commits the joint to a full revolution on one encoder sample
+    across the boundary and NEITHER torque-on guard fires. Before the 2026-10
+    centring two arm bounds (joint2 and joint3 at +π) landed exactly on that
+    edge; since then no in-window command comes within 795 ticks of it, so the
+    clamp is a no-op on every in-window command and stays as defence in
+    depth."""
 
-    # ── the premise: which bounds are actually on the seam ─────────────────
-    def test_two_of_the_ten_arm_bounds_land_exactly_on_a_register_end(self):
-        # The whole reason this clamp exists. Derived from the SHIPPED limits +
-        # signs, not restated — a limits edit that moved a bound off the seam (or
-        # onto one) has to update this list consciously.
-        on_edge = []
-        for i, (lo, hi) in enumerate(_N['JOINT_LIMITS_RAD']):
-            for which, rad in (('lo', lo), ('hi', hi)):
-                tick = _N['rad_to_tick'](rad, _N['JOINT_SIGNS'][i])
-                if tick in (0, 4095):
-                    on_edge.append((i + 1, which, tick))
-        self.assertEqual(on_edge, [
-            (2, 'hi', 4095),                       # shoulder at +180°
-            (3, 'hi', 4095),                       # elbow at +180°
-        ])
-        # …and the claw's two bounds are the 11th/12th: "two of ten" counts ARM
-        # joints. Nothing about the claw is near the seam.
-        g_lo, g_hi = _N['JOINT_LIMITS_RAD'][5]
-        self.assertEqual((_N['rad_to_tick'](g_lo, 1), _N['rad_to_tick'](g_hi, 1)),
-                         (2048, 3072))
+    # ── the premise: no bound is near the seam any more ────────────────────
+    def test_no_arm_bound_lands_within_795_ticks_of_a_register_end(self):
+        # Derived from the limits through the shipped map, in every
+        # tick-direction combination — a limits or spec edit that moved a bound
+        # toward the seam has to update this consciously.
+        for spec in _ALL_SPECS:
+            closest = []
+            for i, (lo, hi) in enumerate(_N['JOINT_LIMITS_RAD']):
+                for rad in (lo, hi):
+                    tick = _N['rad_to_tick'](rad, spec.signs[i],
+                                             t0=spec.t0[i])
+                    closest.append((min(tick, 4095 - tick), i + 1, tick))
+            self.assertEqual(min(closest)[:2], (795, 4), spec.tick_direction)
 
     def test_a_full_circle_joint_subset_would_miss_both_seam_bounds(self):
         # Guard against re-deriving a `full_circle_joint_indexes()`-style
-        # predicate: the V1 has NO full-circle joint, yet joint2's and joint3's hi
-        # bounds are pinned on the seam. A subset keyed on "window == register"
-        # would protect nothing at all.
-        full_circle = [i + 1 for i, (lo, hi) in enumerate(_N['JOINT_LIMITS_RAD'])
-                       if fb.position_limit_window(lo, hi, 1) == (0, 4095)]
-        self.assertEqual(full_circle, [])
-        for jid, rad in ((2, 3.1416), (3, 3.1416)):
-            self.assertNotIn(jid, full_circle)
-            self.assertIn(_N['rad_to_tick'](rad, 1), (0, 4095))
+        # predicate: the V1 has NO full-circle joint and no bound on the seam,
+        # in any combination — a blanket clamp needs no predicate at all.
+        for spec in _ALL_SPECS:
+            self.assertNotIn((0, 4095), spec.windows)
+            for i, (lo, hi) in enumerate(_N['JOINT_LIMITS_RAD']):
+                for rad in (lo, hi):
+                    self.assertNotIn(
+                        _N['rad_to_tick'](rad, spec.signs[i], t0=spec.t0[i]),
+                        (0, 4095))
 
     # ── the clamp itself ───────────────────────────────────────────────────
-    def test_clamp_moves_every_seam_bound_and_touches_nothing_else(self):
+    def test_clamp_moves_no_bound_and_touches_nothing(self):
         m = _N['GOAL_EDGE_MARGIN_TICKS']
-        moved, kept = [], []
-        for i, (lo, hi) in enumerate(_N['JOINT_LIMITS_RAD']):
-            sign = _N['JOINT_SIGNS'][i]
-            for which, rad in (('lo', lo), ('hi', hi)):
-                plain = _N['rad_to_tick'](rad, sign)
-                cmd = _N['rad_to_command_tick'](rad, sign)
-                # THE invariant: no commanded tick is ever within `m` of an end.
-                self.assertGreaterEqual(cmd, m, (i + 1, which))
-                self.assertLessEqual(cmd, 4095 - m, (i + 1, which))
-                (moved if cmd != plain else kept).append((i + 1, which))
-        # It bites exactly the two seam bounds and nothing else.
-        self.assertEqual(moved, [(2, 'hi'), (3, 'hi')])
-        self.assertEqual(len(kept), 10)
+        for spec in _ALL_SPECS:
+            moved, kept = [], []
+            for i, (lo, hi) in enumerate(_N['JOINT_LIMITS_RAD']):
+                sign, t0 = spec.signs[i], spec.t0[i]
+                for which, rad in (('lo', lo), ('hi', hi)):
+                    plain = _N['rad_to_tick'](rad, sign, t0=t0)
+                    cmd = _N['rad_to_command_tick'](rad, sign, t0=t0)
+                    # THE invariant: no commanded tick is ever within `m` of
+                    # an end.
+                    self.assertGreaterEqual(cmd, m, (i + 1, which))
+                    self.assertLessEqual(cmd, 4095 - m, (i + 1, which))
+                    (moved if cmd != plain else kept).append((i + 1, which))
+            self.assertEqual(moved, [], spec.tick_direction)
+            self.assertEqual(len(kept), 12, spec.tick_direction)
 
     def test_clamp_is_a_noop_across_every_joints_ordinary_travel(self):
-        # The COST bound. A margin wide enough to touch joint1/joint4/joint5/the
-        # claw anywhere in their designed travel, or any real solver solution of
-        # joint2/joint3, or HOME, would fail here — that is what pins the
-        # default's blast radius.
-        m = _N['GOAL_EDGE_MARGIN_TICKS']
-        for i, (lo, hi) in enumerate(_N['JOINT_LIMITS_RAD']):
-            if i in (1, 2):
-                continue                   # the two joints with a seam bound
-            steps = 400
-            for k in range(steps + 1):
-                rad = lo + (hi - lo) * k / steps
-                self.assertEqual(_N['rad_to_command_tick'](rad, _N['JOINT_SIGNS'][i]),
-                                 _N['rad_to_tick'](rad, _N['JOINT_SIGNS'][i]),
-                                 (i + 1, rad))
-        # joint2/joint3 over [0, 2.938642] — the analytic bound q3 ≤ _G_OFFSET
-        # every real solver solution respects (the server's
-        # test_feetech_goal_edge_ceiling.py derives it) — at the default AND at
-        # the fenced maximum margin.
-        g_offset = 2.938642
-        for margin in (m, _N['_GOAL_EDGE_MARGIN_MAX_TICKS']):
-            for k in range(401):
-                rad = g_offset * k / 400
-                self.assertEqual(_N['rad_to_command_tick'](rad, 1, margin),
-                                 _N['rad_to_tick'](rad, 1), (margin, rad))
-        # HOME + open claw, and the fenced-maximum margin still misses it.
+        # The COST bound. A margin wide enough to touch any joint anywhere in
+        # its designed travel, or HOME, would fail here — that is what pins
+        # the default's blast radius, in every tick-direction combination and
+        # at the fenced maximum margin too.
+        ceiling = _N['_GOAL_EDGE_MARGIN_MAX_TICKS']
+        for spec in _ALL_SPECS:
+            for margin in (_N['GOAL_EDGE_MARGIN_TICKS'], ceiling):
+                for i, (lo, hi) in enumerate(_N['JOINT_LIMITS_RAD']):
+                    sign, t0 = spec.signs[i], spec.t0[i]
+                    for k in range(401):
+                        rad = lo + (hi - lo) * k / 400
+                        self.assertEqual(
+                            _N['rad_to_command_tick'](rad, sign, margin,
+                                                      t0=t0),
+                            _N['rad_to_tick'](rad, sign, t0=t0),
+                            (spec.tick_direction, margin, i + 1, rad))
+        # HOME + open claw: 1441 ticks from an end under A, 1440 under B — far
+        # beyond the fenced maximum margin.
         home = list(_N['HOME_JOINTS_RAD']) + [_N['GRIPPER_OPEN_RAD']]
-        worst = min(min(t, 4095 - t) for t in
-                    (_N['rad_to_tick'](r, 1) for r in home))
-        self.assertEqual(worst, 1082)                    # joint3 at 1.48 rad
-        self.assertGreater(worst, _N['_GOAL_EDGE_MARGIN_MAX_TICKS'])
-        self.assertGreater(worst, m)
+        for spec, want in ((_SPEC_A, 1441), (_SPEC_B, 1440)):
+            worst = min(min(t, 4095 - t) for t in (
+                _N['rad_to_tick'](r, s, t0=z)
+                for r, s, z in zip(home, spec.signs, spec.t0)))
+            self.assertEqual(worst, want)
+            self.assertGreater(worst, ceiling)
 
     def test_autonomous_grasping_is_untouched_at_any_legal_margin(self):
         """THIS TEST CANNOT VALIDATE THE CEILING'S INPUT NUMBER — read on.
@@ -4134,57 +4530,56 @@ class TestCommandedGoalEdgeClamp(unittest.TestCase):
         The number is derived analytically and guarded where the solver lives:
         ``physical_ai_tools/physical_ai_server/test/test_feetech_goal_edge_ceiling.py``
         ast-extracts THIS constant, derives joint3's bound from the solver's own
-        ``_G_OFFSET``, and bisects the reach boundary with the real ``solve()``.
-        What is pinned HERE is the literal and the clamp's BEHAVIOUR at it."""
+        ``_G_OFFSET``, and sweeps the real ``solve()``. What is pinned HERE is
+        the literal and the clamp's BEHAVIOUR at it."""
         ceiling = _N['_GOAL_EDGE_MARGIN_MAX_TICKS']
-        # One tick under the 131-tick analytic bound of q3 ≤ _G_OFFSET (owner
-        # decision b1; the inherited 246 belonged to an earlier arm).
+        # Owner decision b1: the ceiling stays 130 (the inherited 246 belonged
+        # to an earlier arm).
         self.assertEqual(ceiling, 130)
         f = _N['rad_to_command_tick']
-        bound = ceiling + 1                       # ticks from the 4095 end
-        bound_tick = 4095 - bound                 # 3964
-        rad = _N['tick_to_rad'](bound_tick, 1)
-        # At the ceiling — and at the shipped default — the tightest tick a real
-        # solution can carry is commanded unchanged, and STRICTLY inside the band
-        # (that strictness is why the ceiling is 130 and not 131: at margin 131
-        # the tick would still survive, but only because the band boundary is
-        # inclusive, and a fence should not lean on that).
-        for margin in (_N['GOAL_EDGE_MARGIN_TICKS'], ceiling):
-            self.assertLessEqual(margin, ceiling, margin)
-            self.assertEqual(f(rad, 1, margin), bound_tick, margin)
-            self.assertGreater(bound, margin, margin)
-        # The first margin that actually SHIFTS the bound tick is bound + 1 —
-        # two above the ceiling. That headroom is the point of the fence.
-        self.assertEqual(f(rad, 1, bound), bound_tick)
-        self.assertEqual(f(rad, 1, bound + 1), bound_tick - 1)
-        # The shipped default clamps at tick 3967 = 2.94371 rad, above the
-        # 2.938642-rad bound (3.3 ticks of headroom).
-        self.assertAlmostEqual(_N['tick_to_rad'](4095 - _N['GOAL_EDGE_MARGIN_TICKS'], 1),
-                               2.94371, places=5)
+        g_offset = 2.938642            # q3 ≤ _G_OFFSET for every solution
+        # joint3's analytic bound lands 1156 ticks from tick 0 when its sign is
+        # −1 (2825 ticks rise CCW) and 1155 from tick 4095 when it is +1.
+        for spec, bound, toward_zero in ((_SPEC_A, 1156, True),
+                                         (_SPEC_B, 1155, False)):
+            sign, t0 = spec.signs[2], spec.t0[2]
+            tick = _N['rad_to_tick'](g_offset, sign, t0=t0)
+            self.assertEqual(tick if toward_zero else 4095 - tick, bound)
+            for margin in (_N['GOAL_EDGE_MARGIN_TICKS'], ceiling):
+                self.assertLessEqual(margin, ceiling)
+                self.assertEqual(f(g_offset, sign, margin, t0=t0), tick)
+                self.assertGreater(bound, margin)
+            # The first margin that SHIFTS the bound tick is bound + 1.
+            self.assertEqual(f(g_offset, sign, bound, t0=t0), tick)
+            self.assertEqual(f(g_offset, sign, bound + 1, t0=t0),
+                             tick + 1 if toward_zero else tick - 1)
 
     def test_clamp_survives_a_sign_flip_without_a_per_joint_predicate(self):
-        # EDUBOTICS_FEETECH_JOINT_SIGNS=−1 on joint2 mirrors its window to (0, 2048),
-        # moving the pinned bound from hi to lo. The blanket clamp follows for
-        # free; a per-joint table would have to be re-derived.
+        # joint2's centred window is (1024, 3072) for BOTH signs (T0 1024 at
+        # +1, 3072 at −1), so its bounds are commanded unclamped either way.
         lo, hi = _N['JOINT_LIMITS_RAD'][1]
-        self.assertEqual(fb.position_limit_window(lo, hi, -1), (0, 2048))
-        self.assertEqual(_N['rad_to_tick'](hi, -1), 0)          # now the lo end
-        m = _N['GOAL_EDGE_MARGIN_TICKS']
-        self.assertEqual(_N['rad_to_command_tick'](hi, -1), m)
+        for spec in (_SPEC_A, _SPEC_B):
+            sign, t0 = spec.signs[1], spec.t0[1]
+            self.assertEqual(fb.position_limit_window(lo, hi, sign, t0=t0),
+                             (1024, 3072))
+            for rad in (lo, hi):
+                self.assertEqual(_N['rad_to_command_tick'](rad, sign, t0=t0),
+                                 _N['rad_to_tick'](rad, sign, t0=t0))
 
     def test_margin_zero_is_the_documented_rollback(self):
         for rad, sign in ((3.1416, 1), (-3.1416, 1), (3.1416, -1), (10.0, 1)):
-            self.assertEqual(_N['rad_to_command_tick'](rad, sign, 0),
-                             _N['rad_to_tick'](rad, sign))
+            for t0 in _T0S:
+                self.assertEqual(_N['rad_to_command_tick'](rad, sign, 0, t0=t0),
+                                 _N['rad_to_tick'](rad, sign, t0=t0))
 
     def test_rad_to_tick_itself_is_still_only_register_clamped(self):
         # rad_to_tick must stay a plain coordinate map: fb.le16 of an out-of-range
         # tick would silently encode a different number, so that clamp is its own
         # unconditional invariant — and a future NON-command caller must not
         # inherit a safety clamp meant for commands.
-        self.assertEqual(_N['rad_to_tick'](10.0, 1), 4095)
-        self.assertEqual(_N['rad_to_tick'](-10.0, 1), 0)
-        self.assertEqual(_N['rad_to_tick'](3.1416, 1), 4095)
+        self.assertEqual(_N['rad_to_tick'](10.0, 1, t0=2048), 4095)
+        self.assertEqual(_N['rad_to_tick'](-10.0, 1, t0=2048), 0)
+        self.assertEqual(_N['rad_to_tick'](3.1416, 1, t0=2048), 4095)
 
     # ── the residual, measured against the SHIPPED wrong-way predicate ─────
     def test_the_clamp_raises_the_forced_displacement_from_one_tick_to_margin_plus_one(self):
@@ -4203,29 +4598,32 @@ class TestCommandedGoalEdgeClamp(unittest.TestCase):
                         return d
             return None
 
-        # Today's pinned goals — a hair trigger at both ends of the register.
+        # A goal pinned on the seam is a hair trigger at both ends.
         self.assertEqual(min_forced(4095), 1)
         self.assertEqual(min_forced(0), 1)
-        # The clamped band's extremes, derived from the clamp itself over the real
-        # limits (NOT hardcoded), are what the arm can actually command. At the
-        # shipped signs only the 4095 end is reached (joint2/joint3 at +π); the
-        # lowest commandable tick is joint4's window end. The low extreme `m`
-        # is reached under a sign flip, so it is asserted on the band itself.
+        # The clamped band's extremes: the pure clamp property.
         m = _N['GOAL_EDGE_MARGIN_TICKS']
-        commandable = set()
-        for i, (lo, hi) in enumerate(_N['JOINT_LIMITS_RAD']):
-            sign = _N['JOINT_SIGNS'][i]
-            for k in range(801):
-                commandable.add(_N['rad_to_command_tick'](
-                    lo + (hi - lo) * k / 800, sign))
-        self.assertEqual(min(commandable), 796)
-        self.assertEqual(max(commandable), 4095 - m)
-        self.assertEqual(min_forced(max(commandable)), m + 1)
         self.assertEqual(min_forced(m), m + 1)
-        # No commandable goal is worse than those two extremes: nothing within
-        # `m` ticks of ANY commandable goal can trip the abort. (Sampled with a
-        # stride through the interior, exhaustive over the outer bands where the
-        # bound actually binds.)
+        self.assertEqual(min_forced(4095 - m), m + 1)
+        self.assertEqual(m + 1, 129)
+        # What the arm can actually command, derived from the clamp over the
+        # real limits in every combination (NOT hardcoded): joint4's centred
+        # window ends, 796 and 3300 — 797 and 796 ticks from tripping.
+        commandable = set()
+        for spec in _ALL_SPECS:
+            for i, (lo, hi) in enumerate(_N['JOINT_LIMITS_RAD']):
+                for k in range(801):
+                    commandable.add(_N['rad_to_command_tick'](
+                        lo + (hi - lo) * k / 800, spec.signs[i],
+                        t0=spec.t0[i]))
+        self.assertEqual(min(commandable), 796)
+        self.assertEqual(max(commandable), 3300)
+        self.assertEqual(min_forced(796), 797)
+        self.assertEqual(min_forced(3300), 796)
+        # No goal in the clamped band is worse than its extremes: nothing within
+        # `m` ticks of ANY such goal can trip the abort. (Sampled with a stride
+        # through the interior, exhaustive over the outer bands where the bound
+        # actually binds.)
         probes = (list(range(m, m + 200)) + list(range(4095 - m - 199, 4096 - m))
                   + list(range(m, 4096 - m, 97)))
         for goal in probes:
@@ -4233,14 +4631,26 @@ class TestCommandedGoalEdgeClamp(unittest.TestCase):
                 for p in ((goal + d) % 4096, (goal - d) % 4096):
                     self.assertFalse(wrong({1: goal}, {1: p}), (goal, d, p))
 
-    def test_the_eeprom_window_cannot_substitute_for_the_clamp(self):
-        # Asked directly at review: does Min/Max_Position_Limit bound this? No —
-        # every joint carrying a seam bound has a window that TOUCHES a register
-        # end, so there is no headroom to clamp into even if the register limit
-        # bounded the physical path (it does not; it bounds the GOAL).
-        for idx in (1, 2):
-            lo, hi = fb.position_limit_window(*_N['JOINT_LIMITS_RAD'][idx], 1)
-            self.assertTrue(lo == 0 or hi == 4095, (idx + 1, lo, hi))
+    def test_the_eeprom_window_and_the_clamp_are_separate_layers(self):
+        # Two layers, neither standing in for the other. The EEPROM window
+        # lies inside the clamp band even at the fenced maximum margin, so the
+        # clamp never shortens a window…
+        ceiling = _N['_GOAL_EDGE_MARGIN_MAX_TICKS']
+        for spec in _ALL_SPECS:
+            for lo, hi in spec.windows:
+                self.assertLessEqual(ceiling, lo)
+                self.assertLessEqual(hi, 4095 - ceiling)
+        # …and the window bounds the GOAL, never the PATH: the seed WRITES the
+        # measured tick (a claw resting at 1400) while the effective goal the
+        # servo will drive to is the window edge 1536.
+        bus = _TorqueFakeBus({6: 1400})
+        node = _TorqueStubNode(bus)
+        with node._bus_lock:
+            goals = node._seed_goal_from_present_locked()
+        self.assertEqual(goals[6], 1536)
+        addr, per = bus.writes[-1]
+        self.assertEqual(addr, fb.REG_ACCELERATION)
+        self.assertEqual(fb.from_le16(per[6][1], per[6][2]), 1400)
 
     # ── the call site ──────────────────────────────────────────────────────
     def _written_ticks(self, q):
@@ -4265,38 +4675,42 @@ class TestCommandedGoalEdgeClamp(unittest.TestCase):
                 self.assertGreaterEqual(tick, m, (pick_hi, sid, tick))
                 self.assertLessEqual(tick, 4095 - m, (pick_hi, sid, tick))
         # …and the radian clamp above it still holds: a wildly out-of-limit
-        # request lands on the clamped LIMIT, not somewhere arbitrary.
-        ticks = self._written_ticks([99.0] * 6)
-        self.assertEqual(ticks[2], 4095 - m)             # joint2 hi = +π
-        self.assertEqual(ticks[3], 4095 - m)             # joint3 hi = +π
-        self.assertEqual(ticks[6], 3072)                 # claw hi: unclamped
-        ticks = self._written_ticks([-99.0] * 6)
-        self.assertEqual(ticks[2], 2048)                 # joint2 lo = 0
-        self.assertEqual(ticks[4], 796)                  # joint4 lo: unclamped
-        self.assertEqual(ticks[6], 2048)                 # claw lo: unclamped
+        # request lands on the LIMIT's tick (spec A), not somewhere arbitrary
+        # — and nothing there needs the edge clamp.
+        self.assertEqual(self._written_ticks([99.0] * 6),
+                         {1: 1024, 2: 3072, 3: 1024, 4: 796, 5: 1024, 6: 2560})
+        self.assertEqual(self._written_ticks([-99.0] * 6),
+                         {1: 3072, 2: 1024, 3: 3072, 4: 3300, 5: 3072, 6: 1536})
 
     def test_write_targets_passes_ordinary_targets_through_bit_identically(self):
         home = list(_N['HOME_JOINTS_RAD']) + [_N['GRIPPER_OPEN_RAD']]
         ticks = self._written_ticks(home)
         self.assertEqual(
             ticks,
-            {sid: _N['rad_to_tick'](home[i], _N['JOINT_SIGNS'][i])
+            {sid: _N['rad_to_tick'](home[i], _N['JOINT_SIGNS'][i],
+                                    t0=_N['JOINT_T0'][i])
              for i, sid in enumerate(_N['SERVO_IDS'])})
-        self.assertEqual(ticks[3], 3013)                 # joint3 at HOME
+        # spec A's HOME ticks
+        self.assertEqual(tuple(ticks[sid] for sid in _SIDS),
+                         (2048, 1441, 2107, 1461, 2048, 2123))
 
     def test_every_boot_home_point_is_commanded_unchanged(self):
-        # The boot-home glide's HOME endpoint is 1082 ticks clear, so a glide from
-        # any pose the plausibility band admits arrives unclamped. (Its FIRST
-        # points can be clamped when a joint was hand-parked inside the band —
-        # that is the documented, direction-safe jerk, not a silent failure.)
+        # The boot-home glide's HOME endpoint is 1441 ticks clear, so a glide
+        # from any pose the plausibility band admits arrives unclamped. (Its
+        # FIRST points can be clamped when a joint was hand-parked within the
+        # margin of a register end — the documented, direction-safe jerk, not a
+        # silent failure.)
+        signs, t0s = _N['JOINT_SIGNS'], _N['JOINT_T0']
         for start_tick in (2048, 1024, 3072, 600, 3500):
-            rad = _N['tick_to_rad'](start_tick, 1)
-            pts = _N['build_boot_home']([rad] * 6)
+            start = [_N['tick_to_rad'](start_tick, s, t0=z)
+                     for s, z in zip(signs, t0s)]
+            pts = _N['build_boot_home'](start)
             for q, _t in pts:
-                for i, sign in enumerate(_N['JOINT_SIGNS']):
-                    plain = _N['rad_to_tick'](q[i], sign)
-                    self.assertEqual(_N['rad_to_command_tick'](q[i], sign),
-                                     plain, (start_tick, i))
+                for i, (sign, t0) in enumerate(zip(signs, t0s)):
+                    plain = _N['rad_to_tick'](q[i], sign, t0=t0)
+                    self.assertEqual(
+                        _N['rad_to_command_tick'](q[i], sign, t0=t0),
+                        plain, (start_tick, i))
 
     def test_the_goal_seed_is_deliberately_not_edge_clamped(self):
         # A software guard must not CREATE motion. The seed writes Goal = Present
@@ -4310,9 +4724,11 @@ class TestCommandedGoalEdgeClamp(unittest.TestCase):
         with node._bus_lock:
             goals = node._seed_goal_from_present_locked()
         self.assertIsNotNone(goals)
-        self.assertEqual(goals[3], 4090)          # NOT 4095 − margin
+        # The EFFECTIVE goal is joint3's window end (the EEPROM clamp)…
+        self.assertEqual(goals[3], 3072)
         addr, per = bus.writes[-1]
         self.assertEqual(addr, fb.REG_ACCELERATION)
+        # …but the WRITTEN tick is the measured 4090, NOT 4095 − margin.
         self.assertEqual(fb.from_le16(per[3][1], per[3][2]), 4090)
         # …and the seed keeps its own gentle speed, not the motion cap.
         self.assertEqual(fb.from_le16(per[3][5], per[3][6]),
@@ -4385,9 +4801,10 @@ class TestCommandedGoalEdgeClamp(unittest.TestCase):
                            _N['EDGE_REFUSE_MARGIN_TICKS'])
         # Disabling one must not disable the other.
         self.assertEqual(_N['edge_parked_joints']({3: 4093}, 0), [])
-        self.assertEqual(_N['rad_to_command_tick'](3.1416, 1, 0), 4095)
+        self.assertEqual(_N['rad_to_command_tick'](3.1416, 1, 0, t0=2048), 4095)
         self.assertTrue(_N['edge_parked_joints']({3: 4093}))
-        self.assertNotEqual(_N['rad_to_command_tick'](3.1416, 1), 4095)
+        self.assertNotEqual(_N['rad_to_command_tick'](3.1416, 1, t0=2048),
+                            4095)
 
     def test_the_knob_is_forwarded_on_a_compose_environment_list(self):
         # ci.yml::env-forwarding-guard in miniature: an EDUBOTICS_* the driver
@@ -4484,6 +4901,73 @@ class TestEdgeGuardLogicIsFrozen(unittest.TestCase):
             _logic_hash(_driver_function(mutated, 'edge_parked_joints')),
             self._BASE['edge_parked_joints'])
 
+    def test_the_seed_changes_only_by_t0(self):
+        # Base text with exactly two substitutions: the loop header gains
+        # JOINT_T0 and the window call passes it.
+        self.assertEqual(
+            _logic_hash(_driver_function(self.src,
+                                         '_seed_goal_from_present_locked')),
+            'b5bb69ec8b0035a820aaa4e6bc148dda065bd4fea4c23faafc567e99fee79a1d')
+
+    def test_the_goal_margin_parser_differs_only_in_its_message(self):
+        class _BlankPrint(ast.NodeTransformer):
+            def visit_Call(self, node):
+                self.generic_visit(node)
+                if isinstance(node.func, ast.Name) and node.func.id == 'print':
+                    node.args = [ast.Constant('<msg>')]   # keywords kept
+                return node
+
+        fn = _BlankPrint().visit(_strip_docstring(
+            _driver_function(self.src, '_parse_goal_edge_margin')))
+        ast.fix_missing_locations(fn)
+        self.assertEqual(
+            hashlib.sha256(ast.unparse(fn).encode('utf-8')).hexdigest(),
+            '0506705ef4b3929766f7e6c832cc51bb10d94e77cf9d37d1e7bd81715fabce21')
+        with patch('builtins.print') as printed:
+            _N['_parse_goal_edge_margin']('200')
+        said = printed.call_args[0][0]
+        self.assertIn('EDUBOTICS_FEETECH_GOAL_EDGE_MARGIN_TICKS', said)
+        self.assertIn('0 to DISABLE', said)
+        self.assertIn('b1', said)
+        self.assertNotIn('ANALYTIC', said)
+
+    def test_the_tick_functions_are_exactly_these(self):
+        want = {
+            'rad_to_tick': (
+                'def rad_to_tick(rad: float, sign: int, *, t0: int) -> int:\n'
+                '    tick = t0 + int(round(rad * sign / RAD_PER_TICK))\n'
+                '    return max(0, min(TICKS_PER_REV - 1, tick))'),
+            'tick_to_rad': (
+                'def tick_to_rad(tick: int, sign: int, *, t0: int) -> float:\n'
+                '    return (tick - t0) * RAD_PER_TICK * sign'),
+            'rad_to_command_tick': (
+                'def rad_to_command_tick(rad: float, sign: int, margin=None, *, '
+                't0: int) -> int:\n'
+                '    margin = GOAL_EDGE_MARGIN_TICKS if margin is None else '
+                'margin\n'
+                '    tick = rad_to_tick(rad, sign, t0=t0)\n'
+                '    if margin <= 0:\n'
+                '        return tick\n'
+                '    return max(margin, min(TICKS_PER_REV - 1 - margin, tick))'),
+        }
+        for name, text in want.items():
+            self.assertEqual(
+                ast.unparse(_strip_docstring(_driver_function(self.src, name))),
+                text, name)
+        bus_src = open(os.path.join(_DOCKER, 'feetech_bus.py'),
+                       encoding='utf-8').read()
+        window = next(n for n in ast.parse(bus_src).body
+                      if isinstance(n, ast.FunctionDef)
+                      and n.name == 'position_limit_window')
+        self.assertEqual(
+            ast.unparse(_strip_docstring(window)),
+            'def position_limit_window(lo_rad: float, hi_rad: float, '
+            'sign: int, *, t0: int) -> tuple[int, int]:\n'
+            '    a = t0 + int(round(lo_rad * sign / _RAD_PER_TICK))\n'
+            '    b = t0 + int(round(hi_rad * sign / _RAD_PER_TICK))\n'
+            '    lo, hi = (a, b) if a <= b else (b, a)\n'
+            '    return (max(0, lo), min(TICKS_PER_REV - 1, hi))')
+
     def test_the_constants_are_unchanged(self):
         want = {
             '_DEFAULT_EDGE_REFUSE_MARGIN_TICKS': '40',
@@ -4537,31 +5021,33 @@ class TestProvisionArmIdentityIsThreadedNotAssumed(unittest.TestCase):
     # ── the record's family tag ─────────────────────────────────────────────
     def test_v1_record_is_tagged_v1_studio(self):
         spec, bus = self._v1()
-        record = self.prov.provision(bus, 'V1-0001', (1,) * 6, spec)
+        record = self.prov.provision(bus, 'V1-0001', spec, servo_spec=_SPEC_A)
         self.assertEqual(record['profile_id'], 'v1_studio')
         self.assertEqual(len(record['servos']), 6)
         self.assertEqual([e['id'] for e in record['servos']], [1, 2, 3, 4, 5, 6])
-        # the V1 EEPROM windows land in the record (sign +1)
+        # the centred V1 EEPROM windows land in the record
         windows = [(e['range_min'], e['range_max']) for e in record['servos']]
-        self.assertEqual(windows, [(1024, 3072), (2048, 4095), (2048, 4095),
-                                   (796, 3300), (1024, 3072), (2048, 3072)])
-        # the claw (last id) gets the pinch floor, every arm joint 800
+        self.assertEqual(windows, [(1024, 3072), (1024, 3072), (1024, 3072),
+                                   (796, 3300), (1024, 3072), (1536, 2560)])
+        # the claw (last id) gets the pinch floor
         self.assertEqual([e['max_torque'] for e in record['servos']],
-                         [800, 800, 800, 800, 800, 150])
+                         list(fss.MAX_TORQUE))
 
     def test_the_tag_does_not_move_the_checksum(self):
         # `record_checksum` hashes serial+signs+servos and NOT profile_id.
         spec, bus = self._v1()
-        record = self.prov.provision(bus, 'V1-0001', (1,) * 6, spec)
+        record = self.prov.provision(bus, 'V1-0001', spec, servo_spec=_SPEC_A)
         self.assertEqual(
             record['checksum'],
-            self.prov.record_checksum(record['servos'], 'V1-0001', (1,) * 6))
+            self.prov.record_checksum(record['servos'], 'V1-0001',
+                                      _SPEC_A.signs))
 
     # ── the identity gate names the arm on the bench ────────────────────────
     def test_foreign_servo_names_the_v1(self):
         spec, bus = self._v1(model=1234)
         with self.assertRaises(SystemExit) as ctx:
-            self.prov.provision(bus, 'V1-BAD', (1,) * 6, spec)
+            self.prov.provision(bus, 'V1-BAD', spec,
+                                servo_spec=_SPEC_A)
         msg = str(ctx.exception)
         self.assertIn('dieser Arm ist kein V1', msg)
 
@@ -4571,7 +5057,8 @@ class TestProvisionArmIdentityIsThreadedNotAssumed(unittest.TestCase):
         spec, bus = self._v1()
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            self.prov.provision(bus, 'V1-0002', (1,) * 6, spec)
+            self.prov.provision(bus, 'V1-0002', spec,
+                                servo_spec=_SPEC_A)
         out = buf.getvalue()
         self.assertIn('Alle 6 Servos gefunden', out)
         self.assertIn('alle 6 Servos lesen die Soll-Position.', out)
@@ -4586,7 +5073,7 @@ class TestProvisionArmIdentityIsThreadedNotAssumed(unittest.TestCase):
         stale = dict(self.prov._ARM_SPECS['v1'],
                      servo_ids=(1, 2, 3, 4, 5, 6, 7))
         with self.assertRaises(SystemExit) as ctx:
-            self.prov.provision(bus, 'V1-0003', (1,) * 6, stale)
+            self.prov.provision(bus, 'V1-0003', stale)
         self.assertIn('apply_arm_spec', str(ctx.exception))
 
     def test_provision_requires_a_spec_at_all(self):

@@ -47,6 +47,9 @@ COPY calibrate_collision_currents.py /usr/local/bin/calibrate_collision_currents
 # identify_arm.py (NOT apply_overlay targets — there is no upstream file to
 # overlay); byte-verified by image_source_parity.sh's /usr/local/bin root.
 COPY feetech_bus.py /usr/local/bin/feetech_bus.py
+# The V1 servo spec (signs, encoder zero, golden EEPROM image) the driver's boot
+# probe checks every servo against. Plain COPY, byte-verified like its siblings.
+COPY feetech_servo_spec.py /usr/local/bin/feetech_servo_spec.py
 COPY feetech_arm_node.py /usr/local/bin/feetech_arm_node.py
 # The driver's whole-link box model (table-floor pre-check for boot-home).
 # Plain COPY like its two siblings, byte-verified by image_source_parity.sh.
@@ -59,8 +62,8 @@ COPY feetech_geometry.py /usr/local/bin/feetech_geometry.py
 # image_source_parity.sh.
 COPY activation_agent.py /usr/local/bin/activation_agent.py
 # Strip Windows CRLF line endings (Git on Windows may convert LF→CRLF)
-RUN sed -i 's/\r$//' /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py /usr/local/bin/calibrate_collision_currents.py /usr/local/bin/feetech_bus.py /usr/local/bin/feetech_arm_node.py /usr/local/bin/feetech_geometry.py /usr/local/bin/activation_agent.py \
-    && chmod +x /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py /usr/local/bin/calibrate_collision_currents.py /usr/local/bin/feetech_bus.py /usr/local/bin/feetech_arm_node.py /usr/local/bin/feetech_geometry.py /usr/local/bin/activation_agent.py
+RUN sed -i 's/\r$//' /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py /usr/local/bin/calibrate_collision_currents.py /usr/local/bin/feetech_bus.py /usr/local/bin/feetech_servo_spec.py /usr/local/bin/feetech_arm_node.py /usr/local/bin/feetech_geometry.py /usr/local/bin/activation_agent.py \
+    && chmod +x /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py /usr/local/bin/calibrate_collision_currents.py /usr/local/bin/feetech_bus.py /usr/local/bin/feetech_servo_spec.py /usr/local/bin/feetech_arm_node.py /usr/local/bin/feetech_geometry.py /usr/local/bin/activation_agent.py
 
 # Overlay patched ros2_control configs:
 #   - follower (omx_f): joint limits + aligned gripper current limit

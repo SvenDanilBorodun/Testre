@@ -69,7 +69,8 @@ class TestArmDockerfileCopySources(unittest.TestCase):
     def test_the_feetech_driver_trio_is_copied(self):
         copied = {dest for _src, dest in _copies()}
         for name in ('feetech_arm_node.py', 'feetech_geometry.py',
-                     'feetech_bus.py', 'identify_arm.py', 'activation_agent.py'):
+                     'feetech_bus.py', 'feetech_servo_spec.py',
+                     'identify_arm.py', 'activation_agent.py'):
             self.assertIn(f'/usr/local/bin/{name}', copied, name)
 
 

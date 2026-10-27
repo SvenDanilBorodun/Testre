@@ -186,14 +186,15 @@ _FK_TOL_M = 1e-5
 # and never widen past it.
 #
 # ⚠ CHANGING ANY VALUE HERE IS A HARDWARE-PROVISIONING CHANGE, NOT A SOFTWARE
-# ONE. The driver's boot probe verifies the servo EEPROM Min/Max_Position_Limit
-# window as a PROVISIONING FINGERPRINT, so a limit that moves here without
-# ``python3 tools/feetech_provision.py --arm v1`` being re-run on every physical
-# arm makes that arm refuse to boot, in German, with no hint why. The same pair
-# is declared in FOUR places that must move together — here, the shipped URDF
-# (physical_ai_manager/public/v1-urdf/v1.urdf), the driver node
-# (docker/open_manipulator/feetech_arm_node.py::JOINT_LIMITS_RAD) and the
-# provisioning tool (tools/feetech_provision.py, ``--arm v1``).
+# ONE. The driver's boot probe compares every servo's EEPROM
+# Min/Max_Position_Limit window with the servo spec, so a limit that moves here
+# makes every physical arm refuse to boot („Positionsgrenzen") until each servo
+# is re-calibrated at the Servo-Station (or ``python3 tools/feetech_provision.py
+# --arm v1`` is re-run). The same pair is declared in FOUR places that must move
+# together — here, the shipped URDF (physical_ai_manager/public/v1-urdf/v1.urdf),
+# the driver node (docker/open_manipulator/feetech_arm_node.py::JOINT_LIMITS_RAD)
+# and the servo spec
+# (docker/open_manipulator/feetech_servo_spec.py::JOINT_LIMITS_RAD).
 _V1_JOINT_LIMITS_RAD: list[tuple[float, float]] = [
     (-1.5708, 1.5708),     # joint1  base yaw
     (0.0, 3.1416),         # joint2  shoulder

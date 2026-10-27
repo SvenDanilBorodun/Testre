@@ -102,9 +102,9 @@ services:
       # the Feetech driver node instead of the OMX bringup; default = today's
       # OMX phases). The server container has its own copy further down.
       - EDUBOTICS_ROBOT_TYPE=${EDUBOTICS_ROBOT_TYPE:-omx_full}
-      # Feetech per-joint direction convention (6 comma-separated ±1) — bench
-      # knob for rig gate VR3; empty = the baked default (all +1). A flip needs
-      # re-provisioning. Read by feetech_arm_node.py.
+      # Feetech per-joint direction signs: an ASSERTION only (6 comma-separated ±1). Empty = no check. The signs
+      # are fixed by the servo spec (feetech_servo_spec.py); a value that differs makes the arm refuse to boot
+      # in German. Read by feetech_arm_node.py.
       - EDUBOTICS_FEETECH_JOINT_SIGNS=${EDUBOTICS_FEETECH_JOINT_SIGNS:-}
       # Feetech boot plausibility band, in encoder ticks (empty = 400 ≈ 35°). The
       # boot probe refuses a joint reading this far outside its designed EEPROM

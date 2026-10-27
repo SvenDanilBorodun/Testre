@@ -58,6 +58,10 @@ tools/v1_records/
 # A bench machine may still hold records written by the retired tool; keep them out.
 tools/edu6_records/
 tools/edu1_records/
+# Generated V1 gauge and marked arm parts (STEP/STL/PNG + manifest): derived from the owner's STEP,
+# re-made after every CAD export, never committed (docs/servo-station.md).
+tools/servo_gauge/out/
+tools/v1_marked_parts/out/
 
 # Generated classroom-kit artefacts (tools/generate_v1_mat.py) — the printable
 # mat is derived from the code on demand, never checked in.

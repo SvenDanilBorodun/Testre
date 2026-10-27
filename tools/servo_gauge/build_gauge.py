@@ -374,8 +374,9 @@ def _p0_arrow(g):
                  g.cyl_z(0.0, 0.0, z0 - 1.0, 2.0 * (radius - half), height + 2.0))
     big = 2.0 * radius
     th0 = ar['theta_deg'][0]
-    wedge = g.prism([(0.0, 0.0, z0 - 1.0)] + [(big * math.cos(math.radians(t)), big * math.sin(math.radians(t)), z0 - 1.0)
-                                              for t in (th0, (th0 + base) / 2.0, base)], (0.0, 0.0, height + 2.0))
+    rim = [(big * math.cos(math.radians(t)), big * math.sin(math.radians(t)), z0 - 1.0)
+           for t in (th0, (th0 + base) / 2.0, base)]
+    wedge = g.prism([(0.0, 0.0, z0 - 1.0)] + rim, (0.0, 0.0, height + 2.0))
     shaft = g.o.BRepAlgoAPI_Common(ring, wedge).Shape()
     cb, sb = math.cos(math.radians(base)), math.sin(math.radians(base))
     ct, st = math.cos(math.radians(tip)), math.sin(math.radians(tip))

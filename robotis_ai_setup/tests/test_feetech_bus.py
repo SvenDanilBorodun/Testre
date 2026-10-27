@@ -290,6 +290,152 @@ class TestBusTransactions(unittest.TestCase):
                          fb.ERR_OVERHEAT)
 
 
+class TestBusPrimitives(unittest.TestCase):
+    """The primitives the Servo-Station and the EEPROM-image boot probe stand
+    on: the vendor's Homing_Offset encoding, the wrap-aware offset formula,
+    the 40-byte EEPROM block and the broadcast ping."""
+
+    # ── Homing_Offset (register 31): the vendor's CHINESE table ─────────────
+    def test_a_foreign_offset_encoding_is_refused_not_misread(self):
+        # 0x1805 = 6149: bit 12 set (+2048) with bit 11 (sign) set means −2053
+        # in the vendor's 13-bit encoding. The plain bit-11 sign-magnitude
+        # decode reads it as −5, a silent 2048-tick error.
+        self.assertEqual(fb.decode_sign_magnitude(0x1805, 11), -5)
+        with self.assertRaises(fb.ForeignOffsetEncoding):
+            fb.decode_homing_offset(0x1805)
+        for raw in (0x1000, 0x2000, 0x8000, 0xF7FF):
+            with self.assertRaises(fb.ForeignOffsetEncoding, msg=hex(raw)):
+                fb.decode_homing_offset(raw)
+        self.assertTrue(issubclass(fb.ForeignOffsetEncoding, ValueError))
+
+    def test_our_own_offsets_round_trip(self):
+        self.assertEqual(fb.decode_homing_offset(0x0800 | 810), -810)
+        self.assertEqual(fb.decode_homing_offset(810), 810)
+        for value in (-fb.HOMING_OFFSET_MAX, -2025, -1, 0, 1, 1047,
+                      fb.HOMING_OFFSET_MAX):
+            self.assertEqual(
+                fb.decode_homing_offset(fb.encode_homing_offset(value)), value)
+        self.assertEqual(fb.HOMING_OFFSET_MAX, 2047)
+        for value in (2048, -2048, 4095):
+            with self.assertRaises(ValueError, msg=value):
+                fb.encode_homing_offset(value)
+
+    def test_the_wrap_aware_offset_formula(self):
+        # Present = (Raw − Offset) mod 4096, so the offset that makes `raw`
+        # read `mark` is raw − mark folded into [−2047, 2047].
+        self.assertEqual(fb.homing_offset_for(1834, 1024), 810)
+        self.assertEqual(fb.homing_offset_for(23, 3072), 1047)
+        self.assertEqual(fb.homing_offset_for(23, 1024), -1001)
+        self.assertEqual(fb.homing_offset_for(23, 2048), -2025)
+        # exactly opposite the mark: −2048 has no 11-bit sign-magnitude form
+        with self.assertRaises(fb.OffsetUnrepresentable):
+            fb.homing_offset_for(3072, 1024)
+        self.assertTrue(issubclass(fb.OffsetUnrepresentable, ValueError))
+        # …and every representable offset really makes raw read mark.
+        for raw in range(0, 4096, 7):
+            for mark in (1024, 1536, 2048, 2560, 3072):
+                try:
+                    off = fb.homing_offset_for(raw, mark)
+                except fb.OffsetUnrepresentable:
+                    self.assertEqual((raw - mark) % 4096, 2048)
+                    continue
+                self.assertLessEqual(abs(off), fb.HOMING_OFFSET_MAX)
+                self.assertEqual((raw - off) % 4096, mark)
+
+    def test_raw_tick_and_circular_distance(self):
+        # The bench datum: J5 read 4034 under a legacy +85 offset, raw 23.
+        self.assertEqual(fb.raw_tick_from(4034, 85), 23)
+        self.assertEqual(fb.raw_tick_from(1024, 810), 1834)
+        self.assertEqual(fb.circular_distance(4095, 1), 2)
+        self.assertEqual(fb.circular_distance(1, 4095), 2)
+        self.assertEqual(fb.circular_distance(0, 2048), 2048)
+        self.assertEqual(fb.circular_distance(1024, 1028), 4)
+
+    # ── the EEPROM block and the register names ─────────────────────────────
+    def test_the_eeprom_block_is_every_eeprom_register(self):
+        self.assertEqual(fb.EEPROM_BLOCK_ADDR, 0)
+        self.assertEqual(fb.EEPROM_BLOCK_LEN, 40)
+        # one past the block is the RAM torque switch, never part of it
+        self.assertEqual(fb.EEPROM_BLOCK_ADDR + fb.EEPROM_BLOCK_LEN,
+                         fb.REG_TORQUE_ENABLE)
+        self.assertEqual(
+            (fb.REG_LED_ALARM, fb.REG_P_GAIN, fb.REG_D_GAIN, fb.REG_I_GAIN,
+             fb.REG_MIN_STARTUP_FORCE, fb.REG_25, fb.REG_CW_DEADZONE,
+             fb.REG_CCW_DEADZONE, fb.REG_SPEED_P, fb.REG_OVERCURRENT_TIME,
+             fb.REG_SPEED_I, fb.REG_TORQUE_LIMIT),
+            (20, 21, 22, 23, 24, 25, 26, 27, 37, 38, 39, 48))
+
+    def test_the_baud_table_follows_the_official_sdk(self):
+        self.assertEqual(fb.BAUD_RATES,
+                         (1_000_000, 500_000, 250_000, 128_000, 115_200,
+                          76_800, 57_600, 38_400))
+        bus = fb.FeetechBus('fake', baudrate=500_000,
+                            serial_factory=lambda p, b, t: _FakeSerial())
+        self.assertEqual(bus.baudrate, 500_000)
+        self.assertEqual(_bus()[0].baudrate, 1_000_000)
+
+    def test_the_broadcast_window_is_lerobots(self):
+        self.assertAlmostEqual(fb.broadcast_wait_s(1_000_000),
+                               6 * 253 * 10 / 1_000_000 + 0.003 * 253 + 0.016)
+        self.assertGreater(fb.broadcast_wait_s(38_400),
+                           fb.broadcast_wait_s(1_000_000))
+
+    # ── the status-stream parser ────────────────────────────────────────────
+    def test_parse_status_stream(self):
+        one = _status(1, 0, b'\x05')
+        two = one + _status(7, fb.ERR_OVERLOAD)
+        self.assertEqual(fb.parse_status_stream(one), ([(1, 0, b'\x05')], 0))
+        self.assertEqual(fb.parse_status_stream(two),
+                         ([(1, 0, b'\x05'), (7, fb.ERR_OVERLOAD, b'')], 0))
+        self.assertEqual(fb.parse_status_stream(b''), ([], 0))
+        # leading noise: the bytes before the header are junk, the packet counts
+        self.assertEqual(fb.parse_status_stream(b'\x00\x13\xff' + one),
+                         ([(1, 0, b'\x05')], 3))
+        # a bad checksum makes the whole packet junk, the next one still counts
+        garbled = one[:-1] + bytes([(one[-1] + 1) & 0xFF])
+        packets, junk = fb.parse_status_stream(garbled + _status(7, 0))
+        self.assertEqual(packets, [(7, 0, b'')])
+        self.assertEqual(junk, len(garbled))
+        # a truncated tail is junk too
+        self.assertEqual(fb.parse_status_stream(one + one[:4]),
+                         ([(1, 0, b'\x05')], 4))
+        # a bad length byte is not a packet
+        self.assertEqual(fb.parse_status_stream(b'\xff\xff\x01\x01\x00\xfd'),
+                         ([], 6))
+
+    def test_broadcast_ping(self):
+        bus, fake = _bus(_status(1, 0))
+        self.assertEqual(bus.broadcast_ping(wait_s=0.01), ([(1, 0)], 0))
+        self.assertEqual(fake.written,
+                         fb.build_packet(fb.BROADCAST_ID, fb.INSTR_PING))
+        bus, _ = _bus(_status(1, 0) + _status(7, 0))
+        self.assertEqual(bus.broadcast_ping(wait_s=0.01), ([(1, 0), (7, 0)], 0))
+        bus, _ = _bus(b'')
+        self.assertEqual(bus.broadcast_ping(wait_s=0.01), ([], 0))
+        good = _status(1, 0)
+        bus, _ = _bus(good[:-1] + bytes([(good[-1] + 1) & 0xFF]))
+        ids, junk = bus.broadcast_ping(wait_s=0.01)
+        self.assertEqual(ids, [])
+        self.assertGreater(junk, 0)
+
+    def test_a_deadline_raises_the_timeout_class(self):
+        # FeetechBusTimeout subclasses FeetechBusError, so every existing
+        # `except FeetechBusError` keeps catching it.
+        self.assertTrue(issubclass(fb.FeetechBusTimeout, fb.FeetechBusError))
+        bus, _ = _bus(b'')
+        with self.assertRaises(fb.FeetechBusTimeout):
+            bus.read(1, fb.REG_MODEL_NUMBER, 2)
+        bus, _ = _bus(b'\xff\xff\x01')            # header, then silence
+        with self.assertRaises(fb.FeetechBusTimeout):
+            bus.read(1, fb.REG_MODEL_NUMBER, 2)
+        # a framing fault is NOT a timeout
+        good = _status(1, 0, fb.le16(777))
+        bus, _ = _bus(good[:-1] + bytes([(good[-1] + 1) & 0xFF]))
+        with self.assertRaises(fb.FeetechBusError) as ctx:
+            bus.read(1, fb.REG_MODEL_NUMBER, 2)
+        self.assertNotIsInstance(ctx.exception, fb.FeetechBusTimeout)
+
+
 class TestTorqueEnableWriteRail(unittest.TestCase):
     """Register 40 is NOT a boolean: 128 means "calibrate the current position
     to 2048", i.e. the servo writes itself a fresh Homing_Offset. It replies no

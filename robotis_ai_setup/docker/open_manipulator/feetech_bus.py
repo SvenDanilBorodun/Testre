@@ -38,8 +38,9 @@ from typing import Optional
 REG_FIRMWARE_MAJOR = 0        # R, firmware major.minor at addr 0/1
 REG_MODEL_NUMBER = 3          # R, 2 bytes — 777 = STS3215, 2825 = STS3250
 REG_ID = 5
-REG_BAUD_RATE = 6             # 0 = 1 Mbps (factory default)
-REG_RETURN_DELAY = 7          # status-return delay time (provisioned to 0)
+REG_BAUD_RATE = 6             # 0 = 1 Mbps (factory default); see BAUD_RATES
+REG_RETURN_DELAY = 7          # OLD table: status-return delay (provisioned to
+#                               0); NEW table: reserved
 REG_RESPONSE_STATUS_LEVEL = 8  # 1 = ack every instruction (factory); 0 = reply
 #                                only to READ/PING — a 0 makes every awaited
 #                                WRITE time out, so provisioning normalizes it
@@ -52,20 +53,43 @@ REG_MIN_VOLTAGE = 15
 REG_MAX_TORQUE_LIMIT = 16     # 2 bytes — copied into REG_TORQUE_LIMIT at power-on (R2-verify)
 REG_PHASE = 18
 REG_UNLOAD_CONDITION = 19
+REG_LED_ALARM = 20
+REG_P_GAIN = 21
+REG_D_GAIN = 22
+REG_I_GAIN = 23
+REG_MIN_STARTUP_FORCE = 24
+REG_25 = 25                   # NEW firmware: integral limit; OLD: high byte of a 2-byte 24
+REG_CW_DEADZONE = 26
+REG_CCW_DEADZONE = 27
 REG_PROTECTION_CURRENT = 28   # 2 bytes, ×6.5 mA
-REG_ANGULAR_RESOLUTION = 30   # EEPROM, 1 byte, factory 1, range 1..3 — see below
-REG_HOMING_OFFSET = 31        # 2 bytes, sign bit 11
+REG_ANGULAR_RESOLUTION = 30   # EEPROM, 1 byte, factory 1 (OLD range 1..3, NEW 1..128) — see below
+# Homing_Offset, 2 bytes. The vendor's CHINESE memory table (row 31) is a 13-bit
+# encoding: 0–2047 → 0…+2047, 2048–4095 → 0…−2047 (bit 11 = sign),
+# 4096–6143 → +2048…+4095, 6144–8191 → −2048…−4095 (bit 12 = +2048). The English
+# page mistranslates the third range. Our tools only ever write |offset| ≤ 2047,
+# so bits 12–15 set mean a FOREIGN tool wrote it — see decode_homing_offset.
+REG_HOMING_OFFSET = 31
 REG_OPERATING_MODE = 33       # 0 = position
 REG_PROTECTIVE_TORQUE = 34
 REG_PROTECTION_TIME = 35
 REG_OVERLOAD_TORQUE = 36
-REG_TORQUE_ENABLE = 40        # RAM: 0 off, 1 on, 128 = set current pos as 2048
+REG_SPEED_P = 37
+REG_OVERCURRENT_TIME = 38
+REG_SPEED_I = 39
+# RAM: 0 off, 1 on, 2 damping (NEW table: the torque limit at 48 sets the
+# damping force), 128 = re-datum the current position as 2048. Only 0/1 are
+# ever written — see SAFE_TORQUE_ENABLE_VALUES.
+REG_TORQUE_ENABLE = 40
 REG_ACCELERATION = 41         # RAM
 REG_GOAL_POSITION = 42        # RAM, 2 bytes
-REG_GOAL_TIME = 44            # RAM, 2 bytes (documented no-op on ST/STS — never rely on it)
+# RAM, 2 bytes. OLD table: Goal_Time, a documented no-op on ST/STS. NEW table:
+# "PWM open-loop speed", factory 1000, effective only in mode 2 — inert in
+# position mode 0, which the boot probe enforces. Never rely on it.
+REG_GOAL_TIME = 44
 REG_GOAL_SPEED = 46           # RAM, 2 bytes
-REG_TORQUE_LIMIT = 48         # RAM, 2 bytes (volatile — REG_MAX_TORQUE_LIMIT is the floor)
-REG_LOCK = 55                 # RAM: 0 = EEPROM writes persist, 1 = protected (inverted!)
+REG_TORQUE_LIMIT = 48         # RAM, 2 bytes, loaded from Max_Torque (16) at power-on (vendor table)
+REG_LOCK = 55                 # RAM: 0 = EEPROM writes persist, 1 = protected (inverted!);
+#                               factory default OLD table 0, NEW table 1
 REG_PRESENT_POSITION = 56     # R, 2 bytes, sign bit 15
 REG_PRESENT_SPEED = 58        # R, 2 bytes, steps/s, sign bit 15
 REG_PRESENT_LOAD = 60         # R, 2 bytes, sign bit 10
@@ -73,6 +97,16 @@ REG_PRESENT_VOLTAGE = 62      # R, 1 byte, ×0.1 V
 REG_PRESENT_TEMPERATURE = 63  # R, 1 byte, °C
 REG_STATUS = 65               # R, 1 byte (error flags)
 REG_PRESENT_CURRENT = 69      # R, 2 bytes, ×6.5 mA
+
+# index = register 6 value (official SDK)
+BAUD_RATES = (1_000_000, 500_000, 250_000, 128_000, 115_200, 76_800, 57_600, 38_400)
+# One READ of the whole EEPROM: addr 0..39 is every EEPROM register; 40 is
+# Torque_Enable (RAM) and deliberately outside the block.
+EEPROM_BLOCK_ADDR = 0
+EEPROM_BLOCK_LEN = 40
+# The largest Homing_Offset magnitude the 11-bit sign-magnitude form holds — and
+# therefore the largest our tools ever write (see REG_HOMING_OFFSET).
+HOMING_OFFSET_MAX = 2047
 
 # ── Angular_Resolution (register 30) — the last map-scaling register ──────────
 # Vendor text (identical in both official memory tables): „对传感器最小分辨角度
@@ -249,6 +283,93 @@ def encode_sign_magnitude(value: int, sign_bit: int) -> int:
     return value
 
 
+class ForeignOffsetEncoding(ValueError):
+    """A Homing_Offset word with any of bits 12–15 set: written by a tool that
+    uses the vendor's wider encoding (see REG_HOMING_OFFSET), never by ours."""
+
+
+class OffsetUnrepresentable(ValueError):
+    """The raw tick sits exactly opposite the mark: the offset would be −2048,
+    which the 11-bit sign-magnitude form cannot hold."""
+
+
+def decode_homing_offset(raw16: int) -> int:
+    """Homing_Offset register word → signed offset. Refuses (rather than
+    misreads) a word from a foreign tool: the plain bit-11 decode reads 0x1805
+    (−2053 in the vendor's table) as −5."""
+    if raw16 & 0xF000:
+        raise ForeignOffsetEncoding(
+            f'Homing_Offset word {raw16:#06x} uses bits 12-15 (foreign encoding)')
+    return decode_sign_magnitude(raw16, 11)
+
+
+def encode_homing_offset(value: int) -> int:
+    if abs(value) > HOMING_OFFSET_MAX:
+        raise ValueError(
+            f'Homing_Offset {value} outside ±{HOMING_OFFSET_MAX}')
+    return encode_sign_magnitude(value, 11)
+
+
+def raw_tick_from(present: int, offset: int) -> int:
+    """The encoder's raw tick behind a reading: Present = (Raw − Offset) mod
+    4096 on a single-turn servo, so Raw = (Present + Offset) mod 4096."""
+    return (present + offset) % TICKS_PER_REV
+
+
+def homing_offset_for(raw: int, mark_tick: int) -> int:
+    """The Homing_Offset that makes encoder tick ``raw`` read ``mark_tick`` —
+    wrap-aware, folded into [−2048, 2047]. Raises
+    :class:`OffsetUnrepresentable` for −2048 (raw exactly opposite the mark)."""
+    offset = ((raw - mark_tick + 2048) % TICKS_PER_REV) - 2048
+    if offset == -2048:
+        raise OffsetUnrepresentable(
+            f'raw tick {raw} sits exactly opposite mark {mark_tick}')
+    return offset
+
+
+def circular_distance(a: int, b: int) -> int:
+    """Distance between two ticks the short way round the 4096-tick circle."""
+    d = abs(a - b) % TICKS_PER_REV
+    return min(d, TICKS_PER_REV - d)
+
+
+def broadcast_wait_s(baudrate: int) -> float:
+    """How long a broadcast PING collects replies: LeRobot 0.5.1's
+    ``_broadcast_ping`` window. ASSUMPTION: replies are staggered by id; the
+    P0 reference read on real servos proves the window."""
+    return 6 * 253 * 10 / baudrate + 0.003 * 253 + 0.016
+
+
+def parse_status_stream(buf: bytes) -> tuple[list[tuple[int, int, bytes]], int]:
+    """Every valid status packet in ``buf`` as ``(id, error, params)``, in
+    order, plus the count of bytes that are not part of one (bytes before a
+    header, a bad length, a bad checksum, a truncated tail). Pure."""
+    packets: list[tuple[int, int, bytes]] = []
+    used = 0
+    i = 0
+    n = len(buf)
+    while i + 1 < n:
+        if buf[i] != 0xFF or buf[i + 1] != 0xFF:
+            i += 1
+            continue
+        if i + 4 > n:
+            break
+        servo_id, length = buf[i + 2], buf[i + 3]
+        end = i + 4 + length
+        if length < 2 or length > 250 or end > n:
+            i += 1
+            continue
+        error = buf[i + 4]
+        params = bytes(buf[i + 5:end - 1])
+        if buf[end - 1] != checksum(bytes([servo_id, length, error]) + params):
+            i += 1
+            continue
+        packets.append((servo_id, error, params))
+        used += end - i
+        i = end
+    return packets, n - used
+
+
 def position_limit_window(lo_rad: float, hi_rad: float, sign: int) -> tuple[int, int]:
     """Designed URDF limit pair → the servo's EEPROM ``Min/Max_Position_Limit``
     window around the designed zero (``CENTER_TICK``), sign-aware: a −1
@@ -330,6 +451,12 @@ class FeetechBusError(Exception):
     """Raised on a broken/absent reply (framing, checksum, timeout)."""
 
 
+class FeetechBusTimeout(FeetechBusError):
+    """No (complete) reply before the deadline. A subclass, so every existing
+    ``except FeetechBusError`` keeps catching it; a caller that must tell a
+    silent servo from a garbled reply (the Servo-Station) catches this one."""
+
+
 class FeetechBus:
     """One serial port, many STS3215 servos. NOT thread-safe — the caller
     (feetech_arm_node) serializes access with its own lock."""
@@ -347,6 +474,11 @@ class FeetechBus:
         else:
             self._ser = serial_factory(port, baudrate, timeout_s)
         self._timeout_s = timeout_s
+        self._baudrate = baudrate
+
+    @property
+    def baudrate(self) -> int:
+        return self._baudrate
 
     def close(self) -> None:
         try:
@@ -364,12 +496,13 @@ class FeetechBus:
 
     def _read_status(self, deadline: float) -> tuple[int, int, bytes]:
         """Read one status packet → ``(servo_id, error, params)``. Raises
-        :class:`FeetechBusError` on timeout/framing/checksum."""
+        :class:`FeetechBusTimeout` on a deadline, :class:`FeetechBusError` on
+        framing/checksum."""
         buf = b''
         # hunt the FF FF header
         while True:
             if time.monotonic() > deadline:
-                raise FeetechBusError('timeout waiting for status header')
+                raise FeetechBusTimeout('timeout waiting for status header')
             b1 = self._ser.read(1)
             if not b1:
                 continue
@@ -392,7 +525,7 @@ class FeetechBus:
         out = b''
         while len(out) < n:
             if time.monotonic() > deadline:
-                raise FeetechBusError(f'timeout ({len(out)}/{n} bytes)')
+                raise FeetechBusTimeout(f'timeout ({len(out)}/{n} bytes)')
             chunk = self._ser.read(n - len(out))
             if chunk:
                 out += chunk
@@ -407,6 +540,25 @@ class FeetechBus:
             return rid == servo_id
         except FeetechBusError:
             return False
+
+    def broadcast_ping(self, wait_s: Optional[float] = None
+                       ) -> tuple[list[tuple[int, int]], int]:
+        """PING to the broadcast id: every servo on the bus answers with its
+        own status packet. Collects bytes for ``wait_s`` (default
+        :func:`broadcast_wait_s` at this bus's baud rate) and returns
+        ``([(id, error)], junk_bytes)`` — junk counts every byte that was not
+        part of a valid packet (two servos on one id, a wrong baud rate)."""
+        self._write_packet(build_packet(BROADCAST_ID, INSTR_PING))
+        if wait_s is None:
+            wait_s = broadcast_wait_s(self.baudrate)
+        deadline = time.monotonic() + wait_s
+        buf = b''
+        while time.monotonic() < deadline:
+            chunk = self._ser.read(64)
+            if chunk:
+                buf += chunk
+        packets, junk = parse_status_stream(buf)
+        return [(sid, error) for sid, error, _params in packets], junk
 
     def read(self, servo_id: int, addr: int, length: int) -> tuple[int, bytes]:
         """READ → ``(error_byte, data)``. Raises on no/bad reply."""

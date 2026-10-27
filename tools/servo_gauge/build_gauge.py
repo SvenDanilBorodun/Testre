@@ -205,7 +205,7 @@ def check_cap(g, cap, seat, body):
         return (r * theta_c - w * theta_s, r * theta_s + w * theta_c, z)
 
     if not g.valid(body):
-        fails.append('(1) invalid solid')
+        fails.append('(1) kein gültiger Volumenkörper')
     slot0, slot1 = gp.SLOT_R[cap]
     strip0, strip1 = gp.CASE_STRIP_R[cap]
     reached = {'horn': 0, 'case': 0}
@@ -224,7 +224,7 @@ def check_cap(g, cap, seat, body):
             continue
         probe = g.cyl(along(c, s, r, 0.0, target + 0.02), (0.0, 0.0, 1.0), gp.REACH_PROBE_D, 30.0)
         if g.common_volume(probe, body) > 1e-6:
-            fails.append(f'(2) probe blocked at r {r:.2f}')
+            fails.append(f'(2) Sonde bei r {r:.2f} blockiert')
         else:
             reached[kind] += 1
         if kind == 'case':
@@ -235,11 +235,11 @@ def check_cap(g, cap, seat, body):
                 worst_gap = max(worst_gap, j * 0.01)
     want_horn, want_case = gp.EXPECTED_REACH_COUNTS[cap]
     if reached['horn'] < want_horn or reached['case'] < want_case:
-        fails.append(f"(2) reach horn ×{reached['horn']} / case ×{reached['case']}, "
-                     f'expected ×{want_horn} / ×{want_case}')
+        fails.append(f"(2) Reichweite Horn ×{reached['horn']} / Gehäuse ×{reached['case']}, "
+                     f'erwartet ×{want_horn} / ×{want_case}')
     at_design = abs(seat - gp.CAP_DESIGN_SEAT_N) < 1e-9
     if at_design and worst_gap > gp.LAND_GAP + 1e-6:
-        fails.append(f'(3) land {worst_gap:.2f} mm above the case (> {gp.LAND_GAP})')
+        fails.append(f'(3) Steg {worst_gap:.2f} mm über dem Gehäuse (> {gp.LAND_GAP})')
     r0, r1, step = gp.INTERFERENCE_R
     directions = [(gp.MARK_ARM_THETA_DEG[cap], gp.CASE_TOP[cap])]
     if abs(gp.DOWEL_ARM_THETA_DEG - ref) > 1e-9:
@@ -260,29 +260,29 @@ def check_cap(g, cap, seat, body):
                 if g.inside(body, along(tc, ts, r, w, h + gp.INTERFERENCE_CLEARANCE)):
                     interference += 1
                     if interference <= 3:
-                        fails.append(f'(4) cap material {gp.INTERFERENCE_CLEARANCE} above the case at '
-                                     f'θ {theta:g} r {r:.2f} w {w:g}')
+                        fails.append(f'(4) Kappenmaterial {gp.INTERFERENCE_CLEARANCE} mm über dem Gehäuse '
+                                     f'bei θ {theta:g} r {r:.2f} w {w:g}')
     offset = gp.HOLE_THETA_OFFSET_DEG[cap]
     for th in gp.PIN_THETA_DEG[cap]:
         k_ = (th - offset) / 90.0
         if abs(k_ - round(k_)) > 1e-9:
-            fails.append(f'(5) pin θ {th} not on the hole set')
+            fails.append(f'(5) Stift θ {th} nicht auf dem Lochbild')
         x, y = gp.PIN_PCD_R * math.cos(math.radians(th)), gp.PIN_PCD_R * math.sin(math.radians(th))
         if not g.inside(body, (x, y, seat - 1.0)):
-            fails.append(f'(5) pin θ {th} missing')
+            fails.append(f'(5) Stift θ {th} fehlt')
     hole = g.cyl_z(gp.PIN_PCD_R * c, gp.PIN_PCD_R * s, seat - gp.PIN_LEN - 1.0, gp.HORN_HOLE_D, gp.PIN_LEN + 1.0)
     if g.common_volume(hole, body) > 1e-6:
-        fails.append('(5) cap material in the reference hole')
+        fails.append('(5) Kappenmaterial im markierten Hornloch')
     dc, ds = math.cos(math.radians(gp.DOWEL_ARM_THETA_DEG)), math.sin(math.radians(gp.DOWEL_ARM_THETA_DEG))
     z_mid = gp.DOWEL_ARM_UNDERSIDE_N + (seat - gp.CAP_DESIGN_SEAT_N) + 2.0
     half_s = gp.DOWEL_SLOT_W / 2.0
     for r in (gp.DOWEL_SLOT_R[0] + 0.5, gp.DOWEL_AXIS_RW[0], gp.DOWEL_SLOT_R[1] - 0.1):
         for w in (0.0, half_s - 0.06, -(half_s - 0.06)):
             if g.inside(body, along(dc, ds, r, w, z_mid)):
-                fails.append(f'(6) dowel slot blocked at r {r:g} w {w:g}')
+                fails.append(f'(6) Passstift-Schlitz bei r {r:g} w {w:g} blockiert')
         for w in (half_s + 0.1, -(half_s + 0.1)):
             if r < gp.DOWEL_SLOT_R[1] - 0.2 and not g.inside(body, along(dc, ds, r, w, z_mid)):
-                fails.append(f'(6) dowel slot wider than {gp.DOWEL_SLOT_W} at r {r:g}')
+                fails.append(f'(6) Passstift-Schlitz bei r {r:g} breiter als {gp.DOWEL_SLOT_W} mm')
     report = {'seat_n': seat, 'valid': g.valid(body), 'reach_horn': reached['horn'], 'reach_case': reached['case'],
               'worst_land_gap_mm': round(worst_gap, 3), 'interference_points': interference,
               'failures': list(fails)}
@@ -389,44 +389,44 @@ def _p0_arrow(g):
 def check_cradle(g, body, no_bumps):
     fails = []
     if not g.valid(body):
-        fails.append('(1) invalid cradle')
+        fails.append('(1) Wiege: kein gültiger Volumenkörper')
     if not g.valid(no_bumps):
-        fails.append('(1) invalid cradle without bumps')
+        fails.append('(1) Wiege ohne Noppen: kein gültiger Volumenkörper')
     e = gp.PAD_APEX_PROBE
 
     def apex(label, outside, inside):
         if g.inside(body, outside):
-            fails.append(f'(7) {label}: material beyond the apex')
+            fails.append(f'(7) {label}: Material über den Scheitel hinaus')
         if not g.inside(body, inside):
-            fails.append(f'(7) {label}: no material at the apex')
+            fails.append(f'(7) {label}: kein Material am Scheitel')
 
     for pad in gp.BOTTOM_PADS:
         apex(pad['name'], (pad['r'], pad['w'], pad['top_n'] + e), (pad['r'], pad['w'], pad['top_n'] - e))
     side_apex = gp.WALL_INNER['-w'] + gp.DATUM_PAD_H
     for i, pad in enumerate(gp.SIDE_PADS):
-        apex(f'side pad {i + 1}', (pad['r'], side_apex + e, pad['n']), (pad['r'], side_apex - e, pad['n']))
+        apex(f'Seitenauflage {i + 1}', (pad['r'], side_apex + e, pad['n']), (pad['r'], side_apex - e, pad['n']))
     end_apex = gp.WALL_INNER['near'] + gp.DATUM_PAD_H
-    apex('end pad', (end_apex + e, gp.END_PAD['w'], gp.END_PAD['n']), (end_apex - e, gp.END_PAD['w'], gp.END_PAD['n']))
+    apex('Endauflage', (end_apex + e, gp.END_PAD['w'], gp.END_PAD['n']), (end_apex - e, gp.END_PAD['w'], gp.END_PAD['n']))
     mid_r = sum(gp.FLEXURE_PLUS_W_R) / 2.0
-    apex('+w bump', (mid_r, gp.BUMP_APEX['+w'] - e, gp.BUMP_N), (mid_r, gp.BUMP_APEX['+w'] + e, gp.BUMP_N))
+    apex('Noppe +w', (mid_r, gp.BUMP_APEX['+w'] - e, gp.BUMP_N), (mid_r, gp.BUMP_APEX['+w'] + e, gp.BUMP_N))
     mid_w = sum(gp.FLEXURE_FAR_W) / 2.0
-    apex('far bump', (gp.BUMP_APEX['far'] - e, mid_w, gp.BUMP_N), (gp.BUMP_APEX['far'] + e, mid_w, gp.BUMP_N))
+    apex('Noppe am Ende', (gp.BUMP_APEX['far'] - e, mid_w, gp.BUMP_N), (gp.BUMP_APEX['far'] + e, mid_w, gp.BUMP_N))
     shared = {}
     for b in gp.CASE_ENVELOPE_BOXES:
         v = g.common_volume(no_bumps, g.box(*b))
         shared[str(b)] = v
         if v >= gp.ENVELOPE_MAX_SHARED_MM3:
-            fails.append(f'(7) the cradle shares {v:.4f} mm³ with the case envelope box {b}')
+            fails.append(f'(7) die Wiege teilt {v:.4f} mm³ mit der Gehäusehülle {b}')
     line = gp.CABLE_LINE
     probe = g.cyl_z(line['r'], line['w'], line['n'][0], 0.1, line['n'][1] - line['n'][0])
     if g.common_volume(probe, body) > 1e-9:
-        fails.append('(7) the cable line is blocked')
+        fails.append('(7) die Kabellinie ist blockiert')
     ar = gp.P0_ARROW
     p = (-ar['radius'], 0.0)   # θ 180°
     if g.inside(body, (p[0], p[1], ar['top_n'] - ar['depth'] / 2.0)):
-        fails.append('(7) the P0 arrow groove is missing')
+        fails.append('(7) die Rille des P0-Pfeils fehlt')
     if not g.inside(body, (p[0], p[1], ar['top_n'] - ar['depth'] - 0.25)):
-        fails.append('(7) no material under the P0 arrow groove')
+        fails.append('(7) kein Material unter der Rille des P0-Pfeils')
     return fails, {'valid': g.valid(body), 'envelope_shared_mm3': max(shared.values()), 'failures': list(fails)}
 
 
@@ -519,15 +519,15 @@ def main(argv=None):
                 body = caps[cap] if abs(seat - gp.CAP_DESIGN_SEAT_N) < 1e-9 else build_cap(g, cap, seat)
                 fails, rep = check_cap(g, cap, seat, body)
                 report[f'cap_{cap}@{seat:.2f}'] = rep
-                failures += [f'cap {cap} seat {seat:.2f}: {f}' for f in fails]
-                print(f"cap {cap} seat {seat:.2f}: valid={rep['valid']} reach horn ×{rep['reach_horn']}, "
-                      f"case ×{rep['reach_case']}; land {rep['worst_land_gap_mm']:.2f} mm above the case; "
-                      f"interference {rep['interference_points']}; failures: {fails or 'none'}")
+                failures += [f'Kappe {cap}, Sitz {seat:.2f}: {f}' for f in fails]
+                print(f"Kappe {cap}, Sitz {seat:.2f}: gültig: {'ja' if rep['valid'] else 'nein'}, Reichweite Horn ×{rep['reach_horn']}, "
+                      f"Gehäuse ×{rep['reach_case']}; Steg {rep['worst_land_gap_mm']:.2f} mm über dem Gehäuse; "
+                      f"Berührungen {rep['interference_points']}; Fehler: {fails or 'keine'}")
         fails, rep = check_cradle(g, cradle, build_cradle(g, with_bumps=False))
         report['cradle'] = rep
-        failures += [f'cradle: {f}' for f in fails]
-        print(f"cradle: valid={rep['valid']} shared with the case envelope {rep['envelope_shared_mm3']:.6f} mm³; "
-              f"failures: {fails or 'none'}")
+        failures += [f'Wiege: {f}' for f in fails]
+        print(f"Wiege: gültig: {'ja' if rep['valid'] else 'nein'}, mit der Gehäusehülle geteilt {rep['envelope_shared_mm3']:.6f} mm³; "
+              f"Fehler: {fails or 'keine'}")
         if failures:
             for f in failures:
                 print(f'[FEHLER] Selbstprüfung: {f}', file=sys.stderr)
@@ -544,7 +544,7 @@ def main(argv=None):
         triangles, open_edges = stl_open_edges(stl_path)
         stl_report[stem] = {'triangles': triangles, 'open_edges': open_edges}
         if open_edges:
-            failures.append(f'{stem}.stl: {open_edges} edges not shared by exactly two triangles')
+            failures.append(f'{stem}.stl: {open_edges} Kanten gehören nicht zu genau zwei Dreiecken')
         files[f'{stem}.step'] = _sha256(step_path)
         files[f'{stem}.stl'] = _sha256(stl_path)
     if args.self_check and failures:
@@ -565,7 +565,7 @@ def main(argv=None):
     }
     with open(os.path.join(args.out, 'gauge_manifest.json'), 'w', encoding='utf-8') as f:
         json.dump(manifest, f, indent=1, sort_keys=True, ensure_ascii=False)
-    print(f'wrote {len(files)} files + gauge_manifest.json to {args.out}')
+    print(f'{len(files)} Dateien und gauge_manifest.json geschrieben nach {args.out}')
     return 0
 
 

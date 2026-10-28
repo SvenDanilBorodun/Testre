@@ -5,8 +5,20 @@ const initialState = {
   session: null,
   isAuthenticated: false,
   isLoading: true,
+  // Legacy quota fields (an older API's derived credits). The pages read the
+  // training-hour fields below.
   trainingCredits: 0,
   trainingsUsed: 0,
+  // Training hours from GET /trainings/quota (credit system v2, spec §8.2).
+  // `null` = not asked yet, never 0: the Start key stays off until it is known.
+  hoursFree: null,
+  hoursReserved: null,
+  hoursSpent: null,
+  nextReservationHours: null,
+  maxHoursPerTraining: null,
+  account: null, // 'student' | 'group' | null
+  memberLimitHours: null,
+  memberLeftHours: null,
   // Profile info fetched from /me after session is established.
   role: null, // 'admin' | 'teacher' | 'student' | null
   username: null,
@@ -41,7 +53,25 @@ const initialState = {
   studentCount: null,
   groupCount: null,
   groupCreditsTotal: null,
+  // Σ of the admin's compensations into this teacher's student/group accounts.
+  compensated: null,
 };
+
+/** The student's training-hour quota fields, reset by `session/signedOut`. */
+function clearQuotaFields(state) {
+  state.trainingCredits = 0;
+  state.trainingsUsed = 0;
+  state.hoursFree = null;
+  state.hoursReserved = null;
+  state.hoursSpent = null;
+  state.nextReservationHours = null;
+  state.maxHoursPerTraining = null;
+  state.account = null;
+  state.memberLimitHours = null;
+  state.memberLeftHours = null;
+}
+
+const intOrNull = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
 /** Every profile field derived from /me. Shared by the two paths that drop a
  *  session — `setSession(null)` (supabase's own auth-state change) and the
@@ -62,6 +92,7 @@ function clearProfileFields(state) {
   state.studentCount = null;
   state.groupCount = null;
   state.groupCreditsTotal = null;
+  state.compensated = null;
 }
 
 const authSlice = createSlice({
@@ -79,8 +110,20 @@ const authSlice = createSlice({
       state.isLoading = action.payload;
     },
     setQuota: (state, action) => {
-      state.trainingCredits = action.payload.training_credits;
-      state.trainingsUsed = action.payload.trainings_used;
+      const q = action.payload || {};
+      state.trainingCredits = q.training_credits;
+      state.trainingsUsed = q.trainings_used;
+      state.hoursFree = intOrNull(q.hours_free);
+      state.hoursReserved = intOrNull(q.hours_reserved);
+      state.hoursSpent = intOrNull(q.hours_spent);
+      state.nextReservationHours = intOrNull(q.next_reservation_hours);
+      state.maxHoursPerTraining = intOrNull(q.max_hours_per_training);
+      state.account = q.account === 'student' || q.account === 'group' ? q.account : null;
+      state.memberLimitHours = intOrNull(q.member_limit_hours);
+      state.memberLeftHours = intOrNull(q.member_left_hours);
+      // The quota names the group whose hours fund the student; an answer
+      // without the key (an older API) keeps what /me said.
+      if (q.workgroup_name !== undefined) state.workgroupName = q.workgroup_name ?? null;
     },
     setProfile: (state, action) => {
       const p = action.payload;
@@ -100,6 +143,7 @@ const authSlice = createSlice({
         state.studentCount = p.student_count;
         state.groupCount = p.group_count ?? 0;
         state.groupCreditsTotal = p.group_credits_total ?? 0;
+        state.compensated = intOrNull(p.compensated);
       }
     },
     // Update just the proven HF account name after a successful PUT
@@ -129,6 +173,7 @@ const authSlice = createSlice({
       if (p.student_count !== undefined) state.studentCount = p.student_count;
       if (p.group_count !== undefined) state.groupCount = p.group_count;
       if (p.group_credits_total !== undefined) state.groupCreditsTotal = p.group_credits_total;
+      if (p.compensated !== undefined) state.compensated = intOrNull(p.compensated);
     },
   },
   extraReducers: (builder) => {
@@ -138,11 +183,10 @@ const authSlice = createSlice({
     builder.addCase(signedOut, (state) => {
       state.session = null;
       state.isAuthenticated = false;
-      // The credit balance is the STUDENT's, not the machine's — and unlike the
+      // The hour balance is the STUDENT's, not the machine's — and unlike the
       // fields above it is not reset by `setSession(null)`, which is why the
       // two paths are not the same function.
-      state.trainingCredits = 0;
-      state.trainingsUsed = 0;
+      clearQuotaFields(state);
       clearProfileFields(state);
     });
   },

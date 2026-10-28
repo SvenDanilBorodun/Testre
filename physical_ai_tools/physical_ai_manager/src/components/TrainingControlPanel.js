@@ -14,13 +14,20 @@
 //
 // Author: Kiwoong Park
 
-import React from 'react';
+import React, { useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { Key } from './sucher';
 import toast from 'react-hot-toast';
 import { setIsTraining, triggerCloudJobsRefresh } from '../features/training/trainingSlice';
 import { setQuota } from '../features/auth/authSlice';
-import { startCloudTraining, getQuota } from '../services/cloudTrainingApi';
+import { startCloudTraining, getQuota, newRequestId } from '../services/cloudTrainingApi';
+import StartTrainingDialog, {
+  MEMBER_LIMIT_DE,
+  NO_HOURS_DE,
+  NO_HOURS_LABEL_DE,
+  START_DIALOG_DE,
+  noHoursKind,
+} from './StartTrainingDialog';
 
 export default function TrainingControlPanel() {
   const dispatch = useDispatch();
@@ -30,12 +37,25 @@ export default function TrainingControlPanel() {
   const outputFolderName = useSelector((state) => state.training.trainingInfo.outputFolderName);
   const trainingInfo = useSelector((state) => state.training.trainingInfo);
   const session = useSelector((state) => state.auth.session);
-  const trainingCredits = useSelector((state) => state.auth.trainingCredits);
-  const trainingsUsed = useSelector((state) => state.auth.trainingsUsed);
+  const nextReservationHours = useSelector((state) => state.auth.nextReservationHours);
+  const maxHoursPerTraining = useSelector((state) => state.auth.maxHoursPerTraining);
+  const hoursFree = useSelector((state) => state.auth.hoursFree);
+  const memberLimitHours = useSelector((state) => state.auth.memberLimitHours);
+  const memberLeftHours = useSelector((state) => state.auth.memberLeftHours);
+  const account = useSelector((state) => state.auth.account);
+  const workgroupName = useSelector((state) => state.auth.workgroupName);
 
-  const remaining = trainingCredits - trainingsUsed;
+  const [dialogOpen, setDialogOpen] = useState(false);
+  // The idempotency key of the open dialog: minted on its first confirm, kept
+  // for a retry of the same send, dropped when the dialog closes.
+  const keyRef = useRef(null);
+  // A second click before the re-render that disables the key sends nothing.
+  const sendingRef = useRef(false);
 
-  const handleStartTraining = async () => {
+  const canStart = typeof nextReservationHours === 'number' && nextReservationHours >= 1;
+  const noHours = noHoursKind({ nextReservationHours, hoursFree, memberLimitHours, memberLeftHours });
+
+  const handleStartTraining = () => {
     if (!datasetRepoId) {
       toast.error('Bitte wähle einen Datensatz aus');
       return;
@@ -48,15 +68,27 @@ export default function TrainingControlPanel() {
       toast.error('Bitte gib einen Ausgabeordnernamen ein');
       return;
     }
-    if (remaining <= 0) {
-      toast.error('Kein Trainingsguthaben mehr. Kontaktiere deinen Dozenten für mehr.');
+    if (!canStart) {
+      toast.error(noHours === 'member_limit' ? MEMBER_LIMIT_DE : NO_HOURS_DE);
       return;
     }
+    keyRef.current = null;
+    setDialogOpen(true);
+  };
 
+  const closeDialog = () => {
+    keyRef.current = null;
+    setDialogOpen(false);
+  };
+
+  const confirmStart = async () => {
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    if (!keyRef.current) keyRef.current = newRequestId();
     dispatch(setIsTraining(true));
-
+    let result;
     try {
-      const result = await startCloudTraining(session.access_token, {
+      result = await startCloudTraining(session.access_token, {
         datasetName: datasetRepoId,
         modelType: selectedPolicy,
         trainingParams: {
@@ -69,26 +101,36 @@ export default function TrainingControlPanel() {
           save_freq: trainingInfo.saveFreq,
           output_folder_name: outputFolderName,
         },
+        idempotencyKey: keyRef.current,
       });
-
-      toast.success(
-        `Training an Cloud gesendet! Modell: ${result.model_name}`,
-        { duration: 5000 }
-      );
-
-      // Signal MyModels to refetch immediately so the new training appears
-      // without waiting for the 5s poll cycle or a manual refresh.
-      dispatch(triggerCloudJobsRefresh());
-
-      // Refresh quota
-      const quota = await getQuota(session.access_token);
-      dispatch(setQuota(quota));
     } catch (error) {
-      toast.error(`Cloud-Training konnte nicht gestartet werden: ${error.message}`);
-    } finally {
+      // The dialog stays open: a second „Training starten" is a retry of the
+      // same send and reuses the key.
+      toast.error(START_DIALOG_DE.failed(error.message));
       dispatch(setIsTraining(false));
+      sendingRef.current = false;
+      return;
+    }
+
+    toast.success(START_DIALOG_DE.started(result?.reserved_hours), { duration: 5000 });
+    closeDialog();
+    dispatch(setIsTraining(false));
+    sendingRef.current = false;
+
+    // Signal MyModels to refetch immediately so the new training appears
+    // without waiting for the 5s poll cycle or a manual refresh.
+    dispatch(triggerCloudJobsRefresh());
+
+    // The reservation changed the free hours. A failed refresh is not a failed
+    // start (the next focus refetches the quota).
+    try {
+      dispatch(setQuota(await getQuota(session.access_token)));
+    } catch {
+      // ignored on purpose
     }
   };
+
+  const hoursKnownZero = typeof nextReservationHours === 'number' && nextReservationHours < 1;
 
   return (
     <div className="flex items-center justify-end gap-4 flex-wrap">
@@ -97,15 +139,26 @@ export default function TrainingControlPanel() {
         size="lg"
         icon="play"
         onClick={handleStartTraining}
-        disabled={isTraining || remaining <= 0}
+        disabled={isTraining || !canStart}
       >
         {isTraining ? 'Wird gesendet...' : 'Training starten'}
       </Key>
 
-      {remaining <= 0 && (
+      {hoursKnownZero && (
         <span className="su-trn-nocredit">
-          Kein Guthaben mehr
+          {NO_HOURS_LABEL_DE}
         </span>
+      )}
+
+      {dialogOpen && (
+        <StartTrainingDialog
+          hours={nextReservationHours}
+          maxHours={maxHoursPerTraining}
+          workgroupName={account === 'group' ? workgroupName : null}
+          busy={isTraining}
+          onConfirm={confirmStart}
+          onCancel={closeDialog}
+        />
       )}
     </div>
   );

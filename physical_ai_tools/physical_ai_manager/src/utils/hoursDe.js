@@ -41,6 +41,19 @@ function groupDe(intDigits) {
   return intDigits.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
 }
 
+/** '999' → '1000': a decimal digit string plus one. */
+function incrementDigits(digits) {
+  const out = digits.split('');
+  for (let i = out.length - 1; i >= 0; i -= 1) {
+    if (out[i] !== '9') {
+      out[i] = String(Number(out[i]) + 1);
+      return out.join('');
+    }
+    out[i] = '0';
+  }
+  return `1${out.join('')}`;
+}
+
 /** A finite number, or null for anything that is not one (null is not 0). */
 function finiteOrNull(value) {
   if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
@@ -78,7 +91,7 @@ export function hoursDe(value) {
     tenth += 1;
     if (tenth === 10) {
       tenth = 0;
-      intDigits = (BigInt(intDigits) + 1n).toString();
+      intDigits = incrementDigits(intDigits);
     }
   }
   return `${sign}${groupDe(intDigits)},${tenth} Stunden`;
@@ -88,4 +101,47 @@ export function hoursDe(value) {
 export function lostMinutes(seconds) {
   const n = finiteOrNull(seconds);
   return n === null ? 0 : Math.round(n / 60);
+}
+
+// ── A training's hour lines (spec §10.2), shared by „Meine Modelle", the live
+// chart and the teacher's training history. ────────────────────────────────
+
+const TERMINAL = new Set(['succeeded', 'failed', 'canceled']);
+
+/**
+ * What a training cost (credit system v2, spec §10): „Berechnet: 1 Stunde." /
+ * „Es wurde nichts berechnet." for a row the hour ledger settled, null for a
+ * pre-052 row (its credit was paid under the old rules). Never a refund claim.
+ */
+export function chargeSentence(job) {
+  const c = job?.charged_hours;
+  if (typeof c !== 'number' || !Number.isFinite(c)) return null;
+  return c > 0 ? `Berechnet: ${hoursDe(c)}.` : 'Es wurde nichts berechnet.';
+}
+
+/**
+ * The lost time [Q-B]: the unsaved part of lost attempts, which counts against
+ * the training's time limit and is never charged. Shown from one minute on (spec §10.2).
+ */
+export function lostTimeLine(job) {
+  const s = job?.lost_seconds;
+  if (typeof s !== 'number' || !(s >= 60)) return null;
+  const m = lostMinutes(s);
+  return TERMINAL.has(job.status)
+    ? `Verlorene Zeit: ${m} Min. (nicht berechnet)`
+    : `Verlorene Zeit bisher: ${m} Min. – zählt zum Zeitlimit, wird nicht berechnet.`;
+}
+
+/** The card's hour lines: the reservation while active, the charge once settled, who stopped it. */
+export function hourLines(job, { chargeShownElsewhere = false } = {}) {
+  const lines = [];
+  const terminal = TERMINAL.has(job?.status);
+  if (!terminal && typeof job?.reserved_hours === 'number') {
+    lines.push(`Reserviert: ${hoursDe(job.reserved_hours)}`);
+  }
+  if (terminal && !chargeShownElsewhere && typeof job?.charged_hours === 'number') {
+    lines.push(`Berechnet: ${hoursDe(job.charged_hours)}`);
+  }
+  if (job?.stop_requested_by_role === 'teacher') lines.push('Von deiner Lehrkraft gestoppt');
+  return lines;
 }

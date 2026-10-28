@@ -118,8 +118,8 @@ const EMPTY = Object.freeze({
   episodeCount: null,
   modelCount: null,
   workflowCount: null,
-  creditsRemaining: null,
-  creditsTotal: null,
+  hoursFree: null,
+  hoursReserved: null,
   runningTrainings: null,
   lastDataset: null,
   lastWorkflow: null,
@@ -177,10 +177,12 @@ export default function useStudentWork({ enabled = true } = {}) {
         ? jobs.filter((j) => j && (j.status === 'running' || j.status === 'queued')).length
         : null,
       workflowCount: own ? own.length : null,
-      creditsRemaining: quota.ok && typeof quota.value?.remaining === 'number'
-        ? quota.value.remaining : null,
-      creditsTotal: quota.ok && typeof quota.value?.training_credits === 'number'
-        ? quota.value.training_credits : null,
+      // Training hours (credit system v2): the free hours of the account that
+      // funds the student (the group's when in one) and its open reservations.
+      hoursFree: quota.ok && typeof quota.value?.hours_free === 'number'
+        ? quota.value.hours_free : null,
+      hoursReserved: quota.ok && typeof quota.value?.hours_reserved === 'number'
+        ? quota.value.hours_reserved : null,
       lastDataset: ownDatasets ? newestBy(ownDatasets, 'created_at') : null,
       lastWorkflow: own ? newestBy(own, 'updated_at') : null,
     });

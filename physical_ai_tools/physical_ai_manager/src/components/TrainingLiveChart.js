@@ -29,6 +29,7 @@ import {
 } from './trainingLiveChartUtils';
 import Icon from './icons/Icon';
 import ContinueTrainingButton from './ContinueTrainingButton';
+import { chargeSentence, lostTimeLine } from '../utils/hoursDe';
 
 // Re-exported so existing importers (TrainingPage + the gate test) keep working
 // after the pure helpers moved into trainingLiveChartUtils.
@@ -246,7 +247,7 @@ function LossChart({ history, totalSteps, currentStep, currentLoss, isRunning, i
 
 // ---------- main component ----------
 
-export default function TrainingLiveChart({ jobs, isRealtime, remaining, onContinued }) {
+export default function TrainingLiveChart({ jobs, isRealtime, nextReservationHours, onContinued }) {
   const dispatch = useDispatch();
   const selectedId = useSelector((s) => s.training.selectedTrainingId);
   const job = useMemo(() => pickSelectedJob(jobs, selectedId), [jobs, selectedId]);
@@ -286,6 +287,11 @@ export default function TrainingLiveChart({ jobs, isRealtime, remaining, onConti
   const statusNote = isActive && typeof job.status_note === 'string' && job.status_note.trim()
     ? job.status_note
     : null;
+
+  // Training hours (credit system v2, spec §10): the lost time of this training
+  // under the chart, and the failed run's charge in its error tail.
+  const lost = lostTimeLine(job);
+  const charge = chargeSentence(job);
 
   // A capped parent shows its real percentage, never „100 %" (owner E32, review m2).
   const heroPct = isSucceeded && !Number.isInteger(job.capped_step) ? 100 : pct;
@@ -390,7 +396,12 @@ export default function TrainingLiveChart({ jobs, isRealtime, remaining, onConti
           </div>
 
           {isSucceeded && (
-            <ContinueTrainingButton job={job} jobs={jobs} remaining={remaining} onContinued={onContinued} />
+            <ContinueTrainingButton
+              job={job}
+              jobs={jobs}
+              nextReservationHours={nextReservationHours}
+              onContinued={onContinued}
+            />
           )}
 
           {statusNote && (
@@ -417,6 +428,13 @@ export default function TrainingLiveChart({ jobs, isRealtime, remaining, onConti
         </div>
       </div>
 
+      {/* Lost time [Q-B]: counts against the limit, never charged */}
+      {lost && (
+        <p className="text-[13px] text-[var(--su-scr-ink-2)]" data-testid="lost-time">
+          {lost}
+        </p>
+      )}
+
       {/* Error tail */}
       {isFailed && job.error_message && (
         <details className="su-trn-error text-xs">
@@ -424,7 +442,7 @@ export default function TrainingLiveChart({ jobs, isRealtime, remaining, onConti
           <pre className="mt-2 whitespace-pre-wrap break-all text-[11px] font-mono leading-snug">
             {job.error_message}
           </pre>
-          <div className="mt-2 italic opacity-80">Das Trainingsguthaben wurde erstattet.</div>
+          {charge && <div className="mt-2 italic opacity-80">{charge}</div>}
         </details>
       )}
     </div>

@@ -1,6 +1,9 @@
-// „Fortsetzen" for a capped / wall-capped training (owner E32–E37, E46).
-// Pure: decides what the student may do with one training, given the job list
-// and the remaining credits. No React, no side effects.
+// „Fortsetzen" for a capped / wall-capped / stopped training (owner E32–E37,
+// E46, D6). Pure: decides what the student may do with one training, given the
+// job list and the hours a start would reserve now. No React, no side effects.
+// A continuation is a new reservation of training hours (credit system v2).
+
+import { hoursDe } from '../../utils/hoursDe';
 
 const de = (n) => Number(n).toLocaleString('de-DE');
 
@@ -16,8 +19,13 @@ export const CONTINUE_DE = {
     'Der gespeicherte Zwischenstand ist abgelaufen oder nicht mehr nutzbar – ein neues Training ist nötig.',
   continuing: 'Wird gerade fortgesetzt …',
   continued: 'Wurde bereits fortgesetzt.',
-  noCredit: 'Kein Trainingsguthaben mehr für die Fortsetzung.',
-  started: 'Fortsetzung gestartet – ein weiteres Guthaben wurde verbraucht.',
+  noCredit: 'Keine freien Trainingsstunden für die Fortsetzung.',
+  // The answer's `reserved_hours`; an answer without it (an older API) says
+  // only that the continuation started.
+  started: (n) =>
+    (typeof n === 'number' && Number.isFinite(n)
+      ? `Fortsetzung gestartet – ${hoursDe(n)} reserviert.`
+      : 'Fortsetzung gestartet.'),
   failedPrefix: 'Fortsetzen nicht möglich: ',
 };
 
@@ -31,10 +39,11 @@ const ACTIVE = new Set(['queued', 'running', 'cancel_requested']);
  *   - not_mine if the caller did not start it
  *   - continuing / continued if a child exists (active / succeeded)
  *   - expired past continuable_until
- *   - no_credit with no credits left
+ *   - no_credit when a start would reserve less than one hour now
+ *     (`nextReservationHours`, the quota's `next_reservation_hours`)
  *   - else continuable
  */
-export function continuationState(job, jobs, remaining, nowMs) {
+export function continuationState(job, jobs, nextReservationHours, nowMs) {
   if (
     !job ||
     job.status !== 'succeeded' ||
@@ -59,7 +68,7 @@ export function continuationState(job, jobs, remaining, nowMs) {
   if (Date.parse(job.continuable_until) <= nowMs) {
     return { kind: 'expired', child: null };
   }
-  if (Number(remaining) <= 0) {
+  if (Number(nextReservationHours) < 1) {
     return { kind: 'no_credit', child: null };
   }
   return { kind: 'continuable', child: null };

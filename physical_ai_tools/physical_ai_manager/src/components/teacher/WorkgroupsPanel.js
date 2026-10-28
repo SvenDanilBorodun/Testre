@@ -6,6 +6,7 @@ import {
   createWorkgroup,
   deleteWorkgroup,
   getWorkgroup,
+  getWorkgroupCreditHistory,
   listWorkgroupTrainings,
   listWorkgroups,
   renameWorkgroup,
@@ -16,13 +17,25 @@ import { setSelectedClassroom } from '../../features/teacher/teacherSlice';
 import CreateWorkgroupModal from './CreateWorkgroupModal';
 import WorkgroupMembersModal from './WorkgroupMembersModal';
 import WorkgroupCreditsModal from './WorkgroupCreditsModal';
+import CreditHistoryDrawer from './CreditHistoryDrawer';
 import Icon from '../icons/Icon';
+import { hoursOf, numberDe, std } from '../../utils/hoursDe';
+
+/** A group summary's hour fields after an answer that carries them (credit system v2). */
+function hourFields(src) {
+  const out = {};
+  for (const k of ['hours_free', 'hours_reserved', 'hours_spent', 'member_limit_hours',
+    'shared_credits', 'trainings_used', 'remaining']) {
+    if (src && Object.prototype.hasOwnProperty.call(src, k)) out[k] = src[k];
+  }
+  return out;
+}
 
 /**
  * Sidebar+detail panel rendered inside a classroom's tab area.
  *
  * Left rail: list of workgroups in this classroom; "neu" button up top.
- * Right rail: detail view with members, credit chip, rename, delete.
+ * Right rail: detail view with members, the hours chip, rename, delete.
  *
  * Updates trigger a parent refetch of the classroom (so StudentRow gets
  * the new workgroup_id badges) and the teacher pool summary (so the
@@ -45,6 +58,7 @@ export default function WorkgroupsPanel({
   const [showCreate, setShowCreate] = useState(false);
   const [showMembers, setShowMembers] = useState(false);
   const [showCredits, setShowCredits] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   // Right-rail tab selector. "Übersicht" is the existing members + stats
@@ -64,6 +78,7 @@ export default function WorkgroupsPanel({
           student_count: me.student_count,
           group_count: me.group_count,
           group_credits_total: me.group_credits_total,
+          compensated: me.compensated,
         })
       );
     } catch {}
@@ -213,9 +228,7 @@ export default function WorkgroupsPanel({
           ? {
               ...g,
               member_count: updated.member_count,
-              shared_credits: updated.shared_credits,
-              trainings_used: updated.trainings_used,
-              remaining: updated.remaining,
+              ...hourFields(updated),
             }
           : g
       )
@@ -226,16 +239,11 @@ export default function WorkgroupsPanel({
   const handleCreditsChanged = async (updated) => {
     setDetail((d) => ({ ...d, ...updated }));
     setGroups((prev) =>
-      prev.map((g) =>
-        g.id === updated.id
-          ? {
-              ...g,
-              shared_credits: updated.shared_credits,
-              remaining: updated.remaining,
-            }
-          : g
-      )
+      prev.map((g) => (g.id === updated.id ? { ...g, ...hourFields(updated) } : g))
     );
+    if (typeof updated.pool_available === 'number') {
+      dispatch(updateTeacherPool({ pool_available: updated.pool_available }));
+    }
     await refreshTeacherPool();
   };
 
@@ -268,9 +276,11 @@ export default function WorkgroupsPanel({
             <ul className="flex flex-col gap-1">
               {groups.map((g) => {
                 const active = g.id === selectedId;
-                const used = g.trainings_used || 0;
-                const total = g.shared_credits || 0;
+                const free = hoursOf(g.hours_free);
+                const used = hoursOf(g.hours_reserved) + hoursOf(g.hours_spent);
+                const total = free + used;
                 const pct = total > 0 ? (used / total) * 100 : 0;
+                const out = total > 0 && free === 0;
                 return (
                   <li key={g.id}>
                     <button
@@ -285,11 +295,11 @@ export default function WorkgroupsPanel({
                         <span className="text-sm font-medium text-[var(--ink)] truncate">
                           {g.name}
                         </span>
-                        <Pill tone={used >= total && total > 0 ? 'danger' : 'accent'}>
-                          {used} / {total}
+                        <Pill tone={out ? 'danger' : 'accent'}>
+                          {`${std(free)} frei`}
                         </Pill>
                       </div>
-                      <Progress pct={pct} tone={used >= total && total > 0 ? 'danger' : 'accent'} />
+                      <Progress pct={pct} tone={out ? 'danger' : 'accent'} />
                       <div className="font-mono text-[10px] text-[var(--ink-3)] mt-1">
                         {g.member_count} Mitglieder
                       </div>
@@ -306,7 +316,7 @@ export default function WorkgroupsPanel({
           {!detail ? (
             <div className="flex items-center justify-center h-full text-[var(--ink-3)] text-sm">
               {groups.length === 0
-                ? 'Erstelle eine Arbeitsgruppe, um Credits, Trainings und Datensätze für mehrere Schüler zu bündeln.'
+                ? 'Erstelle eine Arbeitsgruppe, um Stunden, Trainings und Datensätze für mehrere Schüler zu bündeln.'
                 : 'Wähle links eine Gruppe.'}
             </div>
           ) : (
@@ -362,9 +372,17 @@ export default function WorkgroupsPanel({
                     variant="secondary"
                     size="sm"
                     onClick={() => setShowCredits(true)}
-                    title="Geteilte Credits anpassen"
+                    title="Stunden der Gruppe anpassen"
                   >
-                    <Icon name="piggyBank" /> Credits
+                    <Icon name="piggyBank" /> Stunden
+                  </Btn>
+                  <Btn
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setShowHistory(true)}
+                    title="Stundenverlauf"
+                  >
+                    <Icon name="history" /> Stundenverlauf
                   </Btn>
                   {onShowGroupProgress && (
                     <Btn
@@ -412,20 +430,20 @@ export default function WorkgroupsPanel({
                         {detail.member_count}
                       </div>
                     </div>
-                    <div className="bg-[var(--bg-sunk)] rounded-[var(--radius-sm)] py-3">
-                      <div className="text-[10px] uppercase font-mono tracking-wider text-[var(--ink-3)] mb-1">
-                        Geteilte Credits
-                      </div>
-                      <div className="text-2xl font-semibold text-[var(--ink)]">
-                        {detail.shared_credits}
-                      </div>
-                    </div>
                     <div className="bg-[var(--accent-wash)] rounded-[var(--radius-sm)] py-3">
                       <div className="text-[10px] uppercase font-mono tracking-wider text-[var(--accent-ink)] mb-1">
-                        Frei
+                        Freie Stunden der Gruppe
                       </div>
                       <div className="text-2xl font-semibold text-[var(--accent-ink)]">
-                        {detail.remaining}
+                        {numberDe(hoursOf(detail.hours_free))}
+                      </div>
+                    </div>
+                    <div className="bg-[var(--bg-sunk)] rounded-[var(--radius-sm)] py-3">
+                      <div className="text-[10px] uppercase font-mono tracking-wider text-[var(--ink-3)] mb-1">
+                        Verbraucht
+                      </div>
+                      <div className="text-2xl font-semibold text-[var(--ink)]">
+                        {numberDe(hoursOf(detail.hours_spent))}
                       </div>
                     </div>
                   </div>
@@ -478,6 +496,13 @@ export default function WorkgroupsPanel({
           workgroup={detail}
           onClose={() => setShowMembers(false)}
           onChanged={handleMembersChanged}
+        />
+      )}
+      {showHistory && detail && (
+        <CreditHistoryDrawer
+          title={`Stundenverlauf · ${detail.name}`}
+          load={(page) => getWorkgroupCreditHistory(token, detail.id, page)}
+          onClose={() => setShowHistory(false)}
         />
       )}
       {showCredits && detail && (

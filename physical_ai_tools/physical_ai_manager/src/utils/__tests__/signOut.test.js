@@ -339,13 +339,30 @@ describe('signOutStudent — no trace of the previous student', () => {
   it('ends the auth session', async () => {
     const { store, signOutStudent, auth } = await freshStore();
     store.dispatch(auth.setSession({ access_token: 'jwt-abc', user: { email: 'a@b.c' } }));
-    store.dispatch(auth.setQuota({ training_credits: 5, trainings_used: 2 }));
+    store.dispatch(auth.setQuota({
+      training_credits: 5, trainings_used: 2,
+      account: 'group', workgroup_name: 'Rot', hours_free: 3, hours_reserved: 2, hours_spent: 4,
+      next_reservation_hours: 3, max_hours_per_training: 3, member_limit_hours: 5, member_left_hours: 1,
+    }));
+    expect(store.getState().auth.hoursFree).toBe(3);
 
     await store.dispatch(signOutStudent({ reload: false }));
 
-    expect(store.getState().auth.session).toBeNull();
-    expect(store.getState().auth.isAuthenticated).toBe(false);
-    expect(store.getState().auth.trainingCredits).toBe(0);
+    const a = store.getState().auth;
+    expect(a.session).toBeNull();
+    expect(a.isAuthenticated).toBe(false);
+    expect(a.trainingCredits).toBe(0);
+    // The training hours are the STUDENT's (credit system v2): gone with the
+    // session, back to „unknown", never to a stale number.
+    expect(a.hoursFree).toBeNull();
+    expect(a.hoursReserved).toBeNull();
+    expect(a.hoursSpent).toBeNull();
+    expect(a.nextReservationHours).toBeNull();
+    expect(a.maxHoursPerTraining).toBeNull();
+    expect(a.account).toBeNull();
+    expect(a.memberLimitHours).toBeNull();
+    expect(a.memberLeftHours).toBeNull();
+    expect(a.workgroupName).toBeNull();
   });
 
   it('keeps the machine-scoped keys', async () => {

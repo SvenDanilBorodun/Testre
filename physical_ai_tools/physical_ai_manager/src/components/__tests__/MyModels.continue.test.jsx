@@ -36,7 +36,9 @@ function base(over = {}) {
   };
 }
 
-function renderModels(jobs, remaining = 5) {
+// `nextHours` is what a start would reserve now (the quota's
+// next_reservation_hours, credit system v2).
+function renderModels(jobs, nextHours = 3) {
   const store = configureStore({
     reducer: {
       training: trainingReducer,
@@ -46,7 +48,7 @@ function renderModels(jobs, remaining = 5) {
   });
   return render(
     <Provider store={store}>
-      <MyModels jobs={jobs} remaining={remaining} onContinued={vi.fn()} />
+      <MyModels jobs={jobs} nextReservationHours={nextHours} onContinued={vi.fn()} />
     </Provider>,
   );
 }
@@ -81,12 +83,24 @@ describe('MyModels „Fortsetzen"', () => {
     expect(screen.getByText(CONTINUE_DE.continuationChip)).toBeInTheDocument();
   });
 
-  test('remaining 0 disables the capped card key', () => {
+  test('a start that would reserve 0 hours disables the capped card key', () => {
     renderModels([base({
       capped_step: 42500,
       total_steps: 50000,
       continuable_until: new Date(Date.now() + 7 * 86400 * 1000).toISOString(),
     })], 0);
     expect(screen.getByRole('button', { name: new RegExp(CONTINUE_DE.noCredit) })).toBeDisabled();
+    expect(screen.getByText('Keine freien Trainingsstunden für die Fortsetzung.')).toBeInTheDocument();
+  });
+
+  test('a capped card names what it was charged (spec §10.2)', () => {
+    renderModels([base({
+      capped_step: 42500,
+      total_steps: 50000,
+      continuable_until: new Date(Date.now() + 7 * 86400 * 1000).toISOString(),
+      reserved_hours: 3,
+      charged_hours: 3,
+    })]);
+    expect(screen.getByText('Berechnet: 3 Stunden')).toBeInTheDocument();
   });
 });

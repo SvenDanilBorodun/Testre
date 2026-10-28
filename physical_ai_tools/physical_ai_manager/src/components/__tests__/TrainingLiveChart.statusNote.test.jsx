@@ -118,7 +118,9 @@ describe('TrainingLiveChart starting state', () => {
 });
 
 describe('TrainingLiveChart capped hero and „Fortsetzen" (owner E32–E37, review m2)', () => {
-  const S23 = 'Nach 3,5 Stunden bei Schritt 42.500 von 50.000 gestoppt – du kannst das Training fortsetzen.';
+  // S23 after 052 (spec §8.1): „{hours}" is hours_de of the row's limit — a
+  // 3-hour reservation here.
+  const S23 = 'Nach 3 Stunden bei Schritt 42.500 von 50.000 gestoppt – du kannst das Training fortsetzen.';
   const capped = (over = {}) => job({
     status: 'succeeded',
     current_step: 42500,
@@ -132,7 +134,7 @@ describe('TrainingLiveChart capped hero and „Fortsetzen" (owner E32–E37, rev
   });
 
   test('a capped succeeded job shows its real percent, S23, and the key', () => {
-    renderChart(capped(), { remaining: 5 });
+    renderChart(capped(), { nextReservationHours: 3 });
     expect(document.querySelector('.su-trn-pct')).toHaveTextContent('85');
     expect(document.querySelector('.su-trn-pct')).not.toHaveTextContent('100');
     const note = screen.getByRole('status');
@@ -142,7 +144,7 @@ describe('TrainingLiveChart capped hero and „Fortsetzen" (owner E32–E37, rev
 
   test('a succeeded job without capped_step shows 100 % and no continue note', () => {
     renderChart(job({ status: 'succeeded', current_step: 50000, total_steps: 50000,
-      terminated_at: '2026-10-18T11:00:00Z' }), { remaining: 5 });
+      terminated_at: '2026-10-18T11:00:00Z' }), { nextReservationHours: 3 });
     expect(document.querySelector('.su-trn-pct')).toHaveTextContent('100');
     expect(screen.queryByRole('status')).toBeNull();
     expect(screen.queryByRole('button', { name: new RegExp(CONTINUE_DE.button) })).toBeNull();

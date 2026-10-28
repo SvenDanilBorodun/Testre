@@ -18,11 +18,14 @@ const ACTIVE_POLL_MS = 6000;
 // granted to them, so `select=*` answers 42501, and a later column (049's
 // `status_note`, the German „GPU-Server ausgefallen …" line) is readable only
 // because its migration grants it. test_managed_training_lockstep.py checks
-// every name here against those GRANT lists.
+// every name here against those GRANT lists. The last four are the training
+// hours (migration 052 grants exactly them): the reservation, the charge, who
+// stopped it and the lost time that counts against the limit.
 export const LIVE_COLUMNS =
   'id,status,model_name,model_type,dataset_name,current_step,total_steps,' +
   'current_loss,loss_history,error_message,requested_at,terminated_at,' +
-  'last_progress_at,workgroup_id,status_note,capped_step,continuable_until,continued_from';
+  'last_progress_at,workgroup_id,status_note,capped_step,continuable_until,continued_from,' +
+  'reserved_hours,charged_hours,stop_requested_by_role,lost_seconds';
 
 function isActiveJob(j) {
   return j && (j.status === 'queued' || j.status === 'running');

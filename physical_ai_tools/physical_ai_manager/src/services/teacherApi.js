@@ -29,11 +29,45 @@ export const resetStudentPassword = (token, studentId, newPassword) =>
     new_password: newPassword,
   });
 
-export const adjustStudentCredits = (token, studentId, delta) =>
-  apiRequest(`/teacher/students/${studentId}/credits`, 'POST', token, { delta });
+// Training hours (credit system v2, spec §8.3): a delta only — `delta > 0`
+// assigns from the teacher's free pool hours, `delta < 0` reclaims the
+// student's FREE hours (reserved and spent hours never come back). Each change
+// carries the client's `request_id`. Answers `{new_amount, pool_available,
+// hours_free, hours_reserved, hours_spent}`.
+export const changeStudentHours = (token, studentId, { delta, request_id }) =>
+  apiRequest(`/teacher/students/${studentId}/credits`, 'POST', token, { delta, request_id });
 
 export const listStudentTrainings = (token, studentId) =>
   apiRequest(`/teacher/students/${studentId}/trainings`, 'GET', token);
+
+// „Training stoppen" (decision 13): the same rules as the student's
+// „Abbrechen" — after a GPU trained, the newest ready checkpoint is published.
+export const getStudentStopPreview = (token, studentId, trainingId) =>
+  apiRequest(
+    `/teacher/students/${studentId}/trainings/${trainingId}/stop-preview`,
+    'GET',
+    token
+  );
+
+export const stopStudentTraining = (token, studentId, trainingId) =>
+  apiRequest(`/teacher/students/${studentId}/trainings/${trainingId}/stop`, 'POST', token);
+
+function historyQuery({ before, limit } = {}) {
+  const params = new URLSearchParams();
+  if (before !== null && before !== undefined) params.set('before', String(before));
+  if (limit) params.set('limit', String(limit));
+  const qs = params.toString();
+  return qs ? `?${qs}` : '';
+}
+
+// The student's hour history, newest first, paged by `before` (a ledger id);
+// the answer also carries the student's refused starts (`refusals`).
+export const getStudentCreditHistory = (token, studentId, page) =>
+  apiRequest(`/teacher/students/${studentId}/credit-history${historyQuery(page)}`, 'GET', token);
+
+// The teacher's own pool account.
+export const getTeacherCreditHistory = (token, page) =>
+  apiRequest(`/teacher/credit-history${historyQuery(page)}`, 'GET', token);
 
 // Mid-training checkpoint steps the Modal worker mirrored to the model
 // repo (leLab-comparison PR-5a). Teacher-only diagnostics.

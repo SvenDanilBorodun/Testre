@@ -20,12 +20,12 @@
 // SPA's own package version dressed up as the product's.
 
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import { configureStore } from '@reduxjs/toolkit';
 import { Provider } from 'react-redux';
 
 import tasksReducer, { setTaskStatus, setHeartbeatStatus } from '../../features/tasks/taskSlice';
-import authReducer, { setProfile } from '../../features/auth/authSlice';
+import authReducer, { setProfile, setSession } from '../../features/auth/authSlice';
 import rosReducer from '../../features/ros/rosSlice';
 import uiReducer from '../../features/ui/uiSlice';
 import workshopReducer from '../../features/workshop/workshopSlice';
@@ -392,9 +392,9 @@ describe('HomePage — Deine Arbeit', () => {
     expect(screen.queryByText(/Noch nichts aufgenommen/)).toBeNull();
   });
 
-  it('labels credits and models as the group\'s when the student is in one', async () => {
-    // `/trainings/list` returns the group's rows and get_remaining_credits
-    // returns the shared pool; both numbers are correct, and presenting them
+  it('labels the hours and models as the group\'s when the student is in one', async () => {
+    // `/trainings/list` returns the group's rows and the quota answers the
+    // group account's hours; both numbers are correct, and presenting them
     // unlabelled as personal would be the lie.
     renderHome({
       profile: {
@@ -403,10 +403,38 @@ describe('HomePage — Deine Arbeit', () => {
         training_credits: 10,
       },
     });
-    expect(await screen.findByText('Credits der Gruppe')).toBeInTheDocument();
-    expect(screen.getByText(/Training und Credits teilst du mit der Gruppe Rot/))
+    expect(await screen.findByText('Stunden der Gruppe')).toBeInTheDocument();
+    expect(screen.getByText('Training und Stunden teilst du mit der Gruppe Rot'))
       .toBeInTheDocument();
     expect(screen.getByText('in der Gruppe')).toBeInTheDocument();
+  });
+
+  // „Deine Arbeit" asks the cloud only with a session token.
+  const signIn = (store) => act(() => {
+    store.dispatch(setSession({ access_token: 'jwt', user: { id: 'u1', email: 'a@b.c' } }));
+  });
+
+  it('shows the free training hours and the reserved ones (credit system v2)', async () => {
+    mockQuota = { account: 'student', hours_free: 4, hours_reserved: 2, hours_spent: 1 };
+    signIn(renderHome({}));
+    expect(await screen.findByText('2 Stunden reserviert')).toBeInTheDocument();
+    expect(screen.getByText('Trainingsstunden')).toBeInTheDocument();
+    expect(screen.getByText('4')).toBeInTheDocument();
+  });
+
+  it('one reserved hour reads „1 Stunde reserviert"', async () => {
+    mockQuota = { account: 'student', hours_free: 0, hours_reserved: 1, hours_spent: 0 };
+    signIn(renderHome({}));
+    expect(await screen.findByText('1 Stunde reserviert')).toBeInTheDocument();
+  });
+
+  it('no reserved hours read „frei", and the card never says Credit', async () => {
+    mockQuota = { account: 'student', hours_free: 3, hours_reserved: 0, hours_spent: 0 };
+    signIn(renderHome({}));
+    expect(await screen.findByText('3')).toBeInTheDocument();
+    expect(screen.getByText('Trainingsstunden')).toBeInTheDocument();
+    expect(screen.getByText('frei')).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/Credit|Guthaben/);
   });
 
   it('greets the student by first name', () => {

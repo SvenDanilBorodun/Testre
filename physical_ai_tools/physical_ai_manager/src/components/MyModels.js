@@ -3,6 +3,8 @@ import { useDispatch, useSelector } from 'react-redux';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import { cancelCloudTraining } from '../services/cloudTrainingApi';
+import CancelTrainingDialog, { cancelResultToast } from './CancelTrainingDialog';
+import { chargeSentence, hourLines, lostTimeLine } from '../utils/hoursDe';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { setSelectedTrainingId } from '../features/training/trainingSlice';
 import ContinueTrainingButton from './ContinueTrainingButton';
@@ -17,7 +19,7 @@ const STATUS_LED = { queued: 'warn', running: 'sig', succeeded: 'ok', failed: 'r
 // A failed row's error_message is cut on the card only when it is longer than
 // this: a legacy worker writes up to 2 KB of LeRobot output there, while every
 // German sentence of the managed training's S-table (training_texts_de.py, the
-// longest S4 at 178 characters) is shown whole. Fenced by
+// longest at 240 characters at its widest) is shown whole. Fenced by
 // robotis_ai_setup/tests/test_managed_training_lockstep.py (every S sentence fits).
 export const ERROR_MESSAGE_MAX_CHARS = 300;
 
@@ -36,10 +38,16 @@ const STATUS_CONFIG = {
   canceled: { icon: 'cancel', color: 'text-gray-400', bg: 'bg-gray-50', label: 'Abgebrochen' },
 };
 
-function ModelCard({ job, jobs, remaining, onContinued, rosConnected, onDownload, downloadingModel, onCancel, selected, onSelect }) {
+function ModelCard({ job, jobs, nextReservationHours, onContinued, rosConnected, onDownload, downloadingModel, onCancel, selected, onSelect }) {
   const config = STATUS_CONFIG[job.status] || STATUS_CONFIG.queued;
   const isActive = job.status === 'queued' || job.status === 'running';
   const isSucceeded = job.status === 'succeeded';
+  // A failed card's error box carries its charge sentence, so the hour line
+  // does not say it a second time.
+  const errorBox = job.status === 'failed' && !!job.error_message;
+  const lines = hourLines(job, { chargeShownElsewhere: errorBox });
+  const lost = lostTimeLine(job);
+  const charge = errorBox ? chargeSentence(job) : null;
 
   const formatDate = (dateStr) => {
     if (!dateStr) return '-';
@@ -141,12 +149,18 @@ function ModelCard({ job, jobs, remaining, onContinued, rosConnected, onDownload
         )}
       </div>
 
+      {/* Training hours: reservation / charge / who stopped it, and lost time */}
+      {lines.map((line) => (
+        <div key={line} className="su-model__meta">{line}</div>
+      ))}
+      {lost && <div className="su-model__meta">{lost}</div>}
+
       {/* Error message */}
-      {job.status === 'failed' && job.error_message && (
+      {errorBox && (
         <div className="su-model__error">
           <span className="font-medium">Fehler: </span>
           <span className="break-all">{cardErrorText(job.error_message)}</span>
-          <div className="mt-1 italic">Trainingsguthaben wurde erstattet.</div>
+          {charge && <div className="mt-1 italic">{charge}</div>}
         </div>
       )}
 
@@ -154,7 +168,7 @@ function ModelCard({ job, jobs, remaining, onContinued, rosConnected, onDownload
       <div className="su-model__actions" onClick={(e) => e.stopPropagation()}>
         {isSucceeded && (
           <>
-            <ContinueTrainingButton job={job} jobs={jobs} remaining={remaining} onContinued={onContinued} />
+            <ContinueTrainingButton job={job} jobs={jobs} nextReservationHours={nextReservationHours} onContinued={onContinued} />
             <button
               type="button"
               onClick={(e) => { releasePointerFocus(e); onDownload(job.model_name); }}
@@ -194,7 +208,7 @@ function ModelCard({ job, jobs, remaining, onContinued, rosConnected, onDownload
         {isActive && (
           <button
             type="button"
-            onClick={(e) => { releasePointerFocus(e); onCancel(job.id); }}
+            onClick={(e) => { releasePointerFocus(e); onCancel(job); }}
             className="su-key su-key--flat su-key--sm su-model__cancel"
           >
             <Icon name="cancel" size={14} />
@@ -206,7 +220,9 @@ function ModelCard({ job, jobs, remaining, onContinued, rosConnected, onDownload
   );
 }
 
-export default function MyModels({ jobs = [], loading = false, refetch, isRealtime = false, remaining, onContinued }) {
+export default function MyModels({
+  jobs = [], loading = false, refetch, isRealtime = false, nextReservationHours, onContinued, onHoursChanged,
+}) {
   const dispatch = useDispatch();
   const session = useSelector((state) => state.auth.session);
   const heartbeatStatus = useSelector((state) => state.tasks.heartbeatStatus);
@@ -214,15 +230,29 @@ export default function MyModels({ jobs = [], loading = false, refetch, isRealti
   const selectedTrainingId = useSelector((state) => state.training.selectedTrainingId);
   const [downloadingModel, setDownloadingModel] = useState(null);
   const [filter, setFilter] = useState('all');
+  // The training „Abbrechen" was pressed for: the dialog first asks the API
+  // what a stop would do now (spec §10.2), then cancels on „Ja, abbrechen".
+  const [cancelJob, setCancelJob] = useState(null);
+  const [canceling, setCanceling] = useState(false);
   const { controlHfServer } = useRosServiceCaller();
 
-  const handleCancel = async (trainingId) => {
+  const handleCancel = (job) => {
+    setCancelJob(job);
+  };
+
+  const confirmCancel = async () => {
+    if (!cancelJob || canceling) return;
+    setCanceling(true);
     try {
-      await cancelCloudTraining(session.access_token, trainingId);
-      toast.success('Training abgebrochen');
+      const res = await cancelCloudTraining(session.access_token, cancelJob.id);
+      toast.success(cancelResultToast(res));
       refetch?.();
+      onHoursChanged?.();
     } catch (error) {
       toast.error(`Abbrechen fehlgeschlagen: ${error.message}`);
+    } finally {
+      setCanceling(false);
+      setCancelJob(null);
     }
   };
 
@@ -353,7 +383,7 @@ export default function MyModels({ jobs = [], loading = false, refetch, isRealti
               key={job.id}
               job={job}
               jobs={jobs}
-              remaining={remaining}
+              nextReservationHours={nextReservationHours}
               onContinued={onContinued}
               rosConnected={rosConnected}
               onDownload={handleDownload}
@@ -364,6 +394,16 @@ export default function MyModels({ jobs = [], loading = false, refetch, isRealti
             />
           ))}
         </div>
+      )}
+
+      {cancelJob && (
+        <CancelTrainingDialog
+          token={session?.access_token}
+          trainingId={cancelJob.id}
+          busy={canceling}
+          onConfirm={confirmCancel}
+          onClose={() => { if (!canceling) setCancelJob(null); }}
+        />
       )}
     </div>
   );

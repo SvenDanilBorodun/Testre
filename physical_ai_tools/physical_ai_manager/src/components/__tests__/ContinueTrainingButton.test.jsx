@@ -37,11 +37,11 @@ function store() {
   return s;
 }
 
-function renderBtn(job, { jobs = [job], remaining = 5, onContinued } = {}) {
+function renderBtn(job, { jobs = [job], nextReservationHours = 3, onContinued } = {}) {
   const s = store();
   const utils = render(
     <Provider store={s}>
-      <ContinueTrainingButton job={job} jobs={jobs} remaining={remaining} onContinued={onContinued} />
+      <ContinueTrainingButton job={job} jobs={jobs} nextReservationHours={nextReservationHours} onContinued={onContinued} />
     </Provider>,
   );
   return { ...utils, store: s };
@@ -76,7 +76,7 @@ describe('ContinueTrainingButton', () => {
   });
 
   test('no_credit: a disabled key and the label', () => {
-    renderBtn(capped(), { remaining: 0 });
+    renderBtn(capped(), { nextReservationHours: 0 });
     const btn = screen.getByRole('button');
     expect(btn).toBeDisabled();
     expect(btn).toHaveAttribute('title', CONTINUE_DE.noCredit);
@@ -100,11 +100,11 @@ describe('ContinueTrainingButton', () => {
     const btn = screen.getByRole('button', { name: new RegExp(CONTINUE_DE.button) });
     fireEvent.click(btn);
     expect(btn).toBeDisabled();
-    resolve({ training_id: 99 });
+    resolve({ training_id: 99, reserved_hours: 2 });
     await waitFor(() => expect(onContinued).toHaveBeenCalled());
     expect(api.continueCloudTraining).toHaveBeenCalledTimes(1);
     expect(api.continueCloudTraining).toHaveBeenCalledWith('tok', 1);
-    expect(toast.success).toHaveBeenCalledWith(CONTINUE_DE.started);
+    expect(toast.success).toHaveBeenCalledWith('Fortsetzung gestartet – 2 Stunden reserviert.');
     const types = s.dispatched.map((a) => a.type);
     expect(types).toContain('training/triggerCloudJobsRefresh');
     expect(s.dispatched).toContainEqual({ type: 'training/setSelectedTrainingId', payload: 99 });

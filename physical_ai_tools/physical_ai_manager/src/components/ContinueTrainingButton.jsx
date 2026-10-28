@@ -7,15 +7,17 @@ import { continuationState, CONTINUE_DE } from '../features/training/continuatio
 import Icon from './icons/Icon';
 import { releasePointerFocus } from './sucher/pointerFocus';
 
-// „Fortsetzen" for a capped / wall-capped training (owner E32–E37, E46). Only the
-// student who started it sees the key; a groupmate sees the stop fact without the
-// false „du kannst … fortsetzen" promise (not_mine).
-export default function ContinueTrainingButton({ job, jobs, remaining, onContinued }) {
+// „Fortsetzen" for a capped / wall-capped / stopped training (owner E32–E37,
+// E46, D6). Only the student who started it sees the key; a groupmate sees the
+// stop fact without the false „du kannst … fortsetzen" promise (not_mine). A
+// continuation reserves hours like a start, so the key is off while a start
+// would reserve less than one hour (`nextReservationHours`).
+export default function ContinueTrainingButton({ job, jobs, nextReservationHours, onContinued }) {
   const dispatch = useDispatch();
   const session = useSelector((s) => s.auth?.session); // defensive: the chart's tests have no auth slice
   const [busy, setBusy] = useState(false);
 
-  const { kind } = continuationState(job, jobs, remaining, Date.now());
+  const { kind } = continuationState(job, jobs, nextReservationHours, Date.now());
   if (kind === null) return null;
 
   const step = job.capped_step;
@@ -43,7 +45,7 @@ export default function ContinueTrainingButton({ job, jobs, remaining, onContinu
     setBusy(true);
     try {
       const result = await continueCloudTraining(session?.access_token, job.id);
-      toast.success(CONTINUE_DE.started);
+      toast.success(CONTINUE_DE.started(result?.reserved_hours));
       dispatch(triggerCloudJobsRefresh());
       dispatch(setSelectedTrainingId(result.training_id));
       onContinued?.();

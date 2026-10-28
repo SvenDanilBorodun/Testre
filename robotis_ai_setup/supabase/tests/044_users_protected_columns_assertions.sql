@@ -15,6 +15,12 @@
 -- with the migrations applied in order by psql as `postgres`.) A PostgREST
 -- request is simulated the way PostgREST runs it: SET LOCAL ROLE plus the JWT
 -- claims as settings (both spellings auth.uid() has read over the years).
+-- 052 BREAKS this file's T15 by design (spec §12.3): T15 calls the baseline's
+-- adjust_student_credits, which since 052 answers P0069 („superseded by the
+-- credit ledger (052)"). Run it on a stack migrated only up to 051 at most.
+-- Measured after 052 (2026-10-28, a local stack with every migration through 051
+-- plus 052): 15 PASS, 1 FAIL (T15) and 0 ERROR.
+--
 -- Expected: 16 PASS, 0 FAIL/ERROR (T1..T15, T2 with a/b halves).
 \set ON_ERROR_STOP off
 \pset pager off

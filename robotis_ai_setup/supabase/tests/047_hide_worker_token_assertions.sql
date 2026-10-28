@@ -18,6 +18,14 @@
 -- role here; function privileges are asserted with has_function_privilege —
 -- calling a function the role may not execute crashes the stand-alone
 -- supabase/postgres:17.6.1.106 backend (signal 11, measured; SR-25).
+-- 052 BREAKS this file by design (spec §12.3), although 049 did not: its first
+-- INSERT of a trainings row violates 052's trainings_ledger_shape (a new row
+-- defaults to credit_scheme 'ledger' and must carry its reservation) and the
+-- block it opens aborts. Run it on a stack migrated only up to 051 at most.
+-- Measured after 052 (2026-10-28, a local stack with every migration through 051
+-- plus 052): 7 PASS, 2 FAIL (T2, T7) and 4 ERROR (the refused INSERT, the
+-- worker-token update of the missing row, two statements of the aborted block).
+--
 -- Expected: 10 PASS, 0 FAIL (T1..T10). Against a database WITHOUT 047, T1, T3,
 -- T4, T5 and T6 fail (the token is readable there).
 \set ON_ERROR_STOP off

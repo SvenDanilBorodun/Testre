@@ -29,6 +29,14 @@
 -- PostgREST's view of the same denials is checked by hand (see the RunPod
 -- training build's proof notes): a student's call of any of the ten functions
 -- or of start_training_safe, and a read of training_checkpoints, answer 403.
+-- 052 BREAKS this file by design (spec §12.3): it seeds users.training_credits
+-- and starts through the 8-argument start_training_safe, but since 052 the hours
+-- come from the ledger (every start answers P0003, an unmanaged one P0061) and
+-- the 5-argument finish_training is gone, so the rows and psql variables the
+-- later checks read never exist. Run it on a stack migrated only up to 049, as
+-- above. Measured after 052 (2026-10-28, a local stack with every migration
+-- through 051 plus 052): 2 PASS, 25 FAIL and 237 ERROR.
+--
 -- Expected: 69 PASS, 0 FAIL (T1..T36; T5, T8, T9, T18, T24, T27..T30 and T32..T36 in
 -- lettered parts). The rollback is exercised separately
 -- (rollback/20261020130000_049_managed_training_rollback.sql refuses while this

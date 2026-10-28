@@ -17,6 +17,7 @@ import WorkgroupCreditsModal, { limitStateText } from '../WorkgroupCreditsModal'
 import WorkgroupsPanel from '../WorkgroupsPanel';
 import CreateWorkgroupModal from '../CreateWorkgroupModal';
 import CreateStudentModal from '../CreateStudentModal';
+import ClassroomDetail from '../ClassroomDetail';
 import authReducer, { setSession } from '../../../features/auth/authSlice';
 import teacherReducer from '../../../features/teacher/teacherSlice';
 import * as api from '../../../services/workgroupsApi';
@@ -37,6 +38,23 @@ vi.mock('../../../services/workgroupsApi', () => ({
   removeWorkgroupMember: vi.fn(),
 }));
 vi.mock('../../../services/meApi', () => ({ __esModule: true, getMe: () => Promise.resolve({ pool_available: 4 }) }));
+vi.mock('../../../services/teacherApi', () => ({
+  __esModule: true,
+  getClassroom: vi.fn(() => Promise.resolve({
+    id: 'c1', name: '7b',
+    students: [{ id: 's1', username: 'anna', full_name: 'Anna', hours_free: 2, hours_reserved: 0, hours_spent: 1 }],
+  })),
+  createStudent: vi.fn(),
+  deleteClassroom: vi.fn(),
+  renameClassroom: vi.fn(),
+  deleteStudent: vi.fn(),
+  patchStudent: vi.fn(),
+  resetStudentPassword: vi.fn(),
+  changeStudentHours: vi.fn(),
+  getStudentCreditHistory: vi.fn(),
+}));
+vi.mock('../JetsonSection', () => ({ __esModule: true, default: () => null }));
+vi.mock('../../../pages/teacher/WorkflowTemplatesPage', () => ({ __esModule: true, default: () => null }));
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -195,5 +213,16 @@ describe('WorkgroupsPanel, CreateWorkgroupModal, CreateStudentModal wording (spe
     render(<CreateStudentModal onClose={vi.fn()} onSubmit={vi.fn()} poolAvailable={12} />);
     expect(screen.getByText('Start-Stunden')).toBeInTheDocument();
     expect(screen.getByText('Frei im Lehrer-Pool: 12 Std.')).toBeInTheDocument();
+  });
+});
+
+describe('ClassroomDetail', () => {
+  test('the hours column is „Stunden frei" and its cell reads the free hours', async () => {
+    const store = configureStore({ reducer: { auth: authReducer, teacher: teacherReducer } });
+    store.dispatch(setSession({ access_token: 'jwt', user: { id: 't1' } }));
+    render(<Provider store={store}><ClassroomDetail classroomId="c1" /></Provider>);
+    expect(await screen.findByRole('columnheader', { name: 'Stunden frei' })).toBeInTheDocument();
+    expect(screen.getByText('2 Std. frei')).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/Credit/);
   });
 });

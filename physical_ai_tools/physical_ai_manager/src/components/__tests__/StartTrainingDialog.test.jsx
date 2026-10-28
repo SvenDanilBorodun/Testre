@@ -210,3 +210,22 @@ describe('TrainingControlPanel start', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 });
+
+describe('newRequestId', () => {
+  test('a v4 UUID, also where crypto.randomUUID is missing (the Pi serves plain http)', async () => {
+    const { newRequestId } = await vi.importActual('../../services/cloudTrainingApi');
+    expect(newRequestId()).toMatch(UUID);
+    const desc = Object.getOwnPropertyDescriptor(globalThis.crypto, 'randomUUID')
+      || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(globalThis.crypto), 'randomUUID');
+    Object.defineProperty(globalThis.crypto, 'randomUUID', { value: undefined, configurable: true });
+    try {
+      const ids = new Set(Array.from({ length: 50 }, () => newRequestId()));
+      expect(ids.size).toBe(50);
+      for (const id of ids) expect(id).toMatch(UUID);
+    } finally {
+      delete globalThis.crypto.randomUUID;
+      if (desc && !globalThis.crypto.randomUUID) Object.defineProperty(globalThis.crypto, 'randomUUID', desc);
+    }
+    expect(typeof globalThis.crypto.randomUUID).toBe('function');
+  });
+});

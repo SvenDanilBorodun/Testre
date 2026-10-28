@@ -88,13 +88,13 @@ describe('EbUI hook classes', () => {
   it('Stat, StatBig, Progress, Divider hooks', () => {
     render(
       <div>
-        <Stat label="Credits" value="3" trend="+1" />
+        <Stat label="Trainingsstunden" value="3" trend="+1" />
         <StatBig label="Episoden" value="12" sub="heute" />
         <Progress pct={40} />
         <Divider />
       </div>,
     );
-    expect(screen.getByText('Credits')).toHaveClass('eb-stat__label');
+    expect(screen.getByText('Trainingsstunden')).toHaveClass('eb-stat__label');
     expect(screen.getByText('3')).toHaveClass('eb-stat__value', 'font-mono');
     expect(screen.getByText('+1')).toHaveClass('eb-stat__trend');
     expect(screen.getByText('12')).toHaveClass('eb-stat__value');

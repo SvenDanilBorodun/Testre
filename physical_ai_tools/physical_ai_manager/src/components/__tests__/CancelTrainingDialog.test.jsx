@@ -17,12 +17,21 @@ import CancelTrainingDialog, { cancelResultToast, previewSentence } from '../Can
 import MyModels from '../MyModels';
 import trainingReducer from '../../features/training/trainingSlice';
 import * as api from '../../services/cloudTrainingApi';
+import StudentTrainingHistoryDrawer, { stopPreviewSentence } from '../teacher/StudentTrainingHistoryDrawer';
+import * as teacherApi from '../../services/teacherApi';
 
 vi.mock('react-hot-toast', () => ({ default: { success: vi.fn(), error: vi.fn() } }));
 vi.mock('../../services/cloudTrainingApi', () => ({
   getStopPreview: vi.fn(),
   cancelCloudTraining: vi.fn(),
   continueCloudTraining: vi.fn(),
+}));
+vi.mock('../../services/teacherApi', () => ({
+  listStudentTrainings: vi.fn(),
+  listStudentInferenceRuns: vi.fn(() => Promise.resolve([])),
+  listTrainingCheckpoints: vi.fn(),
+  getStudentStopPreview: vi.fn(),
+  stopStudentTraining: vi.fn(),
 }));
 vi.mock('../../hooks/useRosServiceCaller', () => ({
   useRosServiceCaller: () => ({ controlHfServer: vi.fn() }),
@@ -179,5 +188,77 @@ describe('MyModels „Abbrechen"', () => {
     await screen.findByText(/Der GPU-Server wird gestoppt/);
     fireEvent.click(screen.getByRole('button', { name: 'Ja, abbrechen' }));
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Abbrechen fehlgeschlagen: Training ist nicht aktiv.'));
+  });
+});
+
+// ── the teacher's „Training stoppen" (decision 13, spec §10.4) ──────────────
+
+describe('StudentTrainingHistoryDrawer „Training stoppen"', () => {
+  const T_PUBLISH = 'Der GPU-Server wird gestoppt und der letzte Zwischenstand (Schritt 7.500) als Modell veröffentlicht. Berechnet: 1 Stunde von 3 Stunden.';
+  const T_NO_CKPT = 'Der GPU-Server wird gestoppt. Es gibt noch keinen Zwischenstand, also wird kein Modell veröffentlicht. Berechnet: 2 Stunden von 3 Stunden.';
+  const T_NOT_TRAINED = 'Das Training hat noch nicht begonnen. Es wird nichts berechnet.';
+
+  const managedRunning = {
+    id: 41, model_name: 'EduBotics-Solutions/act-1', model_type: 'act', dataset_name: 'anna/pick',
+    status: 'running', managed: true, reserved_hours: 3, charged_hours: null, lost_seconds: 900,
+    stop_requested_by_role: null, current_step: 9000, total_steps: 50000, requested_at: '2026-10-28T09:00:00Z',
+  };
+
+  function renderDrawer(trainings) {
+    teacherApi.listStudentTrainings.mockResolvedValue(trainings);
+    const store = configureStore({ reducer: { auth: (s = { session: { access_token: 'jwt' } }) => s } });
+    render(
+      <Provider store={store}>
+        <StudentTrainingHistoryDrawer student={{ id: 'stu1', username: 'anna', full_name: 'Anna' }} onClose={vi.fn()} />
+      </Provider>,
+    );
+  }
+
+  test('the three teacher previews, verbatim', () => {
+    expect(stopPreviewSentence(preview({ outcome: 'publish', checkpoint_step: 7500 }))).toBe(T_PUBLISH);
+    expect(stopPreviewSentence(preview({ charged_hours_now: 2 }))).toBe(T_NO_CKPT);
+    expect(stopPreviewSentence(preview({ trained: false }))).toBe(T_NOT_TRAINED);
+    expect(stopPreviewSentence(null)).toBe(FAILED);
+  });
+
+  test('a managed running row: its hours, its lost time, and „Training stoppen" behind the preview', async () => {
+    teacherApi.getStudentStopPreview.mockResolvedValue(preview({ outcome: 'publish', checkpoint_step: 7500 }));
+    teacherApi.stopStudentTraining.mockResolvedValue({ outcome: 'publishing', checkpoint_step: 7500 });
+    renderDrawer([managedRunning]);
+    expect(await screen.findByTestId('hours-41')).toHaveTextContent('Reserviert: 3 Stunden');
+    expect(screen.getByTestId('hours-41')).toHaveTextContent(
+      'Verlorene Zeit bisher: 15 Min. – zählt zum Zeitlimit, wird nicht berechnet.',
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Training stoppen/ }));
+    expect(await screen.findByText(T_PUBLISH)).toBeInTheDocument();
+    expect(screen.getByText('Training stoppen?')).toBeInTheDocument();
+    expect(teacherApi.getStudentStopPreview).toHaveBeenCalledWith('jwt', 'stu1', 41);
+    expect(teacherApi.stopStudentTraining).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Ja, stoppen' }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Training gestoppt.'));
+    expect(teacherApi.stopStudentTraining).toHaveBeenCalledWith('jwt', 'stu1', 41);
+    // The list is read again after the stop.
+    await waitFor(() => expect(teacherApi.listStudentTrainings).toHaveBeenCalledTimes(2));
+  });
+
+  test('„Zurück" stops nothing', async () => {
+    teacherApi.getStudentStopPreview.mockResolvedValue(preview({ trained: false }));
+    renderDrawer([managedRunning]);
+    fireEvent.click(await screen.findByRole('button', { name: /Training stoppen/ }));
+    expect(await screen.findByText(T_NOT_TRAINED)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Zurück' }));
+    expect(teacherApi.stopStudentTraining).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByText('Training stoppen?')).toBeNull());
+  });
+
+  test('no stop key for a finished, a legacy or a waiting-but-unmanaged row; a finished row reads its charge', async () => {
+    renderDrawer([
+      { ...managedRunning, id: 1, status: 'succeeded', charged_hours: 2, lost_seconds: 0, stop_requested_by_role: 'teacher' },
+      { ...managedRunning, id: 2, managed: false, reserved_hours: null },
+    ]);
+    expect(await screen.findByTestId('hours-1')).toHaveTextContent('Berechnet: 2 Stunden');
+    // The teacher's own view does not call the teacher „deine Lehrkraft".
+    expect(screen.getByTestId('hours-1')).not.toHaveTextContent('Lehrkraft');
+    expect(screen.queryByRole('button', { name: /Training stoppen/ })).toBeNull();
   });
 });

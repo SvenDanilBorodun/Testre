@@ -132,8 +132,11 @@ export function lostTimeLine(job) {
     : `Verlorene Zeit bisher: ${m} Min. – zählt zum Zeitlimit, wird nicht berechnet.`;
 }
 
-/** The card's hour lines: the reservation while active, the charge once settled, who stopped it. */
-export function hourLines(job, { chargeShownElsewhere = false } = {}) {
+/**
+ * The card's hour lines: the reservation while active, the charge once
+ * settled, and (on the student's card) that the teacher stopped it.
+ */
+export function hourLines(job, { chargeShownElsewhere = false, withStopper = true } = {}) {
   const lines = [];
   const terminal = TERMINAL.has(job?.status);
   if (!terminal && typeof job?.reserved_hours === 'number') {
@@ -142,6 +145,23 @@ export function hourLines(job, { chargeShownElsewhere = false } = {}) {
   if (terminal && !chargeShownElsewhere && typeof job?.charged_hours === 'number') {
     lines.push(`Berechnet: ${hoursDe(job.charged_hours)}`);
   }
-  if (job?.stop_requested_by_role === 'teacher') lines.push('Von deiner Lehrkraft gestoppt');
+  if (withStopper && job?.stop_requested_by_role === 'teacher') lines.push('Von deiner Lehrkraft gestoppt');
   return lines;
+}
+
+// ── The teacher's hour panels (spec §10.4) ──────────────────────────────────
+
+/** An hour field of a summary as a number (0 for an answer without it). */
+export const hoursOf = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+
+/** „3 Std." — the invariant abbreviation, so no verb or adjective meets the count. */
+export const std = (n) => `${numberDe(n)} Std.`;
+
+export const RECLAIM_FOOTNOTE_DE =
+  'Zurückholen geht nur mit freien Stunden; reservierte und verbrauchte Stunden bleiben.';
+
+/** The reclaim key's title: only free hours can be reclaimed. */
+export function reclaimTitle(canReclaim, free) {
+  if (canReclaim) return 'Zurückholen';
+  return free === 0 ? 'Keine freien Stunden zum Zurückholen' : `Max. ${numberDe(free)} zurückholbar`;
 }

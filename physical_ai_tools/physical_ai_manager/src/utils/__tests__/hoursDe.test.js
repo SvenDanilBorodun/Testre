@@ -34,10 +34,10 @@ describe('hoursDe.cases.json', () => {
   });
 
   test('„Stunde" only for exactly one, never „1 Stunden"', () => {
-    for (const [, text] of CASES) {
-      expect(text).not.toMatch(/(^|[^\d,.])1 Stunden/);
-      if (/ Stunde$/.test(text)) expect(text).toBe('1 Stunde');
-    }
+    for (const [, text] of CASES) expect(text).not.toMatch(/(^|[^\d,.])1 Stunden/);
+    const singular = CASES.filter(([, text]) => / Stunde$/.test(text)).map(([, text]) => text);
+    expect(singular.length).toBeGreaterThan(0);
+    expect(new Set(singular)).toEqual(new Set(['1 Stunde']));
   });
 });
 

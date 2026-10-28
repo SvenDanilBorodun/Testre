@@ -4,6 +4,7 @@ import toast from 'react-hot-toast';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   createClassroom,
+  getTeacherCreditHistory,
   listClassrooms,
 } from '../../services/teacherApi';
 import {
@@ -13,6 +14,8 @@ import {
 } from '../../features/teacher/teacherSlice';
 import CreateClassroomModal from '../../components/teacher/CreateClassroomModal';
 import ClassroomDetail from '../../components/teacher/ClassroomDetail';
+import CreditHistoryDrawer from '../../components/teacher/CreditHistoryDrawer';
+import { hoursDe, numberDe } from '../../utils/hoursDe';
 import useRefetchOnFocus from '../../hooks/useRefetchOnFocus';
 import {
   Btn,
@@ -34,12 +37,14 @@ export default function TeacherDashboard({ onLogout }) {
   const studentCount = useSelector((s) => s.auth.studentCount);
   const groupCount = useSelector((s) => s.auth.groupCount);
   const groupCreditsTotal = useSelector((s) => s.auth.groupCreditsTotal);
+  const compensated = useSelector((s) => s.auth.compensated);
 
   const classrooms = useSelector((s) => s.teacher.classrooms);
   const classroomsLoading = useSelector((s) => s.teacher.classroomsLoading);
   const selectedClassroomId = useSelector((s) => s.teacher.selectedClassroomId);
 
   const [showCreate, setShowCreate] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(
     typeof window !== 'undefined' ? window.innerWidth >= 1024 : true
   );
@@ -114,7 +119,7 @@ export default function TeacherDashboard({ onLogout }) {
         >
           {sidebarOpen ? <Icon name="close" size={20} /> : <Icon name="menu" size={20} />}
         </button>
-        <StatBig label="Pool" value={poolTotal ?? '—'} sub="Credits insgesamt" />
+        <StatBig label="Pool" value={poolTotal ?? '—'} sub="Stunden insgesamt" />
         <Divider className="hidden md:block" />
         <StatBig label="Verteilt" value={allocatedTotal ?? '—'} sub="an Schüler" />
         <Divider className="hidden md:block" />
@@ -138,13 +143,25 @@ export default function TeacherDashboard({ onLogout }) {
             <StatBig
               label="Gruppen"
               value={groupCount}
-              sub={`${groupCreditsTotal ?? 0} geteilte Credits`}
+              sub={`${hoursDe(groupCreditsTotal ?? 0)} bei Gruppen`}
             />
           </>
         )}
-        <div className="w-full xl:w-auto xl:ml-auto xl:max-w-sm p-3 rounded-[var(--radius)] bg-[var(--bg-sunk)] text-xs text-[var(--ink-3)] leading-snug">
-          Pool und Credits werden vom Admin vergeben. Du verteilst sie an
-          Schüler oder bündelst sie in Arbeitsgruppen.
+        <div className="w-full xl:w-auto xl:ml-auto xl:max-w-sm p-3 rounded-[var(--radius)] bg-[var(--bg-sunk)] text-xs text-[var(--ink-3)] leading-snug flex flex-col gap-1.5">
+          {poolAvailable !== null && poolAvailable !== undefined && (
+            <span className="text-sm font-semibold text-[var(--ink)]" data-testid="pool-readout">
+              {`Lehrer-Pool: ${numberDe(poolAvailable)} Std. frei`}
+            </span>
+          )}
+          {typeof compensated === 'number' && compensated > 0 && (
+            <span>{`Ausgleich vom Admin: ${hoursDe(compensated)}`}</span>
+          )}
+          <span>Stunden vergibt der Admin. Du verteilst sie an Schüler oder an Arbeitsgruppen.</span>
+          <span>
+            <Btn variant="secondary" size="sm" onClick={() => setShowHistory(true)} title="Verlauf">
+              <Icon name="history" /> Verlauf
+            </Btn>
+          </span>
         </div>
       </div>
 
@@ -255,6 +272,13 @@ export default function TeacherDashboard({ onLogout }) {
         </main>
       </div>
 
+      {showHistory && (
+        <CreditHistoryDrawer
+          title="Stundenverlauf · Lehrer-Pool"
+          load={(page) => getTeacherCreditHistory(token, page)}
+          onClose={() => setShowHistory(false)}
+        />
+      )}
       {showCreate && (
         <CreateClassroomModal
           onClose={() => setShowCreate(false)}

@@ -68,6 +68,7 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
           allocated_total: me.allocated_total,
           pool_available: me.pool_available,
           student_count: me.student_count,
+          compensated: me.compensated,
         })
       );
     } catch {}
@@ -243,7 +244,7 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
                   <thead className="bg-[var(--bg-sunk)] border-b border-[var(--line)]">
                     <tr className="text-[11px] font-semibold uppercase tracking-wider text-[var(--ink-3)]">
                       <th className="text-left py-3 px-5">Schüler</th>
-                      <th className="text-left py-3 px-3">Credits</th>
+                      <th className="text-left py-3 px-3">Stunden frei</th>
                       <th className="text-right py-3 px-5">Aktionen</th>
                     </tr>
                   </thead>

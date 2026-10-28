@@ -3,12 +3,15 @@ import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import { useDispatch, useSelector } from 'react-redux';
 import {
-  adjustStudentCredits,
+  changeStudentHours,
   deleteStudent as apiDeleteStudent,
+  getStudentCreditHistory,
   patchStudent,
   resetStudentPassword,
 } from '../../services/teacherApi';
 import { getMe } from '../../services/meApi';
+import { newRequestId } from '../../services/cloudTrainingApi';
+import { RECLAIM_FOOTNOTE_DE, hoursOf, numberDe, reclaimTitle, std } from '../../utils/hoursDe';
 import {
   removeStudentFromSelected,
   upsertStudentInSelected,
@@ -16,7 +19,8 @@ import {
 import { updateTeacherPool } from '../../features/auth/authSlice';
 import PasswordResetModal from './PasswordResetModal';
 import StudentProgramsDrawer from './StudentProgramsDrawer';
-import { Avatar, Btn, Pill, Progress } from '../EbUI';
+import CreditHistoryDrawer from './CreditHistoryDrawer';
+import { Avatar, Btn, Pill } from '../EbUI';
 import Icon from '../icons/Icon';
 
 function RenameInline({ student, onSave, onCancel }) {
@@ -65,12 +69,10 @@ function CreditDeltaPopover({ student, onApply, onClose, busy }) {
     };
   }, [onClose]);
 
-  const used = student.trainings_used || 0;
-  const total = student.training_credits || 0;
-  const remaining = Math.max(total - used, 0);
+  const free = hoursOf(student.hours_free);
   const parsed = Number(amount);
   const canAdd = Number.isFinite(parsed) && parsed > 0 && parsed <= 1000;
-  const canSubtract = Number.isFinite(parsed) && parsed > 0 && parsed <= remaining;
+  const canSubtract = Number.isFinite(parsed) && parsed > 0 && parsed <= free;
 
   const submit = (delta) => {
     if (!Number.isFinite(delta) || delta === 0) return;
@@ -83,20 +85,15 @@ function CreditDeltaPopover({ student, onApply, onClose, busy }) {
       className="absolute z-30 top-full mt-2 right-0 w-[240px] bg-white border border-[var(--line)] rounded-[var(--radius-lg)] shadow-pop p-3"
     >
       <div className="text-[10px] font-mono uppercase tracking-wider text-[var(--ink-3)] mb-2">
-        Credits anpassen
+        Stunden anpassen
       </div>
       <div className="flex items-center gap-1.5">
         <button
           onClick={() => submit(-Math.abs(parsed))}
           disabled={busy || !canSubtract}
           className="w-8 h-9 rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] hover:bg-[var(--danger-wash)] hover:text-[color:var(--danger)] text-[var(--ink-2)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
-          title={
-            canSubtract
-              ? 'Abziehen'
-              : remaining === 0
-              ? 'Keine freien Credits zum Abziehen'
-              : `Max. ${remaining} abziehbar`
-          }
+          title={reclaimTitle(canSubtract, free)}
+          aria-label={reclaimTitle(canSubtract, free)}
         >
           <Icon name="minus" size={16} />
         </button>
@@ -121,7 +118,8 @@ function CreditDeltaPopover({ student, onApply, onClose, busy }) {
           onClick={() => submit(Math.abs(parsed))}
           disabled={busy || !canAdd}
           className="w-8 h-9 rounded-[var(--radius-sm)] bg-[var(--accent-wash)] hover:brightness-95 text-[var(--accent-ink)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
-          title="Hinzufügen"
+          title="Zuweisen"
+          aria-label="Zuweisen"
         >
           <Icon name="plus" size={16} />
         </button>
@@ -134,15 +132,16 @@ function CreditDeltaPopover({ student, onApply, onClose, busy }) {
             disabled={busy}
             onClick={() => submit(v)}
             className="h-7 flex-1 rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] hover:bg-[var(--accent-wash)] hover:text-[var(--accent-ink)] text-[11px] font-mono text-[var(--ink-2)] disabled:opacity-40 transition"
-            title={`+${v} Credits sofort hinzufügen`}
+            title={`+${v} Std. sofort zuweisen`}
           >
             +{v}
           </button>
         ))}
       </div>
       <div className="text-[10px] text-[var(--ink-3)] mt-2 leading-snug font-mono">
-        <span className="inline-flex items-center gap-0.5 text-[var(--ink-2)]"><Icon name="enterKey" /> Enter</span> = hinzufügen · Aktuell <span className="text-[var(--ink)]">{total}</span> · verbraucht {used} · max. ±1000
+        <span className="inline-flex items-center gap-0.5 text-[var(--ink-2)]"><Icon name="enterKey" /> Enter</span> weist zu · Frei <span className="text-[var(--ink)]">{numberDe(free)}</span> · max. ±1000
       </div>
+      <p className="text-[10px] text-[var(--ink-3)] mt-1 leading-snug">{RECLAIM_FOOTNOTE_DE}</p>
     </div>
   );
 }
@@ -184,6 +183,7 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
   const [renaming, setRenaming] = useState(false);
   const [moving, setMoving] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
+  const [showHours, setShowHours] = useState(false);
   const otherClassrooms = classrooms.filter((c) => c.id !== student.classroom_id);
 
   const refreshTeacherPool = async () => {
@@ -195,25 +195,38 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
           allocated_total: me.allocated_total,
           pool_available: me.pool_available,
           student_count: me.student_count,
+          compensated: me.compensated,
         })
       );
     } catch {}
   };
 
+  // A delta, never an absolute amount (credit system v2): > 0 assigns from the
+  // pool, < 0 reclaims free hours. Every change carries its own request_id.
   const handleDelta = async (delta) => {
     if (busy) return;
     setBusy(true);
     try {
-      const res = await adjustStudentCredits(token, student.id, delta);
+      const res = await changeStudentHours(token, student.id, { delta, request_id: newRequestId() });
+      const free = hoursOf(res.hours_free ?? res.new_amount);
+      const reserved = hoursOf(res.hours_reserved ?? student.hours_reserved);
+      const spent = hoursOf(res.hours_spent ?? student.hours_spent);
       dispatch(
         upsertStudentInSelected({
           ...student,
-          training_credits: res.new_amount,
-          remaining: res.new_amount - (student.trainings_used || 0),
+          hours_free: free,
+          hours_reserved: reserved,
+          hours_spent: spent,
+          training_credits: free + reserved + spent,
+          trainings_used: reserved + spent,
+          remaining: free,
         })
       );
+      if (typeof res.pool_available === 'number') {
+        dispatch(updateTeacherPool({ pool_available: res.pool_available }));
+      }
       await refreshTeacherPool();
-      toast.success(`Credits: ${res.new_amount}`);
+      toast.success(`Freie Stunden: ${res.new_amount}`);
     } catch (err) {
       toast.error(err.message || 'Fehler');
     } finally {
@@ -305,11 +318,9 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
     }
   };
 
-  const used = student.trainings_used || 0;
-  const total = student.training_credits || 0;
-  const remaining = total - used;
-  const pct = total > 0 ? (used / total) * 100 : 0;
-  const progressTone = remaining === 0 ? 'danger' : 'accent';
+  const free = hoursOf(student.hours_free);
+  const reserved = hoursOf(student.hours_reserved);
+  const spent = hoursOf(student.hours_spent);
 
   return (
     <tr className="border-b last:border-0 border-[var(--line)] hover:bg-[var(--bg-sunk)] group transition-colors">
@@ -358,34 +369,23 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
               In Gruppe <span className="text-[var(--ink)]">{student.workgroup_name || '—'}</span>
             </div>
             <div className="text-[10px]">
-              Credits werden über die Gruppe geteilt
+              Stunden werden über die Gruppe verwaltet
             </div>
           </div>
         ) : (
           <div className="flex items-center gap-2">
-            <div className="w-28 shrink-0">
-              <div className="flex justify-between font-mono text-[11px] text-[var(--ink-3)]">
-                <span className="text-[var(--ink)] font-semibold">{used}</span>
-                <span>/ {total}</span>
-              </div>
-              <Progress pct={pct} tone={progressTone} />
-              <div
-                className={clsx(
-                  'mt-1 text-[10px] font-mono font-semibold',
-                  remaining === 0
-                    ? 'text-[color:var(--danger)]'
-                    : 'text-[color:var(--success)]'
-                )}
-              >
-                {remaining} frei
-              </div>
+            <div className="flex flex-wrap gap-1 max-w-[220px]" data-testid="hour-chips">
+              <Pill tone={free === 0 ? 'danger' : 'success'}>{`${std(free)} frei`}</Pill>
+              {reserved > 0 && <Pill tone="amber">{`${std(reserved)} reserviert`}</Pill>}
+              <Pill tone="neutral">{`${std(spent)} verbraucht`}</Pill>
             </div>
             <div className="flex gap-1 relative">
               <button
                 onClick={() => handleDelta(-1)}
-                disabled={busy || student.training_credits <= student.trainings_used}
+                disabled={busy || free < 1}
                 className="w-7 h-7 rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] hover:bg-[var(--danger-wash)] hover:text-[color:var(--danger)] text-[var(--ink-2)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
-                title="Credit entziehen"
+                title="1 Std. zurückholen"
+                aria-label="1 Std. zurückholen"
               >
                 <Icon name="minus" size={16} />
               </button>
@@ -393,7 +393,8 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
                 onClick={() => handleDelta(1)}
                 disabled={busy}
                 className="w-7 h-7 rounded-[var(--radius-sm)] bg-[var(--accent-wash)] hover:brightness-95 text-[var(--accent-ink)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
-                title="Credit hinzufügen"
+                title="1 Std. zuweisen"
+                aria-label="1 Std. zuweisen"
               >
                 <Icon name="plus" size={16} />
               </button>
@@ -466,6 +467,15 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
             <Btn
               variant="ghost"
               size="sm"
+              onClick={() => setShowHours(true)}
+              title="Stundenverlauf"
+              aria-label="Stundenverlauf"
+            >
+              <Icon name="piggyBank" size={18} />
+            </Btn>
+            <Btn
+              variant="ghost"
+              size="sm"
               onClick={() => setShowPwModal(true)}
               title="Passwort zurücksetzen"
             >
@@ -498,6 +508,14 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
       </td>
       {showPrograms && (
         <StudentProgramsDrawer student={student} onClose={() => setShowPrograms(false)} />
+      )}
+      {showHours && (
+        <CreditHistoryDrawer
+          title={`Stundenverlauf · ${student.full_name || student.username}`}
+          load={(page) => getStudentCreditHistory(token, student.id, page)}
+          showRefusals
+          onClose={() => setShowHours(false)}
+        />
       )}
       {showPwModal && (
         <PasswordResetModal

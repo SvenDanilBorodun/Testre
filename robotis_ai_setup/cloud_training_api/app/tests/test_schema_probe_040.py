@@ -7,10 +7,12 @@ save (the c56c012 class) — the probe is what makes the Railway deploy abort
 with a named cause instead. Read from the source with ``ast`` (main.py's
 module-level env checks would need the full app deps to import).
 
-Counts are pinned (18 tables / 16 column sets / 44 RPCs; migration 042 added
+Counts are pinned (23 tables / 23 column sets / 55 RPCs; migration 042 added
 one of each, migration 048 one table, two column sets and thirteen RPCs,
-migration 049 two tables, three column sets and ten RPCs) so a later addition
-to the probe has to move this file deliberately, the way CLAUDE.md asks.
+migration 049 two tables, three column sets and ten RPCs, 050 one table, two
+column sets and two RPCs, 052 four tables, five column sets and thirteen RPCs
+while dropping the four pre-052 credit RPCs) so a later addition to the probe
+has to move this file deliberately, the way CLAUDE.md asks.
 """
 
 from __future__ import annotations
@@ -67,11 +69,14 @@ class TestSchemaProbeKnows040(unittest.TestCase):
             for e in cls.probe["required_rpcs"].elts
         }
 
-    def test_the_counts_are_19_18_46(self) -> None:
+    def test_the_counts_are_23_23_55(self) -> None:
         # 050 added training_kept_checkpoints, two column sets and two RPCs
-        # (cap_training_attempt, start_continuation_safe).
+        # (cap_training_attempt, start_continuation_safe); 052 the four ledger tables,
+        # five column sets and thirteen RPCs, and dropped get_remaining_credits,
+        # get_teacher_credit_summary, adjust_student_credits, adjust_workgroup_credits:
+        # 46 − 4 + 13 = 55 (the widened RPCs were already counted).
         self.assertEqual(
-            (len(self.tables), len(self.columns), len(self.rpcs)), (19, 18, 46)
+            (len(self.tables), len(self.columns), len(self.rpcs)), (23, 23, 55)
         )
 
     def test_the_submissions_table_is_probed(self) -> None:

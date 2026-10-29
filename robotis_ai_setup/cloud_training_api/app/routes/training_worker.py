@@ -17,6 +17,17 @@ Error bodies are ``{"detail": <German, training_texts_de>, "code": <code>}``;
 the worker reacts to the CODE (§3.2's reaction table). A host's ``detail``
 text only ever reaches the server log, sanitized and cut to 500 characters
 (E11); nothing here writes host text into the database.
+
+Since the training-hour ledger (migration 052, spec §9.6) a host's word costs the
+student nothing it cannot prove: an early ``finish failed/time_cap`` (the API's own
+budget clock still has time) requeues; a checkpoint is uploaded and accepted only
+from a ``running`` attempt; a ``lerobot_error`` (S19) or a content refusal (S7) is
+believed only when an EARLIER attempt on a DISTINCT host (``D.distinct_hosts``)
+reported the same (owner Q-C), else it requeues like a lost attempt; a confirmed S19
+charges 0 (owner OQ-2); ``ckpt-bad`` refuses only on proof (owner OQ-3, R3-2). Every
+checkpoint object's bytes are bound to the manifest's SHA-256 by the presigned PUT and
+read back at ckpt-done (owner OQ-1, gate G0b; an object without a stored checksum is
+stream-hashed instead, review 3 m8).
 """
 
 from __future__ import annotations
@@ -55,6 +66,14 @@ FINISH_REASONS = {
                    "lerobot_crash"),
 }
 MIN_BUDGET_S = 300
+# §9.6: a host's `finish failed/time_cap` while the API's own budget still has more than
+# this left is early (a hostile host ending a fresh training): requeued, never capped.
+TIME_CAP_SLACK_S = 300
+# Owner Q-C: a host's S19 / S7 is believed once this many DISTINCT hosts reported it
+# (RESUME_CRASH_LIMIT reused).
+HOST_CLAIM_LIMIT = D.RESUME_CRASH_LIMIT
+MARK_LEROBOT_ERROR = "host_unfit:lerobot_error_unconfirmed"
+MARK_CONTENT = "host_unfit:content_unconfirmed"
 
 
 def _resp(status: int, content: dict) -> JSONResponse:
@@ -282,7 +301,7 @@ async def _start(row, att, body):
     if budget_s < MIN_BUDGET_S:
         result = await D.cap_attempt(row, att, now, ckpts, bound=bound)
         await D.terminate_attempt(att)
-        detail = T.S22 if result == "published" else (T.S6 if bound == "wall" else T.s5(D.SETTINGS.cap_s))
+        detail = T.S22 if result == "published" else (T.S6 if bound == "wall" else T.s5(D.limit_of(row)))
         return _err(409, detail, "budget_exhausted")
     D.record_budget_bound(tid, n, bound)
     resume = None if finished else _resume_point(ckpts, total)
@@ -362,6 +381,10 @@ async def _upload_url(row, att, body):
         return _resp(200, {"urls": urls, "expires_in": r2_client.PUT_TTL_S, "headers": headers})
     if kind != "ckpt":
         return _bad_request()
+    if att.get("state") != "running":
+        # §9.6: a legitimate worker made its first running write before LeRobot; a
+        # checkpoint of a `starting` attempt (no heartbeat, 0 seconds) is never accepted.
+        return _err(409, T.S10, "not_running")
     step = body.get("step")
     try:
         manifest = AV.validate_ckpt_manifest(
@@ -399,20 +422,61 @@ async def _upload_url(row, att, body):
 # ---------------------------------------------------------------------------
 
 
-def _verify_checkpoint(row, ckpt) -> tuple:
-    """('ready', None, None) | ('refused', reason, content). R2 transport faults raise."""
+def _head_checkpoint(row, ckpt) -> tuple:
+    """The HEAD pass of ckpt-done (§9.8): every object present, sized as the manifest says
+    and — when R2 holds a SHA-256 for it — carrying exactly the manifest's. Returns
+    ('refused', reason, False) | ('ok', [relpaths R2 holds no SHA-256 for]). R2 faults raise."""
+    from app.services import r2_client
+
+    tid, n, step = int(row["id"]), int(ckpt["attempt_no"]), int(ckpt["step"])
+    unchecked = []
+    for rel, meta in (ckpt.get("manifest") or {}).items():
+        try:
+            size, sha = r2_client.head_meta(r2_client.ckpt_key(tid, n, step, rel))
+        except r2_client.R2Missing:
+            return "refused", f"missing {rel}", False
+        if size != meta.get("size"):
+            return "refused", f"size {rel}", False
+        if sha is None:
+            unchecked.append(rel)
+        elif sha != meta.get("sha256"):
+            return "refused", f"checksum {rel}", False  # that checkpoint only, never content
+    return "ok", unchecked
+
+
+async def _verify_checkpoint(row, ckpt) -> tuple:
+    """('ready', None, None) | ('refused', reason, content). R2 transport faults raise.
+
+    An object R2 holds no SHA-256 for (a URL minted before the signed checksum, an R2
+    change after G0) is stream-hashed in the 1-thread ckpt-hash pool and refused only when
+    its bytes differ (review 3 m8), so the binding of I15 never rests on R2 returning it."""
+    from app.services import r2_client
+
+    head = await asyncio.to_thread(_head_checkpoint, row, ckpt)
+    if head[0] == "refused":
+        return head
+    tid, n, step = int(row["id"]), int(ckpt["attempt_no"]), int(ckpt["step"])
+    manifest = ckpt.get("manifest") or {}
+    loop = asyncio.get_running_loop()
+    for rel in head[1]:
+        key = r2_client.ckpt_key(tid, n, step, rel)
+        logger.warning("ckpt-done: R2 holds no SHA-256 for %s; stream-hashing it", key)
+        try:
+            size, sha = await loop.run_in_executor(_HASH_POOL, r2_client.stream_sha256, key)
+        except r2_client.R2Missing:
+            return "refused", f"missing {rel}", False
+        if size != manifest[rel].get("size") or sha != manifest[rel].get("sha256"):
+            return "refused", f"checksum {rel}", False
+    return await asyncio.to_thread(_verify_jsons, row, ckpt)
+
+
+def _verify_jsons(row, ckpt) -> tuple:
+    """The small JSON files downloaded, hashed and validated (§3.5), as before 052."""
     from app.services import r2_client
 
     tid, n, step = int(row["id"]), int(ckpt["attempt_no"]), int(ckpt["step"])
     manifest = ckpt.get("manifest") or {}
     total = D.total_steps_of(row)
-    for rel, meta in manifest.items():
-        try:
-            size = r2_client.head_size(r2_client.ckpt_key(tid, n, step, rel))
-        except r2_client.R2Missing:
-            return "refused", f"missing {rel}", False
-        if size != meta.get("size"):
-            return "refused", f"size {rel}", False
     rels = list(AV.PM_JSON_RELPATHS) + (list(AV.TS_JSON_RELPATHS) if step < total else [])
     docs = {}
     for rel in rels:
@@ -450,6 +514,8 @@ async def _ckpt_done(row, att, body):
     step = body.get("step")
     if type(step) is not int or step < 1:
         return _bad_request()
+    if att.get("state") != "running":
+        return _err(409, T.S10, "not_running")  # §9.6, as upload-url
     tid, n = int(row["id"]), int(att["attempt_no"])
     ckpt = await asyncio.to_thread(_read_ckpt, tid, n, step)
     if ckpt is None or ckpt.get("state") == "deleted":
@@ -458,7 +524,7 @@ async def _ckpt_done(row, att, body):
         return _resp(200, {"state": "ready"})
     if ckpt.get("state") == "refused":
         return _err(422, T.S12, "ckpt_refused")
-    verdict, reason, content = await asyncio.to_thread(_verify_checkpoint, row, ckpt)
+    verdict, reason, content = await _verify_checkpoint(row, ckpt)
     now = D._now()
     if verdict == "ready":
         await asyncio.to_thread(_set_ckpt_state, tid, n, step, {"state": "ready", "ready_at": D._iso(now)},
@@ -476,12 +542,43 @@ async def _ckpt_done(row, att, body):
                             {"state": "refused", "refused_reason": str(reason)[:200], "refused_by": n},
                             ("uploading",))
     logger.warning("training %s attempt %s: checkpoint %s refused (%s%s)", tid, n, step, reason,
-                   ", content rule: training failed" if content else "")
+                   ", content rule" if content else "")
     if content:
-        # FR-5: a content rule refuses every checkpoint of this training the same way.
-        await D.fail_training(row, n, T.S7)
-        await D.terminate_attempt(att)
+        await _content_claim(row, att, now)
     return _err(422, T.S12, "ckpt_refused")
+
+
+async def _content_claim(row, att, now: float) -> None:
+    """A content rule refuses every checkpoint of this training the same way (FR-5), but
+    one host's checkpoint is one host's word (owner Q-C): the first report requeues the
+    attempt like a lost one; a second from a DISTINCT host is believed — the newest ready
+    checkpoint that passed is published (`content_refused`, continuable, owner R3-1), and
+    only without one the row fails S7."""
+    n = int(att["attempt_no"])
+    if not await _host_claim_confirmed(row, att, MARK_CONTENT):
+        await D.requeue_attempt(row, att, MARK_CONTENT, now, skip_community_dc=True)
+        await D.terminate_attempt(att)
+        return
+    tid = int(row["id"])
+    ckpts = await asyncio.to_thread(D.read_checkpoints, [tid], ["ready"])
+    await D.terminate_attempt(att)
+    if D.newest_ready_checkpoint(ckpts, D.total_steps_of(row)) is not None:
+        await D.cap_attempt(row, att, now, ckpts, bound="content_refused")
+    else:
+        await D.fail_training(row, n, T.S7)
+
+
+async def _host_claim_confirmed(row, att, marker: str) -> bool:
+    """Owner Q-C: True when, with this report, HOST_CLAIM_LIMIT pairwise distinct hosts
+    reported ``marker`` for this training (earlier attempts carry it as their end_reason)."""
+    tid, n = int(row["id"]), int(att["attempt_no"])
+    attempts = await asyncio.to_thread(D.read_attempts, [tid])
+    earlier = [a for a in attempts if int(a.get("attempt_no") or 0) < n and a.get("end_reason") == marker]
+    hosts = [att]
+    for a in sorted(earlier, key=lambda a: int(a.get("attempt_no") or 0)):
+        if all(D.distinct_hosts(a, h) for h in hosts):
+            hosts.append(a)
+    return len(hosts) >= HOST_CLAIM_LIMIT
 
 
 # ---------------------------------------------------------------------------
@@ -547,20 +644,42 @@ async def _checkpoint_intact(tid: int, asker: int, ckpt, key_of=None) -> bool:
 def _hash_checkpoint(tid: int, ckpt, key_of=None) -> bool:
     """True when every object of the checkpoint matches its manifest (size + sha256).
     ``key_of(rel)`` picks the R2 key (default the attempt's ckpt_key; a kept copy
-    passes keep_key)."""
+    passes keep_key). Since 052 (§9.8) R2's stored SHA-256 decides without streaming;
+    only an object without one (a CopyObject copy under keep/, an object from before
+    the signed checksum) is streamed and hashed."""
     from app.services import r2_client
 
     if key_of is None:
         def key_of(rel):
             return r2_client.ckpt_key(tid, ckpt["attempt_no"], ckpt["step"], rel)
     for rel, meta in (ckpt.get("manifest") or {}).items():
+        key = key_of(rel)
         try:
-            size, sha = r2_client.stream_sha256(key_of(rel))
+            size, sha = r2_client.head_meta(key)
+            if size != meta.get("size"):
+                return False
+            if sha is None:
+                size, sha = r2_client.stream_sha256(key)
         except r2_client.R2Missing:
             return False
         if size != meta.get("size") or sha != meta.get("sha256"):
             return False
     return True
+
+
+def _count_config_complaint(tid: int, att, src_attempt: int, step: int) -> bool:
+    """R3-2: append the asking attempt to the checkpoint's ``config_complaints`` (NOT
+    ``crash_attempts``, resume_crash's own counter) and answer whether the list now holds
+    two attempts on distinct hosts (filtered on state='ready'; a refusal is the caller's)."""
+    ckpt = _read_ckpt(tid, src_attempt, step)
+    if ckpt is None or ckpt.get("state") != "ready":
+        return False
+    complaints = sorted(set(int(x) for x in (ckpt.get("config_complaints") or [])) | {int(att["attempt_no"])})
+    _set_ckpt_state(tid, src_attempt, step, {"config_complaints": complaints}, ("ready",))
+    by_no = {int(a["attempt_no"]): a for a in D.read_attempts([tid])}
+    by_no[int(att["attempt_no"])] = att
+    rows = [by_no[c] for c in complaints if c in by_no]
+    return any(D.distinct_hosts(a, b) for i, a in enumerate(rows) for b in rows[i + 1:])
 
 
 def _set_kept_state(parent_id: int, payload: dict, expect: str):
@@ -584,7 +703,8 @@ def _count_kept_crash(tid: int, n: int, parent_id: int, step: int) -> bool:
 
 async def _refuse_kept(row, att, parent_id: int, reason: str) -> None:
     """A proven-unusable kept copy (owner E43, review M3): mark it refused, expire the
-    parent, fail the child with a refund, stop the pod. Order load-bearing (§6.4 F)."""
+    parent, fail the child (S27; the 052 settlement charges only its own time), stop the
+    pod. Order load-bearing (§6.4 F)."""
     tid, n = int(row["id"]), int(att["attempt_no"])
 
     def _mark():
@@ -637,11 +757,20 @@ async def _ckpt_bad(row, att, body):
     ckpt = await asyncio.to_thread(_read_ckpt, tid, int(src_attempt), step)
     if ckpt is None:
         return _resp(200, {"state": "ignored"})
-    if reason == "sha256":
-        intact = await _checkpoint_intact(tid, n, ckpt)
-        if intact:
-            logger.info("training %s attempt %s: ckpt-bad sha256 not confirmed for step %s", tid, n, step)
+    # OQ-3 (review 2 m4): never one host's word. Every complaint is first checked against
+    # the bytes ckpt-done verified; only a proven difference refuses.
+    intact = await _checkpoint_intact(tid, n, ckpt)
+    if intact and reason != "train_config":
+        # sha256 / file_list / steps / training_step were verified on exactly these bytes
+        logger.info("training %s attempt %s: ckpt-bad %s not confirmed for step %s", tid, n, reason, step)
+        return _resp(200, {"state": "kept"})
+    if intact:
+        # R3-2: the API cannot reproduce LeRobot's train_config regeneration, so an intact
+        # complaint is counted and refuses only once two DISTINCT hosts made it.
+        if not await asyncio.to_thread(_count_config_complaint, tid, att, int(src_attempt), step):
+            logger.info("training %s attempt %s: ckpt-bad train_config counted for step %s", tid, n, step)
             return _resp(200, {"state": "kept"})
+        reason = "train_config"
     if ckpt.get("state") in ("ready", "uploading"):
         await asyncio.to_thread(_set_ckpt_state, tid, int(src_attempt), step,
                                 {"state": "refused", "refused_reason": reason, "refused_by": n},
@@ -696,15 +825,35 @@ async def _finish(row, att, body):
         if runpod:
             await D.terminate_attempt(att)
         return _resp(200, {"status": "publishing"})
+    if outcome == "failed" and reason == "lerobot_error" and int(att.get("resume_from_step") or 0) > 0:
+        # review 3 m5: the honest worker sends lerobot_error only from a FRESH start; on a
+        # resume (a checkpoint or a kept copy) it is a resume_crash against the handed one.
+        logger.info("training %s attempt %s: lerobot_error on a resume, counted as resume_crash", tid, n)
+        outcome, reason = "host_unfit", "resume_crash"
     if outcome == "failed":
         if reason == "lerobot_error":
-            await D.fail_training(row, n, T.S19)
+            if not await _host_claim_confirmed(row, att, MARK_LEROBOT_ERROR):
+                # Q-C: one host's S19 requeues like a lost attempt (charged E50 + N2).
+                await D.requeue_attempt(row, att, MARK_LEROBOT_ERROR, now, skip_community_dc=True)
+                if runpod:
+                    await D.terminate_attempt(att)
+                return _resp(200, {"status": "requeued"})
+            # confirmed by a distinct host: S19, and nothing is charged (owner OQ-2)
+            await D.fail_training(row, n, T.S19, charge_waiver="lerobot_error")
             if runpod:
                 await D.terminate_attempt(att)
             hf_publish.schedule_failed_log(dict(row, current_attempt=n))
             return _resp(200, {"status": "failed"})
-        # time_cap: publish the newest ready checkpoint (training time or the 12 h wall,
-        # owner E33/E44), else S5 / S6 + the failed log.
+        # time_cap: believed only when the API's own budget clock agrees (§9.6, A13); then
+        # publish the newest ready checkpoint (the row's limit or the 12 h wall, owner
+        # E33/E44), else S5 / S6 + the failed log.
+        budget_s, _ = D.budget_for(row, att, now)
+        if budget_s > TIME_CAP_SLACK_S:
+            logger.warning("training %s attempt %s: time_cap with %d s of budget left, requeued", tid, n, budget_s)
+            await D.requeue_attempt(row, att, "host_unfit:time_cap_early", now, skip_community_dc=True)
+            if runpod:
+                await D.terminate_attempt(att)
+            return _resp(200, {"status": "requeued"})
         ckpts = await asyncio.to_thread(D.read_checkpoints, [tid], ["ready"])
         bound = D.time_cap_bound(row, att, now)
         result = await D.cap_attempt(row, att, now, ckpts, bound=bound)

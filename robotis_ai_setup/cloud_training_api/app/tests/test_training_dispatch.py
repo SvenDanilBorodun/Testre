@@ -131,39 +131,37 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(any("TRAINING_E2E=1" in m for m in logs.output))
         D.validate_boot(dict(BASE_ENV, TRAINING_DISPATCH="legacy"))
 
-    def test_the_cap_ceiling_follows_the_ladder(self):
-        # Owner E43: with the switch a cap above the Modal ceiling is CLAMPED (never a boot stop);
-        # without it a cap above the 12 h wall is malformed.
-        self.assertEqual(D.MANAGED_CAP_CEILING_S, 23520)
-        self.assertEqual(D.MANAGED_CAP_CEILING_RUNPOD_S, D.WALL_CAP_S)
-        self.assertEqual(D.MANAGED_CAP_CEILING_RUNPOD_S, 43200)
-        self.assertEqual(D.cap_ceiling(settings().ladder), 43200)
-        self.assertEqual(D.cap_ceiling(settings(MANAGED_MODAL_RUNG="1").ladder), 23520)
-        on = settings(MANAGED_MODAL_RUNG="1", MANAGED_ACT_CAP_S="23520")
-        self.assertEqual((on.cap_s, on.cap_clamped_from), (23520, None))
-        on = settings(MANAGED_MODAL_RUNG="1", MANAGED_ACT_CAP_S="23521")
-        self.assertEqual((on.cap_s, on.cap_clamped_from), (23520, 23521))
-        on = settings(MANAGED_MODAL_RUNG="1", MANAGED_ACT_CAP_S="50000")
-        self.assertEqual((on.cap_s, on.cap_clamped_from), (23520, 50000))
-        self.assertEqual(settings(MANAGED_MODAL_RUNG="1", MANAGED_ACT_CAP_S="21600").cap_s, 21600)
-        off = settings(MANAGED_ACT_CAP_S="23521")
-        self.assertEqual((off.cap_s, off.cap_clamped_from), (23521, None))
-        self.assertEqual(settings(MANAGED_ACT_CAP_S="43200").cap_s, 43200)
+    def test_the_cap_must_be_one_of_three_values(self):
+        # 052 (decision 6, §9.1): MANAGED_ACT_CAP_S is the CEILING of a 1–3 hour reservation:
+        # 3600, 7200 or 10800, with or without the Modal rung; the E43 clamp is gone.
+        self.assertEqual(D.MANAGED_ACT_CAP_S, 10800)
+        self.assertEqual(D.ALLOWED_CAPS_S, (3600, 7200, 10800))
+        self.assertEqual(D.MANAGED_CAP_CEILING_S, 23520)  # above every allowed cap
+        self.assertFalse(hasattr(D, "cap_ceiling"))
+        self.assertFalse(hasattr(D, "MANAGED_CAP_CEILING_RUNPOD_S"))
+        self.assertFalse(hasattr(settings(), "cap_clamped_from"))
+        self.assertEqual(settings().cap_s, 10800)
+        for ok in ("3600", "7200", "10800"):
+            for switch in ("0", "1"):
+                with self.subTest(cap=ok, switch=switch):
+                    self.assertEqual(settings(MANAGED_ACT_CAP_S=ok, MANAGED_MODAL_RUNG=switch).cap_s, int(ok))
+        for bad in ("12600", "1800", "10801", "23520", "43200", "0", "x"):
+            for switch in ("0", "1"):
+                with self.subTest(cap=bad, switch=switch), self.assertRaises(D.SettingsError) as ctx:
+                    settings(MANAGED_ACT_CAP_S=bad, MANAGED_MODAL_RUNG=switch)
+                self.assertIn("MANAGED_ACT_CAP_S", str(ctx.exception))
         with self.assertRaises(D.SettingsError) as ctx:
-            settings(MANAGED_ACT_CAP_S="43201")
-        self.assertIn("MANAGED_ACT_CAP_S", str(ctx.exception))
-        self.assertNotIn("43201", str(ctx.exception))
+            settings(MANAGED_ACT_CAP_S="12600")
+        self.assertEqual(str(ctx.exception), "MANAGED_ACT_CAP_S must be 3600, 7200 or 10800")
 
-    def test_the_switch_and_the_clamp_log_a_warning_on_every_boot(self):
+    def test_the_switch_logs_a_warning_on_every_boot(self):
         with self.assertLogs("app.services.training_dispatch", level="WARNING") as logs:
             D.validate_boot(dict(BASE_ENV, MANAGED_MODAL_RUNG="1"))
         self.assertTrue(any("MANAGED_MODAL_RUNG=1" in m for m in logs.output))
+        self.assertTrue(any("deployed at the running release" in m for m in logs.output))
         self.assertFalse(any("clamped" in m for m in logs.output))
-        with self.assertLogs("app.services.training_dispatch", level="WARNING") as logs:
+        with self.assertRaises(RuntimeError):  # no clamp any more: an emergency switch does not excuse a bad cap
             D.validate_boot(dict(BASE_ENV, MANAGED_MODAL_RUNG="1", MANAGED_ACT_CAP_S="30000"))
-        self.assertTrue(any("MANAGED_MODAL_RUNG=1" in m for m in logs.output))
-        self.assertTrue(any("clamped" in m for m in logs.output))
-        self.assertFalse(any("30000" in m for m in logs.output))
         with self.assertNoLogs("app.services.training_dispatch", level="WARNING"):
             D.validate_boot(BASE_ENV)
 
@@ -746,29 +744,50 @@ class DispatcherPlacementModalRung(Base):
 
 class DispatcherBudgets(Base):
     async def test_the_attempt_cap(self):
+        # 052 (Q-B/N3): without a ready checkpoint 4 GPU outages read S37; S4 names the
+        # dataset only when at least 2 of the row's losses are dataset-class.
         row = self.queued(current_attempt=4)
+        self.db.add_attempt(row["id"], 4, state="lost", backend="modal")
+        await D.dispatch_tick()
+        self.assertEqual(self.db.row(row["id"])["error_message"], T.S37)
+        row = self.queued(current_attempt=4, credit_scheme="ledger", reserved_hours=3,
+                          lost_reasons=["pod_gone", "stalled", "heartbeat_lost", "host_unfit:lerobot_crash"])
         self.db.add_attempt(row["id"], 4, state="lost", backend="modal")
         await D.dispatch_tick()
         self.assertEqual(self.db.row(row["id"])["error_message"], T.S4)
 
     async def test_a_lost_fourth_runpod_attempt_ends_with_s4(self):
         self.stock()
-        row = self.queued(current_attempt=4)
+        row = self.queued(current_attempt=4, credit_scheme="ledger", reserved_hours=3,
+                          lost_reasons=["host_unfit:resume_crash", "host_unfit:lerobot_error_unconfirmed"])
         self.db.add_attempt(row["id"], 4, state="lost", backend="runpod_secure")
         await D.dispatch_tick()
         r = self.db.row(row["id"])
         self.assertEqual((r["status"], r["error_message"]), ("failed", T.S4))
         self.assertEqual(self.rp.creates(), [])
 
-    async def test_the_training_time_cap_uses_the_setting(self):
-        self.s = settings(MANAGED_ACT_CAP_S="21600")
-        row = self.queued(train_seconds_used=21600 - 300)
-        await D.dispatch_tick(self.s)
-        msg = self.db.row(row["id"])["error_message"]
-        self.assertEqual(msg, T.s5(21600))
-        self.assertIn("6 Stunden", msg)
-        self.assertEqual(T.s5(D.MANAGED_ACT_CAP_S), T.S5.format(hours=T.hours_text(D.MANAGED_ACT_CAP_S)))
-        self.assertEqual(T.hours_text(5400), "1,5")
+    async def test_the_training_time_cap_is_the_rows_own_limit(self):
+        # 052 (§9.2): the limit is the reservation × 3600 (a pre-052 row 12 600 s); the
+        # global setting is only the ceiling of a reservation.
+        ledger = self.queued(credit_scheme="ledger", reserved_hours=2, train_seconds_used=7200 - 300)
+        derived = self.queued(train_seconds_used=D.PRE_LEDGER_CAP_S - 300)
+        fine = self.queued(credit_scheme="ledger", reserved_hours=3, train_seconds_used=7200 - 300)
+        await D.dispatch_tick()
+        self.assertEqual(self.db.row(ledger["id"])["error_message"], T.s5(7200))
+        self.assertIn("2 Stunden", T.s5(7200))
+        self.assertEqual(self.db.row(derived["id"])["error_message"], T.s5(12600))
+        self.assertIn("3,5 Stunden", T.s5(12600))
+        self.assertIn("von 1 Stunde Trainingszeit", T.s5(3600))
+        self.assertEqual(self.db.row(fine["id"])["status"], "queued")
+
+    async def test_lost_time_alone_can_reach_the_limit(self):
+        # [D1]: the limit clock is train_seconds_used + lost_seconds; the charge is not
+        row = self.queued(credit_scheme="ledger", reserved_hours=1, train_seconds_used=0, lost_seconds=3600 - 300)
+        await D.dispatch_tick()
+        self.assertEqual(self.db.row(row["id"])["error_message"], T.s5(3600))
+        derived = self.queued(train_seconds_used=0, lost_seconds=0)  # a derived row never has lost time
+        await D.dispatch_tick()
+        self.assertEqual(self.db.row(derived["id"])["status"], "queued")
 
     async def test_the_wall_cap(self):
         row = self.queued(requested_at=self.clock.iso(self.clock.t - (D.WALL_CAP_S - 300)))
@@ -789,7 +808,7 @@ class DispatcherBudgets(Base):
 
     async def test_budgets_run_while_placement_is_blocked(self):
         D.STATE.hf_check = False
-        row = self.queued(train_seconds_used=D.MANAGED_ACT_CAP_S)
+        row = self.queued(train_seconds_used=D.PRE_LEDGER_CAP_S)
         await D.dispatch_tick()
         self.assertEqual(self.db.row(row["id"])["status"], "failed")
 
@@ -1268,7 +1287,7 @@ class SweepLosses(Base):
         self.assertEqual(self.db.attempt(row["id"], 1)["state"], "running")
 
     async def test_the_training_time_cap_has_the_watchdog_grace(self):
-        row, a = self._running(train_seconds_used=D.MANAGED_ACT_CAP_S - 600)
+        row, a = self._running(train_seconds_used=D.PRE_LEDGER_CAP_S - 600)
         self.clock.advance(D.WATCHDOG_GRACE_S - 1)
         self.db.row(row["id"]).update(last_progress_at=self.clock.iso(), step_advanced_at=self.clock.iso())
         await D.sweep_tick()
@@ -1277,11 +1296,11 @@ class SweepLosses(Base):
         self.db.row(row["id"]).update(last_progress_at=self.clock.iso(), step_advanced_at=self.clock.iso())
         await D.sweep_tick()
         self.assertEqual((self.db.row(row["id"])["status"], self.db.row(row["id"])["error_message"]),
-                         ("failed", T.s5(D.MANAGED_ACT_CAP_S)))
+                         ("failed", T.s5(D.PRE_LEDGER_CAP_S)))
         self.assertIn("pod1", self.rp.deletes())
 
     async def test_a_final_ready_after_the_cap_publishes_instead_of_s5(self):
-        row, a = self._running(train_seconds_used=D.MANAGED_ACT_CAP_S)
+        row, a = self._running(train_seconds_used=D.PRE_LEDGER_CAP_S)
         self.clock.advance(600 + D.WATCHDOG_GRACE_S)
         self.db.add_checkpoint(row["id"], 1, 50000, state="ready", manifest={})
         await D.sweep_tick()
@@ -1395,7 +1414,9 @@ class Reaper(Base):
 
     async def test_the_db_id_rule_reads_only_attempts_young_enough_to_own_a_pod(self):
         old = self.db.add_training(status="failed", current_attempt=1)
-        window = self.s.cap_s + self.s.start_deadline_s + D.REAPER_GRACE_S + D.PLACING_STALE_S + D.REAPER_GRACE_S
+        # §9.4: the window covers the largest per-row limit (a pre-052 row's 12 600 s)
+        window = (max(D.PRE_LEDGER_CAP_S, self.s.cap_s) + self.s.start_deadline_s + D.REAPER_GRACE_S
+                  + D.PLACING_STALE_S + D.REAPER_GRACE_S)
         self.db.add_attempt(old["id"], 1, state="ended", backend="runpod_secure", cloud_ref="ancient",
                             created_at=self.clock.iso(self.clock.t - window - 1))
         young = self.db.add_training(status="failed", current_attempt=1)
@@ -1424,9 +1445,22 @@ class Reaper(Base):
         row = self.db.add_training(status="running", current_attempt=1)
         self.db.add_attempt(row["id"], 1, state="running", backend="runpod_community", cloud_ref="p")
         self.rp.add_pod(id="p", name="x",
-                        createdAt=self.clock.iso(self.clock.t - (D.MANAGED_ACT_CAP_S + 1200 + 1800) - 1))
+                        createdAt=self.clock.iso(self.clock.t - (D.PRE_LEDGER_CAP_S + 1200 + 1800) - 1))
         await D.reaper_tick()
         self.assertEqual(self.rp.deletes(), ["p"])
+
+    async def test_the_maximum_pod_age_is_per_row(self):
+        # §9.4: a 1-hour reservation's pod is old at 3600 + start deadline + grace; a pre-052
+        # row's at 12 600 + …; a 3 h cap never kills the older training's pod early.
+        short = self.db.add_training(status="running", current_attempt=1, credit_scheme="ledger", reserved_hours=1)
+        self.db.add_attempt(short["id"], 1, state="running", backend="runpod_community", cloud_ref="short")
+        old = self.db.add_training(status="running", current_attempt=1)
+        self.db.add_attempt(old["id"], 1, state="running", backend="runpod_community", cloud_ref="old")
+        age = 3600 + self.s.start_deadline_s + D.REAPER_GRACE_S + 1
+        self.rp.add_pod(id="short", name="x1", createdAt=self.clock.iso(self.clock.t - age))
+        self.rp.add_pod(id="old", name="x2", createdAt=self.clock.iso(self.clock.t - (10800 + 1200 + 1800 + 1)))
+        await D.reaper_tick()
+        self.assertEqual(self.rp.deletes(), ["short"], "the pre-052 row keeps its 12 600 s limit")
 
     async def test_unlock_only_when_locked_or_400_409(self):
         self.rp.add_pod(id="L", name=f"{self.s.pod_prefix}-1-a1", locked=True)
@@ -1592,7 +1626,7 @@ class CapPublish(Base):
         return row
 
     async def test_sweep_cap_with_a_ready_checkpoint_publishes(self):
-        row = self._running(train_seconds_used=D.MANAGED_ACT_CAP_S)
+        row = self._running(train_seconds_used=D.PRE_LEDGER_CAP_S)
         self.clock.advance(600 + D.WATCHDOG_GRACE_S)
         self.db.add_checkpoint(row["id"], 1, 42500, state="ready", manifest={})
         await D.sweep_tick()
@@ -1603,10 +1637,10 @@ class CapPublish(Base):
         self.assertIn("pod1", self.rp.deletes())
 
     async def test_sweep_cap_without_a_ready_checkpoint_is_s5(self):
-        row = self._running(train_seconds_used=D.MANAGED_ACT_CAP_S)
+        row = self._running(train_seconds_used=D.PRE_LEDGER_CAP_S)
         self.clock.advance(600 + D.WATCHDOG_GRACE_S)
         await D.sweep_tick()
-        self.assertEqual(self.db.row(row["id"])["error_message"], T.s5(D.MANAGED_ACT_CAP_S))
+        self.assertEqual(self.db.row(row["id"])["error_message"], T.s5(D.PRE_LEDGER_CAP_S))
         self.assertEqual(self.published, [])
 
     async def test_sweep_wall_with_a_ready_checkpoint_publishes(self):
@@ -1622,7 +1656,7 @@ class CapPublish(Base):
         self.assertEqual(self.db.row(row["id"])["error_message"], T.S6)
 
     async def test_budget_finish_cap_with_a_lost_attempt_charges_zero(self):
-        row = self.queued(current_attempt=1, train_seconds_used=D.MANAGED_ACT_CAP_S)
+        row = self.queued(current_attempt=1, train_seconds_used=D.PRE_LEDGER_CAP_S)
         self.db.add_attempt(row["id"], 1, state="lost", backend="runpod_secure",
                             first_heartbeat_at=self.clock.iso(self.clock.t - 600))
         self.db.add_checkpoint(row["id"], 1, 42500, state="ready", manifest={})
@@ -1639,30 +1673,36 @@ class CapPublish(Base):
         self.assertEqual(self.db.attempt(row["id"], 1)["end_reason"], "wall_capped")
         self.assertEqual(self.published, [(row["id"], 1)])
 
-    async def test_s4_never_publishes_even_with_a_ready_checkpoint(self):
+    # 052 (owner Q-A, lifting E47): S4 and S18 publish like a cap when a ready checkpoint
+    # exists; the full matrix lives in test_budget_finish_publish.py.
+    async def test_s4_publishes_attempts_out_with_a_ready_checkpoint(self):
         row = self.queued(current_attempt=4)
         self.db.add_attempt(row["id"], 4, state="lost", backend="runpod_secure")
         self.db.add_checkpoint(row["id"], 4, 42500, state="ready", manifest={})
         await D.dispatch_tick()
-        self.assertEqual(self.db.row(row["id"])["error_message"], T.S4)
-        self.assertEqual(self.published, [])
+        r = self.db.row(row["id"])
+        self.assertEqual((r["status"], r["status_note"], r["capped_step"]), ("running", T.S34, 42500))
+        self.assertEqual(self.db.attempt(row["id"], 4)["end_reason"], "attempts_out")
+        self.assertEqual(self.published, [(row["id"], 4)])
 
-    async def test_s18_never_publishes_even_with_a_ready_checkpoint(self):
+    async def test_s18_publishes_no_gpu_with_a_ready_checkpoint(self):
         row = self.queued(current_attempt=1, unplaced_since=self.clock.iso(self.clock.t - D.PLACEMENT_GIVEUP_S - 1))
         self.db.add_attempt(row["id"], 1, state="lost", backend="runpod_secure")
         self.db.add_checkpoint(row["id"], 1, 42500, state="ready", manifest={})
         await D.dispatch_tick()
-        self.assertEqual(self.db.row(row["id"])["error_message"], T.S18)
-        self.assertEqual(self.published, [])
+        r = self.db.row(row["id"])
+        self.assertEqual((r["status"], r["status_note"]), ("running", T.S34))
+        self.assertEqual(self.db.attempt(row["id"], 1)["end_reason"], "no_gpu")
+        self.assertEqual(self.published, [(row["id"], 1)])
 
     async def test_a_cap_conflict_schedules_nothing(self):
-        row = self._running(train_seconds_used=D.MANAGED_ACT_CAP_S)
+        row = self._running(train_seconds_used=D.PRE_LEDGER_CAP_S)
         self.clock.advance(600 + D.WATCHDOG_GRACE_S)
         self.db.add_checkpoint(row["id"], 1, 42500, state="ready", manifest={})
         self.db._rpc_cap_training_attempt = lambda **kw: (_ for _ in ()).throw(PgError("P0049"))
         await D.sweep_tick()
         self.assertEqual(self.published, [])
-        self.assertNotEqual(self.db.row(row["id"])["error_message"], T.s5(D.MANAGED_ACT_CAP_S))
+        self.assertNotEqual(self.db.row(row["id"])["error_message"], T.s5(D.PRE_LEDGER_CAP_S))
 
     async def test_a_continuation_requeue_floors_at_the_kept_step(self):
         parent = self.db.add_training(status="succeeded", current_attempt=1, capped_step=42500,
@@ -1683,10 +1723,14 @@ class CapPublish(Base):
         self.assertEqual(self.db.row(child["id"])["status_note"], T.s1(42500))
 
     def test_the_constants(self):
-        self.assertEqual(D.MANAGED_ACT_CAP_S, 12600)
+        self.assertEqual(D.MANAGED_ACT_CAP_S, 10800)
+        self.assertEqual(D.PRE_LEDGER_CAP_S, 12600)
         self.assertEqual(D.KEEP_S, 604800)
         self.assertEqual(D.KEEP_DELETE_GRACE_S, 44400)
         self.assertIn("3,5 Stunden", T.s5(12600))
+        self.assertEqual(D.CAP_END_REASONS, ("capped", "wall_capped", "stopped", "attempts_out", "no_gpu",
+                                             "content_refused"))
+        self.assertEqual(D.PUBLISH_END_REASONS, ("succeeded",) + D.CAP_END_REASONS)
 
 
 class RequeueCharging(SweepLosses):
@@ -1783,10 +1827,23 @@ class Helpers(unittest.TestCase):
         row = {"train_seconds_used": 3600, "requested_at": Clock(now - 7200).iso()}
         att = {"first_heartbeat_at": Clock(now - 1800).iso()}
         s = settings()
-        self.assertEqual(D.budget_for(row, att, now, s), (D.MANAGED_ACT_CAP_S - 3600 - 1800, "cap"))
-        self.assertEqual(D.budget_for(row, {"first_heartbeat_at": None}, now, s), (D.MANAGED_ACT_CAP_S - 3600, "cap"))
+        # a pre-052 (derived) row: the old 12 600 s
+        self.assertEqual(D.budget_for(row, att, now, s), (D.PRE_LEDGER_CAP_S - 3600 - 1800, "cap"))
+        self.assertEqual(D.budget_for(row, {"first_heartbeat_at": None}, now, s), (D.PRE_LEDGER_CAP_S - 3600, "cap"))
         old = {"train_seconds_used": 0, "requested_at": Clock(now - 40000).iso()}
         self.assertEqual(D.budget_for(old, {}, now, s), (43200 - 40000, "wall"))
+        # a ledger row: its reservation, and the lost seconds count against it [D1]
+        led = dict(row, credit_scheme="ledger", reserved_hours=2, lost_seconds=600)
+        self.assertEqual(D.budget_for(led, att, now, s), (7200 - 3600 - 600 - 1800, "cap"))
+
+    def test_limit_of_and_limit_used(self):
+        self.assertEqual(D.limit_of({"reserved_hours": 1}), 3600)
+        self.assertEqual(D.limit_of({"reserved_hours": 3}), 10800)
+        self.assertEqual(D.limit_of({"reserved_hours": None}), 12600)
+        self.assertEqual(D.limit_of({}), 12600)
+        self.assertEqual(D.limit_of({"reserved_hours": True}), 12600)
+        self.assertEqual(D.limit_used({"train_seconds_used": 100, "lost_seconds": 50}), 150)
+        self.assertEqual(D.limit_used({"train_seconds_used": None, "lost_seconds": None}), 0)
 
     def test_the_catalog_cache_is_per_scope(self):
         rp = FakeRunpod()

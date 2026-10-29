@@ -1,6 +1,7 @@
 """Work groups (Arbeitsgruppen) inside classrooms.
 
-A workgroup bundles 2-N students who share a single training credit pool
+A workgroup bundles 2-N students who share one training-hour account (migration
+052: ``credit_accounts`` kind ``group``, with an optional per-member hour limit)
 and see each other's trainings, datasets, and Roboter Studio workflows.
 Belongs to one classroom; a student is in at most one group per classroom.
 
@@ -14,18 +15,28 @@ Lifecycle (per user-confirmed plan):
   row in workgroup_memberships (left_at = NOW()) so historical visibility
   via RLS is preserved for ex-members.
 - Deleting a group with members is refused (mirrors classroom delete UX);
-  remaining shared_credits are returned to the teacher pool naturally
-  (the pool summary subtracts allocated, and the row is gone).
+  the AFTER-DELETE close of 052 returns the group's free hours to the
+  funding teacher (spent stays spent). ``workgroups.shared_credits`` is a
+  dead column since 052 and is read by no route.
 """
 
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.auth import get_current_teacher
-from app.routes.teacher import _assert_classroom_owned, _assert_student_owned
+from app.routes.teacher import (
+    _assert_classroom_owned,
+    _assert_student_owned,
+    change_hours,
+    credit_accounts,
+    history_payload,
+    hours_fields,
+    parse_delta,
+)
+from app.services import credit_texts_de as credit_texts
 from app.services.supabase_client import get_supabase
 
 logger = logging.getLogger(__name__)
@@ -51,24 +62,28 @@ class WorkgroupMemberAdd(BaseModel):
     student_id: str
 
 
-class WorkgroupCreditsDelta(BaseModel):
-    delta: int = Field(..., ge=-1000, le=1000)
-
-
 class WorkgroupMember(BaseModel):
     id: str
     username: str | None
     full_name: str | None
+    # 052: the member's hours in this group (§4.2's member formula)
+    hours_used: int = 0
 
 
 class WorkgroupSummary(BaseModel):
     id: str
     classroom_id: str
     name: str
+    # 052: derived from the group's hour account (free + reserved + spent, reserved +
+    # spent, free) — never the dead shared_credits column.
     shared_credits: int
     member_count: int
     trainings_used: int
     remaining: int
+    hours_free: int = 0
+    hours_reserved: int = 0
+    hours_spent: int = 0
+    member_limit_hours: int | None = None
     created_at: str
     updated_at: str
 
@@ -80,6 +95,9 @@ class WorkgroupDetail(WorkgroupSummary):
 class WorkgroupCreditsResponse(BaseModel):
     new_amount: int
     pool_available: int
+    hours_free: int = 0
+    hours_reserved: int = 0
+    hours_spent: int = 0
 
 
 class WorkgroupTrainingSummary(BaseModel):
@@ -96,6 +114,12 @@ class WorkgroupTrainingSummary(BaseModel):
     user_id: str
     started_by_username: str | None = None
     started_by_full_name: str | None = None
+    # 052 (review m8)
+    managed: bool = False
+    reserved_hours: int | None = None
+    charged_hours: int | None = None
+    stop_requested_by_role: str | None = None
+    lost_seconds: int | None = 0
 
 
 # ---------- Helpers ----------
@@ -128,18 +152,6 @@ def _assert_workgroup_owned(teacher_id: str, workgroup_id: str) -> dict:
     return group
 
 
-def _group_usage(workgroup_id: str) -> int:
-    supabase = get_supabase()
-    result = (
-        supabase.table("trainings")
-        .select("id", count="exact")
-        .eq("workgroup_id", workgroup_id)
-        .not_.in_("status", ["failed", "canceled"])
-        .execute()
-    )
-    return int(result.count or 0)
-
-
 def _group_member_count(workgroup_id: str) -> int:
     supabase = get_supabase()
     result = (
@@ -151,30 +163,12 @@ def _group_member_count(workgroup_id: str) -> int:
     return int(result.count or 0)
 
 
-def _batch_group_usage_and_members(group_ids: list[str]) -> tuple[dict[str, int], dict[str, int]]:
-    """Two batched queries → (usage_map, member_count_map).
-
-    Replaces N pairs of count("exact") queries when listing all groups
-    in a classroom — was the second-biggest dashboard hot path after
-    get_classroom.
-    """
+def _batch_member_counts(group_ids: list[str]) -> dict[str, int]:
+    """One select for the member counts of many groups."""
     if not group_ids:
-        return {}, {}
-    supabase = get_supabase()
-    trainings = (
-        supabase.table("trainings")
-        .select("workgroup_id")
-        .in_("workgroup_id", group_ids)
-        .not_.in_("status", ["failed", "canceled"])
-        .execute()
-    ).data or []
-    usage: dict[str, int] = {}
-    for t in trainings:
-        gid = t.get("workgroup_id")
-        if gid:
-            usage[gid] = usage.get(gid, 0) + 1
+        return {}
     members = (
-        supabase.table("users")
+        get_supabase().table("users")
         .select("workgroup_id")
         .in_("workgroup_id", group_ids)
         .execute()
@@ -184,37 +178,62 @@ def _batch_group_usage_and_members(group_ids: list[str]) -> tuple[dict[str, int]
         gid = u.get("workgroup_id")
         if gid:
             member_counts[gid] = member_counts.get(gid, 0) + 1
-    return usage, member_counts
+    return member_counts
 
 
 def _group_summary(
     row: dict,
     *,
-    usage: int | None = None,
+    account: dict | None = None,
     member_count: int | None = None,
 ) -> WorkgroupSummary:
-    """Build a WorkgroupSummary.
-
-    Pass ``usage`` and ``member_count`` from a batched lookup when
-    rendering many groups; otherwise this falls back to per-group count
-    queries (for single-group endpoints like get_workgroup).
-    """
-    credits = int(row.get("shared_credits") or 0)
-    used = usage if usage is not None else _group_usage(row["id"])
+    """Build a WorkgroupSummary from the group's hour account (pass the batched
+    ``account``; a single-group caller reads it here)."""
+    if account is None:
+        account = credit_accounts("group", [row["id"]]).get(str(row["id"]))
     members = (
         member_count if member_count is not None else _group_member_count(row["id"])
     )
+    fields = hours_fields(account)
+    limit = (account or {}).get("member_hour_limit")
     return WorkgroupSummary(
         id=row["id"],
         classroom_id=row["classroom_id"],
         name=row["name"],
-        shared_credits=credits,
+        shared_credits=fields["training_credits"],
         member_count=members,
-        trainings_used=used,
-        remaining=max(credits - used, 0),
+        trainings_used=fields["trainings_used"],
+        remaining=fields["remaining"],
+        hours_free=fields["hours_free"],
+        hours_reserved=fields["hours_reserved"],
+        hours_spent=fields["hours_spent"],
+        member_limit_hours=None if limit is None else int(limit),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def member_hours_used(group_id: str, member_ids) -> dict[str, int]:
+    """§4.2's member formula, one ledger select: ``max(0, Σ reserve − Σ release −
+    Σ compensate)`` of each member's rows on this group's account."""
+    ids = [str(m) for m in member_ids if m]
+    if not ids:
+        return {}
+    rows = (
+        get_supabase().table("credit_ledger")
+        .select("kind, hours, member_id, from_kind, from_id, to_kind, to_id")
+        .in_("kind", ["reserve", "release", "compensate"]).in_("member_id", ids).execute()
+    ).data or []
+    used: dict[str, int] = {m: 0 for m in ids}
+    gid = str(group_id)
+    for r in rows:
+        mid = str(r.get("member_id"))
+        hours = int(r.get("hours") or 0)
+        if r.get("kind") in ("reserve", "release") and r.get("from_kind") == "group" and str(r.get("from_id")) == gid:
+            used[mid] = used.get(mid, 0) + (hours if r["kind"] == "reserve" else -hours)
+        elif r.get("kind") == "compensate" and r.get("to_kind") == "group" and str(r.get("to_id")) == gid:
+            used[mid] = used.get(mid, 0) - hours
+    return {m: max(0, v) for m, v in used.items()}
 
 
 def _group_detail(row: dict) -> WorkgroupDetail:
@@ -230,9 +249,10 @@ def _group_detail(row: dict) -> WorkgroupDetail:
         .execute()
     ).data or []
     summary = _group_summary(row, member_count=len(members_raw))
+    used = member_hours_used(row["id"], [m["id"] for m in members_raw])
     return WorkgroupDetail(
         **summary.model_dump(),
-        members=[WorkgroupMember(**m) for m in members_raw],
+        members=[WorkgroupMember(**m, hours_used=used.get(str(m["id"]), 0)) for m in members_raw],
     )
 
 
@@ -253,11 +273,13 @@ async def list_workgroups(classroom_id: str, teacher=Depends(get_current_teacher
         .order("created_at", desc=False)
         .execute()
     ).data or []
-    usage, members = _batch_group_usage_and_members([r["id"] for r in rows])
+    ids = [r["id"] for r in rows]
+    members = _batch_member_counts(ids)
+    accounts = credit_accounts("group", ids)
     return [
         _group_summary(
             r,
-            usage=usage.get(r["id"], 0),
+            account=accounts.get(str(r["id"])) or {},
             member_count=members.get(r["id"], 0),
         )
         for r in rows
@@ -485,7 +507,8 @@ async def list_workgroup_trainings(
         .select(
             "id, status, dataset_name, model_name, model_type, "
             "current_step, total_steps, requested_at, terminated_at, "
-            "error_message, user_id"
+            "error_message, user_id, managed, reserved_hours, charged_hours, "
+            "stop_requested_by_role, lost_seconds"
         )
         .eq("workgroup_id", workgroup_id)
         .order("requested_at", desc=True)
@@ -529,6 +552,11 @@ async def list_workgroup_trainings(
                 user_id=r["user_id"],
                 started_by_username=u.get("username"),
                 started_by_full_name=u.get("full_name"),
+                managed=bool(r.get("managed")),
+                reserved_hours=r.get("reserved_hours"),
+                charged_hours=r.get("charged_hours"),
+                stop_requested_by_role=r.get("stop_requested_by_role"),
+                lost_seconds=r.get("lost_seconds"),
             )
         )
     return out
@@ -540,49 +568,57 @@ async def list_workgroup_trainings(
 )
 async def adjust_workgroup_credits(
     workgroup_id: str,
-    req: WorkgroupCreditsDelta,
+    body: dict | None = Body(default=None),
     teacher=Depends(get_current_teacher),
 ):
+    """Assign (delta > 0) or reclaim (delta < 0) a group's hours (§8.3)."""
     _assert_workgroup_owned(teacher["id"], workgroup_id)
-    if req.delta == 0:
-        raise HTTPException(status_code=400, detail="Delta darf nicht 0 sein")
-    supabase = get_supabase()
+    delta, request_id = parse_delta(body, 1000, credit_texts.TEACHER_DELTA_RANGE_DE)
+    return WorkgroupCreditsResponse(**change_hours(teacher["id"], "group", workgroup_id, delta, request_id,
+                                                   credit_texts.WORKGROUP_NOT_FOUND_DE))
+
+
+@router.put("/workgroups/{workgroup_id}/member-limit")
+async def set_member_limit(
+    workgroup_id: str,
+    body: dict | None = Body(default=None),
+    teacher=Depends(get_current_teacher),
+):
+    """The group's per-member hour limit (owner D5): 1…1000 or null (no limit). One number
+    for every member, counted over the member's whole time in the group, never reset."""
+    _assert_workgroup_owned(teacher["id"], workgroup_id)
+    if not isinstance(body, dict) or "hours" not in body:
+        raise HTTPException(status_code=400, detail=credit_texts.LIMIT_RANGE_DE)
+    hours = body.get("hours")
+    if hours is not None and (type(hours) is not int or not 1 <= hours <= 1000):
+        raise HTTPException(status_code=400, detail=credit_texts.LIMIT_RANGE_DE)
     try:
-        result = supabase.rpc(
-            "adjust_workgroup_credits",
-            {
-                "p_teacher_id": teacher["id"],
-                "p_workgroup_id": workgroup_id,
-                "p_delta": req.delta,
-            },
-        ).execute()
-    except Exception as e:
-        msg = str(e)
-        if "P0022" in msg:
-            raise HTTPException(
-                status_code=403,
-                detail="Arbeitsgruppe gehört nicht zu diesem Lehrer",
-            )
-        if "P0012" in msg:
-            raise HTTPException(
-                status_code=409,
-                detail="Neuer Betrag waere kleiner als bereits verbrauchte Credits",
-            )
-        if "P0013" in msg:
-            raise HTTPException(
-                status_code=409, detail="Credits dürfen nicht negativ werden"
-            )
-        if "P0014" in msg:
-            raise HTTPException(
-                status_code=409,
-                detail="Lehrer hat nicht genug Credits im Pool",
-            )
-        logger.error("adjust_workgroup_credits failed: %s", e)
-        raise HTTPException(
-            status_code=500, detail="Credit-Anpassung fehlgeschlagen"
-        )
-    row = (result.data or [{}])[0]
-    return WorkgroupCreditsResponse(
-        new_amount=int(row.get("new_amount", 0)),
-        pool_available=int(row.get("pool_available", 0)),
-    )
+        data = get_supabase().rpc("credit_set_member_limit", {
+            "p_teacher_id": teacher["id"], "p_group_id": workgroup_id, "p_hours": hours,
+        }).execute().data
+    except Exception as exc:
+        from app.services.training_dispatch import pg_code
+
+        code = pg_code(exc)
+        if code in ("P0066", "P0002"):
+            raise HTTPException(status_code=404, detail=credit_texts.WORKGROUP_NOT_FOUND_DE)
+        if code == "22023":
+            raise HTTPException(status_code=400, detail=credit_texts.LIMIT_RANGE_DE)
+        logger.error("credit_set_member_limit failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=500, detail=credit_texts.CREDIT_CHANGE_FAILED_DE)
+    value = data[0] if isinstance(data, list) and data else data
+    if isinstance(value, dict):
+        value = next(iter(value.values()), None)
+    return {"member_limit_hours": None if value is None else int(value)}
+
+
+@router.get("/workgroups/{workgroup_id}/credit-history")
+async def workgroup_credit_history(
+    workgroup_id: str,
+    before: int | None = Query(default=None),
+    limit: int | None = Query(default=None),
+    teacher=Depends(get_current_teacher),
+):
+    """The group's hour history (scope ``group``), incl. its limit changes."""
+    _assert_workgroup_owned(teacher["id"], workgroup_id)
+    return history_payload("group", workgroup_id, before, limit)

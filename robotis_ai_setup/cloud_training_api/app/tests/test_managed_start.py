@@ -1,11 +1,14 @@
 """POST /trainings/start, /trainings/cancel and the legacy reconcilers with managed rows (spec §4.1, §4.4).
 
-Pinned: managed = TRAINING_DISPATCH=managed AND act; the cadences written and
-num_workers dropped before the dedupe; the dedupe ignores dataset_revision; the
-anonymous v3.0 → commit resolution (E17) with the PEP 440 fallback and TR-1's
-error mapping; S20 before any credit (FR-5); p_managed / the token; the cancel
-compare-and-set in every attempt state, S21 at the cap (FR-22); the legacy
-reconcilers leave managed rows alone and keep their own stall rule (SR-13).
+Pinned: since the training-hour ledger (052, §8.2) every start is managed ACT: another
+policy is refused (POLICY_REFUSED_DE, recorded), TRAINING_DISPATCH=legacy answers 503
+(DISPATCH_OFF_DE, not recorded) and the legacy Modal dispatch branch is gone; the
+cadences written and num_workers dropped before the dedupe; the dedupe ignores
+dataset_revision; the anonymous v3.0 → commit resolution (E17) with the PEP 440 fallback
+and TR-1's error mapping; S20 before any GPU (FR-5); p_managed / no token / the key and
+the cap; the cancel compare-and-set (now ``stop_training``, §4.9) in every attempt
+state, S21 at the cap (FR-22); the legacy reconcilers leave managed rows alone and keep
+their own stall rule (SR-13). The credit routes' own matrix is test_credit_routes.py.
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ def _complete_the_modal_stub() -> None:
     async def _unset(*a, **k):
         raise AssertionError("patch this in the test")
 
-    for name in ("get_job_status", "start_training_job", "start_managed_training_job"):
+    for name in ("get_job_status", "start_managed_training_job"):
         if not hasattr(stub, name):
             setattr(stub, name, _unset)
 
@@ -44,8 +47,9 @@ _complete_the_modal_stub()
 
 from fastapi import HTTPException  # noqa: E402
 from app.routes import training as route  # noqa: E402
-from app.services import dataset_preflight, training_dispatch as D  # noqa: E402
+from app.services import dataset_preflight, hf_publish, training_dispatch as D  # noqa: E402
 from app.services import training_texts_de as T  # noqa: E402
+from app.services.credit_texts_de import DISPATCH_OFF_DE, NO_HOURS_DE, POLICY_REFUSED_DE  # noqa: E402
 from app.services.training_sweep import LEGACY_CANCEL_GIVEUP_DE, MAX_CANCEL_ATTEMPTS  # noqa: E402
 from app.tests._managed_fakes import SHA, Clock, FakeDB, FakeModal, FakeRunpod, PgError  # noqa: E402
 from app.tests.test_training_dispatch import settings  # noqa: E402
@@ -94,18 +98,15 @@ class StartBase(unittest.IsolatedAsyncioTestCase):
                 raise self.resolved
             return self.resolved
 
-        async def _legacy(**kw):
-            self.legacy.append(kw)
-            return "fc-legacy"
-
         self._cms = [
             patch.object(route, "get_supabase", lambda: self.db),
-            patch.object(route, "get_user_profile", lambda uid: {"id": uid, "workgroup_id": None}),
+            patch.object(route, "get_user_profile",
+                         lambda uid: {"id": uid, "workgroup_id": self.db.workgroup_of.get(uid),
+                                      "role": self.db.roles.get(uid, "student")}),
             patch.object(dataset_preflight, "preflight_dataset", _preflight),
             patch.object(dataset_preflight, "resolve_v3_commit", _resolve),
             patch.object(D, "SETTINGS", self.s),
             patch.object(D, "kick", lambda: self.kicks.append(1)),
-            patch.object(route, "start_training_job", _legacy),
             patch.dict("os.environ", {"HF_TOKEN": "hf_platform"}),
         ]
         for cm in self._cms:
@@ -136,7 +137,10 @@ class ManagedStart(StartBase):
         row = self.db.row(resp.training_id)
         self.assertEqual((row["managed"], row["dataset_fps"], row["status"]), (True, 30, "queued"))
         self.assertEqual(self.kicks, [1])
-        self.assertEqual(self.legacy, [], "no inline Modal dispatch for a managed row")
+        # 052: the reservation, its key and the deploy's ceiling
+        self.assertEqual((call["p_idempotency_key"], call["p_max_hours"]), (None, 3))
+        self.assertEqual((resp.reserved_hours, resp.replay), (3, False))
+        self.assertEqual((row["credit_scheme"], row["reserved_hours"]), ("ledger", 3))
         # E17: anonymous, at the resolved commit
         self.assertEqual(self.resolve_calls, ["u/ds"])
         self.assertEqual(self.preflight_calls, [("u/ds", False, "act", SHA)])
@@ -212,61 +216,60 @@ class ManagedStart(StartBase):
         gate.set()
         self.assertEqual(ctx.exception.status_code, 502)
 
-    async def test_non_act_policies_stay_legacy(self):
-        resp = await self.start(request(model_type="diffusion"))
-        (call,) = self.db.calls("start_training_safe")
-        self.assertIs(call["p_managed"], False)
-        self.assertEqual(str(uuid.UUID(call["p_worker_token"])), call["p_worker_token"])
-        self.assertEqual(resp.status, "running")
-        self.assertEqual(len(self.legacy), 1)
-        self.assertEqual(self.preflight_calls, [("u/ds", "hf_platform", "diffusion", "v3.0")])
-        self.assertEqual(self.resolve_calls, [])
+    async def test_another_policy_is_refused_and_recorded(self):
+        # 052 (H4, decision 12): only managed ACT trains; the route's 400 is German and the
+        # refusal is recorded (a pydantic validator's 422 was English and recorded nothing).
+        for model_type in ("diffusion", "pi0", "PI0"):
+            with self.subTest(model_type=model_type):
+                with self.assertRaises(HTTPException) as ctx:
+                    await self.start(request(model_type=model_type))
+                self.assertEqual((ctx.exception.status_code, ctx.exception.detail), (400, POLICY_REFUSED_DE))
+        self.assertEqual(self.db.calls("start_training_safe"), [])
+        self.assertEqual(self.preflight_calls, [], "refused before the 60 s dataset check")
+        self.assertEqual([(r["code"], r["model_type"]) for r in self.db.refusals],
+                         [("policy", "diffusion"), ("policy", "pi0"), ("policy", "pi0")])
+        self.assertFalse(hasattr(route, "ALLOWED_POLICIES"))
+        self.assertEqual(route.TRAINABLE_POLICIES, frozenset({"act"}))
+        self.assertEqual(route.POLICY_MAX_TIMEOUT_HOURS["act"], 3.0)
 
-    def test_the_training_job_model_carries_the_note(self):
+    async def test_the_clients_hidden_form_fields_never_reach_the_row(self):
+        # Owner D4/E3: the server fixes batch 8, drops num_workers and writes its own cadences
+        await self.start(request(num_workers=9, save_freq=123, batch_size=64))
+        (call,) = self.db.calls("start_training_safe")
+        params = call["p_training_params"]
+        self.assertNotIn("num_workers", params)
+        self.assertEqual((params["save_freq"], params["mirror_every"], params["batch_size"]), (2500, 10000, 8))
+        self.assertFalse(hasattr(D, "LEGACY_ACT_NUM_WORKERS"))
+        self.assertFalse(hasattr(D, "LEGACY_ACT_SAVE_FREQ"))
+
+    def test_the_training_job_model_carries_the_note_and_the_hours(self):
         ann = route.TrainingJob.__annotations__
-        self.assertIn("status_note", ann)
-        self.assertIn("managed", ann)
+        for name in ("status_note", "managed", "reserved_hours", "charged_hours", "stop_requested_by_role",
+                     "lost_seconds"):
+            self.assertIn(name, ann)
 
 
 class LegacyDispatchStart(StartBase):
+    """052 (§9.1): TRAINING_DISPATCH=legacy no longer dispatches anything new."""
+
     dispatch = "legacy"
 
-    async def test_act_under_legacy_dispatch(self):
-        resp = await self.start()
-        (call,) = self.db.calls("start_training_safe")
-        self.assertIs(call["p_managed"], False)
-        self.assertIsNotNone(call["p_worker_token"])
-        self.assertEqual(call["p_training_params"]["num_workers"], 2, "E3: the client's value is ignored for ACT")
-        self.assertNotIn("mirror_every", call["p_training_params"])
-        self.assertEqual(resp.status, "running")
-        self.assertEqual(self.preflight_calls, [("u/ds", "hf_platform", "act", "v3.0")])
+    async def test_a_start_under_legacy_answers_503_and_records_nothing(self):
+        for model_type in ("act", "diffusion"):
+            with self.subTest(model_type=model_type):
+                with self.assertRaises(HTTPException) as ctx:
+                    await self.start(request(model_type=model_type))
+                self.assertEqual((ctx.exception.status_code, ctx.exception.detail), (503, DISPATCH_OFF_DE))
+        self.assertEqual(self.db.calls("start_training_safe"), [])
+        self.assertEqual(self.db.refusals, [], "not the student's doing: not recorded")
+        self.assertEqual(self.preflight_calls, [])
 
-    async def test_a_legacy_act_start_ignores_the_hidden_form_fields(self):
-        # Owner E3: the form hides „Worker" and „Speicher-Intervall" for ACT, but the
-        # browser still sends what it stored (an old edubotics_trainingInfo).
-        await self.start(request(num_workers=9, save_freq=123))
-        (call,) = self.legacy
-        self.assertEqual((call["training_params"]["num_workers"], call["training_params"]["save_freq"]), (2, 10000))
-        (row,) = self.db.calls("start_training_safe")
-        self.assertEqual((row["p_training_params"]["num_workers"], row["p_training_params"]["save_freq"]),
-                         (2, 10000), "the stored dict (the dedupe key) too")
+    def test_the_legacy_modal_dispatch_is_gone(self):
+        import inspect
 
-    async def test_another_policy_keeps_the_clients_values(self):
-        await self.start(request(model_type="diffusion", num_workers=9, save_freq=123))
-        (call,) = self.legacy
-        self.assertEqual((call["training_params"]["num_workers"], call["training_params"]["save_freq"]), (9, 123))
-
-    def test_the_defaults_are_the_fresh_forms(self):
-        import os
-        import re
-
-        here = os.path.dirname(os.path.abspath(__file__))
-        slice_js = os.path.join(here, "..", "..", "..", "..", "physical_ai_tools", "physical_ai_manager", "src",
-                                "features", "training", "trainingSlice.js")
-        with open(slice_js, encoding="utf-8") as fh:
-            block = re.search(r"const defaultTrainingInfo = \{(.*?)\n\};", fh.read(), re.S).group(1)
-        self.assertEqual(int(re.search(r"\bnumWorkers: (\d+),", block).group(1)), D.LEGACY_ACT_NUM_WORKERS)
-        self.assertEqual(int(re.search(r"\bsaveFreq: (\d+),", block).group(1)), D.LEGACY_ACT_SAVE_FREQ)
+        src = inspect.getsource(route)
+        self.assertNotIn("start_training_job", src)
+        self.assertNotIn("LEGACY_ACT", src)
 
 
 class ResolveV3Commit(unittest.TestCase):
@@ -342,10 +345,12 @@ class Cancel(unittest.IsolatedAsyncioTestCase):
         self.db = FakeDB(self.clock)
         self.rp = FakeRunpod()
         self.modal = FakeModal()
-        self.legacy_cancel = AsyncMock()
+        from app.services import stop_actions
+
         self._cms = [patch.object(route, "get_supabase", lambda: self.db), patch.object(D, "_sb", lambda: self.db),
-                     patch.object(route, "cancel_training_job", self.legacy_cancel), self.rp.installed(),
-                     self.modal.installed()]
+                     patch.object(stop_actions, "_sb", lambda: self.db),
+                     patch.object(hf_publish, "schedule_publish", lambda tid, n: True),
+                     self.rp.installed(), self.modal.installed()]
         for cm in self._cms:
             cm.__enter__()
 
@@ -410,6 +415,18 @@ class Cancel(unittest.IsolatedAsyncioTestCase):
         await self.cancel(row["id"])
         self.assertEqual(self.modal.canceled, ["fc-7"])
 
+    async def test_the_answer_carries_the_outcome_and_the_charge(self):
+        # 052 §8.2: {status, training_id, outcome, checkpoint_step, charged_hours}
+        row = self.managed("running", ref="pod-x", credit_scheme="ledger", reserved_hours=3)
+        self.db.attempt(row["id"], 1)["first_heartbeat_at"] = self.clock.iso(self.clock.t - 5000)
+        out = await self.cancel(row["id"])
+        self.assertEqual(out, {"status": "canceled", "training_id": row["id"], "outcome": "canceled",
+                               "checkpoint_step": None, "charged_hours": 2})
+        (call,) = self.db.calls("stop_training")
+        self.assertEqual((call["p_actor_role"], call["p_note"], call["p_user_id"], call["p_actor_id"]),
+                         ("student", T.S30, "u-1", "u-1"))
+        self.assertEqual(self.db.row(row["id"])["stop_requested_by_role"], "student")
+
     async def test_a_failed_stop_waits_and_the_cap_gives_s21(self):
         row = self.managed("running", ref="pod9")
         self.rp.delete_answers["pod9"] = [500] * 20
@@ -421,14 +438,17 @@ class Cancel(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.row(row["id"])["error_message"], T.S21)
 
     async def test_legacy_rows_keep_their_behaviour_through_the_cas(self):
+        # a pre-052 (derived) unmanaged row takes stop_training's cancel branch and today's
+        # Modal cancel (modal_client.cancel_training_job, the FakeModal here)
         row = self.db.add_training(status="running", managed=False, cloud_job_id="fc-L")
         self.assertEqual((await self.cancel(row["id"]))["status"], "canceled")
-        self.legacy_cancel.assert_awaited_once_with("fc-L")
+        self.assertEqual(self.modal.canceled, ["fc-L"])
         row2 = self.db.add_training(status="running", managed=False, cloud_job_id="fc-M",
                                     cancel_attempts=MAX_CANCEL_ATTEMPTS - 1)
-        self.legacy_cancel.side_effect = RuntimeError("modal down")
+        self.modal.cancel_raises = RuntimeError("modal down")
         self.assertEqual((await self.cancel(row2["id"]))["status"], "failed")
         self.assertEqual(self.db.row(row2["id"])["error_message"], LEGACY_CANCEL_GIVEUP_DE)
+        self.modal.cancel_raises = None
         row3 = self.db.add_training(status="queued", managed=False, cloud_job_id=None)
         self.assertEqual((await self.cancel(row3["id"]))["status"], "canceled")
 
@@ -438,6 +458,7 @@ class Cancel(unittest.IsolatedAsyncioTestCase):
         self.db.row(row["id"])  # status becomes cancel_requested via the CAS
         out = await self.cancel(row["id"])
         self.assertEqual(out["status"], "cancel_requested")
+        self.assertEqual(out["outcome"], "cancel_requested")
 
 
 class LegacyReconcilers(unittest.IsolatedAsyncioTestCase):
@@ -592,25 +613,34 @@ class Continue(StartBase):
         resp = await self.cont(p["id"])
         self.assertTrue(resp.training_id)
 
-    async def test_403_at_zero_credits(self):
+    async def test_403_without_free_hours(self):
         p = self._parent()
-        self.db.credits["u-1"] = 1  # the parent already counts as 1 → none left
+        self.db.hours[("student", "u-1")] = 0
         with self.assertRaises(HTTPException) as ctx:
             await self.cont(p["id"])
-        self.assertEqual(ctx.exception.status_code, 403)
+        self.assertEqual((ctx.exception.status_code, ctx.exception.detail), (403, NO_HOURS_DE))
+        self.assertEqual([(r["request_kind"], r["code"]) for r in self.db.refusals], [("continue", "no_hours")])
 
-    async def test_a_workgroup_member_spends_the_pool(self):
+    async def test_a_workgroup_member_spends_the_groups_hours(self):
         self.db.workgroup_of["u-1"] = "g1"
-        self.db.pools["g1"] = 2
+        self.db.hours[("group", "g1")] = 2
         p = self._parent(workgroup_id="g1")
         resp = await self.cont(p["id"])
         self.assertEqual(self.db.row(resp.training_id)["workgroup_id"], "g1")
+        self.assertEqual(resp.reserved_hours, 2, "a new reservation, capped by the free hours")
+        (call,) = self.db.calls("start_continuation_safe")
+        self.assertEqual(call["p_max_hours"], 3)
 
-    async def test_a_teacher_may_continue_their_own(self):
-        # no role rule (review n5): ownership is the gate, not the role.
+    async def test_only_a_student_continues(self):
+        # 052 (H6): a continuation is a new reservation, so the role rule applies — a teacher
+        # never trains, not even their own earlier training.
         p = self._parent()
-        resp = await self.cont(p["id"])
-        self.assertTrue(resp.training_id)
+        self.db.roles["u-1"] = "teacher"
+        with self.assertRaises(HTTPException) as ctx:
+            await self.cont(p["id"])
+        self.assertEqual(ctx.exception.status_code, 403)
+        self.assertEqual([(r["request_kind"], r["code"]) for r in self.db.refusals], [("continue", "role")])
+        self.assertEqual(self.db.calls("start_continuation_safe"), [])
 
     async def test_400_and_502_on_the_dataset_check(self):
         p = self._parent()
@@ -645,7 +675,7 @@ class Continue(StartBase):
     async def test_a_fresh_start_is_not_deduped_onto_a_child(self):
         parent = self._parent()
         await self.cont(parent["id"])  # a child with the same dataset/model/params exists
-        resp = await self.start(request(steps=50000, save_freq=2500, dataset_revision=SHA))
+        resp = await self.start(request(steps=50000, save_freq=2500))
         new = self.db.row(resp.training_id)
         self.assertIsNone(new["continued_from"], "the fresh start is its own row, not the child")
 

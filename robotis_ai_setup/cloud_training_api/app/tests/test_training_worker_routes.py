@@ -181,7 +181,7 @@ class Start(WorkerBase):
         self.assertIsNone(body["resume"])
         self.assertIs(body["finished"], False)
         # FR-18: minus the current attempt's own 1800 s
-        self.assertEqual(body["budget_s"], D.MANAGED_ACT_CAP_S - 0 - 1800)
+        self.assertEqual(body["budget_s"], D.PRE_LEDGER_CAP_S - 0 - 1800)
         self.assertEqual((self.att["resume_from_step"], self.att["resume_from_attempt"]), (0, None))
 
     async def test_spec_total_steps_is_the_params_not_a_column_a_host_wrote(self):
@@ -305,10 +305,10 @@ class Start(WorkerBase):
         self.assertEqual(_REAL_LOCK_ACCESSOR(), training_lock_hash.TRAINING_LOCK_SHA256)
 
     async def test_an_exhausted_budget_fails_the_row(self):
-        self.db.row(self.tid)["train_seconds_used"] = D.MANAGED_ACT_CAP_S - 1800 - 200
+        self.db.row(self.tid)["train_seconds_used"] = D.PRE_LEDGER_CAP_S - 1800 - 200
         status, body = await self.call("start", {"lock_sha256": LOCK, "build": "b"})
         self.assertEqual((status, body["code"]), (409, "budget_exhausted"))
-        self.assertEqual(self.db.row(self.tid)["error_message"], T.s5(D.MANAGED_ACT_CAP_S))
+        self.assertEqual(self.db.row(self.tid)["error_message"], T.s5(D.PRE_LEDGER_CAP_S))
         self.assertIn("pod1", self.rp.deletes())
 
     async def test_the_wall_term_gives_s6(self):
@@ -433,7 +433,19 @@ class CkptDone(WorkerBase):
                 self.assertEqual(self.db.checkpoint(self.tid, 1, 2500)["state"], "refused")
                 self.assertEqual(self.db.row(self.tid)["status"], "running", "the training goes on")
 
+    def _earlier_distinct_report(self, marker):
+        """Owner Q-C: an earlier attempt on a DISTINCT host (another backend) already reported
+        ``marker``; this attempt's report confirms it."""
+        self.db.row(self.tid)["current_attempt"] = 2
+        self.db.tables["training_attempts"].remove(self.att)
+        self.db.add_attempt(self.tid, 1, state="lost", backend="modal", end_reason=marker,
+                            first_heartbeat_at=self.clock.iso(self.clock.t - 7200))
+        self.att = self.db.add_attempt(self.tid, 2, state="running", backend="runpod_community", cloud_ref="pod1",
+                                       first_heartbeat_at=self.clock.iso(self.clock.t - 1800),
+                                       data_center="EU-RO-1", resume_from_step=0)
+
     async def test_a_content_rule_fails_the_training_with_s7(self):
+        # the first report of a content refusal requeues like a lost attempt (owner Q-C) …
         row = self.db.row(self.tid)
         files = checkpoint_files(row, 2500)
         doc = json.loads(files["pretrained_model/train_config.json"])
@@ -442,17 +454,87 @@ class CkptDone(WorkerBase):
         await self._uploading(2500, files)
         self.assertEqual((await self.call("ckpt-done", {"step": 2500}))[1]["code"], "ckpt_refused")
         r = self.db.row(self.tid)
-        self.assertEqual((r["status"], r["error_message"]), ("failed", T.S7))
+        self.assertEqual((r["status"], r["error_message"]), ("queued", None))
+        self.assertEqual((self.att["state"], self.att["end_reason"]), ("lost", "host_unfit:content_unconfirmed"))
         self.assertIn("pod1", self.rp.deletes())
         c = self.db.checkpoint(self.tid, 1, 2500)
         self.assertEqual((c["state"], c["refused_by"]), ("refused", 1))
+
+    async def test_a_confirmed_content_rule_without_a_ready_checkpoint_fails_with_s7(self):
+        # … the same from a second, distinct host is believed: no ready checkpoint → S7
+        self._earlier_distinct_report("host_unfit:content_unconfirmed")
+        files = checkpoint_files(self.db.row(self.tid), 2500)
+        files["training_state/training_step.json"] = b"{not json"
+        self.r2.put_checkpoint(self.tid, 2, 2500, files)
+        self.db.add_checkpoint(self.tid, 2, 2500, state="uploading", manifest=manifest_of(files))
+        await self.call("ckpt-done", {"step": 2500}, attempt="2")
+        r = self.db.row(self.tid)
+        self.assertEqual((r["status"], r["error_message"]), ("failed", T.S7))
+        self.assertIn("pod1", self.rp.deletes())
 
     async def test_a_json_that_does_not_parse_is_a_content_rule(self):
         files = checkpoint_files(self.db.row(self.tid), 2500)
         files["training_state/training_step.json"] = b"{not json"
         await self._uploading(2500, files)
         await self.call("ckpt-done", {"step": 2500})
-        self.assertEqual(self.db.row(self.tid)["error_message"], T.S7)
+        self.assertEqual(self.att["end_reason"], "host_unfit:content_unconfirmed")
+
+    async def test_a_checkpoint_needs_a_running_attempt(self):
+        # §9.6 (A12): an attempt that never made its first running write has 0 seconds;
+        # its checkpoints are never asked for or accepted. The log stays allowed.
+        await self._uploading(2500)
+        for state in ("placing", "starting"):
+            self.att["state"] = state
+            with self.subTest(state=state):
+                self.assertEqual(await self.call("ckpt-done", {"step": 2500}),
+                                 (409, {"detail": T.S10, "code": "not_running"}))
+                m = manifest_of(checkpoint_files(self.db.row(self.tid), 5000))
+                self.assertEqual(await self.call("upload-url", {"kind": "ckpt", "step": 5000, "files": m}),
+                                 (409, {"detail": T.S10, "code": "not_running"}))
+                log = manifest_of({"training_log.txt": b"log"})
+                self.assertEqual((await self.call("upload-url", {"kind": "log", "files": log}))[0], 200)
+        self.assertEqual(self.db.checkpoint(self.tid, 1, 2500)["state"], "uploading")
+
+    async def test_a_different_stored_checksum_refuses_that_checkpoint_only(self):
+        # §9.8: R2 refuses other bytes at upload; if an object still carries a checksum
+        # that is not the manifest's, the checkpoint is refused (`checksum <rel>`), never content.
+        files = await self._uploading(2500)
+        key = r2_client.ckpt_key(self.tid, 1, 2500, "pretrained_model/model.safetensors")
+        self.r2.objects[key] = bytes(b ^ 0x55 for b in self.r2.objects[key])  # same size, R2's checksum follows
+        self.assertEqual(await self.call("ckpt-done", {"step": 2500}), (422, {"detail": T.S12, "code": "ckpt_refused"}))
+        c = self.db.checkpoint(self.tid, 1, 2500)
+        self.assertEqual((c["state"], c["refused_reason"]), ("refused", "checksum pretrained_model/model.safetensors"))
+        self.assertEqual(self.db.row(self.tid)["status"], "running", "not a content rule: the training goes on")
+        self.assertEqual(self.att["state"], "running")
+        self.assertTrue(files)
+
+    async def test_an_object_without_a_stored_checksum_is_stream_hashed(self):
+        # review 3 m8: a URL minted before 052 (or an R2 change after G0) leaves no checksum;
+        # the object is hashed in the ckpt-hash pool and refused only when its bytes differ.
+        await self._uploading(2500)
+        key = r2_client.ckpt_key(self.tid, 1, 2500, "pretrained_model/model.safetensors")
+        self.r2.checksummed.discard(key)
+        threads = []
+        real = self.r2.stream_sha256
+
+        def spy(k):
+            threads.append(threading.current_thread().name)
+            return real(k)
+
+        with patch.object(r2_client, "stream_sha256", spy), self.assertLogs("app.routes.training_worker",
+                                                                             level="WARNING") as logs:
+            self.assertEqual(await self.call("ckpt-done", {"step": 2500}), (200, {"state": "ready"}))
+        self.assertEqual(len(threads), 1)
+        self.assertTrue(threads[0].startswith("ckpt-hash"))
+        self.assertTrue(any(key in m for m in logs.output))
+        # the same with different bytes of the same size → refused (checksum), not content
+        await self._uploading(5000)
+        key5 = r2_client.ckpt_key(self.tid, 1, 5000, "pretrained_model/model.safetensors")
+        self.r2.checksummed.discard(key5)
+        self.r2.objects[key5] = bytes(b ^ 0x01 for b in self.r2.objects[key5])
+        self.assertEqual((await self.call("ckpt-done", {"step": 5000}))[1]["code"], "ckpt_refused")
+        self.assertEqual(self.db.checkpoint(self.tid, 1, 5000)["refused_reason"],
+                         "checksum pretrained_model/model.safetensors")
 
     async def test_an_r2_outage_is_503_not_a_refusal(self):
         await self._uploading(2500)
@@ -498,8 +580,17 @@ class CkptBad(WorkerBase):
                 self.assertEqual(self.db.checkpoint(self.tid, 1, 5000), before)
         self.assertEqual(self.db.checkpoint(self.tid, 1, 2500)["state"], "ready")
 
-    async def test_deterministic_reasons_refuse(self):
-        for reason in route.DETERMINISTIC_BAD:
+    async def test_deterministic_reasons_refuse_only_on_proof(self):
+        # OQ-3 (review 2 m4): a complaint about intact bytes is one host's word → kept;
+        # train_config is counted (test_ckpt_bad_hosts.py); differing bytes refuse.
+        for reason in ("file_list", "steps", "training_step"):
+            route.reset_hash_state_for_tests()
+            self.assertEqual(await self.bad(2500, reason), (200, {"state": "kept"}), reason)
+            self.assertEqual(self.db.checkpoint(self.tid, 1, 2500)["state"], "ready")
+        key = r2_client.ckpt_key(self.tid, 1, 2500, "training_state/training_step.json")
+        self.r2.objects[key] = b'{"step": 1}'
+        for reason in ("file_list", "steps", "training_step", "train_config"):
+            route.reset_hash_state_for_tests()
             self.db.checkpoint(self.tid, 1, 2500)["state"] = "ready"
             self.assertEqual(await self.bad(2500, reason), (200, {"state": "refused"}), reason)
             c = self.db.checkpoint(self.tid, 1, 2500)
@@ -524,8 +615,17 @@ class CkptBad(WorkerBase):
         c = self.db.checkpoint(self.tid, 1, 2500)
         self.assertEqual((c["state"], c["refused_by"], c["refused_reason"]), ("refused", 2, "sha256"))
 
+    async def test_a_stored_checksum_decides_without_streaming(self):
+        # §9.8: R2's stored SHA-256 per object; nothing is streamed for an intact checkpoint
+        calls, cm = self._count_hashes()
+        with cm:
+            self.assertEqual(await self.bad(2500, "sha256"), (200, {"state": "kept"}))
+        self.assertEqual(calls, [])
+
     async def test_a_repeat_answers_the_remembered_verdict_without_hashing_again(self):
-        # V1-6: every sha256 ask re-streamed the whole checkpoint through the API.
+        # V1-6: every sha256 ask re-streamed the whole checkpoint through the API. Here the
+        # objects carry no stored checksum (uploaded before 052), so they are streamed.
+        self.r2.checksummed.clear()
         calls, cm = self._count_hashes()
         with cm:
             self.assertEqual(await self.bad(2500, "sha256"), (200, {"state": "kept"}))
@@ -544,6 +644,7 @@ class CkptBad(WorkerBase):
             self.assertEqual(len(calls), first, "a refusal is remembered too")
 
     async def test_concurrent_asks_share_one_hash_on_the_dedicated_pool(self):
+        self.r2.checksummed.clear()  # streamed (no stored checksum), so the pool is exercised
         gate = threading.Event()
         threads, calls = [], []
         real = self.r2.stream_sha256
@@ -567,7 +668,7 @@ class CkptBad(WorkerBase):
         self.assertEqual(route._HASH_INFLIGHT, {})
 
     async def test_a_transport_fault_is_503_and_never_remembered(self):
-        self.r2.fail["get"] = 1
+        self.r2.fail["head"] = 1
         self.assertEqual(await self.bad(2500, "sha256"), (503, {"detail": T.WORKER_UNAVAILABLE_DE,
                                                                  "code": "unavailable"}))
         self.assertEqual(self.db.checkpoint(self.tid, 1, 2500)["state"], "ready")
@@ -586,6 +687,7 @@ class CkptBad(WorkerBase):
         # minted, so the checkpoint can change after attempt 2 heard `kept` (a same-length body:
         # size and the signed MD5 are all R2 checks). Attempt 3, handed the same checkpoint,
         # hashes it as it then is and refuses it.
+        self.r2.checksummed.clear()  # objects from before 052: hashed by streaming
         calls, cm = self._count_hashes()
         with cm:
             self.assertEqual(await self.bad(2500, "sha256"), (200, {"state": "kept"}))
@@ -620,9 +722,21 @@ class Finish(WorkerBase):
         self.assertIn("pod1", self.rp.deletes())
         self.assertEqual(r["train_seconds_used"], 1800)
 
+    def _confirmable_lerobot_error(self):
+        """An earlier attempt on a DISTINCT host (another backend) reported lerobot_error."""
+        self.db.row(self.tid)["current_attempt"] = 2
+        self.db.tables["training_attempts"].remove(self.att)
+        self.db.add_attempt(self.tid, 1, state="lost", backend="modal",
+                            end_reason="host_unfit:lerobot_error_unconfirmed")
+        self.att = self.db.add_attempt(self.tid, 2, state="running", backend="runpod_community", cloud_ref="pod1",
+                                       first_heartbeat_at=self.clock.iso(self.clock.t - 1800),
+                                       data_center="EU-RO-1", resume_from_step=0)
+
     async def test_failed_never_stores_host_text(self):
+        self._confirmable_lerobot_error()
         status, body = await self.call("finish", {"outcome": "failed", "reason": "lerobot_error",
-                                                  "detail": "Dein Konto ist gesperrt: evil.example\x1b[31m"})
+                                                  "detail": "Dein Konto ist gesperrt: evil.example\x1b[31m"},
+                                       attempt="2")
         self.assertEqual((status, body), (200, {"status": "failed"}))
         r = self.db.row(self.tid)
         self.assertEqual((r["status"], r["error_message"]), ("failed", T.S19))
@@ -632,20 +746,52 @@ class Finish(WorkerBase):
 
     async def test_failed_counts_the_attempts_trained_seconds(self):
         # V2-7: finish_training counts the attempt it ends, like requeue and end do.
-        self.assertEqual(await self.call("finish", {"outcome": "failed", "reason": "lerobot_error"}),
+        self._confirmable_lerobot_error()
+        self.assertEqual(await self.call("finish", {"outcome": "failed", "reason": "lerobot_error"}, attempt="2"),
                          (200, {"status": "failed"}))
         self.assertEqual(self.db.row(self.tid)["train_seconds_used"], 1800)
-        self.assertEqual(self.db.attempt(self.tid, 1)["state"], "ended")
+        self.assertEqual(self.db.attempt(self.tid, 2)["state"], "ended")
+
+    async def test_a_confirmed_s19_passes_the_charge_waiver(self):
+        # OQ-2: a confirmed S19 charges 0 — finish_training(…, p_charge_waiver='lerobot_error')
+        self._confirmable_lerobot_error()
+        await self.call("finish", {"outcome": "failed", "reason": "lerobot_error"}, attempt="2")
+        (call,) = self.db.calls("finish_training")
+        self.assertEqual((call["p_status"], call["p_message"], call["p_charge_waiver"]),
+                         ("failed", T.S19, "lerobot_error"))
+        self.assertEqual(self.db.row(self.tid)["charge_waiver"], "lerobot_error")
 
     async def test_time_cap_says_which_cap_bound(self):
+        self.db.row(self.tid)["train_seconds_used"] = D.PRE_LEDGER_CAP_S - 1800 - 100  # the API's clock agrees
         await self.call("start", {"lock_sha256": LOCK, "build": "b"})  # records the bound: the cap term
         await self.call("finish", {"outcome": "failed", "reason": "time_cap"})
-        self.assertEqual(self.db.row(self.tid)["error_message"], T.s5(D.MANAGED_ACT_CAP_S))
+        self.assertEqual(self.db.row(self.tid)["error_message"], T.s5(D.PRE_LEDGER_CAP_S))
 
     async def test_time_cap_after_a_restart_recomputes_the_bound(self):
-        self.db.row(self.tid)["requested_at"] = self.clock.iso(self.clock.t - 40000)
+        self.db.row(self.tid)["requested_at"] = self.clock.iso(self.clock.t - (D.WALL_CAP_S - 100))
         await self.call("finish", {"outcome": "failed", "reason": "time_cap"})
         self.assertEqual(self.db.row(self.tid)["error_message"], T.S6)
+
+    async def test_an_early_time_cap_requeues(self):
+        # §9.6 (A13): a host's time_cap while the API's own budget still has > 300 s left is
+        # early — requeued like a loss (host_unfit:time_cap_early, the DC skipped), never a cap.
+        self.db.add_checkpoint(self.tid, 1, 2500, state="ready", manifest={})
+        self.assertEqual(await self.call("finish", {"outcome": "failed", "reason": "time_cap"}),
+                         (200, {"status": "requeued"}))
+        self.assertEqual((self.att["state"], self.att["end_reason"]), ("lost", "host_unfit:time_cap_early"))
+        r = self.db.row(self.tid)
+        self.assertEqual((r["status"], r["error_message"], r["capped_step"]), ("queued", None, None))
+        self.assertEqual(self.db.calls("cap_training_attempt"), [])
+        self.assertTrue(D._dc_skipped("COMMUNITY", self.att.get("gpu_type"), "EU-RO-1", self.clock.t))
+        self.assertIn("pod1", self.rp.deletes())
+
+    async def test_the_time_cap_slack_boundary(self):
+        self.assertEqual(route.TIME_CAP_SLACK_S, 300)
+        # exactly 300 s of budget left: believed
+        self.db.row(self.tid)["train_seconds_used"] = D.PRE_LEDGER_CAP_S - 1800 - 300
+        self.assertEqual((await self.call("finish", {"outcome": "failed", "reason": "time_cap"}))[1],
+                         {"status": "failed"})
+        self.assertEqual(self.db.row(self.tid)["error_message"], T.s5(D.PRE_LEDGER_CAP_S))
 
     async def test_host_unfit_requeues_and_skips_the_dc(self):
         self.db.add_checkpoint(self.tid, 1, 2500, state="ready", manifest={})
@@ -738,7 +884,7 @@ class Continuation(WorkerBase):
             self.assertEqual(r["files"][rel]["sha256"], self.kmanifest[rel]["sha256"])
         a = self.db.attempt(self.cid, 1)
         self.assertEqual((a["resume_from_step"], a["resume_from_attempt"]), (42500, None))
-        self.assertEqual(body["budget_s"], D.MANAGED_ACT_CAP_S - 0 - 0)
+        self.assertEqual(body["budget_s"], D.PRE_LEDGER_CAP_S - 0 - 0)
 
     async def test_an_unusable_kept_copy_fails_the_child(self):
         for setup in ("refused", "missing_row", "missing_object"):
@@ -839,6 +985,8 @@ class Continuation(WorkerBase):
 class TimeCapPublish(WorkerBase):
     async def test_finish_time_cap_publishes_or_fails(self):
         # cap bound + a ready checkpoint → published, NO failed log
+        # 300 s left: start still runs (MIN_BUDGET_S) and the time_cap is believed (TIME_CAP_SLACK_S)
+        self.db.row(self.tid)["train_seconds_used"] = D.PRE_LEDGER_CAP_S - 1800 - 300
         self.db.add_checkpoint(self.tid, 1, 42500, state="ready", manifest={})
         await self.call("start", {"lock_sha256": LOCK, "build": "b"})  # records the cap bound
         status, body = await self.call("finish", {"outcome": "failed", "reason": "time_cap"})
@@ -849,14 +997,14 @@ class TimeCapPublish(WorkerBase):
         self.assertIn("pod1", self.rp.deletes())
 
     async def test_finish_wall_cap_publishes(self):
-        self.db.row(self.tid)["requested_at"] = self.clock.iso(self.clock.t - 40000)  # the wall term bounds
+        self.db.row(self.tid)["requested_at"] = self.clock.iso(self.clock.t - (D.WALL_CAP_S - 100))  # the wall binds
         self.db.add_checkpoint(self.tid, 1, 42500, state="ready", manifest={})
         status, body = await self.call("finish", {"outcome": "failed", "reason": "time_cap"})
         self.assertEqual((status, body), (200, {"status": "publishing"}))
         self.assertEqual(self.db.attempt(self.tid, 1)["end_reason"], "wall_capped")
 
     async def test_finish_wall_cap_without_a_checkpoint_is_s6_and_a_failed_log(self):
-        self.db.row(self.tid)["requested_at"] = self.clock.iso(self.clock.t - 40000)
+        self.db.row(self.tid)["requested_at"] = self.clock.iso(self.clock.t - (D.WALL_CAP_S - 100))
         status, body = await self.call("finish", {"outcome": "failed", "reason": "time_cap"})
         self.assertEqual((status, body), (200, {"status": "failed"}))
         self.assertEqual(self.db.row(self.tid)["error_message"], T.S6)

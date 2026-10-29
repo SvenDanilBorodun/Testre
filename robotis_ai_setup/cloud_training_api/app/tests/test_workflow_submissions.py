@@ -175,6 +175,9 @@ class TestRateLimitRulesUnchanged(unittest.TestCase):
         ("PATCH", "/workflows", 30, 60.0),
         ("POST", "/teacher/classrooms", 10, 60.0),
         ("POST", "/teacher/workgroups", 20, 60.0),
+        # 052 — hour assign/reclaim, stops and password resets, per teacher; inserted
+        # here, not appended (review 3 m2).
+        ("POST", "/teacher/students", 60, 60.0),
         ("POST", "/datasets", 20, 60.0),
         ("POST", "/jetson/register", 5, 60.0),
         ("POST", "/jetson/", 30, 60.0),

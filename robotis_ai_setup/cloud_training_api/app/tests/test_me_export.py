@@ -1,7 +1,8 @@
 """/me/export and /me/delete with managed trainings (spec §4.4, E16, FR-19).
 
 The GDPR export names every trainings column except worker_token (the 20
-columns 047 grants plus 049's seven) and lists, per managed training, where
+columns 047 grants plus 049's seven, 050's three and 052's ten except
+idempotency_key, §8.6) and lists, per managed training, where
 each attempt ran — provider, cloud, data centre, GPU, start, end — never the
 pod or call id. /me/delete cancels a managed row through the same
 compare-and-set as Cancel and leaves a publishing one to finish; legacy rows
@@ -54,10 +55,15 @@ class Export(unittest.TestCase):
         m047 = re.search(r"GRANT SELECT \((.*?)\) ON public\.trainings", code("20261020120000_047_hide_worker_token.sql"), re.S)
         m049 = re.search(r"GRANT SELECT \((.*?)\)\s+ON public\.trainings", code("20261020130000_049_managed_training.sql"), re.S)
         m050 = re.search(r"GRANT SELECT \((.*?)\) ON public\.trainings", code("20261021120000_050_training_continuation.sql"), re.S)
+        m052 = re.search(r"GRANT SELECT \((.*?)\)\s+ON public\.trainings", code("20261028120000_052_credit_ledger.sql"), re.S)
         granted = ([c.strip() for c in m047.group(1).split(",")] + [c.strip() for c in m049.group(1).split(",")]
-                   + [c.strip() for c in m050.group(1).split(",")])
-        self.assertEqual(sorted(cols), sorted(granted))
-        self.assertEqual(len(cols), 30)
+                   + [c.strip() for c in m050.group(1).split(",")] + [c.strip() for c in m052.group(1).split(",")])
+        # 052's columns the request roles do not read, every one but idempotency_key (§8.6)
+        not_granted_052 = ["credit_scheme", "settled_at", "stop_requested_at", "lost_reasons", "charge_waiver"]
+        self.assertEqual(sorted(cols), sorted(granted + not_granted_052))
+        self.assertEqual(len(cols), 39)
+        self.assertNotIn("idempotency_key", cols)
+        self.assertNotIn("stop_requested_by", cols, "no column of the row names another person")
 
     def test_the_export_carries_attempts_without_ids(self):
         db = _db()
@@ -89,6 +95,56 @@ class Export(unittest.TestCase):
         ])
         self.assertEqual(by_id[legacy["id"]]["attempts"], [])
         self.assertEqual(resp.headers["Cache-Control"], "no-store")
+        self.assertEqual(bundle["credit_ledger"], [])
+        self.assertEqual(bundle["training_start_refusals"], [])
+
+    def _bundle(self, db, profile):
+        from app.services import workgroups
+
+        with patch.object(route, "get_supabase", lambda: db), patch.object(workgroups, "get_supabase", lambda: db):
+            return content(asyncio.run(route.export_my_data(profile=dict(profile))))
+
+    def test_the_ledger_view_names_no_other_person(self):
+        # §8.6 / §13: {at, kind, hours, account_kind, training_id, actor_role}; the reason only
+        # on a compensation into the caller's own account (and a teacher's own grant/revoke)
+        db = _db()
+        db.ledger = [
+            {"id": 1, "at": "t1", "kind": "assign", "hours": 3, "from_kind": "teacher", "from_id": "teacher-9",
+             "to_kind": "student", "to_id": "u-1", "training_id": None, "member_id": None, "actor_id": "teacher-9",
+             "actor_role": "teacher", "reason_id": None, "reason": None, "meta": {}},
+            {"id": 2, "at": "t2", "kind": "reserve", "hours": 3, "from_kind": "student", "from_id": "u-1",
+             "to_kind": "student", "to_id": "u-1", "training_id": 7, "member_id": "u-1", "actor_id": "u-1",
+             "actor_role": "student", "reason_id": None, "reason": None, "meta": {}},
+            {"id": 3, "at": "t3", "kind": "compensate", "hours": 1, "from_kind": None, "from_id": None,
+             "to_kind": "student", "to_id": "u-1", "training_id": 7, "member_id": "u-1", "actor_id": "admin-1",
+             "actor_role": "admin", "reason_id": 4, "reason": "GPU-Ausfall", "meta": {}},
+        ]
+        db.tables["training_start_refusals"].append({"id": 1, "at": "t9", "user_id": "u-1", "role": "student",
+                                                     "request_kind": "start", "code": "no_hours", "model_type": "act"})
+        bundle = self._bundle(db, PROFILE)
+        self.assertEqual([e["kind"] for e in bundle["credit_ledger"]], ["compensate", "reserve", "assign"])
+        for e in bundle["credit_ledger"]:
+            self.assertLessEqual(set(e), {"at", "kind", "hours", "account_kind", "training_id", "actor_role", "reason"})
+        self.assertEqual(bundle["credit_ledger"][0]["reason"], "GPU-Ausfall")
+        self.assertNotIn("reason", bundle["credit_ledger"][2])
+        text = json.dumps(bundle["credit_ledger"])
+        for other in ("teacher-9", "admin-1"):
+            self.assertNotIn(other, text)
+        self.assertEqual(bundle["training_start_refusals"],
+                         [{"at": "t9", "request_kind": "start", "code": "no_hours", "model_type": "act"}])
+        (call,) = db.calls("credit_history")
+        self.assertEqual((call["p_scope"], call["p_id"]), ("student", "u-1"))
+
+    def test_a_teacher_exports_the_pool_history(self):
+        db = _db()
+        db.ledger = [{"id": 1, "at": "t", "kind": "grant", "hours": 20, "from_kind": None, "from_id": None,
+                      "to_kind": "teacher", "to_id": "t-1", "training_id": None, "member_id": None,
+                      "actor_id": "admin-1", "actor_role": "admin", "reason_id": 2, "reason": "Schuljahr",
+                      "meta": {}}]
+        bundle = self._bundle(db, {"id": "t-1", "role": "teacher", "workgroup_id": None, "classroom_id": None})
+        self.assertEqual(bundle["credit_ledger"], [{"at": "t", "kind": "grant", "hours": 20, "account_kind": "teacher",
+                                                    "training_id": None, "actor_role": "admin",
+                                                    "reason": "Schuljahr"}])
 
 
 class Delete(unittest.IsolatedAsyncioTestCase):
@@ -135,6 +191,9 @@ class Delete(unittest.IsolatedAsyncioTestCase):
         names = [n for n, _ in self.db.rpcs]
         self.assertEqual(names.count("cancel_request_training"), 3)
         self.assertEqual(names.count("complete_cancel_training"), 2)
+        # 052: the first stop request records who asked (§4.10)
+        self.assertEqual({c.get("p_actor_role") for c in self.db.calls("cancel_request_training")}, {"student"})
+        self.assertEqual(self.db.row(running["id"])["stop_requested_by_role"], "student")
 
 
 if __name__ == "__main__":

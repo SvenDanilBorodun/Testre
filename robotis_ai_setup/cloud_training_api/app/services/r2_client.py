@@ -2,16 +2,16 @@
 
 The API holds the only R2 key (Railway). A worker never sees it: it gets one
 short-lived presigned PUT per file, whose signature binds Content-Type,
-Content-Length and Content-MD5 (proven: X-Amz-SignedHeaders =
-content-length;content-md5;content-type;host), and one presigned GET per file
-for a resume.
-
-Spec 052 §9.8 (OQ-1) would also sign x-amz-checksum-sha256. ``presign_put`` can do
-so (``sha256_hex``; the header becomes a signed header with the pinned botocore)
-and ``head_meta`` reads a stored checksum back, but gate G0
-(runpod_training/e2e/r2_checksum_gate.py, 2026-10-29, test bucket) FAILED: R2
-answered 400 InvalidRequest to every PUT that carried the header, the honest one
-included. No production caller passes ``sha256_hex`` until the owner decides again. Every object of a training lives under
+Content-Length and x-amz-checksum-sha256 — the manifest's SHA-256 (spec 052
+§9.8, OQ-1; proven: X-Amz-SignedHeaders =
+content-length;content-type;host;x-amz-checksum-sha256) — and one presigned GET
+per file for a resume. R2 refuses a body whose SHA-256 is not the signed one
+(400 BadDigest) and a PUT that omits or changes the signed header (403), and
+returns the stored value on a HEAD with ChecksumMode=ENABLED (``head_meta``):
+gate G0b, runpod_training/e2e/r2_checksum_gate.py, variant V1, on the test
+bucket 2026-10-29. Content-MD5 is NOT signed any more: R2 answers 400
+InvalidRequest „You can only specify one non-default checksum at a time." to a
+PUT that carries both (G0, the same day). Every object of a training lives under
 ``{R2_KEY_PREFIX}t{training_id}/``; the janitor deletes them once the row is
 terminal.
 
@@ -133,31 +133,31 @@ def sha256_b64(sha256_hex: str) -> str:
     return base64.b64encode(raw).decode("ascii")
 
 
-def presign_put(key: str, size: int, md5_b64: str, sha256_hex: str | None = None) -> tuple[str, dict]:
-    """A presigned PUT for exactly this length and MD5, and the headers the worker must send.
+def presign_put(key: str, size: int, sha256_hex: str) -> tuple[str, dict]:
+    """A presigned PUT for exactly this length and SHA-256, and the headers the worker must send.
 
-    With ``sha256_hex`` the URL also signs ``x-amz-checksum-sha256`` (spec §9.8): with the
-    pinned botocore it becomes a SIGNED header, not a query parameter, so a client that
-    omits or changes it breaks the signature. ``ChecksumAlgorithm`` is deliberately not
-    passed (it would add a signed x-amz-sdk-checksum-algorithm header). Gate G0 measured
-    that R2 refuses such a PUT (400 InvalidRequest), so no production caller passes it."""
-    params = {
-        "Bucket": bucket(),
-        "Key": key,
-        "ContentType": "application/octet-stream",
-        "ContentLength": int(size),
-        "ContentMD5": md5_b64,
-    }
+    ``ChecksumSHA256`` becomes a SIGNED header with the pinned botocore (not a query
+    parameter): a client that omits or changes it breaks the signature, and R2 refuses
+    a body whose SHA-256 is not the signed one (G0b V1). ``ChecksumAlgorithm`` is not
+    passed (it would add a signed x-amz-sdk-checksum-algorithm header, which G0b V2/V4b
+    proved unnecessary) and Content-MD5 is not signed (R2 refuses both together)."""
+    checksum = sha256_b64(sha256_hex)
+    url = _client().generate_presigned_url(
+        "put_object",
+        Params={
+            "Bucket": bucket(),
+            "Key": key,
+            "ContentType": "application/octet-stream",
+            "ContentLength": int(size),
+            "ChecksumSHA256": checksum,
+        },
+        ExpiresIn=PUT_TTL_S,
+    )
     headers = {
         "Content-Type": "application/octet-stream",
         "Content-Length": str(int(size)),
-        "Content-MD5": md5_b64,
+        "x-amz-checksum-sha256": checksum,
     }
-    if sha256_hex is not None:
-        checksum = sha256_b64(sha256_hex)
-        params["ChecksumSHA256"] = checksum
-        headers["x-amz-checksum-sha256"] = checksum
-    url = _client().generate_presigned_url("put_object", Params=params, ExpiresIn=PUT_TTL_S)
     return url, headers
 
 
@@ -190,15 +190,14 @@ def copy_object(src_key: str, dst_key: str) -> None:
 
 def put_file_presigned(key: str, path: str) -> None:
     """Upload a local file through a presigned PUT — exactly the protocol the workers
-    use (Content-MD5, no aws-chunked trailer; §3 item 21). Raises RuntimeError on a
+    use (the signed SHA-256, no aws-chunked trailer; §3 item 21). Raises RuntimeError on a
     403 or after FALLBACK_PUT_TRIES failures (the publish maps it to Transient)."""
     size = os.path.getsize(path)
-    md5 = hashlib.md5()
+    sha = hashlib.sha256()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(STREAM_CHUNK), b""):
-            md5.update(chunk)
-    md5_b64 = base64.b64encode(md5.digest()).decode("ascii")
-    url, headers = presign_put(key, size, md5_b64)
+            sha.update(chunk)
+    url, headers = presign_put(key, size, sha.hexdigest())
 
     import httpx
 
@@ -251,8 +250,10 @@ def head_meta(key: str) -> tuple[int, str | None]:
 
     botocore sends ``x-amz-checksum-mode: ENABLED`` and maps the answer's
     ``x-amz-checksum-sha256`` to ``ChecksumSHA256``. A value that is not the base64
-    of exactly 32 bytes (absent, or a multipart composite ``…-N``) reads None: the
-    caller then stream-hashes the object (spec §9.8, review 3 m8). R2Missing when absent."""
+    of exactly 32 bytes (absent — an object uploaded without the signed checksum, or a
+    CopyObject copy, which G0 measured to carry no SHA-256 — or a multipart
+    composite ``…-N``) reads None: the caller then stream-hashes the object (spec §9.8,
+    review 3 m8). R2Missing when absent."""
     try:
         resp = _client().head_object(Bucket=bucket(), Key=key, ChecksumMode="ENABLED")
     except Exception as exc:  # botocore ClientError

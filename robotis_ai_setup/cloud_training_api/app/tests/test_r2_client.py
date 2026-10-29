@@ -100,74 +100,59 @@ class RealBotocore(unittest.TestCase):
         self.assertEqual(cfg.retries, {"total_max_attempts": 4, "mode": "standard"})
         self.assertIs(r2_client._client(), c, "one client per process")
 
-    def test_without_a_sha256_the_presigned_put_is_unchanged(self):
-        # gate G0 failed (R2: 400 InvalidRequest to any PUT carrying the checksum header),
-        # so every production caller still presigns exactly today's three headers
+    def test_a_presigned_put_signs_length_type_and_sha256_never_md5(self):
+        # G0b, variant V1 (2026-10-29): the SHA-256 is a SIGNED HEADER, never a query
+        # parameter; Content-MD5 is not signed (R2 refuses both together, G0) and
+        # x-amz-sdk-checksum-algorithm is not signed (ChecksumAlgorithm is not passed)
         data = b"x" * 1665
-        md5 = base64.b64encode(hashlib.md5(data).digest()).decode()
-        url, headers = r2_client.presign_put("train/t1/a1/s0002500/pretrained_model/config.json", len(data), md5)
-        q = parse_qs(urlparse(url).query)
-        self.assertEqual(q["X-Amz-SignedHeaders"], ["content-length;content-md5;content-type;host"])
-        self.assertEqual(headers, {"Content-Type": "application/octet-stream", "Content-Length": "1665",
-                                   "Content-MD5": md5})
-
-    def test_no_production_caller_passes_a_sha256(self):
-        import re
-
-        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        for dirpath, _, files in os.walk(here):
-            if os.sep + "tests" in dirpath:
-                continue
-            for name in files:
-                if name.endswith(".py"):
-                    with open(os.path.join(dirpath, name), encoding="utf-8") as fh:
-                        src = fh.read()
-                    for call in re.findall(r"presign_put\(([^)]*)\)", src):
-                        if name == "r2_client.py" and "sha256_hex" in call:
-                            continue
-                        self.assertLess(call.count(","), 3, f"{name}: presign_put({call}) signs a checksum")
-
-    def test_a_presigned_put_signs_length_md5_type_and_sha256(self):
-        data = b"x" * 1665
-        md5 = base64.b64encode(hashlib.md5(data).digest()).decode()
         sha_hex = hashlib.sha256(data).hexdigest()
         sha_b64 = base64.b64encode(hashlib.sha256(data).digest()).decode()
-        url, headers = r2_client.presign_put("train/t1/a1/s0002500/pretrained_model/config.json", len(data), md5,
-                                             sha_hex)
+        url, headers = r2_client.presign_put("train/t1/a1/s0002500/pretrained_model/config.json", len(data), sha_hex)
         q = parse_qs(urlparse(url).query)
-        # 052 (OQ-1): the checksum is a SIGNED HEADER, never a query parameter, and
-        # x-amz-sdk-checksum-algorithm is not signed (ChecksumAlgorithm is not passed)
-        self.assertEqual(q["X-Amz-SignedHeaders"],
-                         ["content-length;content-md5;content-type;host;x-amz-checksum-sha256"])
-        self.assertNotIn("x-amz-sdk-checksum-algorithm", q["X-Amz-SignedHeaders"][0])
+        self.assertEqual(q["X-Amz-SignedHeaders"], ["content-length;content-type;host;x-amz-checksum-sha256"])
         self.assertFalse([k for k in q if "checksum" in k.lower()], "no checksum query parameter")
         self.assertEqual(q["X-Amz-Expires"], ["900"])
         self.assertEqual(urlparse(url).path, "/edubotics-train/train/t1/a1/s0002500/pretrained_model/config.json")
         self.assertEqual(headers, {"Content-Type": "application/octet-stream", "Content-Length": "1665",
-                                   "Content-MD5": md5, "x-amz-checksum-sha256": sha_b64})
+                                   "x-amz-checksum-sha256": sha_b64})
         self.assertNotIn("test-secret", url)
 
+    def test_every_production_caller_signs_the_manifest_sha256(self):
+        import re
+
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        calls = []
+        for dirpath, _, files in os.walk(here):
+            if os.sep + "tests" in dirpath:
+                continue
+            for name in files:
+                if name.endswith(".py") and name != "r2_client.py":
+                    with open(os.path.join(dirpath, name), encoding="utf-8") as fh:
+                        calls += [(name, c) for c in re.findall(r"presign_put\(([^)]*)\)", fh.read())]
+        self.assertTrue(calls)
+        for name, call in calls:
+            self.assertEqual(call.count(","), 2, f"{name}: presign_put({call})")
+            self.assertIn("sha256", call, f"{name}: presign_put({call}) must pass the manifest's SHA-256")
+
     def test_another_length_or_sha256_is_another_signature(self):
-        md5 = base64.b64encode(hashlib.md5(b"y").digest()).decode()
         sha_a, sha_b = hashlib.sha256(b"a").hexdigest(), hashlib.sha256(b"b").hexdigest()
         with patch("botocore.auth.datetime") as fake_dt:
             import datetime as _dt
             fake_dt.datetime.now.return_value = _dt.datetime(2026, 10, 28, 12, 0, 0, tzinfo=_dt.timezone.utc)
             fake_dt.datetime.utcnow.return_value = _dt.datetime(2026, 10, 28, 12, 0, 0)
-            a, _ = r2_client.presign_put("k", 10, md5, sha_a)
-            b, _ = r2_client.presign_put("k", 11, md5, sha_a)
-            c, _ = r2_client.presign_put("k", 10, md5, sha_b)
-            a2, _ = r2_client.presign_put("k", 10, md5, sha_a)
+            a, _ = r2_client.presign_put("k", 10, sha_a)
+            b, _ = r2_client.presign_put("k", 11, sha_a)
+            c, _ = r2_client.presign_put("k", 10, sha_b)
+            a2, _ = r2_client.presign_put("k", 10, sha_a)
         sig = lambda u: parse_qs(urlparse(u).query)["X-Amz-Signature"][0]  # noqa: E731
         self.assertNotEqual(sig(a), sig(b))
         self.assertNotEqual(sig(a), sig(c))
         self.assertEqual(sig(a), sig(a2), "same inputs at the same instant sign alike")
 
     def test_presign_put_refuses_a_malformed_sha256(self):
-        md5 = base64.b64encode(hashlib.md5(b"y").digest()).decode()
         for bad in ("", "zz", "ab" * 31, "ab" * 33):
             with self.assertRaises(ValueError):
-                r2_client.presign_put("k", 1, md5, bad)
+                r2_client.presign_put("k", 1, bad)
 
     def test_a_presigned_get(self):
         url = r2_client.presign_get("train/t1/a1/s0002500/training_state/rng_state.safetensors")
@@ -194,14 +179,13 @@ class RealBotocore(unittest.TestCase):
                 r2_client.copy_object("train/x", "keep/x")
             self.assertNotIsInstance(ctx.exception, (r2_client.R2CopyUnsupported, r2_client.R2Missing))
 
-    def test_put_file_presigned_sends_the_three_signed_headers(self):
+    def test_put_file_presigned_sends_the_signed_sha256(self):
         import httpx
 
         data = b"z" * 2048
         path = os.path.join(self._tmp(), "blob")
         with open(path, "wb") as fh:
             fh.write(data)
-        md5 = base64.b64encode(hashlib.md5(data).digest()).decode()
         seen = {}
 
         def handler(request):
@@ -219,11 +203,11 @@ class RealBotocore(unittest.TestCase):
             r2_client.put_file_presigned("keep/t1/s0002500/pretrained_model/config.json", path)
         self.assertEqual(seen["headers"]["content-type"], "application/octet-stream")
         self.assertEqual(seen["headers"]["content-length"], "2048")
-        self.assertEqual(seen["headers"]["content-md5"], md5)
+        self.assertEqual(seen["headers"]["x-amz-checksum-sha256"],
+                         base64.b64encode(hashlib.sha256(data).digest()).decode())
         self.assertEqual(seen["body_len"], 2048)
-        # G0 failed: the kept-copy fallback keeps today's three signed headers
         self.assertEqual({k for k in seen["headers"] if k.startswith(("content-", "x-amz-"))},
-                         {"content-type", "content-length", "content-md5"})
+                         {"content-type", "content-length", "x-amz-checksum-sha256"})
 
     def test_put_file_presigned_raises_on_403(self):
         import httpx
@@ -374,8 +358,8 @@ class _FakeR2:
         self.signed: dict = {}
         self.deleted: list = []
 
-    def presign_put(self, key, size, md5_b64, sha256_hex):
-        hdr = {"Content-Type": "application/octet-stream", "Content-Length": str(size), "Content-MD5": md5_b64,
+    def presign_put(self, key, size, sha256_hex):
+        hdr = {"Content-Type": "application/octet-stream", "Content-Length": str(size),
                "x-amz-checksum-sha256": base64.b64encode(bytes.fromhex(sha256_hex)).decode()}
         url = f"https://fake-r2.example/{key}?X-Amz-Signature=SECRETSIGNATURE{len(self.signed)}"
         self.signed[url] = (key, dict(hdr))
@@ -402,6 +386,7 @@ class _FakeR2:
     def put(self, url, content, headers):
         import httpx
 
+        content = content if isinstance(content, bytes) else b"".join(content)
         key, signed = self.signed[url]
         sent = {k.lower(): v for k, v in headers.items()}
         if {k.lower(): v for k, v in signed.items()} != sent:
@@ -501,6 +486,17 @@ class ChecksumGate(unittest.TestCase):
         self.assertFalse(out["a"]["ok"])
         self.assertTrue(out["f"]["ok"], "cleanup ran after the failed step")
 
+    def test_step_a_counts_only_when_the_honest_step_passed(self):
+        import httpx
+
+        fake = _FakeR2()
+        fake.put = lambda url, content, headers: httpx.Response(
+            400, content=b"<Error><Code>InvalidRequest</Code><Message>nope</Message></Error>")
+        code, out = self._run(fake)
+        self.assertEqual(code, 1)
+        self.assertFalse(out["a"]["ok"], "a refusal of everything proves nothing about the checksum")
+        self.assertEqual((out["a"]["code"], out["a"]["message"]), ("InvalidRequest", "nope"))
+
     def test_an_r2_that_returns_no_checksum_fails_step_c(self):
         code, out = self._run(_FakeR2(returns_checksum=False))
         self.assertEqual(code, 1)
@@ -534,6 +530,234 @@ class ChecksumGate(unittest.TestCase):
         code, out = self._run(fake)
         self.assertEqual(code, 2)
         self.assertFalse(out["f"]["ok"])
+
+
+class _StoreR2:
+    """A dict-backed R2 behind the REAL botocore signer (for G0b): presigning is botocore's
+    own, HEAD/exists/delete answer from ``objects``."""
+
+    def __init__(self, test):
+        r2_client._reset_for_tests()
+        test._env = patch.dict(os.environ, ENV)
+        test._env.__enter__()
+        test.addCleanup(lambda: (test._env.__exit__(None, None, None), r2_client._reset_for_tests()))
+        self.objects: dict = {}
+        self.deleted: list = []
+        self.R2Missing = r2_client.R2Missing
+        self.R2CopyUnsupported = r2_client.R2CopyUnsupported
+        self.PUT_TTL_S = r2_client.PUT_TTL_S
+        self.sha256_b64 = r2_client.sha256_b64
+        self.bucket = r2_client.bucket
+        self.presign_put = r2_client.presign_put
+        real = r2_client._client()
+        store = self
+
+        class _Proxy:
+            meta = real.meta
+
+            def generate_presigned_url(self, *a, **kw):
+                return real.generate_presigned_url(*a, **kw)
+
+            def head_object(self, Bucket, Key, **kw):
+                if Key not in store.objects:
+                    raise r2_client.R2Missing(Key)
+                _, sha = store.objects[Key]
+                out = {"ContentLength": len(store.objects[Key][0])}
+                if sha:
+                    out["ChecksumSHA256"] = base64.b64encode(bytes.fromhex(sha)).decode()
+                return out
+
+        self._proxy = _Proxy()
+
+    def _client(self):
+        return self._proxy
+
+    def head_meta(self, key):
+        if key not in self.objects:
+            raise r2_client.R2Missing(key)
+        data, sha = self.objects[key]
+        return len(data), sha
+
+    def exists(self, key):
+        return key in self.objects
+
+    def delete_keys(self, keys):
+        self.deleted.extend(keys)
+        for k in keys:
+            self.objects.pop(k, None)
+
+
+class _R2Http:
+    """The R2 side of a PUT: ``mode`` 'aws' validates the signed checksum against the body
+    (like AWS S3), 'refuse_header' answers 400 InvalidRequest to any request carrying
+    x-amz-checksum-sha256 before the signature (what the 2026-10-29 run measured) and
+    validates a query checksum, and
+    'ignore' never validates a checksum. A changed or missing signed value is 403."""
+
+    def __init__(self, store, mode):
+        self.store, self.mode = store, mode
+        self.signed: dict = {}
+
+    def record(self, key, url, headers):
+        q = parse_qs(urlparse(url).query)
+        self.signed[key] = ({k.lower(): v for k, v in headers.items()}, q.get("x-amz-checksum-sha256", [None])[0],
+                            q["X-Amz-SignedHeaders"][0].split(";"))
+
+    def put(self, url, content, headers):
+        import httpx
+
+        body = content if isinstance(content, bytes) else b"".join(content)
+        key = urlparse(url).path.split("/", 2)[2]
+        sent = {k.lower(): v for k, v in headers.items()}
+        q = parse_qs(urlparse(url).query)
+        if self.mode == "refuse_header" and "x-amz-checksum-sha256" in sent:
+            return httpx.Response(400, content=b"<Error><Code>InvalidRequest</Code>"
+                                               b"<Message>Header x-amz-checksum-sha256 not allowed</Message></Error>")
+        signed_hdrs, signed_q, names = self.signed[key]
+        for name in names:
+            if name != "host" and sent.get(name) != signed_hdrs.get(name):
+                return httpx.Response(403, content=b"<Error><Code>SignatureDoesNotMatch</Code></Error>")
+        if q.get("x-amz-checksum-sha256", [None])[0] != signed_q:
+            return httpx.Response(403, content=b"<Error><Code>SignatureDoesNotMatch</Code></Error>")
+        claimed = sent.get("x-amz-checksum-sha256") or q.get("x-amz-checksum-sha256", [None])[0]
+        claimed_hex = base64.b64decode(claimed).hex() if claimed else None
+        validate = self.mode in ("aws", "refuse_header")
+        if validate and claimed_hex and claimed_hex != hashlib.sha256(body).hexdigest():
+            return httpx.Response(400, content=b"<Error><Code>BadDigest</Code><Message>The SHA256 you specified "
+                                               b"did not match the calculated checksum.</Message></Error>")
+        self.store.objects[key] = (body, claimed_hex if validate else None)
+        return httpx.Response(200)
+
+
+@unittest.skipUnless(_HAVE_BOTO, "boto3/botocore not installed (CI installs them)")
+class ChecksumGateVariants(unittest.TestCase):
+    """G0b (owner decision after G0 failed): every variant signs what it says, the four
+    probes per variant and the pass rule, the scrubbed messages, the exit codes."""
+
+    def setUp(self):
+        self.gate = _load_gate()
+
+    def _run(self, mode, names=None):
+        store = _StoreR2(self)
+        http = _R2Http(store, mode)
+        real = self.gate.presign_variant
+
+        def recording(r2, key, size, md5_b64, sha256_hex, spec):
+            url, hdr = real(r2, key, size, md5_b64, sha256_hex, spec)
+            http.record(key, url, hdr)
+            return url, hdr
+
+        real_put = r2_client.presign_put
+
+        def recording_put(key, size, sha256_hex):
+            url, hdr = real_put(key, size, sha256_hex)
+            http.record(key, url, hdr)
+            return url, hdr
+
+        store.presign_put = recording_put
+        with patch.object(self.gate, "presign_variant", recording):
+            code, out = self.gate.run_variants(store, http, names, run_id="feedbeef")
+        return code, out, store
+
+    def test_every_variant_signs_what_it_says(self):
+        store = _StoreR2(self)
+        expect = {
+            "V0": "content-length;content-md5;content-type;host;x-amz-checksum-sha256",
+            "V1": "content-length;content-type;host;x-amz-checksum-sha256",
+            "V2": "content-length;content-type;host;x-amz-checksum-sha256;x-amz-sdk-checksum-algorithm",
+            "V3": "content-length;content-md5;content-type;host;x-amz-checksum-sha256;x-amz-sdk-checksum-algorithm",
+            "V4a": "content-length;content-md5;content-type;host;x-amz-checksum-sha256;x-amz-sdk-checksum-algorithm",
+            "V4b": "content-length;content-type;host;x-amz-checksum-sha256;x-amz-sdk-checksum-algorithm",
+            "V6": "content-length;content-type;host",
+            "V6m": "content-length;content-md5;content-type;host",
+        }
+        self.assertEqual(set(expect), set(self.gate.VARIANTS))
+        sha = hashlib.sha256(b"a").hexdigest()
+        md5 = base64.b64encode(hashlib.md5(b"a").digest()).decode()
+        for name, signed in expect.items():
+            url, hdr = self.gate.presign_variant(store, "k", 1, md5, sha, self.gate.VARIANTS[name])
+            q = parse_qs(urlparse(url).query)
+            self.assertEqual(q["X-Amz-SignedHeaders"], [signed], name)
+            self.assertEqual({k.lower() for k in hdr} | {"host"}, set(signed.split(";")), name)
+            if self.gate.VARIANTS[name]["mode"] == "query":
+                self.assertEqual(q["x-amz-checksum-sha256"], [r2_client.sha256_b64(sha)], name)
+            else:
+                self.assertNotIn("x-amz-checksum-sha256", q, name)
+
+    def test_the_query_checksum_is_covered_by_the_signature(self):
+        store = _StoreR2(self)
+        md5 = base64.b64encode(hashlib.md5(b"a").digest()).decode()
+        with patch("botocore.auth.datetime") as fake_dt:
+            import datetime as _dt
+            fake_dt.datetime.now.return_value = _dt.datetime(2026, 10, 29, 12, 0, 0, tzinfo=_dt.timezone.utc)
+            fake_dt.datetime.utcnow.return_value = _dt.datetime(2026, 10, 29, 12, 0, 0)
+            sig = [parse_qs(urlparse(self.gate.presign_variant(store, "k", 1, md5, hashlib.sha256(x).hexdigest(),
+                                                              self.gate.VARIANTS["V6"])[0]).query)["X-Amz-Signature"]
+                   for x in (b"a", b"b", b"a")]
+        self.assertNotEqual(sig[0], sig[1])
+        self.assertEqual(sig[0], sig[2])
+
+    def test_with_query_removes_or_replaces_only_the_checksum(self):
+        url = "https://h/b/k?X-Amz-Algorithm=AWS4&x-amz-checksum-sha256=AAA%3D&X-Amz-Signature=ff"
+        self.assertEqual(parse_qs(urlparse(self.gate._with_query(url, None)).query),
+                         {"X-Amz-Algorithm": ["AWS4"], "X-Amz-Signature": ["ff"]})
+        self.assertEqual(parse_qs(urlparse(self.gate._with_query(url, "B+/=")).query)["x-amz-checksum-sha256"],
+                         ["B+/="])
+
+    def test_an_aws_like_r2_passes_every_variant(self):
+        code, out, store = self._run("aws")
+        self.assertEqual((code, out["verdict"]), (0, "pass"))
+        self.assertEqual(out["passing"], list(self.gate.VARIANTS))
+        v = out["variants"]["V1"]
+        self.assertEqual((v["wrong"]["status"], v["wrong"]["code"], v["wrong"]["stored"]), (400, "BadDigest", False))
+        self.assertEqual(v["wrong"]["message"], "The SHA256 you specified did not match the calculated checksum.")
+        self.assertEqual((v["missing"]["status"], v["forged"]["status"]), (403, 403))
+        self.assertTrue(v["honest"]["head_sha256_ok"])
+        self.assertEqual(v["honest"]["head_fields"], ["ChecksumSHA256"])
+        self.assertEqual(out["info"]["V7_plain"]["head_fields"], [])
+        self.assertEqual(store.objects, {})
+        self.assertTrue(all(k.startswith("train/gate/feedbeef/") for k in store.deleted))
+        self.assertEqual(len(store.deleted), 4 * len(self.gate.VARIANTS) + 3)
+        self.assertTrue(out["f"]["ok"])
+        text = json.dumps(out)
+        for secret in ("X-Amz-Signature", "test-secret", "test-access-key", "r2.cloudflarestorage.com"):
+            self.assertNotIn(secret, text)
+
+    def test_the_measured_r2_passes_only_the_query_variants(self):
+        code, out, _ = self._run("refuse_header")
+        self.assertEqual(code, 0)
+        self.assertEqual(out["passing"], ["V6", "V6m"])
+        v0 = out["variants"]["V0"]
+        self.assertEqual((v0["honest"]["status"], v0["honest"]["code"]), (400, "InvalidRequest"))
+        self.assertEqual(v0["honest"]["message"], "Header x-amz-checksum-sha256 not allowed")
+        self.assertFalse(v0["pass"])
+
+    def test_an_r2_that_ignores_checksums_passes_nothing(self):
+        code, out, _ = self._run("ignore", ["V1", "V6"])
+        self.assertEqual((code, out["verdict"], out["passing"]), (1, "fail", []))
+        self.assertTrue(out["variants"]["V1"]["wrong"]["stored"])
+        self.assertFalse(out["variants"]["V1"]["honest"]["head_sha256_ok"])
+
+    def test_unknown_variants_are_refused_before_any_request(self):
+        code, text, calls = ChecksumGate._main(self, ["--run", "--variants", "V1,V99"], dict(ChecksumGate.GOOD))
+        self.assertEqual((code, calls), (2, []))
+        self.assertIn("V99", text)
+        code, text, calls = ChecksumGate._main(self, ["--variants"], dict(ChecksumGate.GOOD))
+        self.assertEqual((code, calls), (2, []))
+        self.assertIn("G0b plan", text)
+
+    def test_messages_are_scrubbed(self):
+        sc = self.gate.scrub_message
+        self.assertEqual(sc("The Content-MD5 you specified did not match what we received."),
+                         "The Content-MD5 you specified did not match what we received.")
+        self.assertEqual(sc("Header x-amz-checksum-sha256 is not supported, use x-amz-sdk-checksum-algorithm."),
+                         "Header x-amz-checksum-sha256 is not supported, use x-amz-sdk-checksum-algorithm.")
+        for secret in ("https://acct.r2.cloudflarestorage.com/b/k?X-Amz-Signature=abc", "X-Amz-Signature=ab12",
+                       "0123456789abcdef0123456789abcdef", "Mo3o8Ylfi7CfbmtMIBLvKypvBnzQAnlLdQqgQKb22L0=",
+                       "AKIAABCDEFGHIJKLMNOPQR"):
+            self.assertNotIn(secret, sc(f"bad value {secret} here"))
+        self.assertLessEqual(len(sc("word " * 200)), 300)
+        self.assertIsNone(sc(None))
 
 
 if __name__ == "__main__":

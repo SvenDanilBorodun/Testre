@@ -328,8 +328,10 @@ class UploadUrl(WorkerBase):
         self.assertEqual(body["expires_in"], 900)
         self.assertEqual(set(body["urls"]), set(AV.CHECKPOINT_RELPATHS))
         for rel, meta in m.items():
+            # 052 (OQ-1, G0b V1): the manifest's SHA-256 is signed, Content-MD5 is not
             self.assertEqual(body["headers"][rel], {"Content-Type": "application/octet-stream",
-                                                    "Content-Length": str(meta["size"]), "Content-MD5": meta["md5"]})
+                                                    "Content-Length": str(meta["size"]),
+                                                    "x-amz-checksum-sha256": r2_client.sha256_b64(meta["sha256"])})
         c = self.db.checkpoint(self.tid, 1, 2500)
         self.assertEqual((c["state"], c["manifest"]), ("uploading", m))
         keys = {p[1] for p in self.r2.presigned}

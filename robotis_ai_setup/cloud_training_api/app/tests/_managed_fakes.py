@@ -668,6 +668,10 @@ class FakeR2:
         self.copies: list = []           # (src, dst) of each copy_object
         self.puts: list = []             # (key, path) of each put_file_presigned
         self.copy_unsupported = False    # raise R2CopyUnsupported on every copy_object
+        # keys R2 holds a stored SHA-256 for (a PUT through presign_put signs it, OQ-1 / G0b V1):
+        # head_meta returns the sha256 of the CURRENT bytes for them (R2 enforces it at upload),
+        # None for every other object (a direct write, a CopyObject copy), as measured by G0
+        self.checksummed: set = set()
 
     def _maybe_fail(self, op):
         n = self.fail.get(op, 0)
@@ -675,11 +679,23 @@ class FakeR2:
             self.fail[op] = n - 1
             raise RuntimeError(f"r2 {op} failed")
 
-    def presign_put(self, key, size, md5_b64):
+    def presign_put(self, key, size, sha256_hex):
+        from app.services import r2_client
+
         self._maybe_fail("presign")
-        self.presigned.append(("put", key, size, md5_b64))
-        return (f"https://r2.test/{key}?X-Amz-SignedHeaders=content-length%3Bcontent-md5%3Bcontent-type%3Bhost",
-                {"Content-Type": "application/octet-stream", "Content-Length": str(int(size)), "Content-MD5": md5_b64})
+        self.presigned.append(("put", key, size, sha256_hex))
+        return (f"https://r2.test/{key}?X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost%3Bx-amz-checksum-sha256",
+                {"Content-Type": "application/octet-stream", "Content-Length": str(int(size)),
+                 "x-amz-checksum-sha256": r2_client.sha256_b64(sha256_hex)})
+
+    def head_meta(self, key):
+        from app.services import r2_client
+
+        self._maybe_fail("head")
+        if key not in self.objects:
+            raise r2_client.R2Missing(key)
+        data = self.objects[key]
+        return len(data), (hashlib.sha256(data).hexdigest() if key in self.checksummed else None)
 
     def presign_get(self, key):
         self.presigned.append(("get", key))
@@ -740,11 +756,13 @@ class FakeR2:
         if src_key not in self.objects:
             raise r2_client.R2Missing(src_key)
         self.objects[dst_key] = self.objects[src_key]
+        self.checksummed.discard(dst_key)  # G0 (e): a CopyObject copy carries no SHA-256
 
     def put_file_presigned(self, key, path):
         self._maybe_fail("put")
         with open(path, "rb") as fh:
             self.objects[key] = fh.read()
+        self.checksummed.add(key)
         self.puts.append((key, path))
 
     @contextmanager
@@ -752,8 +770,8 @@ class FakeR2:
         from app.services import r2_client
 
         with ExitStack() as st:
-            for name in ("presign_put", "presign_get", "head_size", "exists", "get_bytes", "stream_to_file",
-                         "stream_sha256", "delete_keys", "copy_object", "put_file_presigned"):
+            for name in ("presign_put", "presign_get", "head_size", "head_meta", "exists", "get_bytes",
+                         "stream_to_file", "stream_sha256", "delete_keys", "copy_object", "put_file_presigned"):
                 st.enter_context(patch.object(r2_client, name, getattr(self, name)))
             yield self
 
@@ -761,7 +779,9 @@ class FakeR2:
         from app.services import r2_client
 
         for rel, data in files.items():
-            self.objects[r2_client.ckpt_key(tid, attempt, step, rel)] = data
+            key = r2_client.ckpt_key(tid, attempt, step, rel)
+            self.objects[key] = data
+            self.checksummed.add(key)  # uploaded through a signed PUT (OQ-1)
 
 
 # ---------------------------------------------------------------------------

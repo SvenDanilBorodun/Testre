@@ -334,11 +334,14 @@ def _insert_ckpt(tid: int, attempt_no: int, step: int, manifest: dict):
 
 
 def _presign_all(keys_sizes) -> tuple[dict, dict]:
+    """One presigned PUT per file, binding its size and the manifest's SHA-256 (spec 052
+    §9.8, OQ-1): R2 refuses other bytes (G0b V1). The worker sends the returned headers
+    verbatim, so it needs no change; the manifest's md5 is still validated but unsigned."""
     from app.services import r2_client
 
     urls, headers = {}, {}
     for rel, key, meta in keys_sizes:
-        url, hdr = r2_client.presign_put(key, meta["size"], meta["md5"])
+        url, hdr = r2_client.presign_put(key, meta["size"], meta["sha256"])
         urls[rel] = url
         headers[rel] = hdr
     return urls, headers

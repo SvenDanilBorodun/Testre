@@ -108,8 +108,10 @@ class SessionMachine:
     def end_reason_for(self, session_id):
         return self._ended.get(session_id, '')
 
-    def _ended_answer(self, session_id):
-        if self.holds_claim:
+    def _ended_answer(self, session_id, client_id):
+        """SESSION_ENDED (with the end reason kept for that session id), unless
+        a session with ANOTHER owner now exists: then OWNER_MISMATCH."""
+        if self.holds_claim and client_id != self.owner:
             return Answer(False, 'OWNER_MISMATCH', T.OWNER_MISMATCH_DE, '')
         reason = self.end_reason_for(session_id)
         message = T.END_REASON_DE.get(reason, T.SESSION_ENDED_DE)
@@ -160,7 +162,7 @@ class SessionMachine:
             return Answer(True, '', T.KEEPALIVE_OK_DE, '')
         if self.holds_claim and session_id == self.session_id:
             return Answer(False, 'OWNER_MISMATCH', T.OWNER_MISMATCH_DE, '')
-        return self._ended_answer(session_id)
+        return self._ended_answer(session_id, client_id)
 
     def leave(self, session_id, client_id, workflow_active):
         """Returns (Answer, ended: bool)."""
@@ -171,7 +173,7 @@ class SessionMachine:
             return Answer(True, '', T.LEFT_DE, ''), True
         if self.holds_claim and session_id == self.session_id:
             return Answer(False, 'OWNER_MISMATCH', T.OWNER_MISMATCH_DE, ''), False
-        return self._ended_answer(session_id), False
+        return self._ended_answer(session_id, client_id), False
 
     def visible_session_id(self, client_id):
         """`status` returns the session_id only to the owner."""

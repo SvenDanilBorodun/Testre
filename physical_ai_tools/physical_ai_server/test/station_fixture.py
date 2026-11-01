@@ -25,7 +25,8 @@ TEST_LAYOUT_ID = 'OMX-STATION-TEST'
 W, H = 1920, 1080
 F_THETA = (W / 2) / math.radians(53)        # f-theta 106°H
 PXMM = 6.0
-X0, X1, Y0, Y1 = -75.0, 733.0, -300.0, 300.0
+X0, X1, Y0, Y1 = -75.0, 733.0, -300.0, 300.0         # the mat
+TX0, TX1, TY0, TY1 = -250.0, 950.0, -760.0, 760.0    # the rendered table around it
 NOMINAL_C_MM = (550.0, 0.0, 592.0)
 
 
@@ -113,13 +114,16 @@ def ftheta_intrinsics():
 
 # ── texture + render ──────────────────────────────────────────────────────────
 def _to_px(x, y):
-    return (Y1 - y) * PXMM, (X1 - x) * PXMM
+    return (TY1 - y) * PXMM, (TX1 - x) * PXMM
 
 
 def mat_texture(layout):
     import cv2
-    Wt, Ht = int((Y1 - Y0) * PXMM), int((X1 - X0) * PXMM)
-    tex = np.full((Ht, Wt), 235, np.uint8)
+    Wt, Ht = int((TY1 - TY0) * PXMM), int((TX1 - TX0) * PXMM)
+    tex = np.full((Ht, Wt), 140, np.uint8)               # the table
+    mu0, mv0 = _to_px(X1, Y1)
+    mu1, mv1 = _to_px(X0, Y0)
+    tex[int(mv0):int(mv1), int(mu0):int(mu1)] = 235      # the matte light-grey mat
 
     def paste(img, cx, cy, size_mm):
         s = int(round(size_mm * PXMM))

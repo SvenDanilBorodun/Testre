@@ -243,6 +243,11 @@ services:
       # (and so an accidental EDUBOTICS_CAMERA_SOURCE flip stays coherent).
       - EDUBOTICS_CAMERA_INGEST_PORT=${EDUBOTICS_CAMERA_INGEST_PORT:-5557}
       - EDUBOTICS_CAMERA_NAMES=${EDUBOTICS_CAMERA_NAMES:-gripper,scene}
+      # OMX camera station flag — Windows-only this round, forwarded for
+      # parity with the student compose and INERT here: the Pi generator never
+      # sets it, so it stays 0 (and the usb_cam path never starts the ingest
+      # node that would read it).
+      - EDUBOTICS_STATION_ENABLED=${EDUBOTICS_STATION_ENABLED:-0}
     volumes:
       # usb_cam + Dynamixel serial need the raw device tree; /dev/shm for
       # DDS shared-memory transport between containers.
@@ -455,6 +460,9 @@ services:
       # docker-compose.yml (omx_full default; the current Pi kit is
       # leader-toggle-capable, i.e. omx_full-equivalent).
       - EDUBOTICS_ROBOT_TYPE=${EDUBOTICS_ROBOT_TYPE:-omx_full}
+      # OMX camera station flag — parity with the student compose; the Pi
+      # generator never sets it, so it stays 0 (inert) on every Pi.
+      - EDUBOTICS_STATION_ENABLED=${EDUBOTICS_STATION_ENABLED:-0}
       # Scene-cam single-shot extrinsic: the known board-on-table placement
       # (base frame, metres). Read by workflow/calibration_manager.py at
       # import time — MUST stay forwarded (env-forwarding-guard).

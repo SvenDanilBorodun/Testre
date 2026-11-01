@@ -180,6 +180,12 @@ services:
       - EDUBOTICS_CAMERA_SOURCE=${EDUBOTICS_CAMERA_SOURCE:-}
       - EDUBOTICS_CAMERA_INGEST_PORT=${EDUBOTICS_CAMERA_INGEST_PORT:-5557}
       - EDUBOTICS_CAMERA_NAMES=${EDUBOTICS_CAMERA_NAMES:-gripper,scene}
+      # OMX camera station: 1 = camera_ingest_node.py also publishes the
+      # station camera's native 1920x1080 frames (cam_id 200) on
+      # /station_scene/image_raw/compressed for Roboter Studio. The GUI writes
+      # it (managed .env key); 0 = today's rig. Read again by
+      # physical_ai_server below — both containers read it at start.
+      - EDUBOTICS_STATION_ENABLED=${EDUBOTICS_STATION_ENABLED:-0}
     volumes:
       - /dev:/dev
       - /dev/shm:/dev/shm
@@ -350,6 +356,9 @@ services:
       # behavior); omx_follower = Roboter-Studio-only kit. Absent/unknown
       # values fall back to omx_full (one-variable rollback).
       - EDUBOTICS_ROBOT_TYPE=${EDUBOTICS_ROBOT_TYPE:-omx_full}
+      # OMX camera station flag (GUI-managed .env key; 0 = today's rig). The
+      # server is a station rig only with this at 1 AND an OMX profile.
+      - EDUBOTICS_STATION_ENABLED=${EDUBOTICS_STATION_ENABLED:-0}
       # WS4 (2026-06-17) scene-cam single-shot extrinsic: the known
       # board-on-table placement (base frame, metres). The student lays the
       # ChArUco flat at this reference; the scene extrinsic + z_table derive

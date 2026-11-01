@@ -28,6 +28,14 @@ id, so a single multiplexed connection (older GUI) is also accepted and demuxed:
 
 cam_id indexes EDUBOTICS_CAMERA_NAMES (default "gripper,scene") so id 0 ->
 /gripper/image_raw/compressed and id 1 -> /scene/image_raw/compressed.
+
+OMX camera station: with EDUBOTICS_STATION_ENABLED=1 the node additionally
+maps cam_id 200 (STATION_SCENE_CAM_ID) to /station_scene/image_raw/compressed,
+frame_id 'station_scene' — the station camera's native 1920x1080 frames, which
+only Roboter Studio reads. Without the flag an id-200 frame is dropped with the
+unknown-id warning, exactly as an older arm image drops it. The topic is never
+in omx_f_config.yaml's camera_topic_list, so recording, inference, the
+image-topic list and the signal status never see it.
 capture_unix_nanos becomes the published header.stamp (see _publish): the two
 cameras stream on independent connections, so the GUI's true capture time —
 both from the same host clock — lets the recorder's camera pairer align the
@@ -52,6 +60,7 @@ import os
 import socket
 import struct
 import threading
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -61,9 +70,29 @@ from sensor_msgs.msg import CompressedImage
 # Header layout: cam_id (B), jpeg_len (I, big-endian), capture_ns (Q, big-endian)
 _HEADER = struct.Struct('>BIQ')
 _HEADER_LEN = _HEADER.size
-# Reject absurd frame sizes early — a 640x480 JPEG is ~30-60 KB; cap at 8 MB
-# so a desynced/garbage stream can't make us allocate gigabytes.
+# Reject absurd frame sizes early — a 640x480 JPEG is ~30-60 KB and the camera
+# station's 1920x1080 JPEG (quality 90) well under 1 MB; cap at 8 MB so a
+# desynced/garbage stream can't make us allocate gigabytes.
 _MAX_JPEG_BYTES = 8 * 1024 * 1024
+
+# OMX camera station (registered only with EDUBOTICS_STATION_ENABLED=1). The
+# GUI's camera_bridge.py spells the same cam_id.
+STATION_SCENE_CAM_ID = 200
+STATION_SCENE_TOPIC = '/station_scene/image_raw/compressed'
+STATION_SCENE_FRAME_ID = 'station_scene'
+# An unknown cam_id is warned about at most once per this many seconds per id
+# (the station's 15 frames/s would otherwise flood the log).
+_UNKNOWN_CAM_WARN_PERIOD_S = 10.0
+
+
+def station_flag_on(value):
+    """The ONE parsing rule for EDUBOTICS_STATION_ENABLED, shared value for
+    value with the GUI's .env read-back and the server: every whitespace
+    character removed (``tr -d '[:space:]'``), then exactly ``1`` is on and
+    anything else is off."""
+    if value is None:
+        return False
+    return ''.join(ch for ch in value if ch not in ' \t\n\v\f\r') == '1'
 
 
 class CameraIngestNode(Node):
@@ -97,6 +126,20 @@ class CameraIngestNode(Node):
                 self.create_publisher(CompressedImage, topic, qos),
             )
             self.get_logger().info(f'camera_ingest publisher {cam_id}: {topic}')
+        # Camera station: the Studio stream's native frames, same QoS.
+        self.station_enabled = station_flag_on(
+            os.environ.get('EDUBOTICS_STATION_ENABLED'))
+        if self.station_enabled:
+            self.publishers_by_id[STATION_SCENE_CAM_ID] = (
+                STATION_SCENE_FRAME_ID,
+                self.create_publisher(
+                    CompressedImage, STATION_SCENE_TOPIC, qos),
+            )
+            self.get_logger().info(
+                f'camera_ingest publisher {STATION_SCENE_CAM_ID}: '
+                f'{STATION_SCENE_TOPIC} (camera station)')
+        self._unknown_warned_at = {}
+        self._unknown_warn_lock = threading.Lock()
 
         self._stop = threading.Event()
         self._frame_counts = {cam_id: 0 for cam_id in self.publishers_by_id}
@@ -127,7 +170,7 @@ class CameraIngestNode(Node):
         srv.bind(('0.0.0.0', self.port))
         # Backlog ≥ camera count (+1 slack) so simultaneous per-camera connects
         # on (re)connect are never refused.
-        srv.listen(max(2, len(self.camera_names) + 1))
+        srv.listen(max(2, len(self.publishers_by_id) + 1))
         srv.settimeout(1.0)
         handlers = []
         while not self._stop.is_set():
@@ -195,8 +238,11 @@ class CameraIngestNode(Node):
     def _publish(self, cam_id, jpeg_bytes, capture_ns=0):
         entry = self.publishers_by_id.get(cam_id)
         if entry is None:
-            # Unknown camera id — log once-ish and drop.
-            self.get_logger().warn(f'dropping frame for unknown cam_id={cam_id}')
+            # Unknown camera id (e.g. the station's 200 without
+            # EDUBOTICS_STATION_ENABLED=1) — drop it, warning at most once
+            # per _UNKNOWN_CAM_WARN_PERIOD_S per id.
+            if self._unknown_cam_warn_due(cam_id):
+                self.get_logger().warn(f'dropping frame for unknown cam_id={cam_id}')
             return
         name, pub = entry
         msg = CompressedImage()
@@ -223,6 +269,16 @@ class CameraIngestNode(Node):
         msg.data = jpeg_bytes
         pub.publish(msg)
         self._frame_counts[cam_id] += 1
+
+    def _unknown_cam_warn_due(self, cam_id, now=None):
+        """True when an unknown cam_id may be warned about now (rate limit)."""
+        now = time.monotonic() if now is None else now
+        with self._unknown_warn_lock:
+            last = self._unknown_warned_at.get(cam_id)
+            if last is not None and now - last < _UNKNOWN_CAM_WARN_PERIOD_S:
+                return False
+            self._unknown_warned_at[cam_id] = now
+            return True
 
     def _log_rates(self):
         parts = []

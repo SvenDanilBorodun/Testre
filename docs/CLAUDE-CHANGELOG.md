@@ -55,8 +55,8 @@ hash or Modal deploy was needed. Implementer B ran out of its weekly usage in th
 days later.
 
 **Measured** (the build, 2026-11-01). 052's self-check passes inside the migration; its hand-run assertions passed
-265 PASS at the build (the fix round's own count is in the header of
-`supabase/tests/052_credit_ledger_assertions.sql`), 104/104 PostgREST checks, nine races without a deadlock, the
+265 PASS at the build and 292 PASS after the fix round (T42 the waiver proof, T43 the stall clock; the
+header of `supabase/tests/052_credit_ledger_assertions.sql` carries the count), 104/104 PostgREST checks, nine races without a deadlock, the
 rollback refuses while a `ledger` row is active and restores 051's 73 functions with their ACLs. The schema probe is
 23 tables, 23 column sets, 55 RPCs (passes on 052, fails on 051), and a v2.36.0 API boots against 052. Suites on the
 integration head before the fix round: cloud API 1183 (also on python:3.11-slim), setup 2716 (5 errors =
@@ -72,7 +72,9 @@ no ready checkpoint (`training_worker._waiver_blockers`; `finish_training` raise
 at ERROR and answers with a requeue); anything else is requeued like a lost attempt
 (`host_unfit:lerobot_error_not_fresh`). V1-m1: 049's `update_training_progress` reset `step_advanced_at` on every
 running write, so heartbeats alone held an idle attempt to the limit — 052 now resets it only when NULL, on the first
-queued → running write or on a rising step (R18 restated). V1-m2: four surviving mutants (M19 a group history
+queued → running write or on a rising step (R18 restated); a step-only write may still LOWER the step, so a host
+sending 0, 1, 0, 1, … restarts the clock on every rise (found by implementer A; the owner chose to document it,
+not to close it). V1-m2: four surviving mutants (M19 a group history
 without its ownership assert, M17 a literal `p_max_hours=3`, M20 foreign reason texts in `/me/export`, M6 an intact
 content complaint counted as `train_config`) each got a test that kills it. V2-M1: this entry. V2-m1: the old
 v2.36.0 admin dashboard's PATCH still writes the dead `users.training_credits` after W1, and the old teacher web gets

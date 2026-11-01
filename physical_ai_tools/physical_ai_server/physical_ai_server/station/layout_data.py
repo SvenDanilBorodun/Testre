@@ -31,6 +31,7 @@ the old geometry stops validating.
 
 import hashlib
 import json
+import math
 
 LAYOUTS = {
     "OMX-STATION-A": {
@@ -206,3 +207,66 @@ def canonical_json(layout):
 def layout_sha256(layout):
     """The sha256 hex digest of ``canonical_json(layout)`` (printed on the mat)."""
     return hashlib.sha256(canonical_json(layout).encode('utf-8')).hexdigest()
+
+
+# ── derived geometry: one implementation for the server and the mat generator ──
+def _in_nominal_zone(layout, x_mm, y_mm):
+    """The nominal work zone (§2.2): the forward half-annulus about joint 1,
+    minus the robot footprint grown by 10 mm."""
+    zone = layout['zone']
+    cx, cy = zone['nominal_centre_mm']
+    r_lo, r_hi = zone['nominal_radius_mm']
+    b_lo, b_hi = zone['nominal_bearing_deg']
+    dx, dy = x_mm - cx, y_mm - cy
+    r = (dx * dx + dy * dy) ** 0.5
+    if not r_lo <= r <= r_hi:
+        return False
+    bearing = math.degrees(math.atan2(dy, dx))
+    if not b_lo <= bearing <= b_hi:
+        return False
+    fp = layout['robot']['footprint_mm']
+    if (fp['x_range_mm'][0] - 10 <= x_mm <= fp['x_range_mm'][1] + 10
+            and fp['y_range_mm'][0] - 10 <= y_mm <= fp['y_range_mm'][1] + 10):
+        return False
+    return True
+
+
+def board_check_squares(layout):
+    """B1, B2 (§2.2): the two BLACK board squares whose centres lie inside the
+    nominal work zone and are farthest apart; B1 is the one with the larger y.
+
+    OpenCV's CharucoBoard (non-legacy) is black where (column + row) is even,
+    row 0 at board y = 0; board +X = base +X, board +Y = base −Y (the layout's
+    axes). Returns ``[('B1', (x, y)), ('B2', (x, y))]`` in mm (mat frame)."""
+    board = layout['board']
+    nx, ny = board['squares']
+    s = board['square_mm']
+    ox, oy, _ = board['origin_mm']
+    ax, ay = board['axis_x'], board['axis_y']
+    centres = []
+    for j in range(ny):
+        for i in range(nx):
+            if (i + j) % 2:
+                continue
+            bx, by = (i + 0.5) * s, (j + 0.5) * s
+            x = ox + bx * ax[0] + by * ay[0]
+            y = oy + bx * ax[1] + by * ay[1]
+            if _in_nominal_zone(layout, x, y):
+                centres.append((round(x, 6), round(y, 6)))
+    best = None
+    for a in range(len(centres)):
+        for b in range(a + 1, len(centres)):
+            (x1, y1), (x2, y2) = centres[a], centres[b]
+            d = (x1 - x2) ** 2 + (y1 - y2) ** 2
+            if best is None or d > best[0] + 1e-9:
+                best = (d, centres[a], centres[b])
+    if best is None:
+        return []
+    p, q = sorted((best[1], best[2]), key=lambda c: (-c[1], c[0]))
+    return [('B1', p), ('B2', q)]
+
+
+def world_check_marks(layout):
+    """M1…M8 then B1, B2 as ``[(id, (x_mm, y_mm))]`` — the 10 world-check targets."""
+    marks = [(m['id'], tuple(m['centre_mm'])) for m in layout['check_marks']]
+    return marks + board_check_squares(layout)

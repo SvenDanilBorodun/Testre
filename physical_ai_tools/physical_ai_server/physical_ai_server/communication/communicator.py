@@ -209,6 +209,19 @@ class Communicator:
         node.get_logger().info(f'Parsed rosbag extra topics: {self.rosbag_extra_topics}')
 
         self.camera_topic_msgs = {}
+        # OMX camera station (plan v6.13 §5.4): a SEPARATE store for the
+        # station's native 1080p frames. Never in camera_topics,
+        # camera_topic_msgs, get_latest_data, the slot sampler, the signal
+        # status or inference; reachable only through
+        # get_latest_bgr_frame('station_scene') / get_camera_msg_age_s(...),
+        # get_station_frame and station_arrivals. Enabled by the server on a
+        # station rig (enable_station_store).
+        self._station_sub = None
+        self._station_msg = None
+        self._station_seq = 0
+        self._station_last_arrival = 0.0
+        self._station_size = None
+        self._station_arrivals = deque(maxlen=64)
         # Audit F17/F18: per-camera wall-clock arrival deque (length 30
         # → ~1 s window at 30 Hz) for liveness + observed-Hz queries.
         # Header.stamp is also tracked so a driver re-emitting the same
@@ -664,6 +677,10 @@ class Communicator:
         Returns None when no message has arrived yet.
         Used by Roboter Studio / inference to reject stale-frame bursts.
         """
+        if name == self.STATION_CAMERA:
+            if self._station_msg is None:
+                return None
+            return time.monotonic() - self._station_last_arrival
         dq = self._camera_msg_arrival.get(name)
         if not dq:
             return None
@@ -727,7 +744,57 @@ class Communicator:
         self._note_arrival(f'{self.SOURCE_LEADER}:{name}')
         self.leader_topic_msgs[name] = msg
 
+    # ── OMX camera station frame store (plan v6.13 §5.4) ──────────────────────
+    STATION_CAMERA = 'station_scene'
+    STATION_TOPIC = '/station_scene/image_raw/compressed'
+
+    def enable_station_store(self):
+        """One subscription on the sensor node, depth 2, BEST_EFFORT. Idempotent."""
+        if self._station_sub is not None:
+            return
+        qos = QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT,
+                         history=HistoryPolicy.KEEP_LAST)
+        self._station_sub = self.sensor_node.create_subscription(
+            CompressedImage, self.STATION_TOPIC, self._station_callback, qos)
+
+    def _station_callback(self, msg: CompressedImage) -> None:
+        try:
+            arrival = time.monotonic()
+            from physical_ai_server.inference.cloud_protocol import jpeg_size
+            size = jpeg_size(bytes(msg.data))
+            self._station_msg = msg
+            self._station_size = size
+            self._station_seq += 1
+            self._station_last_arrival = arrival
+            self._station_arrivals.append((arrival, size))
+        except Exception as e:  # noqa: BLE001 — never raise into the sensor executor
+            self._sensor_callback_failed('_station_callback', e)
+
+    def station_arrivals(self):
+        """[(arrival_mono, (w, h) | None)] of the last 64 station frames (lock-free)."""
+        return list(self._station_arrivals)
+
+    def get_station_frame(self):
+        """(bgr | None, arrival age s | None, (w, h) | None, seq) of the newest."""
+        msg, seq, size = self._station_msg, self._station_seq, self._station_size
+        if msg is None:
+            return None, None, None, seq
+        age = time.monotonic() - self._station_last_arrival
+        try:
+            import cv2
+            import numpy as np
+            buf = np.frombuffer(msg.data, dtype=np.uint8)
+            frame = cv2.imdecode(buf, cv2.IMREAD_COLOR) if buf.size else None
+        except Exception:  # noqa: BLE001
+            frame = None
+        return frame, age, size, seq
+
     def get_latest_bgr_frame(self, camera: str):
+        if camera == self.STATION_CAMERA:
+            return self.get_station_frame()[0]
+        return self._get_latest_bgr_frame(camera)
+
+    def _get_latest_bgr_frame(self, camera: str):
         """Decode the most recent CompressedImage for the named camera into
         a BGR ndarray. Returns None when no frame has arrived yet, when the
         camera is not subscribed, or when the JPEG payload fails to decode.
@@ -1337,6 +1404,13 @@ class Communicator:
         if hasattr(self, 'multi_subscriber') and self.multi_subscriber is not None:
             self.multi_subscriber.cleanup()
             self.multi_subscriber = None
+
+        if getattr(self, '_station_sub', None) is not None:
+            try:
+                self.sensor_node.destroy_subscription(self._station_sub)
+            except Exception:  # noqa: BLE001
+                pass
+            self._station_sub = None
 
         # Clean up joystick trigger subscriber
         if hasattr(self, 'joystick_trigger_subscriber') and \

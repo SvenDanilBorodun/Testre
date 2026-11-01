@@ -96,7 +96,8 @@ class TestStopEventIsNotCalledStop(unittest.TestCase):
     the 3.11/3.12 the installer and CI run."""
 
     def _thread_classes(self):
-        src = open(camera_bridge.__file__, encoding="utf-8").read()
+        with open(camera_bridge.__file__, encoding="utf-8") as fh:
+            src = fh.read()
         tree = ast.parse(src)
         thread_like = []
         for node in tree.body:

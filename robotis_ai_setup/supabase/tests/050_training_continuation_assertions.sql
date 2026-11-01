@@ -25,18 +25,23 @@
 -- (T1: the 5-argument finish_training no longer exists) and 6 FAIL (T5a, T5d, T29b,
 -- T35b, T36a, T36b — every one a requeue of an attempt without an own ready
 -- checkpoint, which E50 now charges 0); at 049 it prints 69 PASS. (The 041 header
--- did the same for 040.)
+-- did the same for 040.) Both re-counted 2026-11-01 (fix round 3) the way the next
+-- paragraph says, on a stack through 050 and on one through 049: unchanged.
 --
 -- 052 BREAKS this file by design too (spec §12.3): it seeds
 -- users.training_credits and starts through the 8-argument start_training_safe
 -- (every start answers P0003 since 052: the hours come from the ledger), and the
 -- 3-argument start_continuation_safe is gone. Run it on a stack migrated only up
--- to 051 at most. Measured after 052 (2026-10-28, a local stack with every
--- migration through 051 plus 052): 1 PASS, 1 FAIL (T4b) and 77 ERROR.
--- Re-measured 2026-11-01 with the fix round's 052 (finish_training's P0073, the
--- stall clock of update_training_progress), on a fresh reset: unchanged; and again
--- with fix round 2's 052 (mark_checkpoint_ready, the mirror claim's status, the
--- waiver's step condition): unchanged.
+-- to 051 at most.
+-- Measured after 052 (a local stack with every migration through 051 plus 052, the
+-- file on a fresh reset), counted 2026-11-01 in fix round 3: 0 PASS, 0 FAIL and 77
+-- ERROR. The earlier measurements (2026-10-28, both earlier 2026-11-01 rounds) said
+-- 1 PASS, 1 FAIL (T4b): a whole-output grep, whose PASS and FAIL were psql's LINE
+-- echoes of failing statements that quote the labels.
+-- Counted with stdout and stderr captured apart: PASS/FAIL = the file's own result
+-- lines on stdout plus its PASS/FAIL NOTICEs, ERROR = stderr's
+-- `psql:<file>:<n>: ERROR:` lines; psql's echo of a failing statement (LINE n:,
+-- CONTEXT:) is never counted.
 --
 -- Expected: 30 PASS, 0 FAIL.
 \set ON_ERROR_STOP off

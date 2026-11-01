@@ -9,14 +9,18 @@
 -- directly, which 052's trainings_ledger_shape refuses (a new row defaults to
 -- credit_scheme 'ledger' and must carry its reservation), so every session check
 -- that needs the training fails. Run it on a stack migrated only up to 051 at
--- most. Measured after 052 (2026-10-28, a local stack with every migration
--- through 051 plus 052): 31 PASS, 14 FAIL (T4b, T4c, T5a, T6b, T7b, T8a, T9a, T9b,
--- T10a, T11a, T11b, T15b, T24, T26) and 10 ERROR (the deliberate T1c one, the
--- refused INSERT, and the session RPCs that then miss their training).
--- Re-measured 2026-11-01 with the fix round's 052 (finish_training's P0073, the
--- stall clock of update_training_progress), on a fresh reset: unchanged; and again
--- with fix round 2's 052 (mark_checkpoint_ready, the mirror claim's status, the
--- waiver's step condition): unchanged.
+-- most.
+-- Measured after 052 (a local stack with every migration through 051 plus 052, the
+-- file on a fresh reset), counted 2026-11-01 in fix round 3: 31 PASS, 14 FAIL (T4b,
+-- T4c, T5a, T6b, T7b, T8a, T9a, T9b, T10a, T11a, T11b, T15b, T24, T26) and 9 ERROR
+-- (the deliberate T1c one, the refused INSERT, and seven session RPCs that then
+-- miss their training). The earlier measurements (2026-10-28, both earlier
+-- 2026-11-01 rounds) said 10 ERROR: a whole-output grep, which also counted the
+-- \echo line that names T1c's ERROR.
+-- Counted with stdout and stderr captured apart: PASS/FAIL = the file's own result
+-- lines on stdout plus its PASS/FAIL NOTICEs, ERROR = stderr's
+-- `psql:<file>:<n>: ERROR:` lines; psql's echo of a failing statement (LINE n:,
+-- CONTEXT:) is never counted.
 --
 -- Expected: 58 PASS lines, 0 FAIL, and ONE deliberate `ERROR: permission denied for table
 -- inference_sessions` (T1c). Function privileges are asserted with has_function_privilege, never by

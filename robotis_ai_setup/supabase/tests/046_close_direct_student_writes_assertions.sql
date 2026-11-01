@@ -21,14 +21,16 @@
 -- 052 BREAKS this file by design (spec §12.3): its seed INSERTs trainings rows
 -- directly, and since 052 a new row defaults to credit_scheme 'ledger' and must
 -- carry its reservation (trainings_ledger_shape), so the INSERT is refused. Run
--- it on a stack migrated only up to its own migration, as above. Measured after
--- 052 (2026-10-28, a local stack with every migration through 051 plus 052): 22
--- PASS, 4 FAIL (T2, T9, T10a, T12) and 2 ERROR (the refused INSERT, then the
--- worker-token update of the row that does not exist).
--- Re-measured 2026-11-01 with the fix round's 052 (finish_training's P0073, the
--- stall clock of update_training_progress), on a fresh reset: unchanged; and again
--- with fix round 2's 052 (mark_checkpoint_ready, the mirror claim's status, the
--- waiver's step condition): unchanged.
+-- it on a stack migrated only up to its own migration, as above.
+-- Measured after 052 (a local stack with every migration through 051 plus 052, the
+-- file on a fresh reset), counted 2026-11-01 in fix round 3: 22 PASS, 4 FAIL (T2,
+-- T9, T10a, T12) and 2 ERROR (the refused INSERT, then the worker-token update of
+-- the row that does not exist). The 2026-10-28 and both earlier 2026-11-01
+-- measurements reported the same numbers.
+-- Counted with stdout and stderr captured apart: PASS/FAIL = the file's own result
+-- lines on stdout plus its PASS/FAIL NOTICEs, ERROR = stderr's
+-- `psql:<file>:<n>: ERROR:` lines; psql's echo of a failing statement (LINE n:,
+-- CONTEXT:) is never counted.
 --
 -- Expected: 27 PASS, 0 FAIL/ERROR (T1..T15; T6, T7, T8 and T10 in four parts
 -- a..d, one per table). Against a database WITHOUT 046 the same file passes

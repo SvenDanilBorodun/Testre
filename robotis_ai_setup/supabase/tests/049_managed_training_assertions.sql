@@ -34,12 +34,16 @@
 -- come from the ledger (every start answers P0003, an unmanaged one P0061) and
 -- the 5-argument finish_training is gone, so the rows and psql variables the
 -- later checks read never exist. Run it on a stack migrated only up to 049, as
--- above. Measured after 052 (2026-10-28, a local stack with every migration
--- through 051 plus 052): 2 PASS, 25 FAIL and 237 ERROR.
--- Re-measured 2026-11-01 with the fix round's 052 (finish_training's P0073, the
--- stall clock of update_training_progress), on a fresh reset: unchanged; and again
--- with fix round 2's 052 (mark_checkpoint_ready, the mirror claim's status, the
--- waiver's step condition): unchanged.
+-- above.
+-- Measured after 052 (a local stack with every migration through 051 plus 052, the
+-- file on a fresh reset), counted 2026-11-01 in fix round 3: 2 PASS, 1 FAIL (T25)
+-- and 237 ERROR. The earlier measurements (2026-10-28, both earlier 2026-11-01
+-- rounds) said 25 FAIL: a whole-output grep, 24 of whose FAILs were psql's LINE
+-- echoes of failing statements that quote a FAIL label.
+-- Counted with stdout and stderr captured apart: PASS/FAIL = the file's own result
+-- lines on stdout plus its PASS/FAIL NOTICEs, ERROR = stderr's
+-- `psql:<file>:<n>: ERROR:` lines; psql's echo of a failing statement (LINE n:,
+-- CONTEXT:) is never counted.
 --
 -- Expected: 69 PASS, 0 FAIL (T1..T36; T5, T8, T9, T18, T24, T27..T30 and T32..T36 in
 -- lettered parts). The rollback is exercised separately

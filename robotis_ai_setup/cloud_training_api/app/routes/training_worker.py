@@ -562,7 +562,10 @@ async def _content_claim(row, att, now: float) -> None:
     tid = int(row["id"])
     ckpts = await asyncio.to_thread(D.read_checkpoints, [tid], ["ready"])
     await D.terminate_attempt(att)
-    if D.newest_ready_checkpoint(ckpts, D.total_steps_of(row)) is not None:
+    total = D.total_steps_of(row)
+    # a ready final passed the same rules at its ckpt-done: it is published as the
+    # training (cap_attempt's ready-final rule, TR-2), never failed S7
+    if D.final_ready(ckpts, total) is not None or D.newest_ready_checkpoint(ckpts, total) is not None:
         await D.cap_attempt(row, att, now, ckpts, bound="content_refused")
     else:
         await D.fail_training(row, n, T.S7)

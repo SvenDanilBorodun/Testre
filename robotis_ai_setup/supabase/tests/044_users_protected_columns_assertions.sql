@@ -21,7 +21,9 @@
 -- Measured after 052 (2026-10-28, a local stack with every migration through 051
 -- plus 052): 15 PASS, 1 FAIL (T15) and 0 ERROR.
 -- Re-measured 2026-11-01 with the fix round's 052 (finish_training's P0073, the
--- stall clock of update_training_progress), on a fresh reset: unchanged.
+-- stall clock of update_training_progress), on a fresh reset: unchanged; and again
+-- with fix round 2's 052 (mark_checkpoint_ready, the mirror claim's status, the
+-- waiver's step condition): unchanged.
 --
 -- Expected: 16 PASS, 0 FAIL/ERROR (T1..T15, T2 with a/b halves).
 \set ON_ERROR_STOP off

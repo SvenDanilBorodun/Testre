@@ -39,7 +39,7 @@ REACHED = {
     'CORE': {'timeoutW0', 'serveW0', 'step_RELOCK_rt_done', 'step_ABORT_rt_done',
              'step_COMMIT_written', 'cancel', 'idle_relock', 'retry_RELOCK',
              'retry_ABORT', 'step_TOUCH_SOLVE_check_gates_fail'},
-    'SESS': {'sess_takeover', 'sess_end', 'step_RESOLVE_worked', 'step_RESTORE_worked',
+    'SESS': {'sess_takeover', 'sess_end', 'step_RESOLVE_worked', 'restore',
              'enter'},
     'HG': {'ht_d16_refuse', 'hf_ml', 'wd_fire', 'step_CLAIM_claim'},
     'HG2': {'ht_d16_refuse', 'step_CLAIM_relocked'},

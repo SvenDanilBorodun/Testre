@@ -1070,6 +1070,7 @@ class EduBoticsApp:
         # ── Modus-Auswahl ──
         mode_frame = ttk.LabelFrame(main, text="Modus", padding=10)
         mode_frame.pack(fill=tk.X, pady=5)
+        self._mode_frame = mode_frame
 
         self.cloud_only_check = ttk.Checkbutton(
             mode_frame,
@@ -1115,18 +1116,12 @@ class EduBoticsApp:
             "Umgebung stoppen und neu starten.",
             pady=(6, 0))
 
-        # OMX camera station. Built always, PACKED only while the option is
-        # offered (STATION_OPTION_OFFERED: a released layout ships) and the
-        # selected robot type is an OMX profile — see _apply_robot_type_labels.
-        self.station_frame = ttk.Frame(mode_frame)
-        self.station_check = ttk.Checkbutton(
-            self.station_frame,
-            text=STATION_OPTION_LABEL_DE,
-            variable=self.station_var,
-            command=self._on_station_toggled,
-        )
-        self.station_check.pack(anchor=tk.W)
-        self._hint_label(self.station_frame, STATION_OPTION_HINT_DE)
+        # OMX camera station: the option is built by _show_station_option
+        # (from _apply_robot_type_labels) only while it is offered
+        # (STATION_OPTION_OFFERED: a released layout ships) and the selected
+        # robot type is an OMX profile.
+        self.station_frame = None
+        self.station_check = None
 
         # ── Schritt A: Leader-Arm ──
         leader_frame = ttk.LabelFrame(main, text="Schritt A: Leader-Arm", padding=10)
@@ -1393,10 +1388,8 @@ class EduBoticsApp:
         self.robot_help_var.set(row.get("help_de", ""))
         # The camera-station option: offered only with a released layout, and
         # only for the OMX profiles.
-        if STATION_OPTION_OFFERED and _station_profile_ok(profile):
-            self.station_frame.pack(fill=tk.X, pady=(8, 0))
-        else:
-            self.station_frame.pack_forget()
+        self._show_station_option(
+            bool(STATION_OPTION_OFFERED and _station_profile_ok(profile)))
         # Schritt C follows the profile's camera_roles — a kit that can carry
         # only a scene camera must not advertise „bis zu 2".
         max_cams = len(row.get("camera_roles", ("gripper", "scene"))) or 1
@@ -1459,6 +1452,51 @@ class EduBoticsApp:
         self._update_start_button()
 
     # ── OMX camera station (plan §3.1, §3.3) ─────────────────────────
+
+    def _show_station_option(self, show: bool):
+        """Build the „Kamerastation (OMX)" option while it is shown and destroy
+        it while hidden, rather than pack_forget it: a hidden wrapping
+        paragraph would stay registered for re-wrapping at a width of 1 px."""
+        frame = getattr(self, "station_frame", None)
+        if show and frame is None:
+            frame = ttk.Frame(self._mode_frame)
+            self.station_check = ttk.Checkbutton(
+                frame,
+                text=STATION_OPTION_LABEL_DE,
+                variable=self.station_var,
+                command=self._on_station_toggled,
+            )
+            self.station_check.pack(anchor=tk.W)
+            hint = self._hint_label(frame, STATION_OPTION_HINT_DE)
+            # Start narrow: at the default width this long paragraph would
+            # widen the Modus frame past the window before the canvas re-wraps
+            # it, and the frame's other paragraphs would then be wrapped too
+            # wide (measured at the minimum window size). The re-wrap below and
+            # the canvas's own set the real width.
+            hint.configure(wraplength=HINT_WRAP_MIN_PX)
+            frame.pack(fill=tk.X, pady=(8, 0))
+            self.station_frame = frame
+            # Built after the window's first layout (a robot-type switch), the
+            # paragraph has missed the canvas's re-wrap: wrap it when it is
+            # mapped, i.e. once its position (the inset) is known.
+            canvas = getattr(self, "_scroll_canvas", None)
+            if canvas is not None:
+                def _rewrap(_event=None):
+                    try:
+                        if canvas.winfo_width() > 1:
+                            hint.configure(wraplength=self._hint_wrap_width(
+                                hint, canvas, canvas.winfo_width()))
+                    except tk.TclError:
+                        pass
+                hint.bind("<Map>", _rewrap, add="+")
+            self._update_robot_type_combo_state()
+        elif not show and frame is not None:
+            try:
+                frame.destroy()
+            except tk.TclError:
+                pass
+            self.station_frame = None
+            self.station_check = None
 
     def _station_scene_camera(self):
         """The camera on the scene role with a native index, or None."""

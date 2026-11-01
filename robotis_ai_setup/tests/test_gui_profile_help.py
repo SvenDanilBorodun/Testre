@@ -190,7 +190,8 @@ class TheScanCardGoesSingularOnALeaderLessType(unittest.TestCase):
             btn_scan_leader=_FakeWidget("btn_scan_leader", rec),
             btn_scan_arm=_FakeWidget("btn_scan_arm", rec),
             follower_status_label=_FakeWidget("follower_status_label", rec),
-            station_frame=_FakeWidget("station_frame", rec),
+            _show_station_option=lambda show: rec.append(
+                ("station_option", "show", show)),
         )
         method(owner)
         return owner

@@ -197,8 +197,7 @@ class TheOptionIsOfferedOnlyWithAReleasedLayout(unittest.TestCase):
         self.assertIs(constants.STATION_OPTION_OFFERED, False)
 
     def _apply(self, profile, offered):
-        rec = []
-        packed = {"state": None}
+        shown = []
         ns = {"ROBOT_PROFILES": ROBOT_PROFILES,
               "tk": types.SimpleNamespace(X="x", LEFT="left"),
               "STATION_OPTION_OFFERED": offered}
@@ -207,29 +206,77 @@ class TheOptionIsOfferedOnlyWithAReleasedLayout(unittest.TestCase):
         owner = cls()
 
         class _W:
-            def __init__(self, name):
-                self.name = name
-
             def configure(self, **kw):
                 pass
 
             def pack(self, **kw):
-                if self.name == "station_frame":
-                    packed["state"] = True
+                pass
 
             def pack_forget(self):
-                if self.name == "station_frame":
-                    packed["state"] = False
+                pass
         for name in ("leader_frame", "follower_frame", "camera_frame",
                      "camera_hint_label", "btn_scan_camera",
                      "leader_hint_label", "follower_hint_label",
                      "btn_scan_leader", "btn_scan_arm",
-                     "follower_status_label", "station_frame"):
-            setattr(owner, name, _W(name))
+                     "follower_status_label"):
+            setattr(owner, name, _W())
         owner.robot_help_var = _Var("")
         owner._selected_robot_profile = lambda: profile
+        owner._show_station_option = shown.append
         owner._apply_robot_type_labels()
-        return packed["state"]
+        self.assertEqual(len(shown), 1)
+        return shown[0]
+
+    def test_the_option_is_built_while_shown_and_destroyed_while_hidden(self):
+        made = []
+
+        class _Widget:
+            def __init__(self, *a, **kw):
+                self.kw = kw
+                self.packed = False
+                self.destroyed = False
+                made.append(self)
+
+            def pack(self, **kw):
+                self.packed = True
+
+            def destroy(self):
+                self.destroyed = True
+
+            def configure(self, **kw):
+                self.kw.update(kw)
+
+            def bind(self, *a, **kw):
+                pass
+        ns = {"ttk": types.SimpleNamespace(Frame=_Widget, Checkbutton=_Widget),
+              "tk": types.SimpleNamespace(W="w", X="x", TclError=RuntimeError),
+              "HINT_WRAP_MIN_PX": 220}
+        ns.update(_module_str_consts())
+        cls = _owner_class(("_show_station_option",), ns)
+        owner = cls()
+        owner.station_frame = None
+        owner.station_check = None
+        owner._mode_frame = object()
+        owner.station_var = _Var(False)
+        owner._on_station_toggled = lambda: None
+        hints = []
+        owner._hint_label = lambda parent, text: hints.append(text) or _Widget()
+        owner._update_robot_type_combo_state = lambda: None
+        owner.root = types.SimpleNamespace(after_idle=lambda fn: None)
+        owner._show_station_option(True)
+        frame = owner.station_frame
+        self.assertIsNotNone(frame)
+        self.assertTrue(frame.packed)
+        self.assertEqual(owner.station_check.kw["text"], "Kamerastation (OMX)")
+        self.assertEqual(len(hints), 1)
+        self.assertEqual(made[-1].kw["wraplength"], 220,
+                         "the paragraph starts narrow")
+        owner._show_station_option(True)          # idempotent
+        self.assertIs(owner.station_frame, frame)
+        owner._show_station_option(False)
+        self.assertTrue(frame.destroyed)
+        self.assertIsNone(owner.station_frame)
+        self.assertIsNone(owner.station_check)
 
     def test_hidden_on_every_profile_while_not_offered(self):
         for profile in ROBOT_PROFILES:

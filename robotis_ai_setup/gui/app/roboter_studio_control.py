@@ -21,19 +21,37 @@ Bound to ``127.0.0.1`` only, so no off-host process can reach it; the browser
 
 Endpoints (JSON, CORS-open):
 
-* ``GET  /roboter-studio/status``         → ``{"follower_only": bool, "busy": bool}``
+* ``GET  /roboter-studio/status``         → ``{"follower_only": bool,
+  "ready": bool, "busy": bool, "has_leader": bool}``
 * ``POST /roboter-studio/leader-disable`` → switch to follower-only, restart arm
 * ``POST /roboter-studio/leader-enable``  → switch to both-arms, restart arm
+* ``GET  /station/status`` → ``{"enabled": bool, "stream": "off"|"on",
+  "scene_fps": float, "station_fps": float, "error_de": str}``
+* ``POST /station/stream`` body ``{"on": true|false}`` (sent as
+  ``application/json`` or ``text/plain``, so ``navigator.sendBeacon`` can
+  switch it off on ``pagehide``) → the camera station's Studio stream.
 
 The actual work (regenerate ``.env`` + recreate the ``open_manipulator``
-container) is injected as ``on_set_mode`` so this module stays free of
-GUI/docker imports and is unit-testable.
+container; switch the bridge's Studio stream) is injected as callables so this
+module stays free of GUI/docker imports and is unit-testable.
+
+**The Studio stream lease (camera station, plan §3.3).** ``on`` is
+START-OR-RENEW: it requires the station to be enabled and no leader switch in
+flight, starts the stream if it is off, and (re)sets a lease of
+``STATION_LEASE_S`` (10 s). There is no separate keepalive endpoint. ``off``
+stops it at once; lease expiry switches it off. The owner page renews every
+2 s, only right after an accepted server keepalive, so a stray ``off`` is
+undone within 2 s and a page that lost the server stops renewing. The bridge
+never asks the server for permission, and nothing here can change, pause or
+reopen the RECORDING stream: the stream switch only starts or stops the 1080p
+Studio sender.
 """
 
 from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Optional
 from urllib.parse import urlsplit
@@ -71,6 +89,24 @@ SetModeFn = Callable[[bool, Callable[[str], None]], "tuple[bool, str]"]
 StatusFn = Callable[[], dict]
 # get_task_busy() -> bool (True while recording / inferencing — switch refused)
 TaskBusyFn = Callable[[], bool]
+# get_station_status() -> {"enabled": bool, "scene_fps": float,
+#                          "station_fps": float, "error_de": str}
+StationStatusFn = Callable[[], dict]
+# on_station_stream(on: bool) -> (ok: bool, german_error: str). Must not block:
+# it only flips the bridge's Studio sender (called under the bridge's lock).
+StationStreamFn = Callable[[bool], "tuple[bool, str]"]
+
+# The Studio stream's lease: an `on` keeps it running this long. The page
+# renews every 2 s; a page that stops renewing loses the stream within this.
+STATION_LEASE_S = 10.0
+# How often the lease watchdog looks at the clock.
+_LEASE_POLL_S = 0.25
+
+STATION_IN_USE_DE = "Roboter Studio nutzt gerade die Stationskamera."
+STATION_NOT_ENABLED_DE = "Die Kamerastation ist nicht eingeschaltet."
+STATION_SWITCH_IN_FLIGHT_DE = (
+    "Ein Moduswechsel läuft gerade — die Stationskamera startet danach.")
+STATION_BAD_BODY_DE = 'Ungültige Anfrage — erwartet wird {"on": true} oder {"on": false}.'
 
 
 class RoboterStudioControlServer:
@@ -83,9 +119,25 @@ class RoboterStudioControlServer:
         port: int = DEFAULT_PORT,
         log: Optional[Callable[[str], None]] = None,
         get_task_busy: Optional[TaskBusyFn] = None,
+        get_station_status: Optional[StationStatusFn] = None,
+        on_station_stream: Optional[StationStreamFn] = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._on_set_mode = on_set_mode
         self._get_status = get_status
+        # Camera station (plan §3.3). Absent callables = not a station rig:
+        # GET /station/status answers enabled=false and `on` is refused.
+        self._get_station_status = get_station_status or (
+            lambda: {"enabled": False})
+        self._on_station_stream = on_station_stream or (
+            lambda _on: (False, STATION_NOT_ENABLED_DE))
+        self._clock = clock
+        # Guarded by _busy_lock, together with _busy, so a leader switch and
+        # the Studio stream can never both be live.
+        self._stream_on = False
+        self._lease_until = 0.0
+        self._lease_stop = threading.Event()
+        self._lease_thread: Optional[threading.Thread] = None
         # Refuse a mode switch while a recording / inference run is active —
         # recreating the open_manipulator container mid-run blips /joint_states +
         # the camera topics and corrupts the episode. The React toggle disables
@@ -118,9 +170,17 @@ class RoboterStudioControlServer:
         self._thread = threading.Thread(
             target=self._httpd.serve_forever, name="rs-control", daemon=True)
         self._thread.start()
+        self._lease_stop.clear()
+        self._lease_thread = threading.Thread(
+            target=self._lease_loop, name="rs-station-lease", daemon=True)
+        self._lease_thread.start()
         return True
 
     def stop(self) -> None:
+        # The environment is going away: the Studio stream ends with it.
+        self.station_stream_off()
+        self._lease_stop.set()
+        self._lease_thread = None
         if self._httpd is not None:
             try:
                 self._httpd.shutdown()
@@ -139,10 +199,15 @@ class RoboterStudioControlServer:
         # ``ready`` reflects the TRUE arm-container state from the GUI (running
         # vs restarting / down); ``busy`` is True while a switch is in flight on
         # EITHER side, so the badge never claims the new mode is live early.
+        # ``has_leader`` comes from the GUI's own robot profile (false on
+        # omx_follower): on a camera-station rig the bridge exists there too,
+        # and LeaderToggle.jsx hides on `bridgeHasLeader === false` before the
+        # first capabilities tick. Absent from an older status fn = true.
         return 200, {
             "follower_only": bool(st.get("follower_only", False)),
             "ready": bool(st.get("ready", True)),
             "busy": self._busy or bool(st.get("busy", False)),
+            "has_leader": bool(st.get("has_leader", True)),
         }
 
     def handle_set_mode(self, follower_only: bool) -> "tuple[int, dict]":
@@ -159,6 +224,11 @@ class RoboterStudioControlServer:
         # Reject concurrent restarts — a second click while a restart is in
         # flight would race two `compose up` calls on the same container.
         with self._busy_lock:
+            # Camera station (D7): the leader is switched BEFORE station mode,
+            # never during it. Checked under the same lock that starts the
+            # Studio stream, so the two can never both begin.
+            if self._stream_on:
+                return 409, {"ok": False, "message": STATION_IN_USE_DE}
             if self._busy:
                 return 409, {"ok": False,
                              "message": "Ein Moduswechsel läuft bereits."}
@@ -172,6 +242,86 @@ class RoboterStudioControlServer:
         finally:
             with self._busy_lock:
                 self._busy = False
+
+    # ── camera station: the Studio stream and its lease ──────────────
+    def _station_status(self) -> dict:
+        try:
+            st = self._get_station_status() or {}
+        except Exception:  # noqa: BLE001 — a status probe never breaks the bridge
+            st = {}
+        return st
+
+    def station_enabled(self) -> bool:
+        return bool(self._station_status().get("enabled", False))
+
+    def handle_station_status(self) -> "tuple[int, dict]":
+        st = self._station_status()
+        with self._busy_lock:
+            stream = "on" if self._stream_on else "off"
+        return 200, {
+            "enabled": bool(st.get("enabled", False)),
+            "stream": stream,
+            "scene_fps": float(st.get("scene_fps", 0.0) or 0.0),
+            "station_fps": (float(st.get("station_fps", 0.0) or 0.0)
+                            if stream == "on" else 0.0),
+            "error_de": str(st.get("error_de", "") or ""),
+        }
+
+    def handle_station_stream(self, on: bool) -> "tuple[int, dict]":
+        """``on`` = start-or-renew (station enabled, no leader switch in
+        flight; (re)sets the 10 s lease); ``off`` = stop at once."""
+        if not on:
+            self.station_stream_off()
+            return 200, {"ok": True, "stream": "off"}
+        if not self.station_enabled():
+            return 409, {"ok": False, "message": STATION_NOT_ENABLED_DE}
+        with self._busy_lock:
+            if self._busy:
+                return 409, {"ok": False, "message": STATION_SWITCH_IN_FLIGHT_DE}
+            try:
+                ok, err = self._on_station_stream(True)
+            except Exception as e:  # noqa: BLE001
+                ok, err = False, f"Fehler: {e}"
+            if not ok:
+                self._stream_on = False
+                return 409, {"ok": False, "message": err or STATION_NOT_ENABLED_DE}
+            self._stream_on = True
+            self._lease_until = self._clock() + STATION_LEASE_S
+        return 200, {"ok": True, "stream": "on", "lease_s": STATION_LEASE_S}
+
+    def station_stream_off(self) -> None:
+        """Switch the Studio stream off now. Idempotent, never raises. Called
+        by `off`, the lease watchdog, and the GUI's teardown paths."""
+        with self._busy_lock:
+            self._stream_on = False
+            self._lease_until = 0.0
+            try:
+                self._on_station_stream(False)
+            except Exception:  # noqa: BLE001 — switching off must never fail loudly
+                pass
+
+    def expire_station_lease(self) -> bool:
+        """Switch the stream off if its lease ran out. Returns True when it
+        did. One tick of the lease watchdog; public for tests."""
+        with self._busy_lock:
+            if not self._stream_on or self._clock() < self._lease_until:
+                return False
+            self._stream_on = False
+            self._lease_until = 0.0
+            try:
+                self._on_station_stream(False)
+            except Exception:  # noqa: BLE001
+                pass
+        self._log("Stationskamera: Studio-Bild beendet (keine Verlängerung "
+                  "von der Web-Oberfläche).")
+        return True
+
+    def _lease_loop(self) -> None:
+        while not self._lease_stop.wait(_LEASE_POLL_S):
+            try:
+                self.expire_station_lease()
+            except Exception:  # noqa: BLE001 — the watchdog must not die
+                pass
 
     def _make_handler(self):
         server = self
@@ -203,24 +353,29 @@ class RoboterStudioControlServer:
                 self.end_headers()
 
             def do_GET(self):  # noqa: N802
-                if self.path.rstrip("/") == "/roboter-studio/status":
+                p = self.path.rstrip("/")
+                if p == "/roboter-studio/status":
                     self._send(*server.handle_status())
+                elif p == "/station/status":
+                    self._send(*server.handle_station_status())
                 else:
                     self._send(404, {"error": "not found"})
 
-            def _drain_body(self):
-                # Read + discard any request body so the kernel doesn't reset the
+            def _drain_body(self) -> bytes:
+                # Read any request body so the kernel doesn't reset the
                 # connection (some clients send a body on POST); bounded so a
-                # bogus huge Content-Length can't exhaust memory.
+                # bogus huge Content-Length can't exhaust memory. Returned for
+                # the one endpoint that reads it (/station/stream).
                 try:
                     length = int(self.headers.get("Content-Length", "0") or "0")
                 except (TypeError, ValueError):
                     length = 0
                 if length > 0:
                     try:
-                        self.rfile.read(min(length, _MAX_BODY_BYTES))
+                        return self.rfile.read(min(length, _MAX_BODY_BYTES))
                     except Exception:  # noqa: BLE001 — client hung up mid-body
                         pass
+                return b""
 
             def _origin_allowed(self):
                 # The state-changing POSTs restart the arm container. CORS only
@@ -254,7 +409,7 @@ class RoboterStudioControlServer:
                 )
 
             def do_POST(self):  # noqa: N802
-                self._drain_body()
+                body = self._drain_body()
                 if not self._origin_allowed():
                     self._send(403, {"ok": False, "message": "Origin nicht erlaubt."})
                     return
@@ -263,7 +418,33 @@ class RoboterStudioControlServer:
                     self._send(*server.handle_set_mode(True))
                 elif p == "/roboter-studio/leader-enable":
                     self._send(*server.handle_set_mode(False))
+                elif p == "/station/stream":
+                    on = parse_station_stream_body(body)
+                    if on is None:
+                        self._send(400, {"ok": False,
+                                         "message": STATION_BAD_BODY_DE})
+                    else:
+                        self._send(*server.handle_station_stream(on))
                 else:
                     self._send(404, {"error": "not found"})
 
         return Handler
+
+
+def parse_station_stream_body(body: bytes) -> "bool | None":
+    """``{"on": true|false}`` → the bool, anything else → None.
+
+    The body is read whatever its Content-Type says: the page POSTs it as
+    ``application/json`` and ``navigator.sendBeacon`` as ``text/plain`` (a
+    CORS-simple request, so the pagehide beacon needs no preflight). Only a
+    real JSON boolean counts — ``"on": 1`` or ``"on": "true"`` is refused."""
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    on = data.get("on")
+    if not isinstance(on, bool):
+        return None
+    return on

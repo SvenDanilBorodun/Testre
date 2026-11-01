@@ -5,7 +5,19 @@
 -- stack — never CI, never the linked project (it seeds rows and deletes users).
 -- Labels T1..T41 of spec §19a in lettered parts; W8 is T21w. T42 (the S19
 -- waiver needs proof, P0073) and T43 (the stall clock of update_training_progress)
--- are the fix round of 2026-11-01.
+-- are the fix round of 2026-11-01; T44 (mark_checkpoint_ready, with its races
+-- in both orders), T45 (claim_checkpoint_mirror's status rule) and T46 (the
+-- waiver's step condition) its second round.
+--
+-- T44's RACES use a SECOND REAL CONNECTION: the file creates the dblink extension
+-- in schema extensions (and drops it again when it created it) and connects to
+-- host=:race_host (default `db`, the Supabase CLI's network alias of the database
+-- container: a TCP login with a password, which dblink requires of a
+-- non-superuser; 127.0.0.1 is `trust` and refused) as postgres with
+-- :race_password (default `postgres`, the local stack's). This session opens a
+-- transaction, makes its call, sends the other call through dblink, waits until
+-- pg_blocking_pids shows that call blocked by this session, commits, then reads
+-- the other call's result.
 --
 -- The squashed baseline does NOT replay on a fresh database as shipped
 -- (docs/KNOWN-ISSUES.md, „baseline.sql is NOT replayable from scratch"): run it in
@@ -91,6 +103,11 @@
 -- (EXECUTE for its owner only) and the kept credit_scheme column (DEFAULT
 -- 'derived'); update_training_progress is 049's body again (md5
 -- 5b9b815042f296fafd578b34faf1cbde, the rollback's own self-check) with 049's ACL.
+-- Re-measured the same way with fix round 2's 052 (project credfixa2): refused
+-- with 14 active ledger rows (mark_checkpoint_ready still there), applied after
+-- the drain, the dump again equal to 051's but for the same two kept items;
+-- mark_checkpoint_ready is gone and claim_checkpoint_mirror is 049's body (md5
+-- abde11806259a987b58b00cf6a0b0bfc) with 049's ACL.
 --
 -- 052 BREAKS the 046–050 assertion files by design (spec §12.3; each header
 -- records it). Measured after 052, on a stack with every migration through 051
@@ -99,8 +116,9 @@
 -- adjust_student_credits, which answers P0069 since 052): 15 PASS, 1 FAIL.
 -- Re-measured 2026-11-01 with the fix round's 052, each file on a fresh reset:
 -- every number unchanged (049 errors out before its stall-clock checks, and those
--- hold under the fix anyway: a first running write and a requeue).
--- Expected: 292 PASS, 0 FAIL/ERROR (one line per label: T1..T43 in lettered parts,
+-- hold under the fix anyway: a first running write and a requeue). Re-measured
+-- again with fix round 2's 052: unchanged.
+-- Expected: 326 PASS, 0 FAIL/ERROR (one line per label: T1..T46 in lettered parts,
 -- T21w = W8; some arrive as NOTICE lines from DO blocks).
 \set QUIET on
 \set ON_ERROR_STOP off
@@ -259,6 +277,21 @@ END $$;
 CREATE OR REPLACE FUNCTION pg_temp.ckpt(p_tid int, att int, step int, ago int DEFAULT 0) RETURNS void LANGUAGE sql AS $$
   INSERT INTO public.training_checkpoints (training_id, attempt_no, step, state, manifest, ready_at, created_at)
   VALUES (p_tid, att, step, 'ready', '{}', now() - make_interval(secs => ago), now() - make_interval(secs => ago)) $$;
+-- an UPLOADING checkpoint (what upload-url inserts), created `ago` seconds ago
+CREATE OR REPLACE FUNCTION pg_temp.ckpt_up(p_tid int, att int, step int, ago int DEFAULT 0) RETURNS void LANGUAGE sql AS $$
+  INSERT INTO public.training_checkpoints (training_id, attempt_no, step, state, manifest, created_at)
+  VALUES (p_tid, att, step, 'uploading', '{}', now() - make_interval(secs => ago)) $$;
+-- true once the backend `bpid` waits on a lock THIS session holds (live: pg_blocking_pids), at most 5 s
+CREATE OR REPLACE FUNCTION pg_temp.blocked_by_me(bpid int) RETURNS boolean LANGUAGE plpgsql AS $$
+DECLARE i int := 0;
+BEGIN
+  WHILE NOT (pg_backend_pid() = ANY (pg_blocking_pids(bpid))) LOOP
+    i := i + 1;
+    IF i > 200 THEN RETURN false; END IF;
+    PERFORM pg_sleep(0.025);
+  END LOOP;
+  RETURN true;
+END $$;
 
 \echo '=== T21w-z the switch-over (decision 11), before any write ==='
 SELECT pg_temp.ok('PASS T21w (W8) get_teacher_credit_summary right after the switch-over = (0,0,0,4,1,0)',
@@ -1537,6 +1570,264 @@ SELECT pg_temp.ok('PASS T43n update_training_progress: one overload, DEFINER, th
   AND has_function_privilege('anon', 'public.update_training_progress(integer,uuid,text,integer,integer,real,text,text)', 'EXECUTE')
   AND has_function_privilege('authenticated', 'public.update_training_progress(integer,uuid,text,integer,integer,real,text,text)', 'EXECUTE')
   AND NOT has_function_privilege('public', 'public.update_training_progress(integer,uuid,text,integer,integer,real,text,text)', 'EXECUTE'));
+
+\echo '=== T44 (fix round 2, V3-M1) mark_checkpoint_ready: the one ready writer, decided under the trainings row lock ==='
+SELECT pg_temp.ok('PASS T44a one overload (INT, INT, INT) RETURNS boolean, SECURITY INVOKER, search_path public; EXECUTE for service_role only',
+  (SELECT count(*) = 1 FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname = 'mark_checkpoint_ready')
+  AND (SELECT NOT prosecdef AND proconfig = '{search_path=public}' AND prorettype = 'boolean'::regtype
+              AND pg_get_function_identity_arguments(oid) = 'p_training_id integer, p_attempt integer, p_step integer'
+         FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname = 'mark_checkpoint_ready')
+  AND has_function_privilege('service_role', 'public.mark_checkpoint_ready(integer,integer,integer)', 'EXECUTE')
+  AND NOT has_function_privilege('anon', 'public.mark_checkpoint_ready(integer,integer,integer)', 'EXECUTE')
+  AND NOT has_function_privilege('authenticated', 'public.mark_checkpoint_ready(integer,integer,integer)', 'EXECUTE')
+  AND NOT has_function_privilege('public', 'public.mark_checkpoint_ready(integer,integer,integer)', 'EXECUTE'));
+SELECT pg_temp.mk_user('76', 'student', 'c1') IS NOT NULL AS s76 \gset
+SELECT pg_temp.give('f1', 'student', '76', 30) AS g76 \gset
+SELECT pg_temp.run('76', 'c052/ck-live', 1200) AS ck \gset
+SELECT pg_temp.ckpt_up(:ck, 1, 2500, 300);
+SELECT pg_temp.ok('PASS T44b the live running attempt''s uploading checkpoint: true, ready, ready_at set',
+  public.mark_checkpoint_ready(:ck, 1, 2500));
+SELECT pg_temp.ok('PASS T44c ... it is ready with ready_at now',
+  (SELECT state = 'ready' AND ready_at > now() - interval '5 seconds' FROM public.training_checkpoints
+    WHERE training_id = :ck AND attempt_no = 1 AND step = 2500));
+UPDATE public.training_checkpoints SET ready_at = now() - interval '1 hour' WHERE training_id = :ck AND step = 2500;
+SELECT pg_temp.ok('PASS T44d a repeated ckpt-done of a ready checkpoint of the live attempt: true, ready_at kept',
+  public.mark_checkpoint_ready(:ck, 1, 2500));
+SELECT pg_temp.ok('PASS T44e ... ready_at was not touched',
+  (SELECT ready_at < now() - interval '59 minutes' FROM public.training_checkpoints WHERE training_id = :ck AND step = 2500));
+SELECT pg_temp.ckpt_up(:ck, 1, 5000, 0);
+UPDATE public.training_checkpoints SET state = 'refused' WHERE training_id = :ck AND step = 5000;
+SELECT pg_temp.ok('PASS T44f a refused checkpoint: false, still refused',
+  NOT public.mark_checkpoint_ready(:ck, 1, 5000)
+  AND (SELECT state = 'refused' FROM public.training_checkpoints WHERE training_id = :ck AND step = 5000));
+SELECT pg_temp.ok('PASS T44g an absent checkpoint, an unknown training, another attempt number: false',
+  NOT public.mark_checkpoint_ready(:ck, 1, 7500) AND NOT public.mark_checkpoint_ready(-1, 1, 2500)
+  AND NOT public.mark_checkpoint_ready(:ck, 2, 2500));
+SELECT pg_temp.ckpt_up(:ck, 1, 7500, 0);
+SELECT public.requeue_training(:ck, 1, 'pod_gone', NULL, 2500, 1200);
+SELECT pg_temp.ok('PASS T44h after the attempt was lost (row queued) its held-back checkpoint is refused the ready state',
+  NOT public.mark_checkpoint_ready(:ck, 1, 7500)
+  AND (SELECT state = 'uploading' FROM public.training_checkpoints WHERE training_id = :ck AND step = 7500));
+SELECT pg_temp.attempt(:ck, 60) AS ck2 \gset
+SELECT pg_temp.ok('PASS T44i ... and the next attempt runs: attempt 1''s checkpoint is still refused (another attempt is current)',
+  NOT public.mark_checkpoint_ready(:ck, 1, 7500)
+  AND (SELECT state = 'uploading' FROM public.training_checkpoints WHERE training_id = :ck AND step = 7500));
+SELECT public.finish_training(:ck, 2, 'failed', 'x', NULL);
+SELECT pg_temp.ok('PASS T44j a finished training: false',
+  NOT public.mark_checkpoint_ready(:ck, 2, 2500));
+-- a row being stopped (cancel_requested) while its attempt still runs
+SELECT pg_temp.run('76', 'c052/ck-stop', 600) AS cs \gset
+SELECT pg_temp.ckpt_up(:cs, 1, 2500, 0);
+SELECT o_outcome AS cs_out FROM public.stop_training(:cs, pg_temp.u('76'), pg_temp.u('76'), 'student', NULL) \gset
+SELECT pg_temp.ok('PASS T44k a cancel_requested row (attempt still running): false',
+  :'cs_out' = 'cancel' AND NOT public.mark_checkpoint_ready(:cs, 1, 2500)
+  AND (SELECT status = 'cancel_requested' FROM public.trainings WHERE id = :cs)
+  AND (SELECT state = 'running' FROM public.training_attempts WHERE training_id = :cs AND attempt_no = 1), :'cs_out');
+SELECT public.complete_cancel_training(:cs, 'canceled', NULL);
+-- an attempt that is still starting (no first running write)
+SELECT s.training_id AS cst FROM public.start_training_safe(pg_temp.u('76'), 'u/ds', 'c052/ck-starting', 'act',
+  '{"steps":50000,"save_freq":2500}'::jsonb, 50000, NULL, true, NULL, 1) s \gset
+SELECT o_attempt_no AS cst1 FROM public.claim_training_attempt(:cst, 0) \gset
+SELECT public.attach_training_attempt(:cst, 1, 'runpod_secure', 'pod-cst-1');
+SELECT pg_temp.ckpt_up(:cst, 1, 2500, 0);
+SELECT pg_temp.ok('PASS T44l an attempt that is still starting: false', NOT public.mark_checkpoint_ready(:cst, 1, 2500));
+SELECT public.finish_training(:cst, 1, 'failed', 'x', NULL);
+
+-- the races (spec V3-M1), with a SECOND REAL CONNECTION through dblink: this session holds
+-- one transaction open while the other connection's call runs and waits on the trainings row
+\if :{?race_host}
+\else
+\set race_host db
+\endif
+\if :{?race_password}
+\else
+\set race_password postgres
+\endif
+SELECT NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'dblink') AS dblink_new \gset
+CREATE EXTENSION IF NOT EXISTS dblink WITH SCHEMA extensions;
+SELECT extensions.dblink_connect('c052b', format('host=%s port=5432 dbname=postgres user=postgres password=%s',
+                                                 :'race_host', :'race_password')) AS b_conn \gset
+SELECT pid AS bpid FROM extensions.dblink('c052b', 'SELECT pg_backend_pid()') AS t(pid int) \gset
+SELECT pg_temp.ok('PASS T44m (fixture) a second connection, another backend', :bpid <> pg_backend_pid(), :'b_conn');
+-- R-A: the requeue holds the row; the held-back ckpt-done waits, then is refused
+SELECT pg_temp.run('76', 'c052/race-ckA', 3000) AS ra \gset
+SELECT pg_temp.ckpt_up(:ra, 1, 2500, 600);
+BEGIN;
+SELECT public.requeue_training(:ra, 1, 'heartbeat_lost', NULL, 0, 3000);
+SELECT extensions.dblink_send_query('c052b', format('SELECT public.mark_checkpoint_ready(%s, 1, 2500)', :ra)) AS ra_sent \gset
+SELECT pg_temp.blocked_by_me(:bpid) AS ra_waits \gset
+SELECT state AS ra_seen_by_b FROM public.training_checkpoints WHERE training_id = :ra AND step = 2500 \gset
+COMMIT;
+SELECT r AS ra_result FROM extensions.dblink_get_result('c052b') AS t(r boolean) \gset
+SELECT count(*) AS ra_clear FROM extensions.dblink_get_result('c052b') AS t(r boolean) \gset
+SELECT pg_temp.ok('PASS T44n R-A: with requeue_training''s transaction open, mark_checkpoint_ready on the other connection WAITS',
+  :'ra_waits'::boolean AND :ra_sent = 1);
+SELECT pg_temp.ok('PASS T44o R-A: after the commit it returns false; the checkpoint stays uploading; E50 charged the lost attempt 0',
+  NOT :'ra_result'::boolean
+  AND (SELECT state = 'uploading' FROM public.training_checkpoints WHERE training_id = :ra AND step = 2500)
+  AND (SELECT state = 'lost' FROM public.training_attempts WHERE training_id = :ra AND attempt_no = 1)
+  AND (SELECT status = 'queued' AND train_seconds_used = 0 FROM public.trainings WHERE id = :ra),
+  :'ra_result' || ' ' || (SELECT train_seconds_used::text FROM public.trainings WHERE id = :ra));
+UPDATE public.trainings SET status = 'canceled' WHERE id = :ra;
+-- R-B: the reverse order. mark_checkpoint_ready holds the row; the requeue waits and then
+-- charges per E50 with the checkpoint ready (created 600 s ago, first running write 3 000 s ago)
+SELECT pg_temp.run('76', 'c052/race-ckB', 3000) AS rb \gset
+SELECT pg_temp.ckpt_up(:rb, 1, 2500, 600);
+BEGIN;
+SELECT public.mark_checkpoint_ready(:rb, 1, 2500) AS rb_mark \gset
+SELECT extensions.dblink_send_query('c052b',
+  format('SELECT public.requeue_training(%s, 1, %L, NULL, 2500, 3000)::text', :rb, 'heartbeat_lost')) AS rb_sent \gset
+SELECT pg_temp.blocked_by_me(:bpid) AS rb_waits \gset
+COMMIT;
+SELECT count(*) AS rb_rows FROM extensions.dblink_get_result('c052b') AS t(r text) \gset
+SELECT count(*) AS rb_clear FROM extensions.dblink_get_result('c052b') AS t(r text) \gset
+SELECT pg_temp.ok('PASS T44p R-B: with mark_checkpoint_ready''s transaction open, requeue_training on the other connection WAITS',
+  :'rb_mark'::boolean AND :'rb_waits'::boolean AND :rb_sent = 1);
+SELECT pg_temp.ok('PASS T44q R-B: after the commit the requeue charges per E50 up to the ready checkpoint (2 400 s), resume 2 500',
+  :rb_rows = 1
+  AND (SELECT state = 'ready' FROM public.training_checkpoints WHERE training_id = :rb AND step = 2500)
+  AND (SELECT status = 'queued' AND current_step = 2500 AND train_seconds_used BETWEEN 2395 AND 2405
+         FROM public.trainings WHERE id = :rb),
+  (SELECT train_seconds_used::text FROM public.trainings WHERE id = :rb));
+UPDATE public.trainings SET status = 'canceled' WHERE id = :rb;
+-- R-C: finish_training with the waiver holds the row; the held-back ckpt-done waits, then is refused
+SELECT pg_temp.run('76', 'c052/race-ckC', 900) AS rc \gset
+UPDATE public.training_attempts SET resume_from_step = 0 WHERE training_id = :rc AND attempt_no = 1;
+SELECT pg_temp.ckpt_up(:rc, 1, 2500, 60);
+BEGIN;
+SELECT public.finish_training(:rc, 1, 'failed', 'S19', NULL, NULL, NULL, NULL, 'lerobot_error');
+SELECT extensions.dblink_send_query('c052b', format('SELECT public.mark_checkpoint_ready(%s, 1, 2500)', :rc)) AS rc_sent \gset
+SELECT pg_temp.blocked_by_me(:bpid) AS rc_waits \gset
+COMMIT;
+SELECT r AS rc_result FROM extensions.dblink_get_result('c052b') AS t(r boolean) \gset
+SELECT count(*) AS rc_clear FROM extensions.dblink_get_result('c052b') AS t(r boolean) \gset
+SELECT pg_temp.ok('PASS T44r R-C: the waived finish holds the row, mark_checkpoint_ready waits and returns false; the waiver stands, the checkpoint stays uploading',
+  :'rc_waits'::boolean AND NOT :'rc_result'::boolean
+  AND (SELECT status = 'failed' AND charge_waiver = 'lerobot_error' AND charged_hours = 0 FROM public.trainings WHERE id = :rc)
+  AND (SELECT state = 'uploading' FROM public.training_checkpoints WHERE training_id = :rc AND step = 2500),
+  :'rc_result');
+-- R-D: the reverse order. mark_checkpoint_ready holds the row; the waived finish waits and is refused P0073
+SELECT pg_temp.run('76', 'c052/race-ckD', 900) AS rd \gset
+UPDATE public.training_attempts SET resume_from_step = 0 WHERE training_id = :rd AND attempt_no = 1;
+SELECT pg_temp.ckpt_up(:rd, 1, 2500, 60);
+BEGIN;
+SELECT public.mark_checkpoint_ready(:rd, 1, 2500) AS rd_mark \gset
+SELECT extensions.dblink_send_query('c052b',
+  format('SELECT public.finish_training(%s, 1, %L, %L, NULL, NULL, NULL, NULL, %L)::text', :rd, 'failed', 'S19', 'lerobot_error'))
+  AS rd_sent \gset
+SELECT pg_temp.blocked_by_me(:bpid) AS rd_waits \gset
+COMMIT;
+SELECT count(*) AS rd_rows FROM extensions.dblink_get_result('c052b', false) AS t(r text) \gset
+SELECT COALESCE(extensions.dblink_error_message('c052b'), '') AS rd_err \gset
+SELECT count(*) AS rd_clear FROM extensions.dblink_get_result('c052b', false) AS t(r text) \gset
+SELECT pg_temp.ok('PASS T44s R-D: mark_checkpoint_ready holds the row, the waived finish waits and is refused (charge waiver refused); the row runs on, the checkpoint is ready',
+  :'rd_mark'::boolean AND :'rd_waits'::boolean AND :rd_rows = 0 AND strpos(:'rd_err', 'charge waiver refused') > 0
+  AND (SELECT status = 'running' AND charge_waiver IS NULL AND settled_at IS NULL FROM public.trainings WHERE id = :rd)
+  AND (SELECT state = 'ready' FROM public.training_checkpoints WHERE training_id = :rd AND step = 2500),
+  :'rd_err');
+SELECT public.finish_training(:rd, 1, 'failed', 'S19', NULL);
+SELECT extensions.dblink_disconnect('c052b');
+\if :dblink_new
+DROP EXTENSION dblink;
+\endif
+
+\echo '=== T45 (fix round 2) claim_checkpoint_mirror refuses a training that is not queued, running or succeeded ==='
+SELECT pg_temp.mk_user('77', 'student', 'c1') IS NOT NULL AS s77 \gset
+SELECT pg_temp.give('f1', 'student', '77', 30) AS g77 \gset
+SELECT pg_temp.run('77', 'c052/mir-run', 600) AS mr \gset
+SELECT pg_temp.ckpt(:mr, 1, 10000, 0);
+SELECT pg_temp.ok('PASS T45a a running row''s ready checkpoint is claimed', public.claim_checkpoint_mirror(:mr, 1, 10000, 600, 'c052m'));
+SELECT pg_temp.ok('PASS T45b ... and its lease renews', public.claim_checkpoint_mirror(:mr, 1, 10000, 600, 'c052m'));
+SELECT public.finish_training(:mr, 1, 'failed', 'x', NULL);
+SELECT pg_temp.ok('PASS T45c once the row failed, the renewal answers false (the mirror stops)',
+  NOT public.claim_checkpoint_mirror(:mr, 1, 10000, 600, 'c052m'));
+SELECT pg_temp.run('77', 'c052/mir-queued', 900) AS mq \gset
+SELECT pg_temp.ckpt(:mq, 1, 10000, 300);
+SELECT public.requeue_training(:mq, 1, 'pod_gone', NULL, 10000, 900);
+SELECT pg_temp.ok('PASS T45d a row between attempts (queued) is claimed',
+  (SELECT status = 'queued' FROM public.trainings WHERE id = :mq) AND public.claim_checkpoint_mirror(:mq, 1, 10000, 600, 'c052m'));
+UPDATE public.trainings SET status = 'canceled' WHERE id = :mq;
+SELECT pg_temp.ok('PASS T45e a canceled row is refused', NOT public.claim_checkpoint_mirror(:mq, 1, 10000, 600, 'c052m'));
+SELECT pg_temp.run('77', 'c052/mir-cap', 900) AS mc \gset
+SELECT pg_temp.ckpt(:mc, 1, 10000, 0);
+SELECT public.cap_training_attempt(:mc, 1, 10000, 'capped', 'S22', 900);
+SELECT pg_temp.ok('PASS T45f a capped row publishing (running, attempt ended capped) is claimed',
+  (SELECT t.status = 'running' AND a.state = 'ended' AND a.end_reason = 'capped' FROM public.trainings t
+     JOIN public.training_attempts a ON a.training_id = t.id AND a.attempt_no = 1 WHERE t.id = :mc)
+  AND public.claim_checkpoint_mirror(:mc, 1, 10000, 600, 'c052m'));
+SELECT public.finish_training(:mc, 1, 'succeeded', NULL, NULL, 'S23', 10000, now() + interval '7 days');
+SELECT pg_temp.ok('PASS T45g ... and after it ended succeeded (capped, continuable) its lease still renews',
+  (SELECT status = 'succeeded' AND continuable_until IS NOT NULL FROM public.trainings WHERE id = :mc)
+  AND public.claim_checkpoint_mirror(:mc, 1, 10000, 600, 'c052m'));
+SELECT pg_temp.run('77', 'c052/mir-stop', 600) AS ms \gset
+SELECT pg_temp.ckpt(:ms, 1, 10000, 0);
+UPDATE public.trainings SET status = 'cancel_requested' WHERE id = :ms;
+SELECT pg_temp.ok('PASS T45h a cancel_requested row is refused', NOT public.claim_checkpoint_mirror(:ms, 1, 10000, 600, 'c052m'));
+UPDATE public.trainings SET status = 'canceled' WHERE id = :ms;
+SELECT pg_temp.ok('PASS T45i claim_checkpoint_mirror: one overload, INVOKER, the status condition, EXECUTE for service_role only',
+  (SELECT count(*) = 1 FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname = 'claim_checkpoint_mirror')
+  AND (SELECT NOT prosecdef AND strpos(prosrc, 'AND t.status IN (''queued'',''running'',''succeeded'')') > 0
+         FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname = 'claim_checkpoint_mirror')
+  AND has_function_privilege('service_role', 'public.claim_checkpoint_mirror(integer,integer,integer,integer,text)', 'EXECUTE')
+  AND NOT has_function_privilege('anon', 'public.claim_checkpoint_mirror(integer,integer,integer,integer,text)', 'EXECUTE')
+  AND NOT has_function_privilege('authenticated', 'public.claim_checkpoint_mirror(integer,integer,integer,integer,text)', 'EXECUTE'));
+
+\echo '=== T46 (fix round 2) the waiver needs current_step 0; the honest sequence keeps it 0 ==='
+SELECT pg_temp.mk_user('78', 'student', 'c1') IS NOT NULL AS s78 \gset
+SELECT pg_temp.give('f1', 'student', '78', 15) AS g78 \gset
+-- the honest fresh S19, through the worker's own RPC: /start (resume 0), the first running write with
+-- current_step = resume_step = 0, no step write, then finish lerobot_error
+SELECT s.training_id AS wa FROM public.start_training_safe(pg_temp.u('78'), 'u/ds', 'c052/step-fresh', 'act',
+  '{"steps":50000,"save_freq":2500}'::jsonb, 50000, NULL, true, NULL, 3) s \gset
+SELECT o_worker_token AS wa_tok FROM public.claim_training_attempt(:wa, 0) \gset
+SELECT public.attach_training_attempt(:wa, 1, 'runpod_secure', 'pod-wa-1');
+UPDATE public.training_attempts SET resume_from_step = 0 WHERE training_id = :wa AND attempt_no = 1;
+SELECT public.update_training_progress(:wa, :'wa_tok'::uuid, 'running', 0);
+SELECT pg_temp.ok('PASS T46a (fixture) after the first running write the row runs at current_step 0',
+  (SELECT status = 'running' AND current_step = 0 FROM public.trainings WHERE id = :wa));
+SELECT public.finish_training(:wa, 1, 'failed', 'S19', NULL, NULL, NULL, NULL, 'lerobot_error');
+SELECT pg_temp.ok('PASS T46b the honest fresh S19 keeps the waiver',
+  (SELECT status = 'failed' AND charge_waiver = 'lerobot_error' AND charged_hours = 0 FROM public.trainings WHERE id = :wa));
+-- the same with one reported step
+SELECT s.training_id AS wb FROM public.start_training_safe(pg_temp.u('78'), 'u/ds', 'c052/step-one', 'act',
+  '{"steps":50000,"save_freq":2500}'::jsonb, 50000, NULL, true, NULL, 3) s \gset
+SELECT o_worker_token AS wb_tok FROM public.claim_training_attempt(:wb, 0) \gset
+SELECT public.attach_training_attempt(:wb, 1, 'runpod_secure', 'pod-wb-1');
+UPDATE public.training_attempts SET resume_from_step = 0 WHERE training_id = :wb AND attempt_no = 1;
+SELECT public.update_training_progress(:wb, :'wb_tok'::uuid, 'running', 0);
+SELECT public.update_training_progress(:wb, :'wb_tok'::uuid, NULL, 100, NULL, 3.5);
+SELECT pg_temp.err(format($q$SELECT public.finish_training(%s, 1, 'failed', 'S19', NULL, NULL, NULL, NULL, 'lerobot_error')$q$, :wb),
+  'P0073', 'PASS T46c a waiver after a reported step (current_step 100) answers P0073');
+SELECT public.finish_training(:wb, 1, 'failed', 'S19', NULL);
+-- a lost attempt 1 that reported steps but saved nothing, then a fresh attempt 2 that crashes before a step
+SELECT s.training_id AS wc FROM public.start_training_safe(pg_temp.u('78'), 'u/ds', 'c052/step-lost', 'act',
+  '{"steps":50000,"save_freq":2500}'::jsonb, 50000, NULL, true, NULL, 3) s \gset
+SELECT o_worker_token AS wc_tok FROM public.claim_training_attempt(:wc, 0) \gset
+SELECT public.attach_training_attempt(:wc, 1, 'runpod_secure', 'pod-wc-1');
+UPDATE public.training_attempts SET resume_from_step = 0 WHERE training_id = :wc AND attempt_no = 1;
+SELECT public.update_training_progress(:wc, :'wc_tok'::uuid, 'running', 0);
+SELECT public.update_training_progress(:wc, :'wc_tok'::uuid, NULL, 700, NULL, 2.5);
+SELECT public.requeue_training(:wc, 1, 'pod_gone', NULL, 0, 600);
+SELECT pg_temp.ok('PASS T46d the requeue (nothing ready, resume 0) puts current_step back to 0 and counts no second',
+  (SELECT status = 'queued' AND current_step = 0 AND train_seconds_used = 0 FROM public.trainings WHERE id = :wc));
+SELECT o_worker_token AS wc_tok2 FROM public.claim_training_attempt(:wc, 1) \gset
+SELECT public.attach_training_attempt(:wc, 2, 'runpod_secure', 'pod-wc-2');
+UPDATE public.training_attempts SET resume_from_step = 0 WHERE training_id = :wc AND attempt_no = 2;
+SELECT public.update_training_progress(:wc, :'wc_tok2'::uuid, 'running', 0);
+SELECT public.finish_training(:wc, 2, 'failed', 'S19', NULL, NULL, NULL, NULL, 'lerobot_error');
+SELECT pg_temp.ok('PASS T46e ... attempt 2''s S19 keeps the waiver',
+  (SELECT status = 'failed' AND charge_waiver = 'lerobot_error' AND charged_hours = 0 AND current_step = 0
+     FROM public.trainings WHERE id = :wc));
+-- and if a queued row still showed a step, the first running write itself brings it back to the resume step
+SELECT s.training_id AS wd FROM public.start_training_safe(pg_temp.u('78'), 'u/ds', 'c052/step-down', 'act',
+  '{"steps":50000,"save_freq":2500}'::jsonb, 50000, NULL, true, NULL, 3) s \gset
+SELECT o_worker_token AS wd_tok FROM public.claim_training_attempt(:wd, 0) \gset
+SELECT public.attach_training_attempt(:wd, 1, 'runpod_secure', 'pod-wd-1');
+UPDATE public.trainings SET current_step = 700 WHERE id = :wd;
+SELECT public.update_training_progress(:wd, :'wd_tok'::uuid, 'running', 0);
+SELECT pg_temp.ok('PASS T46f the first running write with current_step = resume_step = 0 lowers a shown 700 to 0',
+  (SELECT status = 'running' AND current_step = 0 FROM public.trainings WHERE id = :wd));
+SELECT public.finish_training(:wd, 1, 'failed', 'x', NULL);
 
 \echo '=== T29 / T30 the lock order of I9 (structure; the two-session races are the header''s manual steps) ==='
 SELECT pg_temp.ok('PASS T29a the two closes run AFTER DELETE, the delete settlement BEFORE DELETE (row triggers)',

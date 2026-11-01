@@ -32,6 +32,10 @@
 --     adjust_workgroup_credits raise P0069; get_remaining_credits and
 --     get_teacher_credit_summary keep their exact return types and read the
 --     ledger.
+--   * mark_checkpoint_ready (new, SECURITY INVOKER, service_role only) makes a
+--     checkpoint ready only for the live running attempt, under the trainings
+--     row lock; claim_checkpoint_mirror (049's body + one condition) refuses a
+--     training that is not queued, running or succeeded (fix round 2).
 --   * finish_training grants the OQ-2 waiver only on proof of a fresh first
 --     attempt (P0073 otherwise), and update_training_progress (049's body with
 --     ONE line changed, same signature and grants) restarts the stall clock
@@ -1050,7 +1054,8 @@ $$;
 -- 2026-11-01): P0073 before any write unless this attempt's resume_from_step is 0
 -- (written only by the API's POST /start: NULL means a host that skipped it), the
 -- attempt is 'running', the row is no continuation, it counted no trained second
--- yet and it has no ready checkpoint. A row that would not be finished anyway
+-- yet, it reports no step (current_step 0; fix round 2) and it has no ready
+-- checkpoint. A row that would not be finished anyway
 -- (not managed, another attempt, terminal) keeps its P0049.
 DROP FUNCTION public.finish_training(INT, INT, TEXT, TEXT, TEXT, TEXT, INT, TIMESTAMPTZ);
 CREATE OR REPLACE FUNCTION public.finish_training(
@@ -1079,6 +1084,7 @@ BEGIN
             AND v_a.state IS NOT DISTINCT FROM 'running'
             AND v_t.continued_from IS NULL
             AND v_t.train_seconds_used IS NOT DISTINCT FROM 0
+            AND v_t.current_step IS NOT DISTINCT FROM 0
             AND NOT EXISTS (SELECT 1 FROM public.training_checkpoints c
                              WHERE c.training_id = p_training_id AND c.state = 'ready')) THEN
       RAISE EXCEPTION 'charge waiver refused' USING ERRCODE = 'P0073';
@@ -1363,6 +1369,82 @@ BEGIN
 END;
 $$;
 
+-- 5b. the checkpoint writers (fix round 2, 2026-11-01) ------------------------------
+-- mark_checkpoint_ready (V3-M1) is the ONE writer of a checkpoint's state 'ready'.
+-- ckpt-done verifies the R2 objects outside any lock; this call then decides
+-- under the trainings row lock, which finish_training, requeue_training,
+-- cap_training_attempt, end_training_attempt, stop_training,
+-- cancel_request_training, complete_cancel_training and the claim/attach/release
+-- functions all take FIRST (FOR UPDATE), so the order is always trainings row,
+-- then attempt or checkpoint rows. Before it, a host could hold ckpt-done back
+-- until its attempt had ended (E50 then charged that lost attempt 0, nothing
+-- being ready), let the checkpoints turn ready afterwards and have the next
+-- attempt resume from them; the same race beat the waiver's „no ready
+-- checkpoint" rule.
+-- TRUE: this attempt's checkpoint is ready after the call, set now ('uploading'
+-- -> 'ready', ready_at = now()) or already ready (a repeated ckpt-done; ready_at
+-- kept). FALSE, nothing changed: no row, not managed, status not 'running', another
+-- attempt is current, this attempt is not 'running', or the checkpoint is absent,
+-- refused or deleted. Only 'running' counts as active: an attempt is 'running'
+-- only while its row is (the first running write sets both in one transaction),
+-- 'queued' is between attempts and 'cancel_requested' is a row being stopped.
+CREATE OR REPLACE FUNCTION public.mark_checkpoint_ready(p_training_id INT, p_attempt INT, p_step INT)
+RETURNS BOOLEAN LANGUAGE plpgsql SECURITY INVOKER SET search_path = public AS $$
+DECLARE
+  v_t     public.trainings%ROWTYPE;
+  v_state TEXT;
+  v_rows  INT;
+BEGIN
+  SELECT * INTO v_t FROM public.trainings t WHERE t.id = p_training_id FOR UPDATE;
+  IF NOT FOUND OR NOT v_t.managed OR v_t.status <> 'running' OR v_t.current_attempt IS DISTINCT FROM p_attempt THEN
+    RETURN false;
+  END IF;
+  SELECT a.state INTO v_state FROM public.training_attempts a
+   WHERE a.training_id = p_training_id AND a.attempt_no = p_attempt;
+  IF v_state IS DISTINCT FROM 'running' THEN
+    RETURN false;
+  END IF;
+  UPDATE public.training_checkpoints c
+     SET state = 'ready', ready_at = now()
+   WHERE c.training_id = p_training_id AND c.attempt_no = p_attempt AND c.step = p_step
+     AND c.state = 'uploading';
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  IF v_rows = 1 THEN
+    RETURN true;
+  END IF;
+  RETURN EXISTS (SELECT 1 FROM public.training_checkpoints c
+                  WHERE c.training_id = p_training_id AND c.attempt_no = p_attempt AND c.step = p_step
+                    AND c.state = 'ready');
+END;
+$$;
+
+-- claim_checkpoint_mirror (049 body, same signature and grants): ONE added
+-- condition, the training is queued, running or succeeded. That keeps every
+-- honest mirror: one scheduled while the row runs (ckpt-done, the sweep's
+-- schedule_due_mirrors reads queued/running rows), one between attempts
+-- (queued), one whose lease renews while the row publishes (running) or after it
+-- ended succeeded (capped, continuable). A failed or canceled row, and a
+-- cancel_requested one (it only ever ends canceled or failed, and stop_training
+-- sets it only when nothing is ready), is refused, so its lease renewal fails and
+-- the mirror stops.
+CREATE OR REPLACE FUNCTION public.claim_checkpoint_mirror(
+  p_training_id INT, p_attempt INT, p_step INT, p_lease_s INT, p_owner TEXT)
+RETURNS BOOLEAN LANGUAGE plpgsql SECURITY INVOKER SET search_path = public AS $$
+DECLARE v_rows INT;
+BEGIN
+  UPDATE public.training_checkpoints c
+     SET mirror_claimed_at = now(), mirror_owner = p_owner
+   WHERE c.training_id = p_training_id AND c.attempt_no = p_attempt AND c.step = p_step
+     AND c.state = 'ready' AND c.mirrored_at IS NULL
+     AND EXISTS (SELECT 1 FROM public.trainings t WHERE t.id = c.training_id
+                  AND t.status IN ('queued','running','succeeded'))
+     AND (c.mirror_claimed_at IS NULL OR c.mirror_owner = p_owner
+          OR c.mirror_claimed_at < now() - make_interval(secs => p_lease_s));
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  RETURN v_rows = 1;
+END;
+$$;
+
 -- 6. trigger functions and triggers (spec §5) -----------------------------------
 -- I8: the credit columns change only inside the definer functions. Runs FIRST
 -- (name order) and must stay SECURITY INVOKER (044's lesson: a definer sees its owner).
@@ -1514,7 +1596,7 @@ DECLARE r RECORD;
     'credit_history','credit_erase_reason','record_training_refusal','credit_reconcile','credit_teacher_summary',
     'get_remaining_credits','get_teacher_credit_summary','adjust_student_credits','adjust_workgroup_credits',
     'cap_training_attempt','requeue_training','finish_training','cancel_request_training','complete_cancel_training',
-    'claim_training_publish'];
+    'claim_training_publish','mark_checkpoint_ready','claim_checkpoint_mirror'];
 BEGIN
   FOR r IN SELECT p.oid::regprocedure AS sig, p.proname FROM pg_proc p
             WHERE p.pronamespace = 'public'::regnamespace AND (p.proname = ANY (internals) OR p.proname = ANY (callables)) LOOP
@@ -1542,9 +1624,10 @@ DECLARE
     'credit_history','credit_erase_reason','record_training_refusal','credit_reconcile','credit_teacher_summary',
     'get_remaining_credits','get_teacher_credit_summary','adjust_student_credits','adjust_workgroup_credits',
     'cap_training_attempt','requeue_training','finish_training','cancel_request_training','complete_cancel_training',
-    'claim_training_publish'];
+    'claim_training_publish','mark_checkpoint_ready','claim_checkpoint_mirror'];
   invokers TEXT[] := ARRAY['stop_training','cap_training_attempt','requeue_training','finish_training',
-    'cancel_request_training','complete_cancel_training','claim_training_publish','trainings_guard_credit_columns'];
+    'cancel_request_training','complete_cancel_training','claim_training_publish','trainings_guard_credit_columns',
+    'mark_checkpoint_ready','claim_checkpoint_mirror'];
 BEGIN
   -- the four tables: request roles nothing, service_role SELECT only, not published; their sequences: nobody
   FOREACH t IN ARRAY tabs LOOP
@@ -1647,6 +1730,16 @@ BEGIN
   END LOOP;
   IF has_function_privilege('public', 'public.update_training_progress(integer,uuid,text,integer,integer,real,text,text)', 'EXECUTE') THEN
     RAISE EXCEPTION '052: PUBLIC executes update_training_progress';
+  END IF;
+  -- fix round 2: the checkpoint writers and the sixth waiver condition
+  IF NOT EXISTS (SELECT 1 FROM pg_proc pr WHERE pr.pronamespace = 'public'::regnamespace
+                   AND pr.proname = 'claim_checkpoint_mirror'
+                   AND strpos(pr.prosrc, 'AND t.status IN (''queued'',''running'',''succeeded'')') > 0) THEN
+    RAISE EXCEPTION '052: claim_checkpoint_mirror does not refuse a failed or canceled training';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_proc pr WHERE pr.pronamespace = 'public'::regnamespace
+                   AND pr.proname = 'finish_training' AND strpos(pr.prosrc, 'v_t.current_step IS NOT DISTINCT FROM 0') > 0) THEN
+    RAISE EXCEPTION '052: finish_training lacks the waiver''s step condition';
   END IF;
   -- finish_training refuses the waiver without proof (P0073)
   IF NOT EXISTS (SELECT 1 FROM pg_proc pr WHERE pr.pronamespace = 'public'::regnamespace

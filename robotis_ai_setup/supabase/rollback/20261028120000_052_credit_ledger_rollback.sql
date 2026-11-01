@@ -4,8 +4,8 @@
 --   2. Drops the seven triggers on trainings/users/workgroups (the credit-column
 --      guard, the two settlements, the two closes, the two re-parent triggers)
 --      and every 052 function: stop_training, every credit_* except
---      credit_ledger_immutable, record_training_refusal, every _credit_* and the
---      trigger functions.
+--      credit_ledger_immutable, record_training_refusal, mark_checkpoint_ready,
+--      every _credit_* and the trigger functions.
 --   3. Drops the four re-created signatures (start_training_safe 10 arguments,
 --      start_continuation_safe 4, cancel_request_training 3, finish_training 9)
 --      and restores VERBATIM, each with its old grants (REVOKE ALL FROM PUBLIC,
@@ -14,7 +14,8 @@
 --      claim_training_publish, cap_training_attempt, requeue_training,
 --      finish_training (050), complete_cancel_training (049),
 --      get_remaining_credits, get_teacher_credit_summary, adjust_student_credits,
---      adjust_workgroup_credits (the baseline's last bodies), and
+--      adjust_workgroup_credits (the baseline's last bodies),
+--      claim_checkpoint_mirror (049, its service_role grant), and
 --      update_training_progress (049, same signature) with 049's own grants
 --      (PUBLIC nothing, anon and authenticated EXECUTE). Each body is the last
 --      definition in apply order, copied byte for byte (compared by
@@ -28,8 +29,9 @@
 --      and training_checkpoints.config_complaints; nothing reads them afterwards.
 --   6. A self-check: one overload each of the five, service_role can INSERT
 --      trainings, the ledger keeps its triggers, request roles hold nothing on the
---      four tables, no 052 function survived, and update_training_progress is
---      049's body (the md5 of its prosrc) that anon and authenticated execute.
+--      four tables, no 052 function survived (mark_checkpoint_ready included),
+--      claim_checkpoint_mirror is 049's body (the md5 of its prosrc) and
+--      update_training_progress is 049's body that anon and authenticated execute.
 --
 -- CONSEQUENCE: the old derived credits come back from users.training_credits /
 -- workgroups.shared_credits as they stand at the rollback, and every training
@@ -93,7 +95,7 @@ BEGIN
                    OR (p.proname LIKE 'credit\_%' AND p.proname <> 'credit_ledger_immutable')
                    OR p.proname IN ('stop_training','record_training_refusal','trainings_guard_credit_columns',
                                     'trainings_credit_settle','trainings_credit_settle_delete','users_credit_close',
-                                    'workgroups_credit_close')) LOOP
+                                    'workgroups_credit_close','mark_checkpoint_ready')) LOOP
     EXECUTE 'DROP FUNCTION ' || r.sig;
   END LOOP;
 END $$;
@@ -718,6 +720,26 @@ $$;
 REVOKE ALL ON FUNCTION public.adjust_workgroup_credits(UUID, UUID, INTEGER) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.adjust_workgroup_credits(UUID, UUID, INTEGER) TO service_role;
 
+-- 3a. claim_checkpoint_mirror: 049's body VERBATIM (052 added one condition, the
+-- training's status), with 049's grants.
+CREATE OR REPLACE FUNCTION public.claim_checkpoint_mirror(
+  p_training_id INT, p_attempt INT, p_step INT, p_lease_s INT, p_owner TEXT)
+RETURNS BOOLEAN LANGUAGE plpgsql SECURITY INVOKER SET search_path = public AS $$
+DECLARE v_rows INT;
+BEGIN
+  UPDATE public.training_checkpoints c
+     SET mirror_claimed_at = now(), mirror_owner = p_owner
+   WHERE c.training_id = p_training_id AND c.attempt_no = p_attempt AND c.step = p_step
+     AND c.state = 'ready' AND c.mirrored_at IS NULL
+     AND (c.mirror_claimed_at IS NULL OR c.mirror_owner = p_owner
+          OR c.mirror_claimed_at < now() - make_interval(secs => p_lease_s));
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  RETURN v_rows = 1;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.claim_checkpoint_mirror(INT, INT, INT, INT, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.claim_checkpoint_mirror(INT, INT, INT, INT, TEXT) TO service_role;
+
 -- 3b. update_training_progress: 049's body VERBATIM (052 changed one line of it, the
 -- stall clock), with 049's grants: PUBLIC nothing, anon and authenticated EXECUTE.
 CREATE OR REPLACE FUNCTION public.update_training_progress(
@@ -898,7 +920,7 @@ BEGIN
               AND (proname LIKE '\_credit\_%' OR (proname LIKE 'credit\_%' AND proname <> 'credit_ledger_immutable')
                    OR proname IN ('stop_training','record_training_refusal','trainings_guard_credit_columns',
                                   'trainings_credit_settle','trainings_credit_settle_delete','users_credit_close',
-                                  'workgroups_credit_close'))) THEN
+                                  'workgroups_credit_close','mark_checkpoint_ready'))) THEN
     RAISE EXCEPTION '052 rollback: a 052 function survived';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_trigger WHERE NOT tgisinternal AND tgname IN
@@ -912,6 +934,7 @@ BEGIN
                            'public.cancel_request_training(integer,uuid)',
                            'public.finish_training(integer,integer,text,text,text,text,integer,timestamp with time zone)',
                            'public.complete_cancel_training(integer,text,text)',
+                           'public.claim_checkpoint_mirror(integer,integer,integer,integer,text)',
                            'public.claim_training_publish(integer,integer,integer,text)',
                            'public.cap_training_attempt(integer,integer,integer,text,text,integer)',
                            'public.requeue_training(integer,integer,text,text,integer,integer)',
@@ -925,6 +948,16 @@ BEGIN
       RAISE EXCEPTION '052 rollback: service_role cannot execute %', f;
     END IF;
   END LOOP;
+  -- claim_checkpoint_mirror is 049's body byte for byte (md5 of 049's prosrc), one overload
+  SELECT count(*) INTO n FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname = 'claim_checkpoint_mirror';
+  IF n <> 1 THEN RAISE EXCEPTION '052 rollback: claim_checkpoint_mirror has % overloads', n; END IF;
+  IF (SELECT md5(prosrc) FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname = 'claim_checkpoint_mirror')
+     <> 'abde11806259a987b58b00cf6a0b0bfc' THEN
+    RAISE EXCEPTION '052 rollback: claim_checkpoint_mirror is not 049''s body';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname = 'mark_checkpoint_ready') THEN
+    RAISE EXCEPTION '052 rollback: mark_checkpoint_ready survived';
+  END IF;
   -- update_training_progress is 049's body byte for byte (md5 of 049's prosrc) and the worker's roles execute it
   SELECT count(*) INTO n FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname = 'update_training_progress';
   IF n <> 1 THEN RAISE EXCEPTION '052 rollback: update_training_progress has % overloads', n; END IF;

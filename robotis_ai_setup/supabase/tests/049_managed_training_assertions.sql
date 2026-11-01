@@ -37,7 +37,9 @@
 -- above. Measured after 052 (2026-10-28, a local stack with every migration
 -- through 051 plus 052): 2 PASS, 25 FAIL and 237 ERROR.
 -- Re-measured 2026-11-01 with the fix round's 052 (finish_training's P0073, the
--- stall clock of update_training_progress), on a fresh reset: unchanged.
+-- stall clock of update_training_progress), on a fresh reset: unchanged; and again
+-- with fix round 2's 052 (mark_checkpoint_ready, the mirror claim's status, the
+-- waiver's step condition): unchanged.
 --
 -- Expected: 69 PASS, 0 FAIL (T1..T36; T5, T8, T9, T18, T24, T27..T30 and T32..T36 in
 -- lettered parts). The rollback is exercised separately

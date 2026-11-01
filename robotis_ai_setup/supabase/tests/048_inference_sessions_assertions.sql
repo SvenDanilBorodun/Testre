@@ -13,6 +13,8 @@
 -- through 051 plus 052): 31 PASS, 14 FAIL (T4b, T4c, T5a, T6b, T7b, T8a, T9a, T9b,
 -- T10a, T11a, T11b, T15b, T24, T26) and 10 ERROR (the deliberate T1c one, the
 -- refused INSERT, and the session RPCs that then miss their training).
+-- Re-measured 2026-11-01 with the fix round's 052 (finish_training's P0073, the
+-- stall clock of update_training_progress), on a fresh reset: unchanged.
 --
 -- Expected: 58 PASS lines, 0 FAIL, and ONE deliberate `ERROR: permission denied for table
 -- inference_sessions` (T1c). Function privileges are asserted with has_function_privilege, never by

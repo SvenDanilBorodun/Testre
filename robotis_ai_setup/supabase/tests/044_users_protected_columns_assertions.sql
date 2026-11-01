@@ -20,6 +20,8 @@
 -- credit ledger (052)"). Run it on a stack migrated only up to 051 at most.
 -- Measured after 052 (2026-10-28, a local stack with every migration through 051
 -- plus 052): 15 PASS, 1 FAIL (T15) and 0 ERROR.
+-- Re-measured 2026-11-01 with the fix round's 052 (finish_training's P0073, the
+-- stall clock of update_training_progress), on a fresh reset: unchanged.
 --
 -- Expected: 16 PASS, 0 FAIL/ERROR (T1..T15, T2 with a/b halves).
 \set ON_ERROR_STOP off

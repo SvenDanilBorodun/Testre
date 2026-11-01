@@ -25,6 +25,8 @@
 -- Measured after 052 (2026-10-28, a local stack with every migration through 051
 -- plus 052): 7 PASS, 2 FAIL (T2, T7) and 4 ERROR (the refused INSERT, the
 -- worker-token update of the missing row, two statements of the aborted block).
+-- Re-measured 2026-11-01 with the fix round's 052 (finish_training's P0073, the
+-- stall clock of update_training_progress), on a fresh reset: unchanged.
 --
 -- Expected: 10 PASS, 0 FAIL (T1..T10). Against a database WITHOUT 047, T1, T3,
 -- T4, T5 and T6 fail (the token is readable there).

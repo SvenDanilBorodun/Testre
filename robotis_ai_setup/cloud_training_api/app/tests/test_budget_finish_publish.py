@@ -59,6 +59,18 @@ class GiveUpPublish(Base):
         self.assertEqual((r["status"], r["error_message"]), ("failed", T.S4))
         self.assertEqual(self.published, [])
 
+    async def test_two_unwaivable_s19_claims_read_s4(self):
+        # 052 fix round 2 (owner): an S19 claim that could not lead to the waiver still says
+        # LeRobot failed before any step — two of them point at the dataset
+        for reasons in (["host_unfit:lerobot_error_not_fresh", "pod_gone", "host_unfit:lerobot_error_not_fresh"],
+                        ["host_unfit:lerobot_error_waiver_refused", "host_unfit:lerobot_error_not_fresh"],
+                        ["host_unfit:lerobot_error_waiver_refused"] * 2):
+            with self.subTest(reasons=reasons):
+                row = self.attempts_out(reasons=reasons)
+                await D.dispatch_tick()
+                self.assertEqual(self.db.row(row["id"])["error_message"], T.S4)
+        self.assertEqual(T.attempts_out_message(["host_unfit:lerobot_error_not_fresh", "pod_gone"]), T.S37)
+
     async def test_without_a_checkpoint_host_losses_read_s37(self):
         for reasons in ([], ["pod_gone", "heartbeat_lost", "start_timeout", "stalled"],
                         ["checkpoint_overdue"] * 4, ["host_unfit:time_cap_early", "host_unfit:download"]):
@@ -70,7 +82,8 @@ class GiveUpPublish(Base):
     def test_the_dataset_class_rule(self):
         self.assertEqual(T.DATASET_CLASS_LOSSES, frozenset({
             "stalled", "host_unfit:lerobot_crash", "host_unfit:resume_crash",
-            "host_unfit:lerobot_error_unconfirmed", "host_unfit:content_unconfirmed"}))
+            "host_unfit:lerobot_error_unconfirmed", "host_unfit:content_unconfirmed",
+            "host_unfit:lerobot_error_not_fresh", "host_unfit:lerobot_error_waiver_refused"}))
         self.assertEqual(T.attempts_out_message(["stalled", "stalled"]), T.S4)
         self.assertEqual(T.attempts_out_message(["stalled", None, 7]), T.S37)
         self.assertEqual(T.attempts_out_message(None), T.S37)

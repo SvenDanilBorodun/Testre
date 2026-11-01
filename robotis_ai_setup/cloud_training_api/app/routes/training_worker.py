@@ -89,14 +89,16 @@ def _waiver_blockers(row, att, ready) -> list:
     only for a provable fresh start, decided from the database at finish time and never
     from host input: the attempt ran ``/start`` from step 0 (``resume_from_step`` 0; NULL
     means ``/start`` never ran), it is ``running`` (it made its first running write), the
-    row is no continuation, no training second was counted yet and the training has no
-    ready checkpoint. ``row`` / ``att`` are this request's own database reads (_authorize),
+    row is no continuation, no training second was counted yet, the training has no
+    ready checkpoint and its reported step (``current_step``) is still 0. ``row`` / ``att`` are this request's own database reads (_authorize),
     ``ready`` the training's ready checkpoints read here. Empty = no blocker (the same
     conditions finish_training checks itself, P0073)."""
     why = []
     if att.get("resume_from_step") is None:
         why.append("no_start")
     elif int(att.get("resume_from_step") or 0) != 0:
+        # defence in depth: _finish turns a lerobot_error on a resume (resume_from_step > 0)
+        # into a resume_crash BEFORE it asks this function, so it is unreachable from there
         why.append("resumed")
     if att.get("state") != "running":
         why.append("not_running")
@@ -106,6 +108,11 @@ def _waiver_blockers(row, att, ready) -> list:
         why.append("trained_seconds")
     if ready:
         why.append("ready_checkpoint")
+    if int(row.get("current_step") or 0) != 0:
+        # 052 fix round 2: an honest worker sends lerobot_error only when no new step was
+        # logged (training_handler: `progressed` → lerobot_crash), and a fresh attempt's
+        # first running write reports step 0
+        why.append("stepped")
     return why
 
 
@@ -560,8 +567,18 @@ async def _ckpt_done(row, att, body):
     verdict, reason, content = await _verify_checkpoint(row, ckpt)
     now = D._now()
     if verdict == "ready":
-        await asyncio.to_thread(_set_ckpt_state, tid, n, step, {"state": "ready", "ready_at": D._iso(now)},
-                                ("uploading",))
+        # V3-M1 (052 fix round 2): the verification takes seconds to minutes, so the
+        # authorisation above may be stale by now. mark_checkpoint_ready decides under the
+        # training's row lock: ready only while the row is active, this attempt is current
+        # and running and the checkpoint still pending; false = the attempt ended meanwhile
+        # (requeued, finished, waived, cancelled) or another call got there first, and
+        # nothing below runs. 409 not_uploading makes the worker skip this checkpoint and
+        # go on (its table never stops on it); an ended attempt is fenced by its next call.
+        marked = await D.arpc("mark_checkpoint_ready", {"p_training_id": tid, "p_attempt": n, "p_step": step})
+        if marked is not True:
+            logger.info("training %s attempt %s: checkpoint %s verified, but the attempt is no longer current "
+                        "and running (or the checkpoint no longer pending): not marked ready", tid, n, step)
+            return _err(409, T.S15, "not_uploading")
         try:
             await asyncio.to_thread(D.apply_retention, tid, now)
         except Exception as exc:  # noqa: BLE001 - the janitor catches up

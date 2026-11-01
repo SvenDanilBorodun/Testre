@@ -591,6 +591,10 @@ async def recover_publish(row, attempt, now: float) -> str:
 # ---------------------------------------------------------------------------
 
 
+# A checkpoint is mirrored only while its training is active or succeeded.
+MIRROR_ROW_STATUSES = ("queued", "running", "succeeded")
+
+
 def mirror_sync(tid: int, attempt_no: int, step: int) -> str:
     lease = _Lease(_mirror_claim(tid, attempt_no, step))
     if not lease.acquire():
@@ -602,6 +606,11 @@ def mirror_sync(tid: int, attempt_no: int, step: int) -> str:
         ckpts = [c for c in D.read_checkpoints([tid], ["ready"])
                  if c["attempt_no"] == int(attempt_no) and c["step"] == int(step)]
         if not row or not ckpts or ckpts[0].get("mirrored_at"):
+            return "gone"
+        if row.get("status") not in MIRROR_ROW_STATUSES:
+            # 052 fix round 2: a failed, canceled or stopping training publishes nothing
+            # (claim_checkpoint_mirror refuses it in SQL too)
+            logger.info("training %s: mirror of step %s skipped, the row is %s", tid, step, row.get("status"))
             return "gone"
         ckpt = ckpts[0]
         try:

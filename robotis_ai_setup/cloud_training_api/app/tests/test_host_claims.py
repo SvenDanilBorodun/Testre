@@ -136,7 +136,8 @@ class Claims(WorkerBase):
         self.assertEqual(route.HOST_CLAIM_LIMIT, 2)
         self.assertEqual(route.MARK_LEROBOT_ERROR, "host_unfit:lerobot_error_unconfirmed")
         self.assertEqual(route.MARK_CONTENT, "host_unfit:content_unconfirmed")
-        for marker in (route.MARK_LEROBOT_ERROR, route.MARK_CONTENT):
+        for marker in (route.MARK_LEROBOT_ERROR, route.MARK_CONTENT, route.MARK_LEROBOT_ERROR_NOT_FRESH,
+                       route.MARK_LEROBOT_ERROR_WAIVER_REFUSED):
             self.assertIn(marker, T.DATASET_CLASS_LOSSES)
 
 

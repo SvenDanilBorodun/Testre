@@ -8,7 +8,8 @@ answer P0002 / P0066 / P0067 / an empty result and write nothing (proven through
 PostgREST on the review-2 build, spec §12.1). A database without 052 answers PGRST202.
 An RPC the service role cannot execute (42501, „permission denied" — an INVOKER caller
 of a revoked internal helper) used to read as „exists" and passed the deploy gate; the
-probe now treats it like a missing function. The 23 / 23 / 55 totals are pinned in
+probe now treats it like a missing function. 052's fix round 2 adds ``mark_checkpoint_ready``
+(V3-M1), probed with training 0 (false, nothing written). The 23 / 23 / 56 totals are pinned in
 ``test_schema_probe_040.py``.
 """
 
@@ -139,6 +140,17 @@ class TestSchemaProbeKnows052(unittest.TestCase):
         for name in ("credit_assign", "credit_reclaim", "credit_set_member_limit"):
             self.assertEqual(r[name]["p_teacher_id"], _DUMMY, name)  # a dummy teacher: P0066
 
+    def test_mark_checkpoint_ready_is_probed_and_writes_nothing(self):
+        # V3-M1: training 0 never exists, so the call answers false and writes nothing.
+        # The contract is (p_training_id INT, p_attempt INT, p_step INT) RETURNS BOOLEAN;
+        # once 052 defines it, the probe must name exactly its parameters.
+        self.assertEqual(self.rpcs["mark_checkpoint_ready"], {"p_training_id": 0, "p_attempt": 1, "p_step": 1})
+        if re.search(r"CREATE OR REPLACE FUNCTION public\.mark_checkpoint_ready\(", self.sql):
+            self.assertEqual(sorted(self.rpcs["mark_checkpoint_ready"]),
+                             sorted(_params(self.sql, "mark_checkpoint_ready")))
+            self.assertRegex(self.sql, r"FUNCTION public\.mark_checkpoint_ready\(p_training_id INT, p_attempt INT, "
+                                       r"p_step INT\)\s*RETURNS BOOLEAN")
+
     def test_every_probed_rpc_is_a_callable_052_function_or_older(self):
         # a function 052 defines must not be one of its internal helpers (revoked from the
         # service role: its probe would answer 42501 and stop the boot by design)
@@ -234,7 +246,8 @@ class TestFortyTwoFiveOhOneFailsTheBoot(unittest.TestCase):
 
     def test_a_healthy_database_boots_and_every_rpc_is_asked(self):
         calls = self._run({})
-        self.assertEqual(len(calls), 55)
+        self.assertEqual(len(calls), 56)
+        self.assertIn("mark_checkpoint_ready", calls)
         for name in NEW_RPCS + WIDENED_RPCS:
             self.assertIn(name, calls)
 
@@ -255,7 +268,7 @@ class TestFortyTwoFiveOhOneFailsTheBoot(unittest.TestCase):
                 "credit_assign": self._Err("{'code': 'P0066'}"),
                 "stop_training": self._Err("{'code': 'P0002'}"),
                 "finish_training": self._Err("{'code': 'P0049'}")}
-        self.assertEqual(len(self._run(errs)), 55)
+        self.assertEqual(len(self._run(errs)), 56)
 
 
 if __name__ == "__main__":

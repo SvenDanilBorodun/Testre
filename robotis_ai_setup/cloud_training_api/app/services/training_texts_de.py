@@ -204,6 +204,9 @@ CHECKPOINT_OVERDUE = "checkpoint_overdue"
 DATASET_CLASS_LOSSES = frozenset({
     "stalled", "host_unfit:lerobot_crash", "host_unfit:resume_crash",
     "host_unfit:lerobot_error_unconfirmed", "host_unfit:content_unconfirmed",
+    # 052 fix round 2 (owner): an S19 claim that could not lead to the waiver is still a
+    # claim that LeRobot failed before any step, so it points at the dataset as well
+    "host_unfit:lerobot_error_not_fresh", "host_unfit:lerobot_error_waiver_refused",
 })
 
 

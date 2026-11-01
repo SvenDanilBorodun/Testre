@@ -656,6 +656,9 @@ def _validate_required_schema() -> None:
         ("complete_cancel_training", {"p_training_id": 0, "p_final": "canceled", "p_message": None}),
         ("claim_training_publish", {"p_training_id": 0, "p_attempt": 1, "p_lease_s": 900, "p_owner": "_probe"}),
         ("claim_checkpoint_mirror", {"p_training_id": 0, "p_attempt": 1, "p_step": 1, "p_lease_s": 900, "p_owner": "_probe"}),
+        # 052 fix round 2 (V3-M1): ckpt-done's ready write under the row lock; training 0
+        # answers false and writes nothing.
+        ("mark_checkpoint_ready", {"p_training_id": 0, "p_attempt": 1, "p_step": 1}),
         # Migration 050 — the capped publish + continuation. Training id 0 never
         # exists: cap answers P0049, start_continuation_safe P0002; both write nothing.
         ("cap_training_attempt", {"p_training_id": 0, "p_attempt": 1, "p_step": 1, "p_reason": "capped",

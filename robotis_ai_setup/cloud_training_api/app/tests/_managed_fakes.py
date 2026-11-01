@@ -559,6 +559,7 @@ class FakeDB:
         if p_charge_waiver is not None and not (  # 052 fix round (V1-M1): only a provable fresh start
                 a is not None and a["resume_from_step"] == 0 and a["state"] == "running"
                 and t.get("continued_from") is None and int(t["train_seconds_used"] or 0) == 0
+                and int(t["current_step"] or 0) == 0
                 and not any(c["training_id"] == p_training_id and c["state"] == "ready"
                             for c in self.tables["training_checkpoints"])):
             raise PgError("P0073")
@@ -658,9 +659,30 @@ class FakeDB:
                  publish_first_at=a["publish_first_at"] or self.now())
         return True
 
+    def _rpc_mark_checkpoint_ready(self, p_training_id, p_attempt, p_step):
+        """052 fix round 2 (V3-M1), statement by statement as the migration's function:
+        under the trainings row lock, false unless the row exists, is managed, is
+        'running' and has this attempt current, and the attempt is 'running'; then
+        'uploading' → 'ready' (ready_at now) answers true, an already ready checkpoint
+        true (ready_at kept), anything else (absent, refused, deleted) false."""
+        t = self.row(p_training_id)
+        if not t or not t["managed"] or t["status"] != "running" or t["current_attempt"] != p_attempt:
+            return False
+        a = self.attempt(p_training_id, p_attempt)
+        if not a or a["state"] != "running":
+            return False
+        c = self.checkpoint(p_training_id, p_attempt, p_step)
+        if c and c["state"] == "uploading":
+            c.update(state="ready", ready_at=self.now())
+            return True
+        return bool(c and c["state"] == "ready")
+
     def _rpc_claim_checkpoint_mirror(self, p_training_id, p_attempt, p_step, p_lease_s, p_owner):
         c = self.checkpoint(p_training_id, p_attempt, p_step)
+        t = self.row(p_training_id)
         if not (c and c["state"] == "ready" and c["mirrored_at"] is None):
+            return False
+        if not (t and t["status"] in ("queued", "running", "succeeded")):  # 052 fix round 2
             return False
         if not self._lease(c, "mirror_claimed_at", "mirror_owner", p_lease_s, p_owner):
             return False
@@ -694,8 +716,9 @@ class FakeDB:
         if trimmed:
             hist = [e for e in hist if int(e["s"]) <= p_current_step]
         # 052 fix round (V1-m1): reset only when NULL, on the first queued → running write
-        # (a new attempt) or when the step rises; a mere heartbeat no longer defeats the
-        # stall rule and checkpoint_overdue
+        # (a new attempt) or when the step rises — whatever the write carries. Before, every
+        # running write reset it, so heartbeats alone kept the sweep's stall rule (the only
+        # reader of step_advanced_at) from firing; `_checkpoint_overdue` never reads it
         if t["step_advanced_at"] is None or (p_status == "running" and prev_status == "queued") or (
                 p_current_step is not None and p_current_step > prev_step):
             t["step_advanced_at"] = self.now()

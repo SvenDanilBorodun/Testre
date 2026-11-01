@@ -71,12 +71,14 @@ class Waiver(WorkerBase):
             "continuation": ({}, {"continued_from": 999}),
             "trained_seconds": ({}, {"train_seconds_used": 1}),
             "ready_checkpoint": ({}, {}),
+            "stepped": ({}, {"current_step": 100}),
         }
         for name, (current, row) in cases.items():
             with self.subTest(blocker=name):
                 self.db.rpcs.clear()
                 self.db.tables["training_checkpoints"] = []
-                self.setup_attempts(current=current, **{"continued_from": None, "train_seconds_used": 0, **row})
+                self.setup_attempts(current=current, **{"continued_from": None, "train_seconds_used": 0,
+                                                        "current_step": 0, **row})
                 if name == "ready_checkpoint":
                     self.db.add_checkpoint(self.tid, 1, 2500, state="ready", manifest={})
                 self.assertEqual(route._waiver_blockers(self.db.row(self.tid), self.att,
@@ -84,6 +86,12 @@ class Waiver(WorkerBase):
                                                          if c["state"] == "ready"]), [name])
                 self.assertEqual(await self.lerobot_error(), (200, {"status": "requeued"}))
                 self.never_waived()
+
+    async def test_a_reported_step_prevents_the_waiver_even_from_a_distinct_host(self):
+        # an honest worker sends lerobot_error only when it logged no new step
+        self.setup_attempts(current={}, current_step=500)
+        self.assertEqual(await self.lerobot_error(), (200, {"status": "requeued"}))
+        self.never_waived()
 
     async def test_a_provable_fresh_start_confirmed_by_a_distinct_host_is_waived(self):
         self.setup_attempts(current={})
@@ -117,6 +125,49 @@ class Waiver(WorkerBase):
             self.db._rpc_finish_training(self.tid, 2, "failed", T.S19, None, p_charge_waiver="lerobot_error")
         self.assertEqual(ctx.exception.code, "P0073")
         self.assertEqual(self.db.row(self.tid)["status"], "running")
+
+
+class EveryConditionOnItsOwn(unittest.TestCase):
+    """``_waiver_blockers`` directly, one case per condition (the API's six conditions;
+    ``resume_from_step`` 0 is two names: NULL = ``no_start``, > 0 = ``resumed``)."""
+
+    FRESH_ROW = {"continued_from": None, "train_seconds_used": 0, "current_step": 0}
+    FRESH_ATT = {"resume_from_step": 0, "state": "running"}
+
+    def blockers(self, row=None, att=None, ready=()):
+        return route._waiver_blockers({**self.FRESH_ROW, **(row or {})}, {**self.FRESH_ATT, **(att or {})},
+                                      list(ready))
+
+    def test_a_fresh_start_has_none(self):
+        self.assertEqual(self.blockers(), [])
+
+    def test_no_start(self):
+        self.assertEqual(self.blockers(att={"resume_from_step": None}), ["no_start"])
+
+    def test_resumed(self):
+        # unreachable from _finish (a resume becomes a resume_crash first): defence in depth
+        self.assertEqual(self.blockers(att={"resume_from_step": 2500}), ["resumed"])
+
+    def test_not_running(self):
+        for state in ("placing", "starting"):
+            self.assertEqual(self.blockers(att={"state": state}), ["not_running"], state)
+
+    def test_continuation(self):
+        self.assertEqual(self.blockers(row={"continued_from": 41}), ["continuation"])
+
+    def test_trained_seconds(self):
+        self.assertEqual(self.blockers(row={"train_seconds_used": 1}), ["trained_seconds"])
+
+    def test_ready_checkpoint(self):
+        self.assertEqual(self.blockers(ready=[{"step": 2500, "state": "ready"}]), ["ready_checkpoint"])
+
+    def test_stepped(self):
+        self.assertEqual(self.blockers(row={"current_step": 1}), ["stepped"])
+
+    def test_they_add_up(self):
+        self.assertEqual(self.blockers(row={"continued_from": 1, "train_seconds_used": 9, "current_step": 9},
+                                       att={"resume_from_step": None, "state": "starting"}, ready=[{}]),
+                         ["no_start", "not_running", "continuation", "trained_seconds", "ready_checkpoint", "stepped"])
 
 
 if __name__ == "__main__":

@@ -4229,6 +4229,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         preempt group (see the lock's init comment)."""
         self._follower_torque_last_message = ''
         with self._dxl_torque_lock:
+            # D15 (owner sign-off 2026-11-01, Rule §2): a torque-OFF the server
+            # sent but could not confirm (unavailable, timed out, refused, an
+            # exception) turns a „locked" reading into „unknown": the driver may
+            # still apply the request seconds later, so True must never outlive
+            # it. Only True becomes None; a False stays False (the home glide's
+            # `is False` refusal keeps holding over a confirmed-limp arm). The
+            # next torque-on then publishes the measured-pose hold first.
+            confirmed = False
             try:
                 from std_srvs.srv import SetBool
                 client = getattr(self, '_dxl_torque_client', None)
@@ -4315,6 +4323,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 if ok:
                     # Track the confirmed torque state for the idle watchdog so it
                     # knows whether a limp arm needs re-torquing.
+                    confirmed = True
                     self._follower_torque_on = bool(enabled)
                     if enabled:
                         # F5 — a re-torque can spike holding current; arm the
@@ -4328,6 +4337,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             except Exception as e:  # noqa: BLE001
                 self.get_logger().warning(f'set_dxl_torque failed: {e!r}')
                 return False
+            finally:
+                if (not enabled and not confirmed
+                        and getattr(self, '_follower_torque_on', None) is True):
+                    self._follower_torque_on = None
 
     def _follower_rail_is_ros2_control(self) -> bool:
         """True when the follower is driven through ros2_control's
@@ -5793,6 +5806,19 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                                     'aus — bitte kurz warten.')
                 return response
             try:
+                # D16 (owner sign-off 2026-11-01, manual arbiter): this call runs on
+                # the reentrant _preempt_cb_group, so „Arm festsetzen"
+                # (hand_guide(false)) may have ended the persistent session while
+                # this one waited for _manual_lock. Re-check the claim under
+                # _mode_lock: if it is gone, refuse — restore nothing, switch no
+                # torque; the latest press wins. Without it the arm went limp
+                # with no manual session open, so no other mode was blocked.
+                with self._mode_lock:
+                    claim_held = self._manual_persistent
+                if not claim_held:
+                    response.message = ('Der Arm wurde gerade festgesetzt – bitte '
+                                        'noch einmal versuchen.')
+                    return response
                 # Persistent session already claimed under _mode_lock above.
                 if not self._set_follower_torque(False):
                     # Could not make the arm limp; it stays torqued (SAFE, not
@@ -5935,6 +5961,19 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                                     'aus — bitte kurz warten.')
                 return response
             try:
+                # D16 (owner sign-off 2026-11-01, manual arbiter): this call runs on
+                # the reentrant _preempt_cb_group, so „Arm festsetzen"
+                # (hand_guide(false)) may have ended the persistent session while
+                # this one waited for _manual_lock. Re-check the claim under
+                # _mode_lock: if it is gone, refuse — restore nothing, switch no
+                # torque; the latest press wins. Without it the arm went limp
+                # with no manual session open, so no other mode was blocked.
+                with self._mode_lock:
+                    claim_held = self._manual_persistent
+                if not claim_held:
+                    response.message = ('Der Arm wurde gerade festgesetzt – bitte '
+                                        'noch einmal versuchen.')
+                    return response
                 if self._manual_record_active:
                     with self._mode_lock:
                         self._manual_persistent = was_persistent

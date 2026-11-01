@@ -7,7 +7,13 @@
 -- waiver needs proof, P0073) and T43 (the stall clock of update_training_progress)
 -- are the fix round of 2026-11-01; T44 (mark_checkpoint_ready, with its races
 -- in both orders), T45 (claim_checkpoint_mirror's status rule) and T46 (the
--- waiver's step condition) its second round.
+-- waiver's step condition) its second round. T47–T53 (fix round 3) pin what the
+-- final end-to-end verification's surviving mutants showed no label held: the
+-- waiver's continuation and counted-seconds conditions on their own (T47, T48),
+-- mark_checkpoint_ready's attempt-state and current-attempt checks (T49, T50), the
+-- CHECKs reserved >= 0 and spent >= 0 (T51), stop_training publishing only a
+-- ledger row (T52) and credit_assign's P0066 for an account of another teacher or
+-- a closed one (T53).
 --
 -- T44's RACES use a SECOND REAL CONNECTION: the file creates the dblink extension
 -- in schema extensions (and drops it again when it created it) and connects to
@@ -110,15 +116,20 @@
 -- abde11806259a987b58b00cf6a0b0bfc) with 049's ACL.
 --
 -- 052 BREAKS the 046–050 assertion files by design (spec §12.3; each header
--- records it). Measured after 052, on a stack with every migration through 051
--- plus 052: 046 prints 22 PASS / 4 FAIL / 2 ERROR, 047 7 / 2 / 4, 048 31 / 14 / 10,
--- 049 2 / 25 / 237, 050 1 / 1 / 77; and 044's T15 fails too (it calls
--- adjust_student_credits, which answers P0069 since 052): 15 PASS, 1 FAIL.
--- Re-measured 2026-11-01 with the fix round's 052, each file on a fresh reset:
--- every number unchanged (049 errors out before its stall-clock checks, and those
--- hold under the fix anyway: a first running write and a requeue). Re-measured
--- again with fix round 2's 052: unchanged.
--- Expected: 326 PASS, 0 FAIL/ERROR (one line per label: T1..T46 in lettered parts,
+-- records it), and 044's T15 too (it calls adjust_student_credits, which answers
+-- P0069 since 052). Measured after 052, each file on a fresh reset of a stack with
+-- every migration through 051 plus 052, counted 2026-11-01 in fix round 3: 044
+-- prints 15 PASS / 1 FAIL / 0 ERROR, 046 22 / 4 / 2, 047 7 / 2 / 4, 048 31 / 14 / 9,
+-- 049 2 / 1 / 237, 050 0 / 0 / 77 (049 errors out before its stall-clock checks,
+-- and those hold under the fix anyway: a first running write and a requeue). The
+-- earlier measurements said 048 31 / 14 / 10, 049 2 / 25 / 237 and 050 1 / 1 / 77:
+-- a whole-output grep, which also counted psql's echo lines.
+-- Counted with stdout and stderr captured apart: PASS/FAIL = the file's own result
+-- lines on stdout plus its PASS/FAIL NOTICEs, ERROR = stderr's
+-- `psql:<file>:<n>: ERROR:` lines; psql's echo of a failing statement (LINE n:,
+-- CONTEXT:) is never counted. Counted that way, this file prints the number below
+-- (measured 2026-11-01, fix round 3, project credfix3).
+-- Expected: 349 PASS, 0 FAIL/ERROR (one line per label: T1..T53 in lettered parts,
 -- T21w = W8; some arrive as NOTICE lines from DO blocks).
 \set QUIET on
 \set ON_ERROR_STOP off
@@ -1828,6 +1839,229 @@ SELECT public.update_training_progress(:wd, :'wd_tok'::uuid, 'running', 0);
 SELECT pg_temp.ok('PASS T46f the first running write with current_step = resume_step = 0 lowers a shown 700 to 0',
   (SELECT status = 'running' AND current_step = 0 FROM public.trainings WHERE id = :wd));
 SELECT public.finish_training(:wd, 1, 'failed', 'x', NULL);
+
+\echo '=== T47 (fix round 3, mutant W3) a continuation is never waived, even when every other condition holds ==='
+-- the fix round's students sit in a classroom of their own (c1 holds 30, the race fixtures fill it)
+SELECT pg_temp.mk_class('cf', 'f1') IS NOT NULL AS c_cf \gset
+SELECT pg_temp.mk_user('90', 'student', 'cf') IS NOT NULL AS s90 \gset
+SELECT pg_temp.give('f1', 'student', '90', 3) AS g90 \gset
+INSERT INTO public.trainings (user_id, status, dataset_name, model_name, model_type, training_params, total_steps, managed,
+                              credit_scheme, capped_step, continuable_until)
+VALUES (pg_temp.u('90'), 'succeeded', 'u/p', 'c052/m3-parent', 'act', '{"steps":50000}', 50000, true, 'derived', 2500,
+        now() + interval '7 days');
+-- the parent's id, read before the child exists (the child carries the parent's model_name)
+SELECT pg_temp.tid('c052/m3-parent') AS m3p \gset
+INSERT INTO public.training_kept_checkpoints (training_id, step, manifest, expires_at)
+VALUES (:m3p, 2500, '{}', now() + interval '7 days');
+SELECT o_training_id AS m3c FROM public.start_continuation_safe(pg_temp.u('90'), :m3p, 'S28', 3) \gset
+SELECT o_worker_token AS m3c_tok FROM public.claim_training_attempt(:m3c, 0) \gset
+SELECT public.attach_training_attempt(:m3c, 1, 'runpod_secure', 'pod-m3c-1');
+-- a host whose /start says resume 0, then the first running write at step 0 (the worker's own RPC)
+UPDATE public.training_attempts SET resume_from_step = 0 WHERE training_id = :m3c AND attempt_no = 1;
+SELECT public.update_training_progress(:m3c, :'m3c_tok'::uuid, 'running', 0);
+SELECT pg_temp.ok('PASS T47a (fixture) the continuation meets every other waiver condition: resume 0, running, 0 s, step 0, nothing ready',
+  (SELECT continued_from = :m3p AND status = 'running' AND train_seconds_used = 0
+          AND current_step = 0 FROM public.trainings WHERE id = :m3c)
+  AND (SELECT state = 'running' AND resume_from_step = 0 FROM public.training_attempts WHERE training_id = :m3c AND attempt_no = 1)
+  AND NOT EXISTS (SELECT 1 FROM public.training_checkpoints WHERE training_id = :m3c AND state = 'ready'),
+  (SELECT status || '/' || train_seconds_used || '/' || current_step FROM public.trainings WHERE id = :m3c));
+SELECT pg_temp.err(format($q$SELECT public.finish_training(%s, 1, 'failed', 'S19', NULL, NULL, NULL, NULL, 'lerobot_error')$q$, :m3c),
+  'P0073', 'PASS T47b the waiver on that continuation answers P0073');
+SELECT pg_temp.ok('PASS T47c the refusal wrote nothing: the child runs, unsettled, no waiver; its attempt runs; only its reserve',
+  (SELECT status = 'running' AND worker_token IS NOT NULL AND charge_waiver IS NULL AND settled_at IS NULL
+          AND terminated_at IS NULL FROM public.trainings WHERE id = :m3c)
+  AND (SELECT state = 'running' AND ended_at IS NULL FROM public.training_attempts WHERE training_id = :m3c AND attempt_no = 1)
+  AND pg_temp.led(:m3c) = 'reserve:3', pg_temp.led(:m3c));
+SELECT public.finish_training(:m3c, 1, 'failed', 'S19', NULL);
+
+\echo '=== T48 (fix round 3, mutant W4) counted training seconds alone refuse the waiver ==='
+SELECT pg_temp.mk_user('91', 'student', 'cf') IS NOT NULL AS s91 \gset
+SELECT pg_temp.give('f1', 'student', '91', 3) AS g91 \gset
+-- attempt 1 trains 4 200 s and saves 2 500; it is lost (E50 counts the 3 900 s to its checkpoint);
+-- the checkpoint is then refused, so attempt 2 starts fresh (resume 0) and its first running write is step 0
+SELECT pg_temp.run('91', 'c052/m4-counted', 4200) AS m4 \gset
+SELECT pg_temp.ckpt(:m4, 1, 2500, 300);
+SELECT public.requeue_training(:m4, 1, 'pod_gone', NULL, 2500, 4200);
+UPDATE public.training_checkpoints SET state = 'refused' WHERE training_id = :m4;
+SELECT o_worker_token AS m4_tok FROM public.claim_training_attempt(:m4, 1) \gset
+SELECT public.attach_training_attempt(:m4, 2, 'runpod_secure', 'pod-m4-2');
+UPDATE public.training_attempts SET resume_from_step = 0 WHERE training_id = :m4 AND attempt_no = 2;
+SELECT public.update_training_progress(:m4, :'m4_tok'::uuid, 'running', 0);
+SELECT pg_temp.ok('PASS T48a (fixture) attempt 2 meets every other waiver condition (resume 0, running, step 0, no continuation, nothing ready); 3 900 s are counted',
+  (SELECT status = 'running' AND continued_from IS NULL AND current_step = 0 AND train_seconds_used BETWEEN 3895 AND 3905
+     FROM public.trainings WHERE id = :m4)
+  AND (SELECT state = 'running' AND resume_from_step = 0 FROM public.training_attempts WHERE training_id = :m4 AND attempt_no = 2)
+  AND NOT EXISTS (SELECT 1 FROM public.training_checkpoints WHERE training_id = :m4 AND state = 'ready'),
+  (SELECT status || '/' || train_seconds_used || '/' || current_step FROM public.trainings WHERE id = :m4));
+SELECT pg_temp.err(format($q$SELECT public.finish_training(%s, 2, 'failed', 'S19', NULL, NULL, NULL, NULL, 'lerobot_error')$q$, :m4),
+  'P0073', 'PASS T48b the waiver after counted seconds answers P0073');
+SELECT pg_temp.ok('PASS T48c the refusal wrote nothing: the row runs, unsettled, no waiver; attempt 2 runs',
+  (SELECT status = 'running' AND charge_waiver IS NULL AND settled_at IS NULL AND train_seconds_used BETWEEN 3895 AND 3905
+     FROM public.trainings WHERE id = :m4)
+  AND (SELECT state = 'running' FROM public.training_attempts WHERE training_id = :m4 AND attempt_no = 2)
+  AND pg_temp.led(:m4) = 'reserve:3', pg_temp.led(:m4));
+SELECT public.finish_training(:m4, 2, 'failed', 'S19', NULL);
+SELECT pg_temp.ok('PASS T48d ... and finished without it, the counted seconds are charged (2 of 3)',
+  (SELECT charged_hours = 2 AND charge_waiver IS NULL FROM public.trainings WHERE id = :m4)
+  AND pg_temp.led(:m4) = 'reserve:3,charge:2,release:1', pg_temp.led(:m4));
+
+\echo '=== T49 (fix round 3, mutant K3) a row still running while its current attempt has ended: mark_checkpoint_ready answers false ==='
+SELECT pg_temp.mk_user('92', 'student', 'cf') IS NOT NULL AS s92 \gset
+SELECT pg_temp.give('f1', 'student', '92', 6) AS g92 \gset
+-- stopped and publishing: stop_training ended attempt 1 'stopped', the row runs on to its publish
+SELECT pg_temp.run('92', 'c052/m5-stop', 1800) AS k3s \gset
+SELECT pg_temp.ckpt(:k3s, 1, 2500, 600);
+SELECT pg_temp.ckpt_up(:k3s, 1, 5000, 0);
+SELECT o_outcome AS k3s_out FROM public.stop_training(:k3s, pg_temp.u('92'), pg_temp.u('92'), 'student', NULL) \gset
+SELECT pg_temp.ok('PASS T49a (fixture) the stop published: the row runs, attempt 1 is current and ended stopped',
+  :'k3s_out' = 'publish'
+  AND (SELECT t.status = 'running' AND t.current_attempt = 1 AND a.state = 'ended' AND a.end_reason = 'stopped'
+         FROM public.trainings t JOIN public.training_attempts a ON a.training_id = t.id AND a.attempt_no = 1
+        WHERE t.id = :k3s), :'k3s_out');
+SELECT pg_temp.ok('PASS T49b its held-back upload of attempt 1 is refused the ready state (false, still uploading)',
+  NOT public.mark_checkpoint_ready(:k3s, 1, 5000)
+  AND (SELECT state = 'uploading' FROM public.training_checkpoints WHERE training_id = :k3s AND attempt_no = 1 AND step = 5000));
+SELECT public.finish_training(:k3s, 1, 'succeeded', NULL, NULL, 'S31', 2500, now() + interval '7 days');
+-- capped and publishing: cap_training_attempt ended attempt 1 'capped', the row runs on to its publish
+SELECT pg_temp.run('92', 'c052/m5-cap', 1800) AS k3c \gset
+SELECT pg_temp.ckpt(:k3c, 1, 2500, 600);
+SELECT pg_temp.ckpt_up(:k3c, 1, 5000, 0);
+SELECT public.cap_training_attempt(:k3c, 1, 2500, 'capped', 'S22', 1800);
+SELECT pg_temp.ok('PASS T49c (fixture) the cap: the row runs, attempt 1 is current and ended capped',
+  (SELECT t.status = 'running' AND t.current_attempt = 1 AND a.state = 'ended' AND a.end_reason = 'capped'
+     FROM public.trainings t JOIN public.training_attempts a ON a.training_id = t.id AND a.attempt_no = 1
+    WHERE t.id = :k3c));
+SELECT pg_temp.ok('PASS T49d its held-back upload of attempt 1 is refused the ready state (false, still uploading)',
+  NOT public.mark_checkpoint_ready(:k3c, 1, 5000)
+  AND (SELECT state = 'uploading' FROM public.training_checkpoints WHERE training_id = :k3c AND attempt_no = 1 AND step = 5000));
+SELECT public.finish_training(:k3c, 1, 'succeeded', NULL, NULL, 'S23', 2500, now() + interval '7 days');
+
+\echo '=== T50 (fix round 3, mutant K2) a running attempt that is not the current one: mark_checkpoint_ready answers false ==='
+SELECT pg_temp.mk_user('93', 'student', 'cf') IS NOT NULL AS s93 \gset
+SELECT pg_temp.give('f1', 'student', '93', 3) AS g93 \gset
+SELECT pg_temp.run('93', 'c052/m6-old', 600) AS k2 \gset
+SELECT pg_temp.ckpt_up(:k2, 1, 2500, 60);
+SELECT public.requeue_training(:k2, 1, 'pod_gone', NULL, 0, 600);
+SELECT pg_temp.attempt(:k2, 120) AS k2n \gset
+-- constructed: attempt 1 still says running (no function writes this; the check is the guard)
+UPDATE public.training_attempts SET state = 'running', ended_at = NULL WHERE training_id = :k2 AND attempt_no = 1;
+SELECT pg_temp.ok('PASS T50a (fixture) the row runs on attempt 2 while attempt 1 is marked running',
+  (SELECT status = 'running' AND current_attempt = 2 FROM public.trainings WHERE id = :k2)
+  AND (SELECT string_agg(attempt_no || ':' || state, ',' ORDER BY attempt_no) = '1:running,2:running'
+         FROM public.training_attempts WHERE training_id = :k2),
+  (SELECT string_agg(attempt_no || ':' || state, ',' ORDER BY attempt_no) FROM public.training_attempts WHERE training_id = :k2));
+SELECT pg_temp.ok('PASS T50b attempt 1''s upload is refused the ready state (false, still uploading)',
+  NOT public.mark_checkpoint_ready(:k2, 1, 2500)
+  AND (SELECT state = 'uploading' FROM public.training_checkpoints WHERE training_id = :k2 AND attempt_no = 1 AND step = 2500));
+UPDATE public.training_attempts SET state = 'lost', ended_at = now() WHERE training_id = :k2 AND attempt_no = 1;
+SELECT public.finish_training(:k2, :k2n, 'failed', 'x', NULL);
+
+\echo '=== T51 (fix round 3, mutants B2/B3) the CHECKs reserved >= 0 and spent >= 0 refuse a write that goes negative ==='
+SELECT pg_temp.mk_user('94', 'student', 'cf') IS NOT NULL AS s94 \gset
+SELECT pg_temp.give('f1', 'student', '94', 1) AS g94 \gset
+SELECT count(*) AS n51 FROM public.credit_ledger \gset
+SELECT set_config('c052.u94', pg_temp.u('94')::text, false) \gset
+-- a release (within the ledger's own shape: at most 3 hours, a training and a member) from an account
+-- that reserves nothing; every outcome is rolled back (P0999 marks "the write went through")
+DO $$ DECLARE c text; u uuid := current_setting('c052.u94')::uuid;
+BEGIN
+  BEGIN
+    PERFORM public._credit_post('release', 1, 'student', u, 'reserved', 'student', u, 'free', 999997, u, NULL, 'system',
+                                NULL, NULL, NULL);
+    RAISE EXCEPTION 'the write went through' USING ERRCODE = 'P0999';
+  EXCEPTION
+    WHEN check_violation THEN
+      GET STACKED DIAGNOSTICS c = CONSTRAINT_NAME;
+      IF c = 'credit_accounts_reserved_check' THEN
+        RAISE NOTICE 'PASS T51a a release beyond the reserved hours violates credit_accounts_reserved_check (23514)';
+      ELSE
+        RAISE NOTICE 'FAIL T51a another CHECK fired (%)', c;
+      END IF;
+    WHEN SQLSTATE 'P0999' THEN RAISE NOTICE 'FAIL T51a (no error: reserved went negative)';
+  END;
+END $$;
+DO $$ DECLARE c text; u uuid := current_setting('c052.u94')::uuid;
+BEGIN
+  BEGIN
+    UPDATE public.credit_accounts SET spent = spent - 1 WHERE kind = 'student' AND owner_id = u;
+    RAISE EXCEPTION 'the write went through' USING ERRCODE = 'P0999';
+  EXCEPTION
+    WHEN check_violation THEN
+      GET STACKED DIAGNOSTICS c = CONSTRAINT_NAME;
+      IF c = 'credit_accounts_spent_check' THEN
+        RAISE NOTICE 'PASS T51b a write that takes spent below 0 violates credit_accounts_spent_check (23514)';
+      ELSE
+        RAISE NOTICE 'FAIL T51b another CHECK fired (%)', c;
+      END IF;
+    WHEN SQLSTATE 'P0999' THEN RAISE NOTICE 'FAIL T51b (no error: spent went negative)';
+  END;
+END $$;
+SELECT pg_temp.ok('PASS T51c neither write left a trace: the account is 1/0/0, the ledger unchanged',
+  pg_temp.acct('student', pg_temp.u('94')) = '1/0/0' AND (SELECT count(*) FROM public.credit_ledger) = :n51,
+  pg_temp.acct('student', pg_temp.u('94')));
+
+\echo '=== T52 (fix round 3, mutant Q7) a pre-052 (derived) row with a ready checkpoint is still cancelled, never published ==='
+SELECT pg_temp.mk_user('95', 'student', 'cf') IS NOT NULL AS s95 \gset
+INSERT INTO public.trainings (user_id, status, dataset_name, model_name, model_type, training_params, total_steps, managed,
+                              credit_scheme, current_attempt)
+VALUES (pg_temp.u('95'), 'running', 'u/d', 'c052/m7-derived', 'act', '{"steps":50000,"save_freq":2500}', 50000, true,
+        'derived', 1),
+       (pg_temp.u('95'), 'running', 'u/d', 'c052/m7-derived-final', 'act', '{"steps":50000,"save_freq":2500}', 50000, true,
+        'derived', 1);
+INSERT INTO public.training_attempts (training_id, attempt_no, state, backend, cloud_ref, first_heartbeat_at)
+SELECT id, 1, 'running', 'runpod_secure', 'pod-' || id, now() - interval '40 min' FROM public.trainings
+ WHERE model_name IN ('c052/m7-derived','c052/m7-derived-final');
+SELECT pg_temp.ckpt(pg_temp.tid('c052/m7-derived'), 1, 2500, 600);
+SELECT pg_temp.ckpt(pg_temp.tid('c052/m7-derived-final'), 1, 50000, 60);
+SELECT o_outcome || '/' || COALESCE(o_step::text, '-') || '/' || o_cancel_attempts AS q7a_out
+  FROM public.stop_training(pg_temp.tid('c052/m7-derived'), pg_temp.u('95'), pg_temp.u('95'), 'student', NULL) \gset
+SELECT pg_temp.ok('PASS T52a a derived row that trained and holds a ready checkpoint: outcome cancel, no step; the row cancel_requested, its attempt still running',
+  :'q7a_out' = 'cancel/-/1'
+  AND (SELECT t.status = 'cancel_requested' AND t.capped_step IS NULL AND t.train_seconds_used = 0 AND a.state = 'running'
+         FROM public.trainings t JOIN public.training_attempts a ON a.training_id = t.id AND a.attempt_no = 1
+        WHERE t.model_name = 'c052/m7-derived'), :'q7a_out');
+SELECT o_outcome || '/' || COALESCE(o_step::text, '-') AS q7b_out
+  FROM public.stop_training(pg_temp.tid('c052/m7-derived-final'), pg_temp.u('95'), pg_temp.u('95'), 'student', NULL) \gset
+SELECT pg_temp.ok('PASS T52b ... the same with its FINAL checkpoint ready: outcome cancel, never publish_final',
+  :'q7b_out' = 'cancel/-'
+  AND (SELECT t.status = 'cancel_requested' AND a.state = 'running'
+         FROM public.trainings t JOIN public.training_attempts a ON a.training_id = t.id AND a.attempt_no = 1
+        WHERE t.model_name = 'c052/m7-derived-final'), :'q7b_out');
+SELECT public.complete_cancel_training(pg_temp.tid('c052/m7-derived'), 'canceled', NULL);
+SELECT public.complete_cancel_training(pg_temp.tid('c052/m7-derived-final'), 'canceled', NULL);
+SELECT pg_temp.ok('PASS T52c both end canceled under the old rules: no ledger row, no charged_hours',
+  pg_temp.led(pg_temp.tid('c052/m7-derived')) = '' AND pg_temp.led(pg_temp.tid('c052/m7-derived-final')) = ''
+  AND (SELECT bool_and(status = 'canceled' AND charged_hours IS NULL AND settled_at IS NULL) AND count(*) = 2
+         FROM public.trainings WHERE model_name IN ('c052/m7-derived','c052/m7-derived-final')));
+
+\echo '=== T53 (fix round 3, mutant R9) credit_assign refuses an account of another teacher or a closed one (P0066) ==='
+-- another teacher's account: the classroom changed hands (no trigger re-parents on a classroom's teacher change)
+SELECT pg_temp.mk_class('ce', 'f1') IS NOT NULL AS c_ce \gset
+SELECT pg_temp.mk_user('96', 'student', 'ce') IS NOT NULL AS s96 \gset
+SELECT pg_temp.give('f1', 'student', '96', 2) AS g96 \gset
+UPDATE public.classrooms SET teacher_id = pg_temp.u('f2') WHERE id = pg_temp.u('ce');
+SELECT count(*) AS n53 FROM public.credit_ledger \gset
+SELECT pg_temp.acct('teacher', pg_temp.u('f2')) AS f2_before \gset
+SELECT pg_temp.ok('PASS T53a (fixture) student 96 sits in f2''s classroom now; its account (2 free) is still funded by f1; f2 has free hours',
+  (SELECT parent_teacher_id = pg_temp.u('f1') AND free = 2 FROM public.credit_accounts WHERE kind = 'student' AND owner_id = pg_temp.u('96'))
+  AND (SELECT c.teacher_id = pg_temp.u('f2') FROM public.users s JOIN public.classrooms c ON c.id = s.classroom_id
+        WHERE s.id = pg_temp.u('96'))
+  AND (SELECT free >= 1 FROM public.credit_accounts WHERE kind = 'teacher' AND owner_id = pg_temp.u('f2')), :'f2_before');
+SELECT pg_temp.err($q$SELECT * FROM public.credit_assign(pg_temp.u('f2'), 'student', pg_temp.u('96'), 1, NULL)$q$, 'P0066',
+  'PASS T53b f2''s assign into the account f1 funds answers P0066');
+-- a closed account of a student that still exists (constructed: the closes run only after a delete)
+SELECT pg_temp.mk_user('97', 'student', 'cf') IS NOT NULL AS s97 \gset
+INSERT INTO public.credit_accounts (kind, owner_id, parent_teacher_id, closed_at)
+VALUES ('student', pg_temp.u('97'), pg_temp.u('f1'), now());
+SELECT pg_temp.acct('teacher', pg_temp.u('f1')) AS f1_before \gset
+SELECT pg_temp.err($q$SELECT * FROM public.credit_assign(pg_temp.u('f1'), 'student', pg_temp.u('97'), 1, NULL)$q$, 'P0066',
+  'PASS T53c an assign into a closed account answers P0066');
+SELECT pg_temp.ok('PASS T53d neither refusal wrote anything: both accounts and both teacher pools unchanged, no ledger row',
+  pg_temp.acct('student', pg_temp.u('96')) = '2/0/0' AND pg_temp.acct('student', pg_temp.u('97')) = '0/0/0'
+  AND pg_temp.acct('teacher', pg_temp.u('f2')) = :'f2_before' AND pg_temp.acct('teacher', pg_temp.u('f1')) = :'f1_before'
+  AND (SELECT count(*) FROM public.credit_ledger) = :n53,
+  pg_temp.acct('student', pg_temp.u('96')) || ' ' || pg_temp.acct('student', pg_temp.u('97')));
+UPDATE public.classrooms SET teacher_id = pg_temp.u('f1') WHERE id = pg_temp.u('ce');
 
 \echo '=== T29 / T30 the lock order of I9 (structure; the two-session races are the header''s manual steps) ==='
 SELECT pg_temp.ok('PASS T29a the two closes run AFTER DELETE, the delete settlement BEFORE DELETE (row triggers)',

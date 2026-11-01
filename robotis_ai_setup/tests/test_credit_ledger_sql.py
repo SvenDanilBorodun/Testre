@@ -708,7 +708,8 @@ class AssertionFile(unittest.TestCase):
     def test_every_label_of_spec_19a_is_asserted(self):
         text = _read(A052)
         labels = set(re.findall(r"PASS (T\d+)[a-z]?\b", text))
-        self.assertEqual(labels, {f"T{n}" for n in range(1, 47)})
+        # T1..T41 of spec §19a, T42..T46 of the two 2026-11-01 fix rounds, T47..T53 of fix round 3
+        self.assertEqual(labels, {f"T{n}" for n in range(1, 54)})
         self.assertIn("PASS T21w (W8)", text)
 
     def test_it_never_calls_a_function_under_set_role(self):

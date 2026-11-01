@@ -541,7 +541,9 @@ class CommissionWorker:
             return self._effect('solve_wait', E_SOLVE, job.commission_id,
                                 self._record.taps)
         if run.pc == 'solved':
-            return self._effect('rt_wait', E_RETORQUE, False, aux=run.result)
+            # aux := the solve's own payload (gates_ok, gate_message, solution);
+            # run.result is the effect envelope (ok, message, payload).
+            return self._effect('rt_wait', E_RETORQUE, False, aux=run.result[2])
         if run.pc == 'rt_done':
             ok, message, _ = run.result
             gates_ok, gate_message, solution = run.aux

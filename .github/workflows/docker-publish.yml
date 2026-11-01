@@ -1128,6 +1128,33 @@ jobs:
           docker rm -f code-e2e-runner >/dev/null 2>&1 || true
           docker volume rm code-e2e-ipc >/dev/null 2>&1 || true
           exit "$rc"
+      - name: OMX camera station end-to-end smoke (amd64)
+        # Plan v6.13 §12.1: the server image plus the checkout's arm-container
+        # camera_ingest_node.py (the 6.4 GB arm image is not pulled;
+        # image_source_parity.sh proves it ships those bytes). A fake GUI sender
+        # streams 640x480 as cam 1 and 1080p renders as cam 200; /joint_states is
+        # faked at a touch dot. enter → ACTIVE → camera + robot check → verified
+        # → resume (camera re-checked, robot_ok kept) → leave → IDLE; /scene keeps
+        # arriving; a recording start is refused while ACTIVE and accepted after.
+        # The shipped layout_data.py keeps OMX-STATION-A draft, so a fixture
+        # layout_data.py (a released TEST layout) is bind-mounted read-only over
+        # the installed module; the renderer comes from the checkout's test/.
+        # After both revision checks, so it never runs a stale retag. Image names
+        # go through env: (no expression inside run:).
+        if: matrix.platform == 'amd64'
+        timeout-minutes: 10
+        env:
+          SERVER_IMAGE: ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest
+        run: |
+          set -e
+          site=/root/ros2_ws/install/physical_ai_server/lib/python3.12/site-packages/physical_ai_server
+          docker run --rm --network none --entrypoint bash \
+            -v "$GITHUB_WORKSPACE/.github/scripts/station_e2e_smoke.py:/tmp/smoke/station_e2e_smoke.py:ro" \
+            -v "$GITHUB_WORKSPACE/robotis_ai_setup/docker/open_manipulator/camera_ingest_node.py:/tmp/smoke/camera_ingest_node.py:ro" \
+            -v "$GITHUB_WORKSPACE/physical_ai_tools/physical_ai_server/test/station_fixture.py:/tmp/smoke/station_fixture.py:ro" \
+            -v "$GITHUB_WORKSPACE/.github/scripts/station_fixtures/layout_data.py:$site/station/layout_data.py:ro" \
+            "$SERVER_IMAGE" \
+            -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && python3 /tmp/smoke/station_e2e_smoke.py'
       - name: Pull + assert open-manipulator has Dynamixel SDK + pyserial
         # `serial` is asserted EXPLICITLY, not left to ride on dynamixel_sdk.
         # It is the Feetech driver's only third-party dependency: `feetech_bus.py`

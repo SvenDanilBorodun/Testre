@@ -398,3 +398,13 @@ def test_b_squares_are_black_in_opencvs_board():
     for _, (x, y) in layout_data.board_check_squares(LAY):
         i, j = int((x - 180) // 30), int((75 - y) // 30)
         assert img[j * 100 + 5, i * 100 + 5] < 128
+
+
+def test_the_e2e_fixture_layout_module_is_the_shipped_module_with_a_released_test_layout():
+    """.github/scripts/station_fixtures/layout_data.py is bind-mounted over the
+    installed module by the e2e smoke: the shipped functions with LAYOUTS holding
+    only the released TEST layout (regenerate with
+    station_fixture.layout_module_source(released_layout()))."""
+    path = (Path(__file__).resolve().parents[3] / '.github' / 'scripts' / 'station_fixtures'
+            / 'layout_data.py')
+    assert path.read_text(encoding='utf-8') == F.layout_module_source(F.released_layout())

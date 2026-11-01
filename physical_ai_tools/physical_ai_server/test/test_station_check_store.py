@@ -235,6 +235,20 @@ def test_board_pose_comes_from_the_layout_not_the_env(monkeypatch):
 
 
 # ── lens (§6.1): seeded fits pass, unseeded wrong minima fail the fx bound ───
+_TH_H, _TH_D = math.radians(53), math.radians(65)
+_R_H, _R_D = 960.0, math.hypot(960, 540)
+_POLY_A, _POLY_B = np.linalg.solve(np.array([[_TH_H, _TH_H ** 3], [_TH_D, _TH_D ** 3]]),
+                                   [_R_H, _R_D])
+
+
+def _poly_106h_130d_project(P):
+    """A lens matching BOTH the manual's 106°H and 130°D (lens_fit.py's model)."""
+    th = np.arctan2(np.hypot(P[..., 0], P[..., 1]), P[..., 2])
+    ph = np.arctan2(P[..., 1], P[..., 0])
+    r = _POLY_A * th + _POLY_B * th ** 3
+    return np.stack([960 + r * np.cos(ph), 540 + r * np.sin(ph)], -1)
+
+
 def _synthetic_views(f_model='ftheta', n=25, seed=3):
     board = CM.lens_board()
     obj_all = board.getChessboardCorners()
@@ -252,7 +266,7 @@ def _synthetic_views(f_model='ftheta', n=25, seed=3):
         ray = np.array([(u - 0.5) * 2.4, (v - 0.5) * 1.4, 1.0])
         t = ray / np.linalg.norm(ray) * z - R @ np.array([0.105, 0.075, 0.0])
         P = obj_all @ R.T + t
-        px = F._ftheta_project(P)
+        px = (F._ftheta_project(P) if f_model == 'ftheta' else _poly_106h_130d_project(P))
         inside = (px[:, 0] > 5) & (px[:, 0] < 1915) & (px[:, 1] > 5) & (px[:, 1] < 1075)
         if inside.sum() < 16:
             continue
@@ -267,8 +281,9 @@ def _synthetic_views(f_model='ftheta', n=25, seed=3):
     return board, views
 
 
-def test_seeded_lens_fit_passes_acceptance_on_synthetic_ftheta_views():
-    board, views = _synthetic_views()
+@pytest.mark.parametrize('model,seed', [('ftheta', 3), ('poly_106H_130D', 3)])
+def test_seeded_lens_fit_passes_acceptance_on_synthetic_views(model, seed):
+    board, views = _synthetic_views(model, seed=seed)
     fit = [v for i, v in enumerate(views) if i % 5 != 4]
     held = [v for i, v in enumerate(views) if i % 5 == 4]
     rms, K, dist = CM.calibrate(board, fit)
@@ -408,3 +423,28 @@ def test_the_e2e_fixture_layout_module_is_the_shipped_module_with_a_released_tes
     path = (Path(__file__).resolve().parents[3] / '.github' / 'scripts' / 'station_fixtures'
             / 'layout_data.py')
     assert path.read_text(encoding='utf-8') == F.layout_module_source(F.released_layout())
+
+
+def test_a_real_unseeded_fit_lands_in_a_wrong_minimum_the_fx_bound_rejects_and_seeding_fixes_it():
+    """poly_106H_130D, pinned seed 4: OpenCV's UNSEEDED rational fit lands at fx ≈ 1650
+    (the wrong-minimum class the plan measured); the seeded fit on the same views
+    passes every gate."""
+    board, views = _synthetic_views('poly_106H_130D', seed=4)
+    fit = [v for i, v in enumerate(views) if i % 5 != 4]
+    held = [v for i, v in enumerate(views) if i % 5 == 4]
+    objs, imgs = [], []
+    for v in fit:
+        o, i = board.matchImagePoints(v.corners.reshape(-1, 1, 2).astype(np.float32),
+                                      v.ids.reshape(-1, 1))
+        objs.append(o)
+        imgs.append(i)
+    rms, K, dist, _, _ = cv2.calibrateCamera(objs, imgs, (1920, 1080), None, None,
+                                             flags=cv2.CALIB_RATIONAL_MODEL)
+    ok, why = CM.accept_intrinsics(K, dist.reshape(-1), rms, np.array([0.3]), fit)
+    # Measured on OpenCV 4.10 (the image) and 4.13: fx ≈ 1650. An unseeded fit
+    # outside the f₀ band is always rejected by the fx bound, whatever the build.
+    if not 935.0 <= K[0, 0] <= 1265.0:
+        assert not ok and why == 'Brennweite'
+    rms, K, dist = CM.calibrate(board, fit)
+    errs = CM.heldout_errors(board, held, K, dist)
+    assert CM.accept_intrinsics(K, dist, rms, errs, fit) == (True, '')

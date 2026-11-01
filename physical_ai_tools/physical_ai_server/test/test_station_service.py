@@ -603,3 +603,35 @@ def test_mark_destination_routes_and_refuses_scene_on_a_station_rig(tmp_path):
                                           pixel_y=float(px[1]), label='A'),
               types.SimpleNamespace())
     assert resp.success is False and resp.message == T.GATE_NOT_VERIFIED_DE
+
+
+def _segment(name):
+    src = _SERVER_PY.read_text(encoding='utf-8')
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == name)
+    return ast.get_source_segment(src, fn)
+
+
+@pytest.mark.parametrize('name,claim', [
+    ('workshop_jog_callback', "self._assert_no_other_active('manual')"),
+    ('workshop_replay_callback', "self._assert_no_other_active('manual')"),
+])
+def test_the_d4_gate_runs_at_operation_start_before_the_claim(name, claim):
+    seg = _segment(name)
+    i_gate = seg.index('_station.gate_motion()')
+    assert i_gate < seg.index(claim), name
+
+
+def test_a_real_run_binds_before_the_torque_assert_and_continue_step_check_the_digest():
+    seg = _segment('_launch_workflow')
+    i_bind = seg.index('station.bind_run()')
+    assert i_bind < seg.index("torque_on(True)") < seg.index("'run_binding': run_binding")
+    for name in ('workflow_continue_callback', 'workflow_step_callback'):
+        seg = _segment(name)
+        assert seg.index('continue_refusal') < seg.index('manager.')
+
+
+def test_not_gated_paths_stay_ungated():
+    for name in ('workshop_hand_guide_callback', 'workshop_record_callback',
+                 'workflow_stop_callback', 'capture_pose_callback'):
+        assert 'gate_motion' not in _segment(name), name

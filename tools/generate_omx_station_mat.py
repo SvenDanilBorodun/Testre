@@ -223,20 +223,20 @@ def zone_contains(layout, x, y):
     return True
 
 
-def choose_b_squares(layout, board):
-    """B1, B2 (§2.2): the two black board squares whose centres lie inside the
-    work zone, farthest apart. Ties: the first pair in (j, i) order."""
-    inside = [s for s in black_board_squares(layout, board) if zone_contains(layout, s[2], s[3])]
-    if len(inside) < 2:
-        raise ValueError('fewer than two black board squares lie inside the work zone')
-    best = None
-    for a in range(len(inside)):
-        for c in range(a + 1, len(inside)):
-            d = math.hypot(inside[a][2] - inside[c][2], inside[a][3] - inside[c][3])
-            if best is None or d > best[0] + 1e-9:
-                best = (d, inside[a], inside[c])
-    first, second = sorted([best[1], best[2]], key=lambda s: (-s[2], -s[3]))
-    return first, second
+def choose_b_squares(layout, board, layout_module):
+    """B1, B2 (§2.2): ``layout_data.board_check_squares`` names them, the one
+    source the server's world check reads too. This only maps each onto the
+    rendered board and refuses one that does not print as a black square."""
+    black = black_board_squares(layout, board)
+    picked = []
+    for name, (x, y) in layout_module.board_check_squares(layout):
+        match = [s for s in black if abs(s[2] - x) < 1e-6 and abs(s[3] - y) < 1e-6]
+        if not match:
+            raise ValueError(f'{name} at ({x}, {y}) mm is not a black square of the printed board')
+        picked.append(match[0])
+    if len(picked) != 2:
+        raise ValueError('layout_data.board_check_squares must name exactly B1 and B2')
+    return picked[0], picked[1]
 
 
 def _box_gap(a, b):
@@ -372,7 +372,7 @@ def build_mat(layout, layout_module):
     add('label', 'label', lbox, label_prims, text=lab['text'])
 
     # B1, B2 (§2.2): board squares, so they print nothing new except an id label.
-    b1, b2 = choose_b_squares(layout, board)
+    b1, b2 = choose_b_squares(layout, board, layout_module)
     meta = {'b_squares': {'B1': b1, 'B2': b2}}
 
     # The margin: the layout's sha256 (and its id and state) along the top

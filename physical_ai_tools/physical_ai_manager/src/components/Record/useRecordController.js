@@ -73,6 +73,10 @@ import {
 } from '../../utils/signalStatus';
 import { datasetIdOf, finishSteps, sessionView } from './model/finishModel';
 import useDatenStartWait from '../../features/editDataset/hooks/useDatenStartWait';
+import { leave as leaveStationSession } from '../../features/station/controller';
+import { stationStartBlock } from '../../features/station/gating';
+import { isStationRig } from '../../features/station/stationContract';
+import { useStationValue } from '../../features/station/useStation';
 import { VIEW, deriveRecordView, deriveView } from './model/phaseModel';
 import { firstProblem } from './model/problems';
 import RECORD_COPY, {
@@ -169,6 +173,20 @@ export default function useRecordController({ isActive = true } = {}) {
   // signed in through the offline escape), a NON-blocking hint that names the
   // cause instead of only „Keine Benutzer-ID gefunden" (owner decision S2).
   const hfTokenHint = useSelector(selectHfRecordHint);
+  // The camera station (station spec §9.2, D13): while this tab holds the
+  // station claim the robot refuses a recording start, so Start says why and
+  // offers „Station verlassen". ONE primitive from the controller, so the page
+  // re-renders only when the block itself changes (the Aufnahme render rule).
+  const stationRig = isStationRig(status.capabilities);
+  const stationKey = useStationValue((st) => {
+    const b = stationStartBlock(st);
+    if (!b) return '';
+    return b.leaveDisabled ? 'held-locked' : 'held';
+  });
+  const station = useMemo(
+    () => (stationKey ? { leaveDisabled: stationKey === 'held-locked' } : null),
+    [stationKey],
+  );
 
   const [reducedMotion, setReducedMotion] = useState(readReducedMotion);
   useEffect(() => {
@@ -269,8 +287,10 @@ export default function useRecordController({ isActive = true } = {}) {
     activation,
     hfToken: hfTokenBlock,
     waitingForUpload,
+    station,
+    stationRig,
   }), [heartbeat, status, formRaw, collision, session, now.wall, clock.elapsed, clock.secondsLeft, proceed, busy,
-    disk, verdicts, bridge, activation, hfTokenBlock, waitingForUpload]);
+    disk, verdicts, bridge, activation, hfTokenBlock, waitingForUpload, station, stationRig]);
   const { view } = model;
   const currentEpisode = model.episode.current;
 
@@ -288,9 +308,10 @@ export default function useRecordController({ isActive = true } = {}) {
     fps: expectedHz,
     startBlock: model.startBlock,
     hfTokenHint,
+    stationRig,
     nowWallMs: now.wall,
   }), [view, running, heartbeat, notice, transient, session, disk, verdicts, bridge, activation, expectedHz,
-    model.startBlock, hfTokenHint, now.wall]);
+    model.startBlock, hfTokenHint, stationRig, now.wall]);
 
   const invalid = transient && transient.field && Date.now() < transient.until
     ? { field: transient.field, messageDe: transient.textDe }
@@ -590,6 +611,12 @@ export default function useRecordController({ isActive = true } = {}) {
   }, [dispatch, store]);
 
   const goToHome = useCallback(() => dispatch(moveToPage(PageType.HOME)), [dispatch]);
+  // „Station verlassen" from the station block (station spec §9.2): the
+  // controller's leave; its refusal during a program is shown like any other.
+  const leaveStation = useCallback(async () => {
+    const r = await leaveStationSession();
+    if (!r.left && r.message) showTransient('bad', r.message, TRANSIENT_MS);
+  }, [showTransient]);
 
   const toggleMute = useCallback(() => {
     setMuted((m) => {
@@ -647,6 +674,7 @@ export default function useRecordController({ isActive = true } = {}) {
     dismissFinish,
     goToTraining,
     goToHome,
+    leaveStation,
     muted,
     toggleMute,
     estimate,

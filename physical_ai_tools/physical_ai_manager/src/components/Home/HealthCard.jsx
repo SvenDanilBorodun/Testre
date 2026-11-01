@@ -107,6 +107,10 @@ export default function HealthCard({ jointsLive = null, cloudOnly = false }) {
           intrinsic: !!res.has_scene_intrinsics,
           handeye: !!res.has_scene_handeye,
           table: !!res.has_table_plane,
+          // The additive station fields (station spec §8.4); an older image
+          // sends none, which reads as a manual rig.
+          stationRig: res.station_rig === true,
+          stationConfigured: res.station_configured === true,
         });
       } catch {
         // Leave it null: „—" is the honest answer to a question that failed.

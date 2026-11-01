@@ -25,6 +25,7 @@ import CloudInferenceView from '../components/CloudInference/CloudInferenceView'
 import { cloudCopy } from '../components/CloudInference/cloudCopy';
 import useCloudInferenceSession from '../hooks/useCloudInferenceSession';
 import { cloudTargetState, effectiveTarget, jetsonOwnsRosbridge } from '../features/cloudInference/gating';
+import StationBlockNotice from '../components/Station/StationBlockNotice';
 import { isLiveRun, release as releaseCloudReservation } from '../features/cloudInference/controller';
 import { isCloudApiConfigured } from '../services/cloudConfig';
 import { isCloudOnlyMode } from '../utils/cloudMode';
@@ -464,10 +465,18 @@ export default function InferencePage({ isActive = true }) {
     ? <CloudInferenceView isActive={isActive} cloud={cloud} />
     : renderJetsonFlow();
   if (!cloud.offered || jetsonOwnsRosbridge(jetsonStatus)) {
-    return body;
+    // The camera station holds the robot (station spec §9.2): local and cloud
+    // Start alike — the notice renders nothing while no station claim is held.
+    return (
+      <div className="h-full w-full flex flex-col min-h-0">
+        <StationBlockNotice />
+        <div className="flex-1 min-h-0">{body}</div>
+      </div>
+    );
   }
   return (
     <div className="h-full w-full flex flex-col min-h-0">
+      <StationBlockNotice />
       <TargetSwitch
         cloud={cloud}
         target={target}

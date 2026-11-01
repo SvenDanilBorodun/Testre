@@ -7,6 +7,10 @@
 # pinned ast.dump/ast.unparse hash, which differs across the 3.11 CI / 3.12 local
 # pytest interpreters. Never executed (never imported/compileall'd); only parsed.
 # Regenerate from base ONLY when base itself legitimately changes.
+# Regenerated 2026-11-01 for the OMX camera station (plan v6.13, owner-approved):
+# _assert_no_other_active gained the station claim refusal for 'recording' /
+# 'inference' (§5.3) and _launch_workflow the D4 gate + per-run binding (§5.4);
+# workflow_start_callback and _on_workflow_finished are unchanged from 7efaeb4.
 
 class _Base:
     def _assert_no_other_active(self, requested_mode: str) -> tuple[bool, str]:
@@ -17,8 +21,16 @@ class _Base:
         'manual', 'capture', 'leader_teach'. It selects which relaxations apply:
         'manual' coexists with an open Handbetrieb session; 'capture' (a read-only
         FK snapshot) coexists with Handbetrieb AND a leader-arm take; 'leader_teach'
-        coexists with nothing, itself included.
+        coexists with nothing, itself included. 'station' (an OMX camera
+        station enter that opens a NEW session, plan v6.13 §5.3) passes only when
+        every owner is idle, with no relaxation. While the station claim is held,
+        'recording' and 'inference' refuse with the station sentence.
         """
+        station = getattr(self, '_station', None)
+        if station is not None:
+            refusal = station.claim_refusal(requested_mode)
+            if refusal:
+                return False, refusal
         # A collision recovery owns the arm until the student finishes the two-step
         # home→resume flow (which, mid-recording, seamlessly resumes that recording). Block
         # any new operation until then — defense-in-depth behind the non-dismissible
@@ -112,6 +124,7 @@ class _Base:
         workflow_start_callback so the F1 on_workflow claim (set by the caller
         under _mode_lock) can be released in a finally without re-indenting the
         whole routing body."""
+        run_binding = None
         # Roboter Studio Phase-3 sim: the run flag rides a `sim` sibling key
         # INSIDE workflow_json (Interpreter.from_json reads only data['blocks'],
         # so the sibling is silently ignored by the interpreter). When enabled we
@@ -246,6 +259,19 @@ class _Base:
                     response.unreachable_block_ids = []
                     response.unreachable_messages = []
                     return False
+            # D4 + the per-run binding (plan v6.13 §5.4): on a station rig a real
+            # run needs `verified`, and captures the station camera and the
+            # in-memory calibration in ONE hold of _station_lock.
+            station = getattr(self, '_station', None)
+            if station is not None and station.rig:
+                binding, reason = station.bind_run()
+                if binding is None:
+                    response.success = False
+                    response.message = reason
+                    response.unreachable_block_ids = []
+                    response.unreachable_messages = []
+                    return False
+                run_binding = self._station_run_binding(binding)
             manager = self._get_or_create_workflow_manager()
             if manager is None:
                 response.success = False
@@ -272,6 +298,7 @@ class _Base:
         success, message, unreachable = manager.start(
             request.workflow_json,
             request.workflow_id,
+            **({'run_binding': run_binding} if run_binding is not None else {}),
         )
         # on_workflow was claimed under _mode_lock in workflow_start_callback; the
         # caller's finally releases it when this returns False. On success the

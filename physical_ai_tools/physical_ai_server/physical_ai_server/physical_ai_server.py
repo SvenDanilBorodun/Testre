@@ -638,6 +638,18 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         except Exception as e:  # noqa: BLE001 — never fatal at boot
             self.get_logger().warning(f'command-rail publisher pre-create failed: {e}')
 
+        # OMX camera station (plan v6.13 §5): the session machine, the commission
+        # worker thread, the three /station/* services and the 5 Hz timer.
+        # Best-effort like its neighbours: a failure leaves self._station None
+        # (no station features) and the node lives on. Stays ABOVE
+        # _init_robot_profile (degraded-boot contract) and above the code-RPC block,
+        # which stays the statement right before it (test_node_init_ordering).
+        try:
+            self._init_station()
+        except Exception as e:  # noqa: BLE001 — never fatal at boot
+            self._station = None
+            self.get_logger().error(f'station init failed: {e!r}')
+
         # Roboter Studio text-program RPC server (§3.3): bind rpc.sock in the
         # shared ipc volume so a student's Python/Java program can drive the arm
         # over the data socket. Best-effort like its two neighbours above; on any
@@ -649,17 +661,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self._init_code_rpc()
         except Exception as e:  # noqa: BLE001 — never fatal at boot
             self.get_logger().warning(f'code RPC init failed: {e}')
-
-        # OMX camera station (plan v6.13 §5): the session machine, the commission
-        # worker thread, the three /station/* services and the 5 Hz timer.
-        # Best-effort like its neighbours: a failure leaves self._station None
-        # (no station features) and the node lives on. Stays ABOVE
-        # _init_robot_profile (degraded-boot contract).
-        try:
-            self._init_station()
-        except Exception as e:  # noqa: BLE001 — never fatal at boot
-            self._station = None
-            self.get_logger().error(f'station init failed: {e!r}')
 
         # Robot-type self-init (D1) — LAST statement of __init__. Resolves the
         # hardset EDUBOTICS_ROBOT_TYPE into an ArmProfile, sets operation_mode

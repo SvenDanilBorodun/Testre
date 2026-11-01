@@ -1821,6 +1821,31 @@ class MirrorClaim(Base):
         self.assertEqual(self.db.checkpoint(row["id"], 1, 10000)["state"], "deleted")
 
 
+class Reconcile(Base):
+    """§4.12 / §9.5: credit_reconcile is report-only; one ERROR names the four counts."""
+
+    async def test_all_zero_logs_nothing(self):
+        with self.assertNoLogs("app.services.training_dispatch", level="ERROR"):
+            self.assertEqual(await D.reconcile_tick(),
+                             {"o_unsettled": 0, "o_orphans": 0, "o_drift": 0, "o_stale_open": 0})
+        self.assertEqual(self.db.calls("credit_reconcile"), [{}])
+
+    async def test_any_count_logs_one_error_and_writes_nothing(self):
+        self.db._rpc_credit_reconcile = lambda: [{"o_unsettled": 2, "o_orphans": 0, "o_drift": 1, "o_stale_open": 0}]
+        before = len(self.db.ops)
+        with self.assertLogs("app.services.training_dispatch", level="ERROR") as logs:
+            counts = await D.reconcile_tick()
+        self.assertEqual(counts["o_unsettled"], 2)
+        (line,) = logs.output
+        self.assertIn("unsettled=2 orphans=0 drift=1 stale_open=0", line)
+        self.assertEqual(len(self.db.ops), before, "report only")
+
+    async def test_a_scalar_shaped_answer_is_read_too(self):
+        self.db._rpc_credit_reconcile = lambda: {"o_unsettled": 0, "o_orphans": 3, "o_drift": 0, "o_stale_open": 0}
+        with self.assertLogs("app.services.training_dispatch", level="ERROR"):
+            self.assertEqual((await D.reconcile_tick())["o_orphans"], 3)
+
+
 class Helpers(unittest.TestCase):
     def test_budget_for_subtracts_the_current_attempts_own_time(self):
         now = 1_800_000_000.0

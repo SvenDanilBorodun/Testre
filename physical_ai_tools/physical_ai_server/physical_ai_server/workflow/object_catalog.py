@@ -277,6 +277,17 @@ _CATALOG_BY_PROFILE: dict = {
     'v1_studio': (_FIXED_CATALOG_V1, (0.0, 0.90)),
 }
 
+# D14 (owner, 2026-11-01): AprilTag IDs 100–199 are the OMX camera station's
+# reserved reference range on every robot; no fixed catalog ID may lie in it.
+STATION_TAG_ID_RANGE = (100, 199)
+for _catalog, _band in [(_FIXED_CATALOG, None)] + list(_CATALOG_BY_PROFILE.values()):
+    for _recipe in _catalog.get('types', {}).values():
+        if any(STATION_TAG_ID_RANGE[0] <= int(_t) <= STATION_TAG_ID_RANGE[1]
+               for _t in _recipe.get('tag_ids', ())):
+            raise AssertionError(
+                'a fixed catalog tag ID lies in the reserved station range 100–199')
+del _catalog, _band, _recipe
+
 
 def fixed_catalog(profile_id: Optional[str] = None) -> ObjectCatalog:
     """The single, fleet-wide named-object set — identical on every machine and

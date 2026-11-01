@@ -1,0 +1,27 @@
+# OMX camera station (plan v6.13 §8.2): the session checks (/station/check).
+# camera, robot and resolve_camera require the owner's client_id and the current
+# session_id (else NOT_OWNER); status does not. message / action_de are German.
+string command        # camera | robot | resolve_camera | status
+string session_id
+string client_id
+---
+bool accepted
+bool success
+string result         # OK | QUEUED (resolve_camera, §7.3) | MOVED | WRONG_MAT | REFS_MISSING | NO_FRAME | WRONG_SIZE | NOT_CONFIGURED | NOT_OWNER | BUSY | NOT_VERTICAL | NO_DOT | ROBOT_MOVED | RESOLVE_REFUSED | FAILED (the re-lock failed) | INVALID
+uint32 job_id         # resolve_camera: the queued job; status: the owner's last job
+string job_state      # status: none | queued | running | retry_wait | done | failed | stale
+string message        # German
+string action_de
+uint32 generation
+int32[] ref_ids
+float64[] ref_residual_mm
+float64 rms_mm
+float64 max_mm
+float64 centroid_mm
+float64 rotation_deg
+uint8 dot_id
+float64 dot_dxy_mm
+float64 dot_dz_mm
+bool camera_ok
+bool robot_ok
+bool verified

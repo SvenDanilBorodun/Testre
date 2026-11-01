@@ -626,6 +626,42 @@ class WorkflowManager:
         self._persisted_trajectories: dict[str, Any] = {}
 
     @property
+    def bound_digest(self):
+        """The station calibration digest the current run was bound to (None
+        on a manual rig or a run without a binding)."""
+        return getattr(self, '_bound_digest', None)
+
+    def _bound_getters(self, run_binding, calib):
+        """The run's frame getters. With a binding they are the bound camera's,
+        and the getter returns None for a frame whose shape differs from the
+        calibration's image size, with ONE German [WARNUNG] per run — inside the
+        getter, so _scene_frame, _wait_frame_usable and the hat poll all get it.
+        A calibration without an image size keeps today's behaviour."""
+        if not run_binding:
+            return self._get_scene_frame, self._get_scene_frame_age
+        raw = run_binding.get('get_scene_frame') or self._get_scene_frame
+        age = run_binding.get('get_scene_frame_age') or self._get_scene_frame_age
+        size = calib.get('image_size')
+        if raw is None or not size:
+            return raw, age
+        width, height = int(size[0]), int(size[1])
+        warned = [False]
+        emit = self._emit_status
+
+        def guarded():
+            frame = raw()
+            if frame is None:
+                return None
+            shape = getattr(frame, 'shape', None)
+            if shape is None or tuple(shape[:2]) != (height, width):
+                if not warned[0]:
+                    warned[0] = True
+                    emit({'log_message': '[WARNUNG] Kamerabild passt nicht zur Kalibrierung.'})
+                return None
+            return frame
+        return guarded, age
+
+    @property
     def is_running(self) -> bool:
         # Audit fix #5: report False once the stop event has been
         # signalled, even if the daemon thread is still in its finally
@@ -860,7 +896,13 @@ class WorkflowManager:
         self,
         workflow_json: str,
         workflow_id: str,
+        run_binding: dict[str, Any] | None = None,
     ) -> tuple[bool, str, list[dict[str, Any]]]:
+        """``run_binding`` (OMX camera station, plan v6.13 §5.4): the camera and
+        calibration bound to THIS run at its start — ``get_scene_frame``,
+        ``get_scene_frame_age``, ``calibration`` (the in-memory station dict) and
+        ``wrap_perception`` (the zone mask). None keeps the manager's getters and
+        ``load_calibration`` exactly as before."""
         with self._lock:
             if self.is_running:
                 return False, 'Es läuft bereits ein Workflow.', []
@@ -975,7 +1017,12 @@ class WorkflowManager:
                 self._warned_keys = set()
                 self._workflow_id = workflow_id
 
-                calib = self._load_calibration() or {}
+                calib = (dict(run_binding['calibration']) if run_binding
+                         and run_binding.get('calibration') is not None
+                         else (self._load_calibration() or {}))
+                self._bound_digest = calib.get('digest') if run_binding else None
+                get_scene_frame, get_scene_frame_age = self._bound_getters(
+                    run_binding, calib)
 
                 # Load the named-object catalog tolerantly: a failure (missing /
                 # corrupt / invalid JSON) is carried as a German error string and
@@ -1041,6 +1088,15 @@ class WorkflowManager:
                         perception_instance = self._perception_factory()
                     except Exception as e:
                         return False, f'Wahrnehmung konnte nicht initialisiert werden: {e}', []
+                # The zone mask reads the RUN's ctx.object_catalog at call time (an
+                # object registered in code is projected at its own height).
+                ctx_holder: list = []
+                wrap = run_binding.get('wrap_perception') if run_binding else None
+                if wrap is not None and perception_instance is not None and not self._simulated:
+                    perception_instance = wrap(
+                        perception_instance,
+                        lambda: getattr(ctx_holder[0], 'object_catalog', None)
+                        if ctx_holder else None)
 
                 # Phase-4 no-go zones ride a top-level `zones` sibling in the
                 # workflow_json (Interpreter.from_json reads only data['blocks'], so
@@ -1120,9 +1176,9 @@ class WorkflowManager:
                     should_stop=self._stop_event.is_set,
                     log=lambda msg: self._emit_status({'log_message': msg}),
                     emit_detections=lambda dets: self._emit_status({'detections': dets}),
-                    get_scene_frame=self._get_scene_frame,
+                    get_scene_frame=get_scene_frame,
                     get_gripper_frame=self._get_gripper_frame,
-                    get_scene_frame_age=self._get_scene_frame_age,
+                    get_scene_frame_age=get_scene_frame_age,
                     get_current_pose_xyz=self._get_current_pose_xyz,
                     # Grasp-success check (#2): read the achieved gripper angle after
                     # a close to confirm the object is actually held.
@@ -1202,6 +1258,7 @@ class WorkflowManager:
                     swing_radii_m=getattr(self._arm_profile, 'swing_radii_m', None)
                     if self._arm_profile else None,
                 )
+                ctx_holder.append(ctx)
 
                 # Apply the synchronous seed so hat threads start with a
                 # realistic last_full_joints rather than [0]*6.

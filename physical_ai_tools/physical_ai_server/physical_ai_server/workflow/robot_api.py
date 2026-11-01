@@ -153,7 +153,8 @@ CODE_PROJECT_LIMITS: dict[str, Any] = {
 #   target  a `point` OR the name of a pinned destination (`str` rules with
 #           the destination alphabet) — what motion._resolve_target accepts
 #   ziel    a Greifziel handle (int ≥ 0) the run owns
-#   tagids  1..16 ints each in 0..586 (tag36h11's id space)
+#   tagids  1..16 ints each in 0..99 or 200..586 (tag36h11's id space minus the
+#           OMX camera station's reserved 100..199, D14, on every rig)
 #   obj     a catalog type name / Greifobjekt name (`_TYPE_NAME_RE`, ≤ 24)
 #   dict    a JSON object with ≤ max_len string keys (protocol payloads)
 #   value   any JSON value a student shows („zeige"): nesting and node count

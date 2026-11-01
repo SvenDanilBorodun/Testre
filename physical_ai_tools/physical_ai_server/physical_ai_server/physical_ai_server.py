@@ -407,6 +407,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # in a lock-ordering cycle (no deadlock). Distinct from _manual_lock
         # (which serialises the actual arm drive within a manual session).
         self._mode_lock = threading.Lock()
+        # OMX camera station (plan v6.13 §5.2): one lock over the station session
+        # record and the claim flag. Order: _mode_lock → _station_lock only,
+        # never the reverse; every hold O(1); nothing blocking under it.
+        self._station_lock = threading.Lock()
+        self._station = None
         # F4 — one-shot cleanup timer + flag when a manual recording hits
         # RECORD_MAX_S (re-torque + clear on_manual on the executor, off the
         # sampler which must never block).
@@ -633,6 +638,18 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         except Exception as e:  # noqa: BLE001 — never fatal at boot
             self.get_logger().warning(f'command-rail publisher pre-create failed: {e}')
 
+        # OMX camera station (plan v6.13 §5): the session machine, the commission
+        # worker thread, the three /station/* services and the 5 Hz timer.
+        # Best-effort like its neighbours: a failure leaves self._station None
+        # (no station features) and the node lives on. Stays ABOVE
+        # _init_robot_profile (degraded-boot contract) and above the code-RPC block,
+        # which stays the statement right before it (test_node_init_ordering).
+        try:
+            self._init_station()
+        except Exception as e:  # noqa: BLE001 — never fatal at boot
+            self._station = None
+            self.get_logger().error(f'station init failed: {e!r}')
+
         # Roboter Studio text-program RPC server (§3.3): bind rpc.sock in the
         # shared ipc volume so a student's Python/Java program can drive the arm
         # over the data socket. Best-effort like its two neighbours above; on any
@@ -673,6 +690,73 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self._code_rpc = None
             self.get_logger().warning(f'code RPC bind failed: {e}')
 
+    def _init_station(self):
+        """OMX camera station (plan v6.13 §5–§8). The three services exist on
+        every rig (a non-station rig answers NOT_STATION_RIG / state OFF); the
+        5 Hz timer and the station worker thread run only on a station rig
+        (EDUBOTICS_STATION_ENABLED=1 and an OMX profile)."""
+        from physical_ai_server.station.service import StationService, parse_station_flag
+        profile = getattr(self, '_resolved_profile_stash', None)
+        enabled = parse_station_flag(os.environ.get('EDUBOTICS_STATION_ENABLED'))
+        self._station = StationService(self, self._mode_lock, self._station_lock,
+                                       enabled, getattr(profile, 'profile_id', None))
+        self._station.boot()
+        from physical_ai_interfaces.srv import (
+            StationCheck, StationCommission, StationSession)
+        # StationSession on its own MutuallyExclusive group, so a slow check or
+        # solve never delays a keepalive past the 10 s rule; StationCheck and
+        # StationCommission share another (plan §8.3). Never the default group.
+        self._station_session_cb_group = MutuallyExclusiveCallbackGroup()
+        self._station_cb_group = MutuallyExclusiveCallbackGroup()
+        self.create_service(StationSession, '/station/session',
+                            self._station.session_command,
+                            callback_group=self._station_session_cb_group)
+        self.create_service(StationCheck, '/station/check', self._station.check_command,
+                            callback_group=self._station_cb_group)
+        self.create_service(StationCommission, '/station/commission',
+                            self._station.commission_command,
+                            callback_group=self._station_cb_group)
+        if not self._station.rig:
+            return
+        self._station_timer = self.create_timer(
+            0.2, self._station_tick, callback_group=MutuallyExclusiveCallbackGroup())
+        self._station.start_worker()
+        self.get_logger().info('OMX camera station enabled.')
+
+    def _station_tick(self):
+        """The station's 5 Hz state machine. Never raises (a timer exception
+        would kill the node)."""
+        try:
+            self._station.tick()
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().error(f'station tick failed: {e!r}')
+
+    def _station_rig(self) -> bool:
+        station = getattr(self, '_station', None)
+        return bool(station is not None and station.rig)
+
+    def _station_gate(self) -> str:
+        """D4: '' when real motion may start on this rig, else the German reason."""
+        station = getattr(self, '_station', None)
+        if station is None or not station.rig:
+            return ''
+        return station.gate_motion()
+
+    def _station_run_binding(self, binding):
+        """The per-run binding of a verified station rig (§5.4): the station
+        camera, the in-memory StationCalibration it was verified against, and the
+        zone mask."""
+        from physical_ai_server.station.zone_perception import ZonePerception
+        cal = binding['calibration']
+        camera = binding['camera']
+        return {
+            'get_scene_frame': lambda: self._get_latest_camera_frame(camera),
+            'get_scene_frame_age': lambda: self._get_camera_frame_age(camera),
+            'calibration': cal.calibration,
+            'wrap_perception': lambda inner, get_catalog: ZonePerception(
+                inner, cal.calibration, cal.polygon_base, get_catalog),
+        }
+
     def _init_robot_profile(self):
         """Boot-time robot identity + data-pipeline bring-up (Rule D1).
 
@@ -705,10 +789,23 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self._arm_profile = profile
             self.robot_profile = profile.profile_id
             self.capabilities_json = robot_profiles.capabilities_json(profile)
+            # OMX camera station (§5.6): the additive key on every station rig,
+            # configured or not; robot_profiles.py stays unchanged.
+            station = getattr(self, '_station', None)
+            if station is not None and station.rig:
+                caps = json.loads(self.capabilities_json)
+                caps.update(station.capability_extra())
+                self.capabilities_json = json.dumps(caps)
             # data_robot_type is 'omx_f' for BOTH OMX profiles — dataset repo
             # naming ({user}/{robot_type}_{task}) must stay stable.
             self.robot_type = profile.data_robot_type
             self.init_ros_params(self.robot_type)
+            # The station frame store (§5.4): one subscription on the sensor node,
+            # outside every recording / inference structure.
+            if station is not None and station.rig and self.communicator is not None:
+                enable = getattr(self.communicator, 'enable_station_store', None)
+                if callable(enable):
+                    enable()
             # A missing/unloaded config YAML does NOT leave these params falsy:
             # they are declared with default_value=[''] and load_parameters
             # returns that — a NON-empty list of one empty string. Treat a list
@@ -3992,8 +4089,16 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         'manual', 'capture', 'leader_teach'. It selects which relaxations apply:
         'manual' coexists with an open Handbetrieb session; 'capture' (a read-only
         FK snapshot) coexists with Handbetrieb AND a leader-arm take; 'leader_teach'
-        coexists with nothing, itself included.
+        coexists with nothing, itself included. 'station' (an OMX camera
+        station enter that opens a NEW session, plan v6.13 §5.3) passes only when
+        every owner is idle, with no relaxation. While the station claim is held,
+        'recording' and 'inference' refuse with the station sentence.
         """
+        station = getattr(self, '_station', None)
+        if station is not None:
+            refusal = station.claim_refusal(requested_mode)
+            if refusal:
+                return False, refusal
         # A collision recovery owns the arm until the student finishes the two-step
         # home→resume flow (which, mid-recording, seamlessly resumes that recording). Block
         # any new operation until then — defense-in-depth behind the non-dismissible
@@ -4136,6 +4241,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         return getattr(ik, 'approach_axis_local', None)
 
     def calibration_start_callback(self, request, response):
+        # OMX camera station (plan v6.13 §5.4): calibrated through „Station
+        # einrichten" only; the manual YAMLs are never touched on a station rig.
+        if getattr(getattr(self, '_station', None), 'rig', False):
+            from physical_ai_server.station import texts_de as _station_texts
+            response.success = False
+            response.message = _station_texts.MANUAL_CALIBRATION_REFUSED_DE
+            return response
         ok, msg = self._assert_no_other_active('calibration')
         if not ok:
             response.success = False
@@ -4229,6 +4341,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         preempt group (see the lock's init comment)."""
         self._follower_torque_last_message = ''
         with self._dxl_torque_lock:
+            # D15 (owner sign-off 2026-11-01, Rule §2): a torque-OFF the server
+            # sent but could not confirm (unavailable, timed out, refused, an
+            # exception) turns a „locked" reading into „unknown": the driver may
+            # still apply the request seconds later, so True must never outlive
+            # it. Only True becomes None; a False stays False (the home glide's
+            # `is False` refusal keeps holding over a confirmed-limp arm). The
+            # next torque-on then publishes the measured-pose hold first.
+            confirmed = False
             try:
                 from std_srvs.srv import SetBool
                 client = getattr(self, '_dxl_torque_client', None)
@@ -4315,6 +4435,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 if ok:
                     # Track the confirmed torque state for the idle watchdog so it
                     # knows whether a limp arm needs re-torquing.
+                    confirmed = True
                     self._follower_torque_on = bool(enabled)
                     if enabled:
                         # F5 — a re-torque can spike holding current; arm the
@@ -4328,6 +4449,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             except Exception as e:  # noqa: BLE001
                 self.get_logger().warning(f'set_dxl_torque failed: {e!r}')
                 return False
+            finally:
+                if (not enabled and not confirmed
+                        and getattr(self, '_follower_torque_on', None) is True):
+                    self._follower_torque_on = None
 
     def _follower_rail_is_ros2_control(self) -> bool:
         """True when the follower is driven through ros2_control's
@@ -4446,6 +4571,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         return False
 
     def calibration_capture_callback(self, request, response):
+        # OMX camera station (plan v6.13 §5.4): calibrated through „Station
+        # einrichten" only; the manual YAMLs are never touched on a station rig.
+        if getattr(getattr(self, '_station', None), 'rig', False):
+            from physical_ai_server.station import texts_de as _station_texts
+            response.success = False
+            response.message = _station_texts.MANUAL_CALIBRATION_REFUSED_DE
+            return response
         manager = self.calibration_manager
         if manager is None:
             response.success = False
@@ -4504,6 +4636,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         return response
 
     def calibration_solve_callback(self, request, response):
+        # OMX camera station (plan v6.13 §5.4): calibrated through „Station
+        # einrichten" only; the manual YAMLs are never touched on a station rig.
+        if getattr(getattr(self, '_station', None), 'rig', False):
+            from physical_ai_server.station import texts_de as _station_texts
+            response.success = False
+            response.message = _station_texts.MANUAL_CALIBRATION_REFUSED_DE
+            return response
         manager = self.calibration_manager
         if manager is None:
             response.success = False
@@ -4592,6 +4731,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         camera; otherwise narrows to the named camera. Also signals
         ``_calibration_stop_event`` so an in-flight touch-off capture
         halts within ≤50 ms instead of running to completion."""
+        # OMX camera station (plan v6.13 §5.4): no manual step can be active on a
+        # station rig, and the station commission keeps its own step marker, so a
+        # manual cancel (another tab, an old page's cleanup) answers success
+        # without touching anything — it never re-torques the arm under the
+        # commission or releases its on_calibration.
+        if getattr(getattr(self, '_station', None), 'rig', False):
+            response.success = True
+            response.message = 'Kalibrierung abgebrochen.'
+            return response
         camera = request.camera if request.camera else None
         # Set BEFORE dropping buffers so a mid-flight chunked_publish
         # observes the stop on its next poll without racing the manager.
@@ -4672,6 +4820,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     response.has_table_plane = False
             response.success = True
             response.message = 'Kalibrier-Status geladen.'
+            # OMX camera station (§8.4): the additive fields, getattr-safe.
+            station = getattr(self, '_station', None)
+            if station is not None:
+                station.fill_calibration_status(response)
         except Exception as e:
             self.get_logger().warning(f'status read failed: {e}')
             # On a read failure, leave gripper fields satisfied (not the
@@ -4688,6 +4840,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     def mark_destination_callback(self, request, response):
         """Project a pixel click on a calibrated camera to a base-frame
         point on the table plane."""
+        # OMX camera station (plan v6.13 §5.4): a separate branch; the manual
+        # branch below stays byte-identical.
+        if getattr(getattr(self, '_station', None), 'rig', False):
+            return self._station_mark_destination(request, response)
         manager = self._get_or_create_calibration_manager()
         if manager is None or not manager.has_intrinsics(request.camera):
             response.success = False
@@ -4871,6 +5027,70 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # Audit §3.21 — generic German, log details server-side.
             response.message = 'Projektion fehlgeschlagen — bitte Kalibrierung prüfen.'
             return response
+
+    def _station_mark_destination(self, request, response):
+        """Click-to-Ziel on a station rig: D4-gated, only ``station_scene`` with a
+        pixel inside 1920×1080, projected with the in-memory station calibration
+        (K, dist, T_cam_base, board_table_z) through the same
+        project_pixel_to_table, no verify correction; the pin's z from the
+        table plane at the pin's own xy."""
+        from physical_ai_server.station import texts_de as ST
+        response.success = False
+        response.world_x = response.world_y = response.world_z = 0.0
+        refusal = self._station.gate_motion()
+        if refusal:
+            response.message = refusal
+            return response
+        if request.camera != ST.STATION_CAMERA:
+            response.message = ST.MARK_SCENE_REFUSED_DE
+            return response
+        px, py = float(request.pixel_x), float(request.pixel_y)
+        width, height = ST.STATION_IMAGE_SIZE
+        if not (math.isfinite(px) and math.isfinite(py)
+                and 0.0 <= px < width and 0.0 <= py < height):
+            response.message = ST.MARK_OUT_OF_IMAGE_DE
+            return response
+        with self._station_lock:
+            cal = self._station.calibration
+        if cal is None:
+            response.message = ST.GATE_NOT_CONFIGURED_DE
+            return response
+        c = cal.calibration
+        try:
+            from physical_ai_server.workflow.projection import project_pixel_to_table
+            point = project_pixel_to_table(
+                px, py, c['scene_intrinsics']['K'], c['scene_intrinsics']['dist'],
+                c['scene_extrinsics'], float(c['board_table_z']))
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().error(f'station mark_destination failed: {e!r}')
+            point = None
+        if point is None:
+            response.message = ST.MARK_PROJECTION_FAILED_DE
+            return response
+        x, y = float(point[0]), float(point[1])
+        pin_z = float(c['z_table'])
+        try:
+            import types as _types
+            from physical_ai_server.workflow.handlers.motion import table_z_at
+            resolved = table_z_at(_types.SimpleNamespace(
+                table_plane=c['table_plane'], z_table=c['z_table']), x, y)
+            if resolved is not None and math.isfinite(resolved):
+                pin_z = float(resolved)
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().warning(f'station mark_destination plane height skipped: {e}')
+        try:
+            wfm = self._get_or_create_workflow_manager()
+            if wfm is not None and request.label:
+                wfm.set_destination(request.label, x, y, pin_z, plane_tracked=True)
+        except ValueError as e:
+            response.message = str(e)
+            return response
+        except Exception:  # noqa: BLE001 — persistence is best-effort, as in the manual branch
+            pass
+        response.success = True
+        response.world_x, response.world_y, response.world_z = x, y, pin_z
+        response.message = f'Ziel "{request.label}" gespeichert.'
+        return response
 
     def capture_pose_callback(self, request, response):
         """"Position merken" — capture the follower arm's CURRENT base-frame
@@ -5294,6 +5514,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         if self._follower_joints_stale():
             response.message = ('Armstellung noch nicht bekannt — bitte kurz '
                                 'warten und erneut versuchen.')
+            return response
+        # D4 (owner sign-off 2026-11-01, Rule §2): on a camera-station rig no
+        # real Roboter Studio motion until this session's camera and robot
+        # checks passed. Checked at operation start only.
+        _station = getattr(self, '_station', None)
+        station_refusal = (_station.gate_motion()
+                           if getattr(_station, 'rig', False) else '')
+        if station_refusal:
+            response.message = station_refusal
             return response
 
         # F1 — atomic claim: hold _mode_lock around the ownership check AND the
@@ -5793,6 +6022,19 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                                     'aus — bitte kurz warten.')
                 return response
             try:
+                # D16 (owner sign-off 2026-11-01, manual arbiter): this call runs on
+                # the reentrant _preempt_cb_group, so „Arm festsetzen"
+                # (hand_guide(false)) may have ended the persistent session while
+                # this one waited for _manual_lock. Re-check the claim under
+                # _mode_lock: if it is gone, refuse — restore nothing, switch no
+                # torque; the latest press wins. Without it the arm went limp
+                # with no manual session open, so no other mode was blocked.
+                with self._mode_lock:
+                    claim_held = self._manual_persistent
+                if not claim_held:
+                    response.message = ('Der Arm wurde gerade festgesetzt – bitte '
+                                        'noch einmal versuchen.')
+                    return response
                 # Persistent session already claimed under _mode_lock above.
                 if not self._set_follower_torque(False):
                     # Could not make the arm limp; it stays torqued (SAFE, not
@@ -5935,6 +6177,19 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                                     'aus — bitte kurz warten.')
                 return response
             try:
+                # D16 (owner sign-off 2026-11-01, manual arbiter): this call runs on
+                # the reentrant _preempt_cb_group, so „Arm festsetzen"
+                # (hand_guide(false)) may have ended the persistent session while
+                # this one waited for _manual_lock. Re-check the claim under
+                # _mode_lock: if it is gone, refuse — restore nothing, switch no
+                # torque; the latest press wins. Without it the arm went limp
+                # with no manual session open, so no other mode was blocked.
+                with self._mode_lock:
+                    claim_held = self._manual_persistent
+                if not claim_held:
+                    response.message = ('Der Arm wurde gerade festgesetzt – bitte '
+                                        'noch einmal versuchen.')
+                    return response
                 if self._manual_record_active:
                     with self._mode_lock:
                         self._manual_persistent = was_persistent
@@ -6447,6 +6702,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         if self._follower_joints_stale():
             response.message = ('Armstellung noch nicht bekannt — bitte kurz '
                                 'warten und erneut versuchen.')
+            return response
+        # D4 (owner sign-off 2026-11-01, Rule §2): on a camera-station rig no
+        # real Roboter Studio motion until this session's camera and robot
+        # checks passed. Checked at operation start only.
+        _station = getattr(self, '_station', None)
+        station_refusal = (_station.gate_motion()
+                           if getattr(_station, 'rig', False) else '')
+        if station_refusal:
+            response.message = station_refusal
             return response
 
         # Fast pre-check (re-checked atomically under _mode_lock below).
@@ -7622,6 +7886,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         it rides along for motion's descend, NOT for object projection (it is
         offset above the surface, so projecting objects onto it reintroduces the
         lateral error on a tilted camera that board_table_z avoids)."""
+        # OMX camera station (plan v6.13 §5.4): on a station rig the in-memory
+        # StationCalibration's dict, never a disk read and never the manual
+        # YAMLs; an unconfigured station rig gets nothing (motion is gated).
+        station = getattr(self, '_station', None)
+        if station is not None and station.rig:
+            cal = station.calibration
+            return dict(cal.calibration) if cal is not None else {}
         from pathlib import Path
         import os
         import cv2
@@ -7765,6 +8036,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         workflow_start_callback so the F1 on_workflow claim (set by the caller
         under _mode_lock) can be released in a finally without re-indenting the
         whole routing body."""
+        run_binding = None
         # Roboter Studio Phase-3 sim: the run flag rides a `sim` sibling key
         # INSIDE workflow_json (Interpreter.from_json reads only data['blocks'],
         # so the sibling is silently ignored by the interpreter). When enabled we
@@ -7899,6 +8171,19 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     response.unreachable_block_ids = []
                     response.unreachable_messages = []
                     return False
+            # D4 + the per-run binding (plan v6.13 §5.4): on a station rig a real
+            # run needs `verified`, and captures the station camera and the
+            # in-memory calibration in ONE hold of _station_lock.
+            station = getattr(self, '_station', None)
+            if station is not None and station.rig:
+                binding, reason = station.bind_run()
+                if binding is None:
+                    response.success = False
+                    response.message = reason
+                    response.unreachable_block_ids = []
+                    response.unreachable_messages = []
+                    return False
+                run_binding = self._station_run_binding(binding)
             manager = self._get_or_create_workflow_manager()
             if manager is None:
                 response.success = False
@@ -7925,6 +8210,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         success, message, unreachable = manager.start(
             request.workflow_json,
             request.workflow_id,
+            **({'run_binding': run_binding} if run_binding is not None else {}),
         )
         # on_workflow was claimed under _mode_lock in workflow_start_callback; the
         # caller's finally releases it when this returns False. On success the
@@ -8059,6 +8345,16 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             response.success = False
             response.message = 'Es läuft kein Workflow.'
             return response
+        # D4 (plan v6.13 §5.4): a real run on a station rig continues or steps
+        # only while verified AND under the calibration it was bound to.
+        station = getattr(self, '_station', None)
+        if (station is not None and station.rig
+                and manager is getattr(self, 'workflow_manager', None)):
+            refusal = station.continue_refusal(getattr(manager, 'bound_digest', None))
+            if refusal:
+                response.success = False
+                response.message = refusal
+                return response
         success, message = manager.step()
         response.success = success
         response.message = message
@@ -8070,6 +8366,16 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             response.success = False
             response.message = 'Es läuft kein Workflow.'
             return response
+        # D4 (plan v6.13 §5.4): a real run on a station rig continues or steps
+        # only while verified AND under the calibration it was bound to.
+        station = getattr(self, '_station', None)
+        if (station is not None and station.rig
+                and manager is getattr(self, 'workflow_manager', None)):
+            refusal = station.continue_refusal(getattr(manager, 'bound_digest', None))
+            if refusal:
+                response.success = False
+                response.message = refusal
+                return response
         success, message = manager.resume()
         response.success = success
         response.message = message
@@ -8118,6 +8424,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         only re-encodes JPEG quality, it does not resize), so the React SVG
         overlay's ``naturalSize`` viewBox lines up with no offset.
         """
+        # OMX camera station (plan v6.13 §5.4): calibrated through „Station
+        # einrichten" only; the manual YAMLs are never touched on a station rig.
+        if getattr(getattr(self, '_station', None), 'rig', False):
+            from physical_ai_server.station import texts_de as _station_texts
+            response.success = False
+            response.message = _station_texts.MANUAL_CALIBRATION_REFUSED_DE
+            return response
         response.detected = False
         response.corners_x = []
         response.corners_y = []
@@ -8176,6 +8489,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         similarity (Umeyama, via CalibrationManager.fit_xy_correction); on success
         it persists xy_correction + yaw_bias into scene_handeye.yaml, on a
         mirror/handedness flip it refuses + persists nothing. German throughout."""
+        # OMX camera station (plan v6.13 §5.4): calibrated through „Station
+        # einrichten" only; the manual YAMLs are never touched on a station rig.
+        if getattr(getattr(self, '_station', None), 'rig', False):
+            from physical_ai_server.station import texts_de as _station_texts
+            response.success = False
+            response.message = _station_texts.MANUAL_CALIBRATION_REFUSED_DE
+            return response
         import math as _math
 
         self._verify_reset_response(response)

@@ -40,6 +40,7 @@ from app.services import credit_texts_de as C  # noqa: E402
 from app.services import hf_publish, stop_actions, training_dispatch as D  # noqa: E402
 from app.services import training_texts_de as T  # noqa: E402
 from app.tests._managed_fakes import Clock, FakeDB, FakeModal, FakeRunpod, PgError  # noqa: E402
+from app.tests.test_training_dispatch import settings  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP = os.path.dirname(HERE)
@@ -246,6 +247,16 @@ class Start(StartBase):
         await self.start(self.keyed())
         (call,) = self.db.calls("start_training_safe")
         self.assertEqual((call["p_idempotency_key"], call["p_max_hours"], call["p_managed"]), (REQ, 3, True))
+
+    async def test_a_lower_deploy_cap_reaches_the_reservation(self):
+        # MANAGED_ACT_CAP_S=3600: the start asks for at most 1 hour (cap_hours(), never a literal 3)
+        with patch.object(D, "SETTINGS", settings(TRAINING_DISPATCH="managed", MANAGED_ACT_CAP_S="3600")):
+            resp = dump(await self.start())
+            q = dump(await route.get_quota(user=USER))
+        (call,) = self.db.calls("start_training_safe")
+        self.assertEqual((call["p_max_hours"], resp["reserved_hours"]), (1, 1))
+        self.assertEqual(q["max_hours_per_training"], 1)
+        self.assertEqual({c["p_max_hours"] for c in self.db.calls("credit_quota")}, {1})
 
     async def test_a_failing_refusal_record_never_blocks_the_answer(self):
         self.db.roles["u-1"] = "admin"
@@ -521,6 +532,13 @@ class WorkgroupHours(RouteBase):
             self.assertEqual(await self.refused(wg_route.set_member_limit(GROUP, body={"hours": 2}, teacher=T_)), want)
         self.assertEqual(await self.refused(wg_route.set_member_limit(FOREIGN_GROUP, body={"hours": 2}, teacher=T_)),
                          (404, "Arbeitsgruppe nicht gefunden"))
+
+    async def test_a_foreign_groups_history_is_the_german_404(self):
+        self.db.ledger.append(ledger_row(1, "assign", 4, frm=("teacher", OTHER_TEACHER), to=("group", FOREIGN_GROUP)))
+        self.assertEqual(await self.refused(wg_route.workgroup_credit_history(FOREIGN_GROUP, before=None, limit=None,
+                                                                              teacher=T_)),
+                         (404, "Arbeitsgruppe nicht gefunden"))
+        self.assertEqual(self.db.calls("credit_history"), [], "nothing is read before the assert")
 
     async def test_the_group_history_carries_limit_changes(self):
         self.db.ledger.append(ledger_row(1, "limit_change", 0, to=("group", GROUP), meta={"old": None, "new": 4}))

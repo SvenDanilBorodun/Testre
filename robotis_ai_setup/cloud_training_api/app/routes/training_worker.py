@@ -24,7 +24,9 @@ budget clock still has time) requeues; a checkpoint is uploaded and accepted onl
 from a ``running`` attempt; a ``lerobot_error`` (S19) or a content refusal (S7) is
 believed only when an EARLIER attempt on a DISTINCT host (``D.distinct_hosts``)
 reported the same (owner Q-C), else it requeues like a lost attempt; a confirmed S19
-charges 0 (owner OQ-2); ``ckpt-bad`` refuses only on proof (owner OQ-3, R3-2). Every
+charges 0 (owner OQ-2), and only a provable fresh start may ask for that waiver, judged
+from the database's own facts (``_waiver_blockers``, owner fix round 2026-11-01);
+``ckpt-bad`` refuses only on proof (owner OQ-3, R3-2). Every
 checkpoint object's bytes are bound to the manifest's SHA-256 by the presigned PUT and
 read back at ckpt-done (owner OQ-1, gate G0b; an object without a stored checksum is
 stream-hashed instead, review 3 m8).
@@ -74,6 +76,37 @@ TIME_CAP_SLACK_S = 300
 HOST_CLAIM_LIMIT = D.RESUME_CRASH_LIMIT
 MARK_LEROBOT_ERROR = "host_unfit:lerobot_error_unconfirmed"
 MARK_CONTENT = "host_unfit:content_unconfirmed"
+# Owner fix round 2026-11-01 (V1-M1): a lerobot_error that is no provable fresh start
+# (see _waiver_blockers) is requeued like a lost attempt, never waived; the second mark is
+# the database refusing the waiver (P0073) although the API judged it fresh (fail closed).
+MARK_LEROBOT_ERROR_NOT_FRESH = "host_unfit:lerobot_error_not_fresh"
+MARK_LEROBOT_ERROR_WAIVER_REFUSED = "host_unfit:lerobot_error_waiver_refused"
+
+
+def _waiver_blockers(row, att, ready) -> list:
+    """Why this attempt's ``lerobot_error`` cannot lead to the S19 charge waiver (owner
+    fix round 2026-11-01, V1-M1). The waiver charges the WHOLE training 0, so it is allowed
+    only for a provable fresh start, decided from the database at finish time and never
+    from host input: the attempt ran ``/start`` from step 0 (``resume_from_step`` 0; NULL
+    means ``/start`` never ran), it is ``running`` (it made its first running write), the
+    row is no continuation, no training second was counted yet and the training has no
+    ready checkpoint. ``row`` / ``att`` are this request's own database reads (_authorize),
+    ``ready`` the training's ready checkpoints read here. Empty = no blocker (the same
+    conditions finish_training checks itself, P0073)."""
+    why = []
+    if att.get("resume_from_step") is None:
+        why.append("no_start")
+    elif int(att.get("resume_from_step") or 0) != 0:
+        why.append("resumed")
+    if att.get("state") != "running":
+        why.append("not_running")
+    if row.get("continued_from") is not None:
+        why.append("continuation")
+    if int(row.get("train_seconds_used") or 0) != 0:
+        why.append("trained_seconds")
+    if ready:
+        why.append("ready_checkpoint")
+    return why
 
 
 def _resp(status: int, content: dict) -> JSONResponse:
@@ -805,6 +838,13 @@ def _count_resume_crash(tid: int, att) -> None:
     _set_ckpt_state(tid, int(src), int(step), payload, ("ready",))
 
 
+async def _requeue_finish(row, att, reason: str, now: float, ready, runpod: bool):
+    await D.requeue_attempt(row, att, reason, now, ready, skip_community_dc=True)
+    if runpod:
+        await D.terminate_attempt(att)
+    return _resp(200, {"status": "requeued"})
+
+
 async def _finish(row, att, body):
     from app.services import hf_publish
 
@@ -836,14 +876,28 @@ async def _finish(row, att, body):
         outcome, reason = "host_unfit", "resume_crash"
     if outcome == "failed":
         if reason == "lerobot_error":
+            ready = await asyncio.to_thread(D.read_checkpoints, [tid], ["ready"])
+            blockers = _waiver_blockers(row, att, ready)
+            if blockers:
+                # V1-M1: no provable fresh start → never waived; requeued like a lost
+                # attempt (charged by E50 up to its own ready checkpoint) with its mark.
+                logger.warning("training %s attempt %s: lerobot_error without a provable fresh start (%s), "
+                               "requeued, never waived", tid, n, ",".join(blockers))
+                return await _requeue_finish(row, att, MARK_LEROBOT_ERROR_NOT_FRESH, now, ready, runpod)
             if not await _host_claim_confirmed(row, att, MARK_LEROBOT_ERROR):
                 # Q-C: one host's S19 requeues like a lost attempt (charged E50 + N2).
-                await D.requeue_attempt(row, att, MARK_LEROBOT_ERROR, now, skip_community_dc=True)
-                if runpod:
-                    await D.terminate_attempt(att)
-                return _resp(200, {"status": "requeued"})
+                return await _requeue_finish(row, att, MARK_LEROBOT_ERROR, now, ready, runpod)
             # confirmed by a distinct host: S19, and nothing is charged (owner OQ-2)
-            await D.fail_training(row, n, T.S19, charge_waiver="lerobot_error")
+            try:
+                await D.fail_training(row, n, T.S19, charge_waiver="lerobot_error")
+            except Exception as exc:
+                if D.pg_code(exc) != "P0073":
+                    raise
+                # the database judged the waiver unprovable although the API did not: a bug
+                # on one side; fail closed (no waiver, no S19), requeue like a lost attempt
+                logger.error("training %s attempt %s: finish_training refused the S19 charge waiver (P0073); "
+                             "requeued without it", tid, n)
+                return await _requeue_finish(row, att, MARK_LEROBOT_ERROR_WAIVER_REFUSED, now, ready, runpod)
             if runpod:
                 await D.terminate_attempt(att)
             hf_publish.schedule_failed_log(dict(row, current_attempt=n))

@@ -556,6 +556,12 @@ class FakeDB:
         if not (t and t["managed"] and t["current_attempt"] == p_attempt and t["status"] in ("queued", "running")):
             raise PgError("P0049")
         a = self.attempt(p_training_id, p_attempt)
+        if p_charge_waiver is not None and not (  # 052 fix round (V1-M1): only a provable fresh start
+                a is not None and a["resume_from_step"] == 0 and a["state"] == "running"
+                and t.get("continued_from") is None and int(t["train_seconds_used"] or 0) == 0
+                and not any(c["training_id"] == p_training_id and c["state"] == "ready"
+                            for c in self.tables["training_checkpoints"])):
+            raise PgError("P0073")
         first = _ts(a["first_heartbeat_at"]) if a and a["state"] not in ("lost", "ended") else None
         t["train_seconds_used"] += max(int(self.clock.t - first), 0) if first is not None else 0
         t.update(terminated_at=self.now(), worker_token=None, status_note=p_note, charge_waiver=p_charge_waiver)
@@ -687,7 +693,10 @@ class FakeDB:
         trimmed = p_status == "running" and p_current_step is not None and p_current_step < prev_step
         if trimmed:
             hist = [e for e in hist if int(e["s"]) <= p_current_step]
-        if t["step_advanced_at"] is None or p_status == "running" or (
+        # 052 fix round (V1-m1): reset only when NULL, on the first queued → running write
+        # (a new attempt) or when the step rises; a mere heartbeat no longer defeats the
+        # stall rule and checkpoint_overdue
+        if t["step_advanced_at"] is None or (p_status == "running" and prev_status == "queued") or (
                 p_current_step is not None and p_current_step > prev_step):
             t["step_advanced_at"] = self.now()
         t["status"] = p_status or t["status"]

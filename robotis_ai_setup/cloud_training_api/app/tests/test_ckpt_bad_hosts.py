@@ -56,6 +56,23 @@ class ConfigComplaints(WorkerBase):
         self.assertEqual(c["config_complaints"], [2, 3])
         self.assertEqual(c["crash_attempts"], [], "resume_crash's counter is untouched")
 
+    async def test_an_intact_content_complaint_is_never_counted(self):
+        # sha256 / file_list / steps / training_step on intact bytes are answered `kept` and
+        # never join config_complaints, even from two distinct hosts (only train_config counts)
+        from app.routes import training_worker as route
+
+        n = 2
+        for reason in ("sha256", "file_list", "steps", "training_step"):
+            with self.subTest(reason=reason):
+                for host in ({}, {"backend": "runpod_secure"}):
+                    route.reset_hash_state_for_tests()
+                    attempt = self.resume(n, **host)
+                    n += 1
+                    self.assertEqual(await self.call("ckpt-bad", {"step": 2500, "reason": reason}, attempt=attempt),
+                                     (200, {"state": "kept"}))
+                c = self.ckpt()
+                self.assertEqual((c["state"], c["config_complaints"], c["crash_attempts"]), ("ready", [], []))
+
     async def test_the_same_attempt_twice_counts_once(self):
         n = self.resume(2)
         self.assertEqual(await self.complain(n), (200, {"state": "kept"}))

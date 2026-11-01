@@ -135,6 +135,33 @@ class Export(unittest.TestCase):
         (call,) = db.calls("credit_history")
         self.assertEqual((call["p_scope"], call["p_id"]), ("student", "u-1"))
 
+    def test_no_other_reason_text_reaches_the_export(self):
+        # a compensation into the student's GROUP (member_id = the student) and a reserve whose
+        # row carries a reason: neither text is about this person's own account
+        db = _db()
+        db.ledger = [
+            {"id": 1, "at": "t1", "kind": "compensate", "hours": 2, "from_kind": None, "from_id": None,
+             "to_kind": "group", "to_id": "g-1", "training_id": 7, "member_id": "u-1", "actor_id": "admin-1",
+             "actor_role": "admin", "reason_id": 5, "reason": "Ausfall der Gruppe Rot", "meta": {}},
+            {"id": 2, "at": "t2", "kind": "reserve", "hours": 3, "from_kind": "student", "from_id": "u-1",
+             "to_kind": "student", "to_id": "u-1", "training_id": 7, "member_id": "u-1", "actor_id": "u-1",
+             "actor_role": "student", "reason_id": 6, "reason": "interne Notiz", "meta": {}},
+        ]
+        bundle = self._bundle(db, PROFILE)
+        self.assertEqual([e["kind"] for e in bundle["credit_ledger"]], ["reserve", "compensate"])
+        for e in bundle["credit_ledger"]:
+            self.assertNotIn("reason", e)
+        text = json.dumps(bundle)
+        for reason in ("Ausfall der Gruppe Rot", "interne Notiz"):
+            self.assertNotIn(reason, text)
+        # a teacher's export: only the teacher's own grant/revoke reasons
+        db = _db()
+        db.ledger = [{"id": 1, "at": "t", "kind": "assign", "hours": 2, "from_kind": "teacher", "from_id": "t-1",
+                      "to_kind": "student", "to_id": "s-1", "training_id": None, "member_id": None,
+                      "actor_id": "t-1", "actor_role": "teacher", "reason_id": 3, "reason": "Schülerin X", "meta": {}}]
+        bundle = self._bundle(db, {"id": "t-1", "role": "teacher", "workgroup_id": None, "classroom_id": None})
+        self.assertNotIn("Schülerin X", json.dumps(bundle))
+
     def test_a_teacher_exports_the_pool_history(self):
         db = _db()
         db.ledger = [{"id": 1, "at": "t", "kind": "grant", "hours": 20, "from_kind": None, "from_id": None,

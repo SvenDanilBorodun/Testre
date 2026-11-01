@@ -132,6 +132,30 @@ class Overdue(Base):
         await self.round(D.CKPT_OVERDUE_GRACE_S + 5)
         self.assertEqual(self.state(row), "running")
 
+    async def test_heartbeats_without_step_progress_no_longer_hold_the_attempt(self):
+        # 052 fix round (V1-m1, A's update_training_progress): a running write resets
+        # step_advanced_at only when NULL, on the first queued → running write or when the
+        # step rises, so a host that only heartbeats meets the stall rule
+        row, _ = self.running(step=4000)
+        tok = self.db.row(row["id"])["worker_token"]
+        for _ in range(D.STALL_S // 240 + 1):
+            self.clock.advance(240)
+            self.db._rpc_update_training_progress(row["id"], tok, p_status="running", p_current_step=4000)
+            await D.sweep_tick()
+            if self.state(row) != "running":
+                break
+        self.assertEqual(self.db.attempt(row["id"], 2)["end_reason"], "stalled")
+        # a rising step still resets the clock
+        r = self.db.row(row["id"])
+        r.update(status="running", current_step=10, step_advanced_at=None, worker_token="t2")
+        self.db._rpc_update_training_progress(row["id"], "t2", p_status="running", p_current_step=10)
+        first = r["step_advanced_at"]
+        self.clock.advance(60)
+        self.db._rpc_update_training_progress(row["id"], "t2", p_status="running", p_current_step=10)
+        self.assertEqual(r["step_advanced_at"], first, "a heartbeat at the same step keeps it")
+        self.db._rpc_update_training_progress(row["id"], "t2", p_status="running", p_current_step=11)
+        self.assertEqual(r["step_advanced_at"], self.clock.iso())
+
     def test_the_loss_is_not_dataset_class(self):
         self.assertEqual(T.CHECKPOINT_OVERDUE, "checkpoint_overdue")
         self.assertNotIn(T.CHECKPOINT_OVERDUE, T.DATASET_CLASS_LOSSES)

@@ -171,7 +171,11 @@ class TheScanCardGoesSingularOnALeaderLessType(unittest.TestCase):
     def _apply(self, profile):
         rec = []
         ns = {"ROBOT_PROFILES": ROBOT_PROFILES,
-              "tk": types.SimpleNamespace(X="x", LEFT="left")}
+              "tk": types.SimpleNamespace(X="x", LEFT="left"),
+              # The camera-station option rides the same method; with the
+              # option not offered it is hidden on every profile.
+              "STATION_OPTION_OFFERED": False,
+              "_station_profile_ok": lambda p: True}
         method = _load_method("_apply_robot_type_labels", ns)
         owner = types.SimpleNamespace(
             _selected_robot_profile=lambda: profile,
@@ -186,6 +190,7 @@ class TheScanCardGoesSingularOnALeaderLessType(unittest.TestCase):
             btn_scan_leader=_FakeWidget("btn_scan_leader", rec),
             btn_scan_arm=_FakeWidget("btn_scan_arm", rec),
             follower_status_label=_FakeWidget("follower_status_label", rec),
+            station_frame=_FakeWidget("station_frame", rec),
         )
         method(owner)
         return owner

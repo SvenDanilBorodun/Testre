@@ -373,6 +373,7 @@ from . import device_manager, docker_manager, health_checker, config_generator, 
 from .roboter_studio_control import RoboterStudioControlServer
 from . import theme as theme_mod
 from . import camera_bridge as camera_bridge_mod
+from . import win_camera
 from . import phone_camera as phone_camera_mod
 from . import phone_cert as phone_cert_mod
 from .constants import (
@@ -387,6 +388,7 @@ from .constants import (
     ENV_FILE,
     ROBOT_PROFILES,
     DEFAULT_ROBOT_PROFILE,
+    STATION_OPTION_OFFERED,
     cameras_use_native_bridge,
     diagnostics_dir,
 )
@@ -635,6 +637,57 @@ LOG_MAX_LINES = 5000
 # logs only on a CHANGE — see `_poll_camera_health`.
 CAMERA_HEALTH_POLL_MS = 3000
 
+# ── OMX camera station (plan §3.1) ───────────────────────────────────────
+# Every line the GUI writes about the station's flag. Each "ausgeschaltet"
+# sentence names why, so a student who enabled it knows what to undo.
+STATION_OPTION_LABEL_DE = "Kamerastation (OMX)"
+STATION_OPTION_HINT_DE = (
+    "Fester Aufbau mit gedruckter Matte, Kameraturm und der Kamera "
+    "U20CAM-1080P auf der Rolle „Szene“. Beim Einschalten wird die Kamera "
+    "geprüft; die Einstellung lässt sich nur bei gestoppter Umgebung ändern.")
+STATION_ONLY_WHEN_STOPPED_DE = (
+    "Die Kamerastation lässt sich nur bei gestoppter Umgebung ändern.")
+STATION_ONLY_OMX_DE = "Die Kamerastation gibt es nur für die OMX-Robotertypen."
+STATION_NEEDS_NATIVE_DE = (
+    "Die Kamerastation braucht die native Windows-Kamera "
+    "(EDUBOTICS_CAMERA_SOURCE=usb_cam ist gesetzt).")
+STATION_NEEDS_MSMF_DE = (
+    "Die Kamerastation braucht das MSMF-Kamera-Backend "
+    "(EDUBOTICS_CAMERA_BACKEND=dshow ist gesetzt).")
+STATION_NEEDS_SCENE_DE = (
+    "Für die Kamerastation muss eine Kamera die Rolle „Szene“ haben.")
+STATION_PROBING_DE = "Kamerastation wird geprüft …"
+STATION_ENABLED_DE = "Kamerastation eingeschaltet ({fps:.1f} Bilder pro Sekunde)."
+STATION_DISABLED_DE = "Kamerastation ausgeschaltet."
+STATION_OFF_AT_START_PREFIX_DE = "Kamerastation ausgeschaltet: "
+STATION_CLEARED_ROLE_DE = (
+    "Kamerastation ausgeschaltet: Die Rolle „Szene“ hat jetzt eine andere "
+    "Kamera. Bitte die Kamerastation neu einschalten (die Kamera wird dann "
+    "erneut geprüft).")
+STATION_CLEARED_PROFILE_DE = (
+    "Kamerastation ausgeschaltet: Sie gibt es nur für die OMX-Robotertypen.")
+STATION_STREAM_NOT_RUNNING_DE = (
+    "Die Stationskamera läuft nicht — bitte die Umgebung neu starten.")
+
+
+def _station_profile_ok(profile) -> bool:
+    """The station exists only for the OMX profiles (omx_full, omx_follower)."""
+    return ROBOT_PROFILES.get(profile, {}).get("arm_family") == "omx"
+
+
+def _station_native_blocker_de():
+    """German reason the native MSMF bridge is unavailable, or None.
+
+    D9 is native-MSMF-only: the station camera is opened once over MSMF. The
+    usb_cam rollback (no native capture at all) and the DirectShow rollback
+    (which numbers cameras differently from the MSMF list the student picked
+    from) both rule it out."""
+    if not cameras_use_native_bridge():
+        return STATION_NEEDS_NATIVE_DE
+    if win_camera.capture_backend_name() != "msmf":
+        return STATION_NEEDS_MSMF_DE
+    return None
+
 # Starting wrap width for the grey helper paragraphs, in PIXELS. `wraplength` is
 # a fixed pixel value, so a 620 px paragraph inside a container that can be
 # 501 px wide at `minsize` is CLIPPED — and the only scrollbar is vertical, so
@@ -782,6 +835,28 @@ class EduBoticsApp:
         # _rs_get_status reports the in-flight state instead of the optimistic
         # .env value, so the badge never claims "ready" during the restart.
         self._rs_switch_in_flight = False
+
+        # OMX camera station (plan §3.1). The flag lives in GUI state and is
+        # passed explicitly at every .env generation (the robot_type
+        # precedent); it is read back from the .env here so a GUI restart
+        # keeps it — but only where the option is offered at all (a released
+        # layout ships) and only on an OMX profile, else it is off.
+        # `_rs_station_enabled` is the value THIS environment run started with
+        # (after the rollback re-check at „Umgebung starten"); the leader
+        # toggle regenerates with it, and the :8769 bridge serves it.
+        # `_station_scene_key` is the scene camera the flag was last confirmed
+        # with in this session (by the enrollment probe or a start); a later
+        # change of the scene role clears the flag.
+        _saved_station = config_generator.station_flag_on(
+            config_generator.read_env_var(
+                config_generator.STATION_ENABLED_KEY, ENV_FILE))
+        self._station_enabled = bool(
+            STATION_OPTION_OFFERED and _saved_station
+            and _station_profile_ok(_saved_profile))
+        self._station_scene_key = None
+        self._rs_station_enabled = False
+        self._station_probe_running = False
+        self.station_var = tk.BooleanVar(value=self._station_enabled)
 
         # The HuggingFace token is entered once on the Startseite of the web
         # interface and stored with the student's account, so a token the old
@@ -1039,6 +1114,19 @@ class EduBoticsApp:
             "Der Robotertyp wird beim Start festgelegt — zum Wechseln die "
             "Umgebung stoppen und neu starten.",
             pady=(6, 0))
+
+        # OMX camera station. Built always, PACKED only while the option is
+        # offered (STATION_OPTION_OFFERED: a released layout ships) and the
+        # selected robot type is an OMX profile — see _apply_robot_type_labels.
+        self.station_frame = ttk.Frame(mode_frame)
+        self.station_check = ttk.Checkbutton(
+            self.station_frame,
+            text=STATION_OPTION_LABEL_DE,
+            variable=self.station_var,
+            command=self._on_station_toggled,
+        )
+        self.station_check.pack(anchor=tk.W)
+        self._hint_label(self.station_frame, STATION_OPTION_HINT_DE)
 
         # ── Schritt A: Leader-Arm ──
         leader_frame = ttk.LabelFrame(main, text="Schritt A: Leader-Arm", padding=10)
@@ -1303,6 +1391,12 @@ class EduBoticsApp:
         row = ROBOT_PROFILES.get(profile, {})
         has_leader = row.get("scan_requires_leader", True)
         self.robot_help_var.set(row.get("help_de", ""))
+        # The camera-station option: offered only with a released layout, and
+        # only for the OMX profiles.
+        if STATION_OPTION_OFFERED and _station_profile_ok(profile):
+            self.station_frame.pack(fill=tk.X, pady=(8, 0))
+        else:
+            self.station_frame.pack_forget()
         # Schritt C follows the profile's camera_roles — a kit that can carry
         # only a scene camera must not advertise „bis zu 2".
         max_cams = len(row.get("camera_roles", ("gripper", "scene"))) or 1
@@ -1364,6 +1458,192 @@ class EduBoticsApp:
                 self._set_status("Bereit — Hardware scannen, um zu beginnen")
         self._update_start_button()
 
+    # ── OMX camera station (plan §3.1, §3.3) ─────────────────────────
+
+    def _station_scene_camera(self):
+        """The camera on the scene role with a native index, or None."""
+        for cam in getattr(self.hardware, "cameras", None) or []:
+            if getattr(cam, "role", "") == "scene" and getattr(cam, "win_index", -1) >= 0:
+                return cam
+        return None
+
+    @staticmethod
+    def _station_scene_key_of(cam):
+        """Which camera the scene role holds: the student's OpenCV index plus
+        its display path. None when no camera has the scene role."""
+        if cam is None:
+            return None
+        return (cam.win_index, cam.path)
+
+    def _station_enable_blocker_de(self):
+        """German reason the station cannot be enabled now, or None."""
+        if not _station_profile_ok(self._selected_robot_profile()):
+            return STATION_ONLY_OMX_DE
+        blocker = _station_native_blocker_de()
+        if blocker:
+            return blocker
+        if self._station_scene_camera() is None:
+            return STATION_NEEDS_SCENE_DE
+        return None
+
+    def _set_station_flag(self, on: bool):
+        """Set the flag in GUI state and persist it in the managed .env key, so
+        a GUI restart reads it back. Main thread only."""
+        self._station_enabled = bool(on)
+        if not on:
+            self._station_scene_key = None
+        self.station_var.set(self._station_enabled)
+        try:
+            config_generator.upsert_env_var(
+                config_generator.STATION_ENABLED_KEY, "1" if on else "0",
+                ENV_FILE)
+        except Exception as e:  # noqa: BLE001 — the GUI state still holds it
+            self._log("[WARNUNG] Die Einstellung „Kamerastation“ konnte nicht "
+                      f"gespeichert werden ({type(e).__name__}).")
+
+    def _clear_station(self, reason_de: str):
+        """Clear the station flag with one German note; enabling again needs a
+        new enrollment probe."""
+        self._set_station_flag(False)
+        self._log(f"[WARNUNG] {reason_de}")
+
+    def _station_check_scene_role(self):
+        """Clear the station flag when the scene role got another camera, or
+        the robot type left the OMX profiles (plan §3.1).
+
+        Otherwise a 720P camera on the scene role would deliver no recording
+        frames at all (the station path refuses any size but 1920x1080). The
+        comparison is against the camera the flag was last CONFIRMED with in
+        this session — by the enrollment probe or by a start — so the first
+        role pick after a GUI restart is not a change."""
+        if not self._station_enabled:
+            return
+        if not _station_profile_ok(self._selected_robot_profile()):
+            self._clear_station(STATION_CLEARED_PROFILE_DE)
+            return
+        if self._station_scene_key is None:
+            return
+        current = self._station_scene_key_of(self._station_scene_camera())
+        if current != self._station_scene_key:
+            self._clear_station(STATION_CLEARED_ROLE_DE)
+
+    def _on_station_toggled(self):
+        """The „Kamerastation (OMX)" checkbox. Main thread.
+
+        Turning it ON needs the environment stopped, an OMX profile, the native
+        MSMF bridge (no usb_cam / dshow rollback) and a camera on the scene
+        role, and then an enrollment probe of that camera with the bridge and
+        the previews stopped: >= 60 frames of exactly 1920x1080 at >= 29 fps.
+        Any refusal is German and enables nothing."""
+        want = bool(self.station_var.get())
+        if self._station_probe_running:
+            self.station_var.set(self._station_enabled)
+            return
+        if self.running or self.camera_bridge is not None:
+            self.station_var.set(self._station_enabled)
+            self._log(f"[WARNUNG] {STATION_ONLY_WHEN_STOPPED_DE}")
+            self._set_status(STATION_ONLY_WHEN_STOPPED_DE)
+            return
+        if not want:
+            if self._station_enabled:
+                self._set_station_flag(False)
+                self._log(STATION_DISABLED_DE)
+            return
+        blocker = self._station_enable_blocker_de()
+        if blocker:
+            self.station_var.set(False)
+            self._log(f"[WARNUNG] {blocker}")
+            messagebox.showwarning(STATION_OPTION_LABEL_DE, blocker)
+            return
+        cam = self._station_scene_camera()
+        key = self._station_scene_key_of(cam)
+        index = cam.win_index
+        # The probe opens the camera exclusively — previews released first
+        # (the bridge is not running: the environment is stopped).
+        self._stop_camera_previews()
+        self._station_probe_running = True
+        self._update_robot_type_combo_state()
+        self._set_status(STATION_PROBING_DE)
+        self._log(STATION_PROBING_DE)
+
+        def _probe():
+            try:
+                result = win_camera.probe_station_camera(index)
+            except Exception as exc:  # noqa: BLE001 — never strand the checkbox
+                result = win_camera.StationProbeResult(
+                    ok=False,
+                    error_de=f"Die Stationskamera konnte nicht geprüft werden ({exc}).")
+            self.root.after(0, lambda: self._station_probe_done(result, key))
+
+        threading.Thread(target=_probe, daemon=True).start()
+
+    def _station_probe_done(self, result, key):
+        """Main-thread end of the enrollment probe."""
+        self._station_probe_running = False
+        current = self._station_scene_key_of(self._station_scene_camera())
+        if result.ok and current != key:
+            result = win_camera.StationProbeResult(
+                ok=False, error_de=(
+                    "Die Rolle „Szene“ wurde während der Prüfung geändert — "
+                    "bitte die Kamerastation erneut einschalten."))
+        if result.ok:
+            self._station_scene_key = key
+            self._set_station_flag(True)
+            self._log(STATION_ENABLED_DE.format(fps=result.fps))
+            self._set_status(STATION_ENABLED_DE.format(fps=result.fps))
+        else:
+            self.station_var.set(self._station_enabled)
+            self._log(f"[WARNUNG] {result.error_de}")
+            self._set_status(STATION_DISABLED_DE)
+            messagebox.showwarning(STATION_OPTION_LABEL_DE, result.error_de)
+        self._update_robot_type_combo_state()
+        self._restart_camera_previews()
+
+    def _restart_camera_previews(self):
+        """Re-open the previews `_stop_camera_previews` released, keeping the
+        roles the student picked (the preview row reads each camera's role)."""
+        cams = getattr(self, "_preview_cameras", None)
+        row = getattr(self, "_preview_row", None)
+        self._preview_row = None
+        if row is not None:
+            try:
+                row.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+        if cams:
+            self._start_camera_previews(cams)
+
+    def _station_effective_for_start(self, is_cloud_only: bool):
+        """(flag for this start, German reason it is off or None).
+
+        Re-evaluated at every „Umgebung starten" (plan §3.1): a usb_cam or
+        dshow rollback set after enabling — or a scene camera missing on a
+        robot start — emits EDUBOTICS_STATION_ENABLED=0 for this start, so no
+        half-station ever starts. The GUI state keeps the student's choice."""
+        if not self._station_enabled:
+            return False, None
+        reason = (STATION_ONLY_OMX_DE
+                  if not _station_profile_ok(self._rs_robot_type)
+                  else _station_native_blocker_de())
+        if reason is None and not is_cloud_only \
+                and self._station_scene_camera() is None:
+            reason = STATION_NEEDS_SCENE_DE
+        if reason:
+            return False, STATION_OFF_AT_START_PREFIX_DE + reason
+        return True, None
+
+    def _station_stream_off(self):
+        """Switch the Studio stream off now (plan §3.3). Idempotent, never
+        raises, touches no widget: called on the Tk thread by the teardown
+        paths and on the webview watcher thread by the window-exit backstop."""
+        ctl = getattr(self, "_rs_control", None)
+        if ctl is None:
+            return
+        try:
+            ctl.station_stream_off()
+        except Exception:  # noqa: BLE001 — switching off must never fail loudly
+            pass
+
     # ── Legacy HuggingFace token ─────────────────────────────────────
 
     def _purge_legacy_hf_token(self):
@@ -1416,11 +1696,19 @@ class EduBoticsApp:
         A Cloud-Inferenz run of that window is stopped FIRST, in its own ``try``
         (one attempt, ``docker_manager.stop_cloud_inference_after_window_close``):
         the token clear may sleep for minutes between its retries, and the arm
-        must not keep moving on the cloud's plans meanwhile (spec D17).
+        must not keep moving on the cloud's plans meanwhile (spec D17). Then
+        the camera station's Studio stream is switched off (its own ``try``).
         """
         try:
             docker_manager.stop_cloud_inference_after_window_close(
                 generation, webview_window.is_current_generation, log=self._log)
+        except Exception:  # noqa: BLE001 — a watcher-thread hook must not raise
+            pass
+        # Camera station backstop (plan §3.3): the window is gone, so its
+        # Studio stream goes off now, independent of the page's beacon —
+        # BEFORE the token clear, which may sleep for minutes.
+        try:
+            self._station_stream_off()
         except Exception:  # noqa: BLE001 — a watcher-thread hook must not raise
             pass
         try:
@@ -1557,6 +1845,14 @@ class EduBoticsApp:
         try:
             self.robot_type_combo.config(
                 state="disabled" if disabled else "readonly")
+        except (tk.TclError, AttributeError):
+            pass
+        # The station option changes only while the environment is stopped,
+        # like the robot type (the containers read the flag at start).
+        try:
+            self.station_check.config(
+                state=tk.DISABLED if (disabled or self._station_probe_running)
+                else tk.NORMAL)
         except (tk.TclError, AttributeError):
             pass
 
@@ -3087,6 +3383,9 @@ class EduBoticsApp:
             # so it cannot reach a child orphaned by a crashed or
             # Task-Manager-killed GUI. It covers the same-process path, which
             # is the one this button is on.
+            #
+            # The camera station's Studio stream goes off before all of it.
+            self._station_stream_off()
             try:
                 webview_window.destroy_all()
             except Exception:
@@ -3780,6 +4079,10 @@ class EduBoticsApp:
             self._start_camera_previews(selected)
         else:
             self.hardware.cameras = selected
+        # Camera station: another camera on the scene role (or a non-OMX
+        # robot type — `_on_robot_type_changed` routes through here) clears
+        # the flag.
+        self._station_check_scene_role()
 
     def _on_preview_role_changed(self, cameras, position):
         """Per-preview role pick — keep the two cameras mutually exclusive.
@@ -3811,6 +4114,7 @@ class EduBoticsApp:
         self._log(
             f"Kamera-Rolle gesetzt: Kamera {position + 1} = {chosen}, "
             f"Kamera {other + 1} = {other_display}.")
+        self._station_check_scene_role()
 
     # ── Arm-Konfiguration aus letzter Sitzung wiederherstellen (PR-4) ──
 
@@ -3974,6 +4278,10 @@ class EduBoticsApp:
 
         preview_row = ttk.Frame(self.camera_role_frame)
         preview_row.pack(fill=tk.X, pady=(6, 2))
+        # Remembered so the station's enrollment probe can re-open the
+        # previews it had to release (`_restart_camera_previews`).
+        self._preview_row = preview_row
+        self._preview_cameras = cameras
         targets = []
         for position, cam in enumerate(cameras):
             color, cam_label = (
@@ -4035,6 +4343,12 @@ class EduBoticsApp:
             for _idx, paused_label, _name in targets:
                 paused_label.config(
                     text="Vorschau pausiert,\nUmgebung läuft.")
+            return
+        # The station's enrollment probe holds the scene camera exclusively.
+        if getattr(self, "_station_probe_running", False):
+            for _idx, paused_label, _name in targets:
+                paused_label.config(
+                    text="Vorschau pausiert,\nKamerastation wird geprüft.")
             return
 
         if not targets:
@@ -4188,6 +4502,25 @@ class EduBoticsApp:
             else:
                 messagebox.showwarning("Fehlende Hardware", "Bitte den Follower-Arm scannen und identifizieren, bevor du startest.")
             return
+        if self._station_probe_running:
+            messagebox.showwarning(
+                STATION_OPTION_LABEL_DE,
+                "Die Kamerastation wird noch geprüft — bitte kurz warten.")
+            return
+
+        # Camera station: the Studio stream off before any teardown, then the
+        # flag for THIS start — re-checked against the rollbacks, so no
+        # half-station ever starts. Captured here, on the main thread, like
+        # _rs_robot_type: the .env regen, the bridge, the :8769 server and the
+        # leader toggle all reuse it.
+        self._station_stream_off()
+        self._rs_station_enabled, station_off_reason = (
+            self._station_effective_for_start(is_cloud_only))
+        if station_off_reason:
+            self._log(f"[WARNUNG] {station_off_reason}")
+        if self._rs_station_enabled and self._station_scene_key is None:
+            self._station_scene_key = self._station_scene_key_of(
+                self._station_scene_camera())
 
         self.btn_start.config(state=tk.DISABLED)
         self.running = True
@@ -4249,7 +4582,8 @@ class EduBoticsApp:
                 if is_cloud_only:
                     env_content = config_generator.generate_cloud_only_env(
                         ENV_FILE, phone_camera=phone_enabled,
-                        robot_type=self._rs_robot_type)
+                        robot_type=self._rs_robot_type,
+                        station_enabled=self._rs_station_enabled)
                 else:
                     # The initial FOLLOWER_ONLY is DERIVED from the robot type
                     # (omx_full → both arms; omx_follower → follower only). On
@@ -4257,7 +4591,8 @@ class EduBoticsApp:
                     # at RUNTIME via the React leader toggle (_rs_set_leader_mode).
                     env_content = config_generator.generate_env_file(
                         self.hardware, ENV_FILE, phone_camera=phone_enabled,
-                        robot_type=self._rs_robot_type)
+                        robot_type=self._rs_robot_type,
+                        station_enabled=self._rs_station_enabled)
                 self._log(f"Konfiguration geschrieben: {ENV_FILE}")
                 for line in env_content.strip().splitlines():
                     self._log(f"  {_redact_secret_env_line(line)}")
@@ -4368,7 +4703,8 @@ class EduBoticsApp:
             phone_slot = self._start_phone_server()
 
         try:
-            self.camera_bridge = camera_bridge_mod.CameraBridge(role_to_index)
+            self.camera_bridge = camera_bridge_mod.CameraBridge(
+                role_to_index, station=self._rs_station_enabled)
             if phone_slot is not None:
                 # register_external_source MUST precede start().
                 self.camera_bridge.register_external_source(PHONE_CAM_ID, phone_slot)
@@ -4380,7 +4716,10 @@ class EduBoticsApp:
                 CAMERA_HEALTH_POLL_MS, self._poll_camera_health)
             roles = ", ".join(sorted(role_to_index)) or "keine USB-Kamera"
             phone_note = " + Handy" if phone_slot is not None else ""
-            self._log(f"Kamera-Bridge gestartet (nativ, {roles}{phone_note}) — streamt mit "
+            station_note = (" + Kamerastation 1920×1080"
+                            if self.camera_bridge.has_station else "")
+            self._log(f"Kamera-Bridge gestartet (nativ, {roles}{phone_note}"
+                      f"{station_note}) — streamt mit "
                       f"{int(camera_bridge_mod.constants.CAMERA_FRAMERATE)} fps in den Container.")
         except Exception as e:  # noqa: BLE001
             self.camera_bridge = None
@@ -4666,8 +5005,12 @@ class EduBoticsApp:
         self._rs_phone_enabled = bool(phone_enabled)
         # Follower-only robot types have no leader, so there is nothing to
         # toggle — the React LeaderToggle self-hides and the :8769 bridge is not
-        # started at all (the endpoint stays closed).
-        if ROBOT_PROFILES.get(self._rs_robot_type, {}).get("follower_only", False):
+        # started at all (the endpoint stays closed). EXCEPT on a camera-station
+        # rig: the bridge also carries the Studio stream's lease, so it is
+        # constructed on omx_follower too; its leader endpoints keep today's
+        # refusal there (_rs_set_leader_mode → 500).
+        if (ROBOT_PROFILES.get(self._rs_robot_type, {}).get("follower_only", False)
+                and not self._rs_station_enabled):
             self._log(
                 "Roboter Studio (nur Follower): Leader-Umschaltung nicht nötig — "
                 "Steuerbrücke wird nicht gestartet.")
@@ -4680,6 +5023,8 @@ class EduBoticsApp:
                 get_status=self._rs_get_status,
                 get_task_busy=self._rs_get_task_busy,
                 log=self._log,
+                get_station_status=self._rs_get_station_status,
+                on_station_stream=self._rs_set_station_stream,
             )
             if self._rs_control.start():
                 self._log(
@@ -4708,15 +5053,46 @@ class EduBoticsApp:
         container is actually running again."""
         val = config_generator.read_env_var("EDUBOTICS_FOLLOWER_ONLY", ENV_FILE)
         follower_only = str(val).strip() == "1"
+        # From the GUI's own robot profile: false on omx_follower, whose bridge
+        # exists on a camera-station rig (plan §3.3).
+        has_leader = not ROBOT_PROFILES.get(
+            self._rs_robot_type, {}).get("follower_only", False)
         if self._rs_switch_in_flight:
-            return {"follower_only": follower_only, "ready": False, "busy": True}
+            return {"follower_only": follower_only, "ready": False, "busy": True,
+                    "has_leader": has_leader}
         try:
             arm_status = docker_manager.get_container_status().get(
                 "open_manipulator", "not found")
         except Exception:  # noqa: BLE001 — never let the probe break the badge
             arm_status = "error"
         return {"follower_only": follower_only,
-                "ready": arm_status == "running"}
+                "ready": arm_status == "running",
+                "has_leader": has_leader}
+
+    def _rs_get_station_status(self) -> dict:
+        """GET /station/status: whether this run is a station run, and the
+        bridge's two stream rates. Never raises."""
+        bridge = self.camera_bridge
+        st = {}
+        if bridge is not None:
+            try:
+                st = bridge.station_status() or {}
+            except Exception:  # noqa: BLE001
+                st = {}
+        return {"enabled": bool(self._rs_station_enabled),
+                "scene_fps": st.get("scene_fps", 0.0),
+                "station_fps": st.get("station_fps", 0.0),
+                "error_de": st.get("error_de", "")}
+
+    def _rs_set_station_stream(self, on: bool):
+        """The :8769 bridge's Studio-stream switch → the camera bridge. Runs on
+        the control server's thread under its lock: non-blocking, never calls
+        back into the server. Returns (ok, german_error)."""
+        bridge = self.camera_bridge
+        if bridge is None or not bridge.has_station:
+            return (not on), ("" if not on else STATION_STREAM_NOT_RUNNING_DE)
+        bridge.set_station_stream(bool(on))
+        return True, ""
 
     def _rs_get_task_busy(self) -> bool:
         """Whether a recording / inference run is active (the bridge refuses a
@@ -4757,12 +5133,15 @@ class EduBoticsApp:
         try:
             # EDUBOTICS_ROBOT_TYPE is MANAGED (stripped + re-emitted) — pass the
             # session's type on BOTH the forward regen AND the rollback below, or
-            # a switch would silently rewrite it to the default (omx_full).
+            # a switch would silently rewrite it to the default (omx_full). The
+            # same for EDUBOTICS_STATION_ENABLED: a forgotten flag would
+            # recreate open_manipulator with it at 0 while the server keeps 1.
             config_generator.generate_env_file(
                 self.hardware, ENV_FILE,
                 phone_camera=self._rs_phone_enabled,
                 robot_type=self._rs_robot_type,
                 follower_only=follower_only,
+                station_enabled=self._rs_station_enabled,
             )
         except Exception as e:  # noqa: BLE001
             return False, f"Konfiguration konnte nicht erstellt werden: {e}"
@@ -4785,6 +5164,7 @@ class EduBoticsApp:
                     phone_camera=self._rs_phone_enabled,
                     robot_type=self._rs_robot_type,
                     follower_only=prev_follower_only,
+                    station_enabled=self._rs_station_enabled,
                 )
                 log("Moduswechsel fehlgeschlagen — Konfiguration zurückgesetzt.")
             except Exception as e:  # noqa: BLE001
@@ -4806,6 +5186,8 @@ class EduBoticsApp:
             self._log("Container werden gestoppt...")
             self.root.after(0, lambda: self.progress.start(10))
 
+            # The camera station's Studio stream off before the teardown.
+            self._station_stream_off()
             self._stop_camera_bridge()
             self._stop_phone_server()
             self._stop_rs_control_server()
@@ -4959,6 +5341,8 @@ class EduBoticsApp:
         #   * the webview child is now closed GRACEFULLY (WM_CLOSE first) so the
         #     browser's teardown hooks — the Jetson release beacon, JogPanel's
         #     re-torque — actually run.
+        # The camera station's Studio stream goes off first.
+        self._station_stream_off()
         self._stop_camera_bridge()
         self._stop_phone_server()
         self._stop_rs_control_server()

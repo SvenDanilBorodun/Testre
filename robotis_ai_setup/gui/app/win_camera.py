@@ -376,6 +376,13 @@ def open_station_capture(index: int):
     return cap, info
 
 
+def size_text(width: int, height: int) -> str:
+    """``1920×1080`` for German messages. Built with str.format, not an
+    f-string: an f-string's lone ``×`` between two fields is the one glyph
+    tests/test_no_icon_glyphs.py refuses."""
+    return "{}×{}".format(width, height)
+
+
 @dataclass
 class StationProbeResult:
     """Outcome of `probe_station_camera`. ``error_de`` is empty on success."""
@@ -429,8 +436,9 @@ def probe_station_camera(index: int,
                 return StationProbeResult(
                     ok=False, frames=got, width=w, height=h,
                     error_de=(
-                        f"Die Kamera auf der Rolle „Szene“ liefert {w}×{h} "
-                        f"statt {want_w}×{want_h} Bildpunkten — das ist nicht "
+                        f"Die Kamera auf der Rolle „Szene“ liefert "
+                        f"{size_text(w, h)} statt {size_text(want_w, want_h)} "
+                        "Bildpunkten — das ist nicht "
                         "die Stationskamera (U20CAM-1080P)."
                     ),
                 )

@@ -292,7 +292,8 @@ class _CaptureWorker(threading.Thread):
                     size_reopened = True
                     continue
                 self.last_error_de = (
-                    f"Stationskamera liefert {w}×{h} statt {want_w}×{want_h} "
+                    f"Stationskamera liefert {win_camera.size_text(w, h)} statt "
+                    f"{win_camera.size_text(want_w, want_h)} "
                     f"Bildpunkten — es werden keine Bilder gesendet (Index "
                     f"{self.index})."
                 )

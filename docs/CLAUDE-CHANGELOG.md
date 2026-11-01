@@ -101,6 +101,23 @@ mutant that makes a test fail. The docs were corrected where they had said too m
 an earlier attempt's charge, R2's pair can waive at most the confirming attempt's own time, and idle heartbeats had
 defeated only the stall rule — `_checkpoint_overdue` never reads `step_advanced_at`.
 
+**Fix round 3** (the final end-to-end verification, 2026-11-01). A fresh zero-trust verifier re-ran the feature on
+its own local stack (a 051 world upgraded to 052, two API instances against MinIO standing in for R2, the races, the
+rollback) and found no defect in behaviour: ready. Of its deliberate mutants of 052 and the API, 13 survived the 326
+labels and the 1215 API tests; S1 (a start cap of 4, bounded by the CHECKs) and Q1 (the settlement's heartbeat gate,
+while counted seconds imply a heartbeat) are equivalent and stay. Each of the other eleven now fails a test that
+passes without it, proven by running it: T47–T53 of the 052 assertions (W3/W4 the waiver's continuation and
+counted-seconds conditions on their own, K3/K2 `mark_checkpoint_ready`'s attempt-state and current-attempt checks,
+B2/B3 the CHECKs `reserved >= 0` / `spent >= 0` — T13b had only ever met the ledger's own shape CHECK —, Q7
+`stop_training` publishing only a ledger row, R9 `credit_assign`'s P0066 for another teacher's or a closed account;
+349 PASS), `test_stop_preview_rule.py` (one table of ten stop states read by the preview AND by the fake's
+`stop_training`: AP2, AP3) and `test_s19_waiver.py` (AW8: only P0073 becomes the requeue, any other `finish_training`
+error answers 503). The docs had said too much twice: `POLICY_MAX_TIMEOUT_HOURS` still holds eight entries, of which
+only `act`'s is read, and the after-052 counts in the 048, 049 and 050 assertion headers came from a whole-output grep
+that also counted psql's echo lines (048 9 ERROR, not 10; 049 1 FAIL, not 25; 050 0 PASS / 0 FAIL, not 1 / 1); every
+header now says how it was counted. Suites at the round's head: cloud API 1221, setup 2727 (5 errors =
+`test_gui_theme` without `_tkinter`).
+
 **Open.** No real managed start, RunPod placement or W1 against production has run under the ledger; the residuals
 R1–R19 are in `docs/KNOWN-ISSUES.md` („Training-hour ledger (052, v2.37.0)").
 

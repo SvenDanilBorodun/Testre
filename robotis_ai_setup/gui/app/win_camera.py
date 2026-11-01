@@ -28,7 +28,10 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
+
+from . import constants
 
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 _SUBPROCESS_KWARGS = {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "win32" else {}
@@ -59,10 +62,17 @@ def _capture_backend(cv2):
     rig's MSMF driver is flaky — MSMF can emit a transient async ReadSample
     warning at open, harmless here).
     """
-    sel = os.environ.get("EDUBOTICS_CAMERA_BACKEND", "msmf").strip().lower()
-    if sel == "dshow":
+    if capture_backend_name() == "dshow":
         return cv2.CAP_DSHOW
     return cv2.CAP_MSMF
+
+
+def capture_backend_name() -> str:
+    """``"dshow"`` under the EDUBOTICS_CAMERA_BACKEND=dshow rollback, else
+    ``"msmf"``. The one parsing rule `_capture_backend` uses, readable without
+    OpenCV (the station enablement checks it before any camera is opened)."""
+    sel = os.environ.get("EDUBOTICS_CAMERA_BACKEND", "msmf").strip().lower()
+    return "dshow" if sel == "dshow" else "msmf"
 
 
 class CameraUnavailableError(RuntimeError):
@@ -311,3 +321,152 @@ def open_capture(index: int, width: int, height: int, fps: float):
     # callers don't false-warn about a "non-MJPG" format on the MSMF path.
     info["msmf"] = is_msmf
     return cap, info
+
+
+def open_station_capture(index: int):
+    """Open the station camera ONCE in its native 1920x1080 MJPEG mode.
+
+    Used by the scene capture worker on a camera-station rig (and by the
+    enrollment probe, which must see exactly what the worker will). The backend
+    is the unchanged `_capture_backend` — the one the enumeration and the
+    student's role pick used, so ``index`` means the camera the student picked.
+    The station is native-MSMF-only; the GUI refuses to enable it under the
+    DirectShow or usb_cam rollbacks.
+
+    How the native mode is reached is one GUI constant,
+    ``constants.STATION_OPEN_METHOD`` (bench gates B1/B5):
+
+      * ``"fourcc_only"`` — set only the MJPG fourcc, exactly like today's MSMF
+        path in `open_capture`, and no fps; for a camera whose MSMF default mode
+        is already 1920x1080 at >= 29 fps.
+      * ``"fourcc_size_fps"`` — the MJPG fourcc plus CAP_PROP_FRAME_WIDTH/HEIGHT
+        1920x1080 and CAP_PROP_FPS 30.
+
+    Returns ``(cap, info)`` like `open_capture` (``info`` is the read-back, plus
+    ``"msmf"``). Raises CameraUnavailableError if the device does not open.
+    The caller never trusts the read-back for the size: every frame it reads is
+    checked against 1920x1080.
+    """
+    method = constants.STATION_OPEN_METHOD
+    if method not in constants.STATION_OPEN_METHODS:
+        raise CameraUnavailableError(
+            f"Unbekannte Öffnungsart für die Stationskamera: {method!r}."
+        )
+    cv2 = _import_cv2()
+    backend = _capture_backend(cv2)
+    cap = cv2.VideoCapture(index, backend)
+    if not cap.isOpened():
+        cap.release()
+        raise CameraUnavailableError(
+            f"Stationskamera mit Index {index} konnte nicht geöffnet werden."
+        )
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    if method == "fourcc_size_fps":
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, constants.STATION_NATIVE_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, constants.STATION_NATIVE_HEIGHT)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+    info = _readback(cap, cv2)
+    # 1-deep driver buffer so read() returns the freshest frame (best-effort),
+    # as in open_capture.
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:  # noqa: BLE001
+        pass
+    info["msmf"] = backend == cv2.CAP_MSMF
+    return cap, info
+
+
+@dataclass
+class StationProbeResult:
+    """Outcome of `probe_station_camera`. ``error_de`` is empty on success."""
+    ok: bool
+    frames: int = 0
+    fps: float = 0.0
+    width: int = 0
+    height: int = 0
+    error_de: str = ""
+
+
+# How long the probe reads frames after the camera opened before it gives up
+# (60 frames at 30 fps take 2 s; the rest is slack for a slow first frame).
+STATION_PROBE_TIMEOUT_S = 20.0
+
+
+def probe_station_camera(index: int,
+                         frames: int = constants.STATION_PROBE_FRAMES,
+                         min_fps: float = constants.STATION_PROBE_MIN_FPS,
+                         timeout_s: float = STATION_PROBE_TIMEOUT_S,
+                         clock=time.monotonic) -> StationProbeResult:
+    """Enrollment probe for the camera assigned the scene role.
+
+    Opens it exactly as the bridge will (`open_station_capture`) and requires
+    ``frames`` frames of exactly 1920x1080 at a rate of at least ``min_fps``
+    (measured over the intervals between the first and the last of them). A
+    720P camera cannot pass, so the probe also tells the station camera from
+    the 720P gripper camera.
+
+    Run it with the camera bridge and the GUI's previews STOPPED: a second
+    MSMF open of the same device returns a frameless handle. Never raises; the
+    camera is always released. Returns a StationProbeResult whose ``error_de``
+    is the German refusal.
+    """
+    want_w = constants.STATION_NATIVE_WIDTH
+    want_h = constants.STATION_NATIVE_HEIGHT
+    try:
+        cap, _info = open_station_capture(index)
+    except CameraUnavailableError as exc:
+        return StationProbeResult(ok=False, error_de=str(exc))
+    got = 0
+    t_first = t_last = None
+    try:
+        deadline = clock() + timeout_s
+        while got < frames and clock() < deadline:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            h, w = frame.shape[:2]
+            if (w, h) != (want_w, want_h):
+                return StationProbeResult(
+                    ok=False, frames=got, width=w, height=h,
+                    error_de=(
+                        f"Die Kamera auf der Rolle „Szene“ liefert {w}×{h} "
+                        f"statt {want_w}×{want_h} Bildpunkten — das ist nicht "
+                        "die Stationskamera (U20CAM-1080P)."
+                    ),
+                )
+            now = clock()
+            if t_first is None:
+                t_first = now
+            t_last = now
+            got += 1
+    except Exception as exc:  # noqa: BLE001 — a probe never raises
+        return StationProbeResult(
+            ok=False, frames=got,
+            error_de=f"Die Stationskamera konnte nicht gelesen werden ({exc}).",
+        )
+    finally:
+        try:
+            cap.release()
+        except Exception:  # noqa: BLE001
+            pass
+    if got < frames:
+        return StationProbeResult(
+            ok=False, frames=got, width=want_w if got else 0,
+            height=want_h if got else 0,
+            error_de=(
+                f"Die Stationskamera hat nur {got} von {frames} Bildern "
+                "geliefert."
+            ),
+        )
+    span = (t_last - t_first) if (t_first is not None and t_last is not None) else 0.0
+    fps = (frames - 1) / span if span > 0 else float("inf")
+    if fps < min_fps:
+        return StationProbeResult(
+            ok=False, frames=got, fps=fps, width=want_w, height=want_h,
+            error_de=(
+                f"Die Stationskamera liefert nur {fps:.1f} statt mindestens "
+                f"{min_fps:g} Bildern pro Sekunde."
+            ),
+        )
+    return StationProbeResult(ok=True, frames=got, fps=fps,
+                              width=want_w, height=want_h)

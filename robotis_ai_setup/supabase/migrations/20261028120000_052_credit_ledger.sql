@@ -32,6 +32,8 @@
 --     adjust_workgroup_credits raise P0069; get_remaining_credits and
 --     get_teacher_credit_summary keep their exact return types and read the
 --     ledger.
+--   * finish_training grants the OQ-2 waiver only on proof of a fresh first
+--     attempt (P0073 otherwise; fix round 2026-11-01).
 --   * the settlement is a trigger inside the terminal transaction (and on
 --     delete): charge = min(reserved, ceil(train_seconds_used / 3600)), 0 when
 --     no attempt ever had a first running write or under the OQ-2 waiver;
@@ -42,7 +44,8 @@
 --     every classroom owner, every student with a classroom and every group, and
 --     one 0-hour `migrate` row each with the old balance as orientation.
 --   * a self-check DO block before COMMIT: any miss aborts the whole migration.
--- New P-codes P0060–P0072 (spec §6).
+-- New P-codes P0060–P0073 (spec §6; P0073 = finish_training refuses the charge
+-- waiver without proof of a fresh first attempt, fix round 2026-11-01).
 --
 -- Proven on a local `supabase start` stack (Postgres 17,
 -- public.ecr.aws/supabase/postgres:17.6.1.106, PostgREST v14.10; a SCRATCH copy
@@ -1039,7 +1042,13 @@ BEGIN
 END;
 $$;
 
--- finish_training (050 body, DROPPED and re-created): + p_charge_waiver [OQ-2]
+-- finish_training (050 body, DROPPED and re-created): + p_charge_waiver [OQ-2].
+-- The waiver needs PROOF of a fresh first attempt that never trained (fix round,
+-- 2026-11-01): P0073 before any write unless this attempt's resume_from_step is 0
+-- (written only by the API's POST /start: NULL means a host that skipped it), the
+-- attempt is 'running', the row is no continuation, it counted no trained second
+-- yet and it has no ready checkpoint. A row that would not be finished anyway
+-- (not managed, another attempt, terminal) keeps its P0049.
 DROP FUNCTION public.finish_training(INT, INT, TEXT, TEXT, TEXT, TEXT, INT, TIMESTAMPTZ);
 CREATE OR REPLACE FUNCTION public.finish_training(
   p_training_id INT, p_attempt INT, p_status TEXT, p_message TEXT, p_log_url TEXT,
@@ -1049,6 +1058,8 @@ RETURNS VOID LANGUAGE plpgsql SECURITY INVOKER SET search_path = public AS $$
 DECLARE
   v_rows INT;
   v_seconds INT;
+  v_t public.trainings%ROWTYPE;
+  v_a public.training_attempts%ROWTYPE;
 BEGIN
   IF p_status NOT IN ('succeeded','failed') THEN
     RAISE EXCEPTION 'invalid status %', p_status USING ERRCODE = '22023';
@@ -1056,7 +1067,20 @@ BEGIN
   IF p_charge_waiver IS NOT NULL AND (p_charge_waiver <> 'lerobot_error' OR p_status <> 'failed') THEN
     RAISE EXCEPTION 'invalid charge waiver' USING ERRCODE = '22023';
   END IF;
-  PERFORM 1 FROM public.trainings t WHERE t.id = p_training_id FOR UPDATE;
+  SELECT * INTO v_t FROM public.trainings t WHERE t.id = p_training_id FOR UPDATE;
+  IF p_charge_waiver = 'lerobot_error' AND v_t.managed AND v_t.current_attempt = p_attempt
+     AND v_t.status IN ('queued','running') THEN
+    SELECT * INTO v_a FROM public.training_attempts a
+     WHERE a.training_id = p_training_id AND a.attempt_no = p_attempt;
+    IF NOT (v_a.resume_from_step IS NOT DISTINCT FROM 0
+            AND v_a.state IS NOT DISTINCT FROM 'running'
+            AND v_t.continued_from IS NULL
+            AND v_t.train_seconds_used IS NOT DISTINCT FROM 0
+            AND NOT EXISTS (SELECT 1 FROM public.training_checkpoints c
+                             WHERE c.training_id = p_training_id AND c.state = 'ready')) THEN
+      RAISE EXCEPTION 'charge waiver refused' USING ERRCODE = 'P0073';
+    END IF;
+  END IF;
   -- The trained seconds of an attempt this call ends (V2-7): the same
   -- now − first_heartbeat_at the API passes to requeue_training and
   -- end_training_attempt. An attempt they already ended (lost/ended) was counted.
@@ -1449,6 +1473,11 @@ BEGIN
     OR (tg.tgname IN ('trg_9_users_credit_close','trg_9_workgroups_credit_close','trg_9_users_credit_reparent',
                       'trg_9_workgroups_credit_reparent') AND tg.tgtype & 2 = 0));
   IF n <> 9 THEN RAISE EXCEPTION '052: % of 9 triggers with their timing', n; END IF;
+  -- finish_training refuses the waiver without proof (P0073)
+  IF NOT EXISTS (SELECT 1 FROM pg_proc pr WHERE pr.pronamespace = 'public'::regnamespace
+                   AND pr.proname = 'finish_training' AND strpos(pr.prosrc, 'P0073') > 0) THEN
+    RAISE EXCEPTION '052: finish_training lacks the P0073 waiver proof';
+  END IF;
   IF (SELECT o_drift FROM public.credit_reconcile()) <> 0 THEN RAISE EXCEPTION '052: account cache drift'; END IF;
   IF EXISTS (SELECT 1 FROM public.credit_accounts a WHERE a.parent_teacher_id IS NOT NULL AND NOT EXISTS
              (SELECT 1 FROM public.credit_accounts tt WHERE tt.kind = 'teacher' AND tt.owner_id = a.parent_teacher_id)) THEN

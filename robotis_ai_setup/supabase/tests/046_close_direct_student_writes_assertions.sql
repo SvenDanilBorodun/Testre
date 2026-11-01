@@ -25,6 +25,8 @@
 -- 052 (2026-10-28, a local stack with every migration through 051 plus 052): 22
 -- PASS, 4 FAIL (T2, T9, T10a, T12) and 2 ERROR (the refused INSERT, then the
 -- worker-token update of the row that does not exist).
+-- Re-measured 2026-11-01 with the fix round's 052 (finish_training's P0073, the
+-- stall clock of update_training_progress), on a fresh reset: unchanged.
 --
 -- Expected: 27 PASS, 0 FAIL/ERROR (T1..T15; T6, T7, T8 and T10 in four parts
 -- a..d, one per table). Against a database WITHOUT 046 the same file passes

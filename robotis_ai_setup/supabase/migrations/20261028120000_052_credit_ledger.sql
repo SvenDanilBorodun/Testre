@@ -32,6 +32,11 @@
 --     adjust_workgroup_credits raise P0069; get_remaining_credits and
 --     get_teacher_credit_summary keep their exact return types and read the
 --     ledger.
+--   * finish_training grants the OQ-2 waiver only on proof of a fresh first
+--     attempt (P0073 otherwise), and update_training_progress (049's body with
+--     ONE line changed, same signature and grants) restarts the stall clock
+--     step_advanced_at only when it is NULL, on an attempt's first running write
+--     or on a rising step, never on every 'running' write (fix round 2026-11-01).
 --   * the settlement is a trigger inside the terminal transaction (and on
 --     delete): charge = min(reserved, ceil(train_seconds_used / 3600)), 0 when
 --     no attempt ever had a first running write or under the OQ-2 waiver;
@@ -42,7 +47,8 @@
 --     every classroom owner, every student with a classroom and every group, and
 --     one 0-hour `migrate` row each with the old balance as orientation.
 --   * a self-check DO block before COMMIT: any miss aborts the whole migration.
--- New P-codes P0060–P0072 (spec §6).
+-- New P-codes P0060–P0073 (spec §6; P0073 = finish_training refuses the charge
+-- waiver without proof of a fresh first attempt, fix round 2026-11-01).
 --
 -- Proven on a local `supabase start` stack (Postgres 17,
 -- public.ecr.aws/supabase/postgres:17.6.1.106, PostgREST v14.10; a SCRATCH copy
@@ -1039,7 +1045,13 @@ BEGIN
 END;
 $$;
 
--- finish_training (050 body, DROPPED and re-created): + p_charge_waiver [OQ-2]
+-- finish_training (050 body, DROPPED and re-created): + p_charge_waiver [OQ-2].
+-- The waiver needs PROOF of a fresh first attempt that never trained (fix round,
+-- 2026-11-01): P0073 before any write unless this attempt's resume_from_step is 0
+-- (written only by the API's POST /start: NULL means a host that skipped it), the
+-- attempt is 'running', the row is no continuation, it counted no trained second
+-- yet and it has no ready checkpoint. A row that would not be finished anyway
+-- (not managed, another attempt, terminal) keeps its P0049.
 DROP FUNCTION public.finish_training(INT, INT, TEXT, TEXT, TEXT, TEXT, INT, TIMESTAMPTZ);
 CREATE OR REPLACE FUNCTION public.finish_training(
   p_training_id INT, p_attempt INT, p_status TEXT, p_message TEXT, p_log_url TEXT,
@@ -1049,6 +1061,8 @@ RETURNS VOID LANGUAGE plpgsql SECURITY INVOKER SET search_path = public AS $$
 DECLARE
   v_rows INT;
   v_seconds INT;
+  v_t public.trainings%ROWTYPE;
+  v_a public.training_attempts%ROWTYPE;
 BEGIN
   IF p_status NOT IN ('succeeded','failed') THEN
     RAISE EXCEPTION 'invalid status %', p_status USING ERRCODE = '22023';
@@ -1056,7 +1070,20 @@ BEGIN
   IF p_charge_waiver IS NOT NULL AND (p_charge_waiver <> 'lerobot_error' OR p_status <> 'failed') THEN
     RAISE EXCEPTION 'invalid charge waiver' USING ERRCODE = '22023';
   END IF;
-  PERFORM 1 FROM public.trainings t WHERE t.id = p_training_id FOR UPDATE;
+  SELECT * INTO v_t FROM public.trainings t WHERE t.id = p_training_id FOR UPDATE;
+  IF p_charge_waiver = 'lerobot_error' AND v_t.managed AND v_t.current_attempt = p_attempt
+     AND v_t.status IN ('queued','running') THEN
+    SELECT * INTO v_a FROM public.training_attempts a
+     WHERE a.training_id = p_training_id AND a.attempt_no = p_attempt;
+    IF NOT (v_a.resume_from_step IS NOT DISTINCT FROM 0
+            AND v_a.state IS NOT DISTINCT FROM 'running'
+            AND v_t.continued_from IS NULL
+            AND v_t.train_seconds_used IS NOT DISTINCT FROM 0
+            AND NOT EXISTS (SELECT 1 FROM public.training_checkpoints c
+                             WHERE c.training_id = p_training_id AND c.state = 'ready')) THEN
+      RAISE EXCEPTION 'charge waiver refused' USING ERRCODE = 'P0073';
+    END IF;
+  END IF;
   -- The trained seconds of an attempt this call ends (V2-7): the same
   -- now − first_heartbeat_at the API passes to requeue_training and
   -- end_training_attempt. An attempt they already ended (lost/ended) was counted.
@@ -1083,6 +1110,161 @@ BEGIN
    WHERE training_id = p_training_id AND attempt_no = p_attempt AND state NOT IN ('lost','ended');
 END;
 $$;
+
+-- update_training_progress (049 body, same signature, same EXECUTE for anon and
+-- authenticated; fix round 2026-11-01): EXACTLY one line differs from 049's. The
+-- stall clock step_advanced_at restarts only when it IS NULL (requeue_training
+-- clears it for every new attempt), on the attempt's first running write (the
+-- row still 'queued') or when the step rises. In 049 EVERY 'running' write
+-- restarted it, so a host holding the worker token kept a training that made no
+-- step progress alive until its cap and the student paid the whole reservation.
+-- The honest worker sends 'running' once, after /start (training_handler.py
+-- first_running_write), then step-only writes (_progress_loop). Legacy rows lose
+-- nothing: their stall rule reads last_progress_at, which every write still moves.
+CREATE OR REPLACE FUNCTION public.update_training_progress(
+  p_training_id  INT,
+  p_token        UUID,
+  p_status       TEXT  DEFAULT NULL,
+  p_current_step INT   DEFAULT NULL,
+  p_total_steps  INT   DEFAULT NULL,
+  p_current_loss REAL  DEFAULT NULL,
+  p_error_message TEXT DEFAULT NULL,
+  p_log_url      TEXT  DEFAULT NULL
+) RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_rows        INT;
+  v_new_history JSONB;
+  v_len         INT;
+  v_managed     BOOLEAN;
+  v_prev_status TEXT;
+  v_attempt     INT;
+  v_total       INT;
+  v_step        INT  := p_current_step;
+  v_loss        REAL := p_current_loss;
+BEGIN
+  IF p_status IS NOT NULL AND p_status NOT IN ('queued','running','succeeded','failed','canceled') THEN
+    RAISE EXCEPTION 'Invalid status: %', p_status USING ERRCODE = '22023';
+  END IF;
+
+  SELECT managed, status, current_attempt, total_steps INTO v_managed, v_prev_status, v_attempt, v_total
+    FROM public.trainings WHERE id = p_training_id;
+  IF v_managed AND p_status IS NOT NULL AND p_status <> 'running' THEN
+    RAISE EXCEPTION 'Managed training: status % is set by the API', p_status USING ERRCODE = '22023';
+  END IF;
+  -- A managed row's chart is the API's range (V1-3): the step in [0, total_steps],
+  -- a loss only when finite and within ±1e30 (NaN compares above every number).
+  IF v_managed THEN
+    IF v_step IS NOT NULL THEN
+      v_step := LEAST(GREATEST(v_step, 0), v_total);
+    END IF;
+    IF v_loss IS NOT NULL AND NOT (v_loss <> 'NaN'::real AND v_loss BETWEEN -1e30 AND 1e30) THEN
+      v_loss := NULL;
+    END IF;
+  END IF;
+
+  IF v_step IS NOT NULL AND v_loss IS NOT NULL THEN
+    SELECT COALESCE(loss_history, '[]'::jsonb) || jsonb_build_array(
+             jsonb_build_object(
+               's', v_step,
+               'l', v_loss,
+               't', (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
+             )
+           )
+      INTO v_new_history
+      FROM public.trainings
+     WHERE id = p_training_id;
+
+    v_len := jsonb_array_length(v_new_history);
+    IF v_len > 300 THEN
+      SELECT jsonb_agg(elem ORDER BY idx)
+        INTO v_new_history
+        FROM (
+          SELECT 0 AS idx, v_new_history -> 0 AS elem
+          UNION
+          SELECT (1 + s * (v_len - 102.0) / 198.0)::INT,
+                 v_new_history -> (1 + s * (v_len - 102.0) / 198.0)::INT
+            FROM generate_series(0, 198) AS s
+          UNION
+          SELECT v_len - 100 + s,
+                 v_new_history -> (v_len - 100 + s)
+            FROM generate_series(0, 99) AS s
+        ) sampled;
+    END IF;
+  END IF;
+
+  UPDATE public.trainings
+  SET
+    status        = COALESCE(p_status,        status),
+    current_step  = COALESCE(v_step,          current_step),
+    -- A managed row's step count and error text are the API's alone (E11, FR-1):
+    -- a host holding its token can call this RPC directly.
+    total_steps   = CASE WHEN managed THEN total_steps   ELSE COALESCE(p_total_steps,   total_steps)   END,
+    -- An in-place restart (the trim below) leaves the loss of the trimmed curve's
+    -- last point (NULL when none is left), never one of a step it dropped, as
+    -- requeue_training does; a write that carries its own loss keeps it.
+    current_loss  = CASE
+      WHEN p_status = 'running' AND v_step IS NOT NULL AND v_step < COALESCE(current_step, 0)
+        THEN COALESCE(v_loss,
+               (SELECT CASE WHEN jsonb_typeof(e->'l') = 'number' THEN (e->>'l')::real END
+                  FROM jsonb_array_elements(COALESCE(v_new_history, loss_history)) WITH ORDINALITY AS x(e, ord)
+                 WHERE (e->>'s')::int <= v_step
+                 ORDER BY ord DESC LIMIT 1))
+      ELSE COALESCE(v_loss, current_loss)
+    END,
+    error_message = CASE WHEN managed THEN error_message ELSE COALESCE(p_error_message, error_message) END,
+    loss_history  = CASE
+      WHEN p_status = 'running' AND v_step IS NOT NULL AND v_step < COALESCE(current_step, 0)
+        THEN (SELECT COALESCE(jsonb_agg(e ORDER BY ord), '[]'::jsonb)
+                FROM jsonb_array_elements(COALESCE(v_new_history, loss_history)) WITH ORDINALITY AS x(e, ord)
+               WHERE (e->>'s')::int <= v_step)
+      ELSE COALESCE(v_new_history, loss_history)
+    END,
+    log_url       = CASE
+      WHEN p_status IN ('succeeded','failed','canceled')
+        THEN COALESCE(p_log_url, log_url)
+      ELSE log_url
+    END,
+    last_progress_at = NOW(),
+    step_advanced_at = CASE
+      WHEN step_advanced_at IS NULL OR (p_status = 'running' AND status = 'queued') THEN NOW()
+      WHEN v_step IS NOT NULL AND v_step > COALESCE(current_step, 0) THEN NOW()
+      ELSE step_advanced_at
+    END,
+    status_note   = CASE
+      WHEN managed AND p_status = 'running' AND status = 'queued' THEN NULL
+      ELSE status_note
+    END,
+    terminated_at = CASE
+      WHEN p_status IN ('succeeded','failed','canceled') THEN NOW()
+      ELSE terminated_at
+    END,
+    worker_token  = CASE
+      WHEN p_status IN ('succeeded','failed','canceled') THEN NULL
+      ELSE worker_token
+    END
+  WHERE id = p_training_id
+    AND worker_token = p_token
+    AND status NOT IN ('succeeded','failed','canceled','cancel_requested');
+
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  IF v_rows = 0 THEN
+    RAISE EXCEPTION 'Invalid worker token, training not found, or training already terminal (or cancel-requested)'
+      USING ERRCODE = 'P0001';
+  END IF;
+
+  IF v_managed AND p_status = 'running' THEN
+    UPDATE public.training_attempts
+       SET state = 'running', first_heartbeat_at = COALESCE(first_heartbeat_at, NOW())
+     WHERE training_id = p_training_id AND attempt_no = v_attempt AND state IN ('placing','starting');
+  END IF;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.update_training_progress(INT, UUID, TEXT, INT, INT, REAL, TEXT, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.update_training_progress(INT, UUID, TEXT, INT, INT, REAL, TEXT, TEXT) TO anon, authenticated;
 
 -- cancel_request_training (050 body, DROPPED and re-created): + p_actor_role, the
 -- first-writer rule of §4.9, and P0051 for every publish reason
@@ -1449,6 +1631,28 @@ BEGIN
     OR (tg.tgname IN ('trg_9_users_credit_close','trg_9_workgroups_credit_close','trg_9_users_credit_reparent',
                       'trg_9_workgroups_credit_reparent') AND tg.tgtype & 2 = 0));
   IF n <> 9 THEN RAISE EXCEPTION '052: % of 9 triggers with their timing', n; END IF;
+  -- update_training_progress: one overload, the fix-round stall clock, still executable by the worker's roles
+  SELECT count(*) INTO n FROM pg_proc pr WHERE pr.pronamespace = 'public'::regnamespace AND pr.proname = 'update_training_progress';
+  IF n <> 1 THEN RAISE EXCEPTION '052: update_training_progress has % overloads', n; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_proc pr WHERE pr.pronamespace = 'public'::regnamespace
+                   AND pr.proname = 'update_training_progress' AND pr.prosecdef
+                   AND strpos(pr.prosrc, 'WHEN step_advanced_at IS NULL OR (p_status = ''running'' AND status = ''queued'') THEN NOW()') > 0
+                   AND strpos(pr.prosrc, 'WHEN step_advanced_at IS NULL OR p_status = ''running'' THEN NOW()') = 0) THEN
+    RAISE EXCEPTION '052: update_training_progress does not carry the fix-round stall clock';
+  END IF;
+  FOREACH r IN ARRAY ARRAY['anon','authenticated'] LOOP
+    IF NOT has_function_privilege(r, 'public.update_training_progress(integer,uuid,text,integer,integer,real,text,text)', 'EXECUTE') THEN
+      RAISE EXCEPTION '052: % lost EXECUTE on update_training_progress', r;
+    END IF;
+  END LOOP;
+  IF has_function_privilege('public', 'public.update_training_progress(integer,uuid,text,integer,integer,real,text,text)', 'EXECUTE') THEN
+    RAISE EXCEPTION '052: PUBLIC executes update_training_progress';
+  END IF;
+  -- finish_training refuses the waiver without proof (P0073)
+  IF NOT EXISTS (SELECT 1 FROM pg_proc pr WHERE pr.pronamespace = 'public'::regnamespace
+                   AND pr.proname = 'finish_training' AND strpos(pr.prosrc, 'P0073') > 0) THEN
+    RAISE EXCEPTION '052: finish_training lacks the P0073 waiver proof';
+  END IF;
   IF (SELECT o_drift FROM public.credit_reconcile()) <> 0 THEN RAISE EXCEPTION '052: account cache drift'; END IF;
   IF EXISTS (SELECT 1 FROM public.credit_accounts a WHERE a.parent_teacher_id IS NOT NULL AND NOT EXISTS
              (SELECT 1 FROM public.credit_accounts tt WHERE tt.kind = 'teacher' AND tt.owner_id = a.parent_teacher_id)) THEN

@@ -33,6 +33,8 @@
 -- 3-argument start_continuation_safe is gone. Run it on a stack migrated only up
 -- to 051 at most. Measured after 052 (2026-10-28, a local stack with every
 -- migration through 051 plus 052): 1 PASS, 1 FAIL (T4b) and 77 ERROR.
+-- Re-measured 2026-11-01 with the fix round's 052 (finish_training's P0073, the
+-- stall clock of update_training_progress), on a fresh reset: unchanged.
 --
 -- Expected: 30 PASS, 0 FAIL.
 \set ON_ERROR_STOP off

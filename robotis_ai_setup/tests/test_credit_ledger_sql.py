@@ -14,7 +14,11 @@ would break (spec §12.3, §20.2):
 * every REVOKE/GRANT: the four tables, their sequences, trainings, the column
   grant, and one EXECUTE loop that names every function 052 defines; the
   in-migration self-check names every one too;
-* the P-code set (P0060–P0072 all raised, nothing outside the known set);
+* the P-code set (P0060–P0073 all raised, nothing outside the known set);
+* fix round 2026-11-01: finish_training raises P0073 for an unproven charge
+  waiver before its first write, and update_training_progress is 049's body
+  with exactly the stall-clock line changed (same signature and grants, and
+  the rollback restores 049's body and grants);
 * the two review-1 m4 traps are absent: no OUT column of a RETURNS TABLE
   function is read unqualified, and the compatibility functions keep their
   exact old return types;
@@ -59,6 +63,11 @@ INVOKER_CALLABLES = {
     "stop_training", "cap_training_attempt", "requeue_training", "finish_training", "cancel_request_training",
     "complete_cancel_training", "claim_training_publish",
 }
+# the worker's own RPC: 049's body with one line changed, EXECUTE for anon/authenticated (not in the loop)
+WORKER_RPC = {"update_training_progress"}
+UTP_SIG = "INT, UUID, TEXT, INT, INT, REAL, TEXT, TEXT"
+UTP_049_LINE = "      WHEN step_advanced_at IS NULL OR p_status = 'running' THEN NOW()\n"
+UTP_052_LINE = "      WHEN step_advanced_at IS NULL OR (p_status = 'running' AND status = 'queued') THEN NOW()\n"
 COMPAT = ("get_remaining_credits", "get_teacher_credit_summary", "adjust_student_credits", "adjust_workgroup_credits")
 # spec §19 step 3: the bodies the rollback restores (the last pre-052 definition of each)
 RESTORED = {
@@ -81,8 +90,8 @@ SEVEN_TRIGGERS = (
     ("trg_9_workgroups_credit_close", "workgroups"), ("trg_9_users_credit_reparent", "users"),
     ("trg_9_workgroups_credit_reparent", "workgroups"),
 )
-NEW_P_CODES = {f"P00{n}" for n in range(60, 73)}
-KNOWN_P_CODES = NEW_P_CODES | {"P0002", "P0003", "P0023", "P0049", "P0050", "P0051", "P0052", "P0053", "P0054"}
+NEW_P_CODES = {f"P00{n}" for n in range(60, 74)}
+KNOWN_P_CODES = NEW_P_CODES | {"P0001", "P0002", "P0003", "P0023", "P0049", "P0050", "P0051", "P0052", "P0053", "P0054"}
 
 
 def _read(p) -> str:
@@ -222,7 +231,8 @@ class SecurityModel(unittest.TestCase):
         self.defs = _defs_by_name(_code(_read(M052)))
 
     def test_the_function_set_is_exactly_the_spec(self):
-        self.assertEqual(set(self.defs), INTERNAL_HELPERS | TRIGGER_FUNCTIONS | DEFINER_CALLABLES | INVOKER_CALLABLES)
+        self.assertEqual(set(self.defs),
+                         INTERNAL_HELPERS | TRIGGER_FUNCTIONS | DEFINER_CALLABLES | INVOKER_CALLABLES | WORKER_RPC)
 
     def test_every_callable_credit_function_is_definer_with_search_path(self):
         for name in DEFINER_CALLABLES | INTERNAL_HELPERS:
@@ -307,7 +317,7 @@ class LedgerShape(unittest.TestCase):
 class Grants(unittest.TestCase):
     def setUp(self):
         self.code = _code(_read(M052))
-        self.names = {n for n, *_ in _definitions(self.code)}
+        self.names = {n for n, *_ in _definitions(self.code)} - WORKER_RPC
 
     def test_the_four_tables_are_service_role_read_only(self):
         tabs = "public.credit_accounts, public.credit_ledger, public.credit_reasons, public.training_start_refusals"
@@ -480,6 +490,57 @@ class InterfaceForTheApi(unittest.TestCase):
                                 "'content_refused')"), _norm(self.defs[name][0][1]), name)
 
 
+def _full_049(name: str) -> str:
+    """049's raw text of `name`: its CREATE through its GRANT line (comments kept)."""
+    raw = _read(_MIG / "20261020130000_049_managed_training.sql")
+    start = raw.index(f"CREATE OR REPLACE FUNCTION public.{name}(")
+    grant = f"GRANT EXECUTE ON FUNCTION public.{name}({UTP_SIG}) TO anon, authenticated;\n"
+    return raw[start:raw.index(grant, start) + len(grant)]
+
+
+class FixRound20261101(unittest.TestCase):
+    """The two owner-decided fixes of 2026-11-01 (a fresh zero-trust verifier's findings)."""
+
+    def setUp(self):
+        self.raw = _read(M052)
+        self.defs = _defs_by_name(_code(self.raw))
+
+    def test_update_training_progress_is_049_with_exactly_the_stall_clock_line_changed(self):
+        old = _full_049("update_training_progress")
+        self.assertEqual(old.count(UTP_049_LINE), 1)
+        new = old.replace(UTP_049_LINE, UTP_052_LINE)
+        self.assertEqual(self.raw.count(new), 1, "052's update_training_progress is not 049's with one line changed")
+        self.assertNotIn(UTP_049_LINE, self.raw)
+        self.assertEqual(self.raw.count("CREATE OR REPLACE FUNCTION public.update_training_progress("), 1)
+        ((header, _b, _f),) = self.defs["update_training_progress"]
+        self.assertIn("SECURITY DEFINER", header)
+        # the step rise and the requeue's NULL keep restarting it
+        self.assertIn("      WHEN v_step IS NOT NULL AND v_step > COALESCE(current_step, 0) THEN NOW()\n", new)
+
+    def test_update_training_progress_keeps_its_grants_and_stays_out_of_the_service_role_loop(self):
+        code = _code(self.raw)
+        self.assertIn(f"REVOKE ALL ON FUNCTION public.update_training_progress({UTP_SIG}) FROM PUBLIC;", code)
+        self.assertIn(f"GRANT EXECUTE ON FUNCTION public.update_training_progress({UTP_SIG}) TO anon, authenticated;", code)
+        self.assertNotIn("'update_training_progress'", code[:code.rindex("DO $$")])  # not in the EXECUTE loop
+        tail = code[code.rindex("DO $$"):]
+        self.assertIn("pr.proname = 'update_training_progress'", tail)
+        self.assertIn("lost EXECUTE on update_training_progress", tail)
+
+    def test_finish_training_refuses_an_unproven_waiver_before_its_first_write(self):
+        ((_h, body, _f),) = self.defs["finish_training"]
+        refuse = body.index("ERRCODE = 'P0073'")
+        self.assertLess(refuse, body.index("UPDATE public.trainings"))
+        self.assertLess(body.index("FOR UPDATE"), refuse)
+        proof = _norm(body[body.index("IF NOT ("):refuse])
+        for needle in ("v_a.resume_from_step IS NOT DISTINCT FROM 0", "v_a.state IS NOT DISTINCT FROM 'running'",
+                       "v_t.continued_from IS NULL", "v_t.train_seconds_used IS NOT DISTINCT FROM 0",
+                       "NOT EXISTS (SELECT 1 FROM public.training_checkpoints c WHERE c.training_id = p_training_id "
+                       "AND c.state = 'ready')"):
+            self.assertIn(needle, proof, needle)
+        self.assertIn("a.training_id = p_training_id AND a.attempt_no = p_attempt", _norm(body))
+        self.assertIn("'charge waiver refused'", body)
+
+
 class Rollback052(unittest.TestCase):
     def setUp(self):
         self.raw = _read(R052)
@@ -508,7 +569,7 @@ class Rollback052(unittest.TestCase):
 
     def test_it_restores_each_replaced_body_from_the_last_pre052_definition(self):
         restored = _defs_by_name(self.raw)
-        self.assertEqual(set(restored), set(RESTORED))
+        self.assertEqual(set(restored), set(RESTORED) | WORKER_RPC)
         for name, sig in RESTORED.items():
             self.assertEqual(len(restored[name]), 1, name)
             old = _last_pre052(name)
@@ -516,6 +577,16 @@ class Rollback052(unittest.TestCase):
             self.assertEqual(_norm(restored[name][0][2]), _norm(old), name)
             self.assertIn(f"REVOKE ALL ON FUNCTION public.{name}({sig}) FROM PUBLIC, anon, authenticated;", self.code, name)
             self.assertIn(f"GRANT EXECUTE ON FUNCTION public.{name}({sig}) TO service_role;", self.code, name)
+
+    def test_it_restores_049s_update_training_progress_verbatim_with_its_grants(self):
+        old = _full_049("update_training_progress")
+        self.assertEqual(self.raw.count(old), 1, "the rollback's update_training_progress is not 049's text")
+        self.assertNotIn(UTP_052_LINE, self.raw)
+        tail = self.code[self.code.rindex("DO $$"):]
+        self.assertIn("md5(prosrc)", tail)
+        b0 = old.index("AS $$") + len("AS $$")
+        import hashlib
+        self.assertIn(hashlib.md5(old[b0:old.index("$$;", b0)].encode()).hexdigest(), tail)
 
     def test_the_restored_bodies_come_from_049_050_and_the_baseline(self):
         sources = {}
@@ -552,7 +623,7 @@ class AssertionFile(unittest.TestCase):
     def test_every_label_of_spec_19a_is_asserted(self):
         text = _read(A052)
         labels = set(re.findall(r"PASS (T\d+)[a-z]?\b", text))
-        self.assertEqual(labels, {f"T{n}" for n in range(1, 42)})
+        self.assertEqual(labels, {f"T{n}" for n in range(1, 44)})
         self.assertIn("PASS T21w (W8)", text)
 
     def test_it_never_calls_a_function_under_set_role(self):

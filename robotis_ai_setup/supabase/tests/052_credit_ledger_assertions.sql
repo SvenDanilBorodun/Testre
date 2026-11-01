@@ -3,7 +3,9 @@
 -- changed 049/050 functions, the closes, the re-parent trigger, the switch-over,
 -- the compatibility functions and every grant), run BY HAND against a fresh LOCAL
 -- stack — never CI, never the linked project (it seeds rows and deletes users).
--- Labels T1..T41 of spec §19a in lettered parts; W8 is T21w.
+-- Labels T1..T41 of spec §19a in lettered parts; W8 is T21w. T42 (the S19
+-- waiver needs proof, P0073) and T43 (the stall clock of update_training_progress)
+-- are the fix round of 2026-11-01.
 --
 -- The squashed baseline does NOT replay on a fresh database as shipped
 -- (docs/KNOWN-ISSUES.md, „baseline.sql is NOT replayable from scratch"): run it in
@@ -81,14 +83,24 @@
 -- get_teacher_credit_summary answer from the old columns, adjust_student_credits
 -- runs its old body, the ledger is kept and still refuses an UPDATE (P0068),
 -- cancel_request_training has two arguments again, and 052 no longer applies (its
--- columns exist). Measured 2026-10-28.
+-- columns exist). Measured 2026-10-28. Re-measured 2026-11-01 with the fix
+-- round's 052 (project credfixa): refused with 14 active ledger rows, applied after
+-- the drain, and a dump of every public function (identity arguments, md5 of
+-- prosrc, ACL, SECURITY DEFINER, proconfig, result type) plus trainings' table
+-- ACL equals the dump taken at 051 except for the kept credit_ledger_immutable()
+-- (EXECUTE for its owner only) and the kept credit_scheme column (DEFAULT
+-- 'derived'); update_training_progress is 049's body again (md5
+-- 5b9b815042f296fafd578b34faf1cbde, the rollback's own self-check) with 049's ACL.
 --
 -- 052 BREAKS the 046–050 assertion files by design (spec §12.3; each header
 -- records it). Measured after 052, on a stack with every migration through 051
 -- plus 052: 046 prints 22 PASS / 4 FAIL / 2 ERROR, 047 7 / 2 / 4, 048 31 / 14 / 10,
 -- 049 2 / 25 / 237, 050 1 / 1 / 77; and 044's T15 fails too (it calls
 -- adjust_student_credits, which answers P0069 since 052): 15 PASS, 1 FAIL.
--- Expected: 265 PASS, 0 FAIL/ERROR (one line per label: T1..T41 in lettered parts,
+-- Re-measured 2026-11-01 with the fix round's 052, each file on a fresh reset:
+-- every number unchanged (049 errors out before its stall-clock checks, and those
+-- hold under the fix anyway: a first running write and a requeue).
+-- Expected: 292 PASS, 0 FAIL/ERROR (one line per label: T1..T43 in lettered parts,
 -- T21w = W8; some arrive as NOTICE lines from DO blocks).
 \set QUIET on
 \set ON_ERROR_STOP off
@@ -865,6 +877,8 @@ SELECT public.finish_training(:r31b, 1, 'failed', 'x', NULL);
 SELECT pg_temp.run('64', 'c052/s19', 2400) AS s19 \gset
 SELECT public.requeue_training(:s19, 1, 'host_unfit:lerobot_error_unconfirmed', NULL, 0, 2400);
 SELECT pg_temp.attempt(:s19, 1800) AS s19b \gset
+-- what the API's POST /start writes for a fresh attempt (no ready checkpoint to resume from)
+UPDATE public.training_attempts SET resume_from_step = 0 WHERE training_id = :s19 AND attempt_no = 2;
 SELECT public.finish_training(:s19, 2, 'failed', 'S19', NULL, NULL, NULL, NULL, 'lerobot_error');
 SELECT pg_temp.ok('PASS T33a two attempts with heartbeats, finished failed with the waiver: charge 0, release 3, the waiver recorded',
   (SELECT charged_hours = 0 AND charge_waiver = 'lerobot_error' FROM public.trainings WHERE id = :s19)
@@ -1333,6 +1347,196 @@ SELECT pg_temp.ok('PASS T41b holding the users row, a changed group gets its key
           AND (length(prosrc) - length(replace(prosrc, 'FOR KEY SHARE', ''))) / length('FOR KEY SHARE') = 2
           AND prosrc !~ 'P0049'
      FROM pg_proc WHERE proname = '_credit_lock_user'));
+
+\echo '=== T42 (fix round 2026-11-01) the S19 waiver needs proof of a fresh first attempt that never trained (P0073) ==='
+SELECT pg_temp.mk_user('74', 'student', 'c1') IS NOT NULL AS s74 \gset
+SELECT pg_temp.give('f1', 'student', '74', 60) AS g74 \gset
+-- a host that skipped POST /start: resume_from_step stays NULL
+SELECT pg_temp.run('74', 'c052/w-nostart', 1200) AS wn \gset
+SELECT COALESCE(worker_token::text, '') AS wn_tok, train_seconds_used AS wn_secs FROM public.trainings WHERE id = :wn \gset
+SELECT pg_temp.err(format($q$SELECT public.finish_training(%s, 1, 'failed', 'S19', NULL, NULL, NULL, NULL, 'lerobot_error')$q$, :wn),
+  'P0073', 'PASS T42a a waiver for an attempt that never ran /start (resume_from_step NULL) answers P0073');
+SELECT pg_temp.ok('PASS T42b the refusal wrote nothing: the row runs with its token, unsettled, no waiver; the attempt runs',
+  (SELECT status = 'running' AND COALESCE(worker_token::text, '') = :'wn_tok' AND :'wn_tok' <> '' AND charge_waiver IS NULL
+          AND charged_hours IS NULL AND settled_at IS NULL AND terminated_at IS NULL AND train_seconds_used = :wn_secs
+     FROM public.trainings WHERE id = :wn)
+  AND (SELECT state = 'running' AND ended_at IS NULL FROM public.training_attempts WHERE training_id = :wn AND attempt_no = 1)
+  AND pg_temp.led(:wn) = 'reserve:3', pg_temp.led(:wn));
+SELECT public.finish_training(:wn, 1, 'failed', 'S19', NULL);
+SELECT pg_temp.ok('PASS T42c the same finish without the waiver settles and charges 1 (1 200 s)',
+  (SELECT status = 'failed' AND charged_hours = 1 AND charge_waiver IS NULL FROM public.trainings WHERE id = :wn)
+  AND pg_temp.led(:wn) = 'reserve:3,charge:1,release:2', pg_temp.led(:wn));
+-- the current attempt holds a ready checkpoint of its own (it did train)
+SELECT pg_temp.run('74', 'c052/w-ownckpt', 900) AS wo \gset
+UPDATE public.training_attempts SET resume_from_step = 0 WHERE training_id = :wo AND attempt_no = 1;
+SELECT pg_temp.ckpt(:wo, 1, 2500, 0);
+SELECT pg_temp.err(format($q$SELECT public.finish_training(%s, 1, 'failed', 'S19', NULL, NULL, NULL, NULL, 'lerobot_error')$q$, :wo),
+  'P0073', 'PASS T42d a waiver while the training holds a ready checkpoint answers P0073');
+SELECT public.finish_training(:wo, 1, 'failed', 'S19', NULL);
+-- an EARLIER attempt left a ready checkpoint and no counted second; the next attempt says resume 0
+SELECT pg_temp.run('74', 'c052/w-oldckpt', 600) AS wk \gset
+SELECT pg_temp.ckpt(:wk, 1, 2500, 300);
+SELECT public.requeue_training(:wk, 1, 'pod_gone', NULL, 2500, 0);
+SELECT pg_temp.attempt(:wk, 300) AS wk2 \gset
+UPDATE public.training_attempts SET resume_from_step = 0 WHERE training_id = :wk AND attempt_no = 2;
+SELECT pg_temp.ok('PASS T42e (fixture) the earlier attempt counted no second, its checkpoint is ready',
+  (SELECT train_seconds_used = 0 FROM public.trainings WHERE id = :wk)
+  AND EXISTS (SELECT 1 FROM public.training_checkpoints WHERE training_id = :wk AND attempt_no = 1 AND state = 'ready'));
+SELECT pg_temp.err(format($q$SELECT public.finish_training(%s, 2, 'failed', 'S19', NULL, NULL, NULL, NULL, 'lerobot_error')$q$, :wk),
+  'P0073', 'PASS T42f a waiver after an earlier attempt''s ready checkpoint answers P0073');
+SELECT public.finish_training(:wk, 2, 'failed', 'S19', NULL);
+-- the verifier's case: an earlier honest attempt's counted hours, its checkpoint later refused,
+-- then a fresh attempt (resume 0, as /start writes when nothing is ready) that crashes
+SELECT pg_temp.run('74', 'c052/w-counted', 4200) AS wc \gset
+SELECT pg_temp.ckpt(:wc, 1, 2500, 300);
+SELECT public.requeue_training(:wc, 1, 'pod_gone', NULL, 2500, 4200);
+UPDATE public.training_checkpoints SET state = 'refused' WHERE training_id = :wc;
+SELECT pg_temp.attempt(:wc, 600) AS wc2 \gset
+UPDATE public.training_attempts SET resume_from_step = 0 WHERE training_id = :wc AND attempt_no = 2;
+SELECT pg_temp.ok('PASS T42g (fixture) the earlier attempt counted 3 900 s; no checkpoint is ready',
+  (SELECT train_seconds_used BETWEEN 3895 AND 3905 FROM public.trainings WHERE id = :wc)
+  AND NOT EXISTS (SELECT 1 FROM public.training_checkpoints WHERE training_id = :wc AND state = 'ready'),
+  (SELECT train_seconds_used::text FROM public.trainings WHERE id = :wc));
+SELECT pg_temp.err(format($q$SELECT public.finish_training(%s, 2, 'failed', 'S19', NULL, NULL, NULL, NULL, 'lerobot_error')$q$, :wc),
+  'P0073', 'PASS T42h a waiver after earlier counted training seconds answers P0073');
+SELECT public.finish_training(:wc, 2, 'failed', 'S19', NULL);
+SELECT pg_temp.ok('PASS T42i ... and finished without it, the honest attempt''s hours are charged (2 of 3)',
+  (SELECT charged_hours = 2 AND charge_waiver IS NULL FROM public.trainings WHERE id = :wc), pg_temp.led(:wc));
+-- a continuation (continued_from set), everything else fresh
+INSERT INTO public.trainings (user_id, status, dataset_name, model_name, model_type, training_params, total_steps, managed,
+                              credit_scheme, capped_step, continuable_until)
+VALUES (pg_temp.u('74'), 'succeeded', 'u/p', 'c052/w-parent', 'act', '{"steps":50000}', 50000, true, 'derived', 2500,
+        now() + interval '7 days');
+INSERT INTO public.training_kept_checkpoints (training_id, step, manifest, expires_at)
+VALUES (pg_temp.tid('c052/w-parent'), 2500, '{}', now() + interval '7 days');
+SELECT o_training_id AS wcont FROM public.start_continuation_safe(pg_temp.u('74'), pg_temp.tid('c052/w-parent'), 'S28', 3) \gset
+SELECT pg_temp.attempt(:wcont, 300) AS wcont1 \gset
+UPDATE public.training_attempts SET resume_from_step = 0 WHERE training_id = :wcont AND attempt_no = 1;
+SELECT pg_temp.err(format($q$SELECT public.finish_training(%s, 1, 'failed', 'S19', NULL, NULL, NULL, NULL, 'lerobot_error')$q$, :wcont),
+  'P0073', 'PASS T42j a waiver on a continuation answers P0073');
+SELECT public.finish_training(:wcont, 1, 'failed', 'S19', NULL);
+-- /start ran (resume 0) but the attempt never reached its first running write
+SELECT s.training_id AS wst FROM public.start_training_safe(pg_temp.u('74'), 'u/ds', 'c052/w-starting', 'act',
+  '{"steps":50000,"save_freq":2500}'::jsonb, 50000, NULL, true, NULL, 3) s \gset
+SELECT o_attempt_no AS wst1 FROM public.claim_training_attempt(:wst, 0) \gset
+SELECT public.attach_training_attempt(:wst, 1, 'runpod_secure', 'pod-wst-1');
+UPDATE public.training_attempts SET resume_from_step = 0 WHERE training_id = :wst AND attempt_no = 1;
+SELECT pg_temp.err(format($q$SELECT public.finish_training(%s, 1, 'failed', 'S19', NULL, NULL, NULL, NULL, 'lerobot_error')$q$, :wst),
+  'P0073', 'PASS T42k a waiver for an attempt that is still starting answers P0073');
+SELECT public.finish_training(:wst, 1, 'failed', 'S19', NULL);
+-- the honest fresh S19: /start wrote resume 0, the first running write came, LeRobot crashed before a step
+SELECT pg_temp.run('74', 'c052/w-fresh', 900) AS wf \gset
+UPDATE public.training_attempts SET resume_from_step = 0 WHERE training_id = :wf AND attempt_no = 1;
+SELECT public.finish_training(:wf, 1, 'failed', 'S19', NULL, NULL, NULL, NULL, 'lerobot_error');
+SELECT pg_temp.ok('PASS T42l the honest fresh S19 still gets the waiver: charge 0, release 3, the waiver recorded',
+  (SELECT status = 'failed' AND charged_hours = 0 AND charge_waiver = 'lerobot_error' FROM public.trainings WHERE id = :wf)
+  AND pg_temp.led(:wf) = 'reserve:3,charge:0,release:3', pg_temp.led(:wf));
+SELECT pg_temp.err(format($q$SELECT public.finish_training(%s, 1, 'failed', 'S19', NULL, NULL, NULL, NULL, 'lerobot_error')$q$, :wf),
+  'P0049', 'PASS T42m a waiver for a row that is already finished keeps its P0049 (a lost race, not a refusal)');
+
+\echo '=== T43 (fix round 2026-11-01) the stall clock moves on the first running write and on a rising step only ==='
+SELECT pg_temp.mk_user('75', 'student', 'c1') IS NOT NULL AS s75 \gset
+SELECT pg_temp.give('f1', 'student', '75', 30) AS g75 \gset
+SELECT s.training_id AS sc FROM public.start_training_safe(pg_temp.u('75'), 'u/sc', 'c052/stall', 'act',
+  '{"steps":50000,"save_freq":2500}'::jsonb, 50000, NULL, true, NULL, 3) s \gset
+SELECT o_worker_token AS sc_tok FROM public.claim_training_attempt(:sc, 0) \gset
+SELECT public.attach_training_attempt(:sc, 1, 'runpod_secure', 'pod-sc-1');
+UPDATE public.training_attempts SET resume_from_step = 0 WHERE training_id = :sc AND attempt_no = 1;
+SELECT pg_temp.ok('PASS T43a (fixture) a placed attempt: the row queued, no stall clock yet',
+  (SELECT status = 'queued' AND step_advanced_at IS NULL FROM public.trainings WHERE id = :sc));
+SELECT public.update_training_progress(:sc, :'sc_tok'::uuid, 'running', 0);
+SELECT pg_temp.ok('PASS T43b the first running write starts the clock, the row runs, the attempt runs with its first heartbeat',
+  (SELECT status = 'running' AND step_advanced_at > now() - interval '5 seconds' FROM public.trainings WHERE id = :sc)
+  AND (SELECT state = 'running' AND first_heartbeat_at IS NOT NULL FROM public.training_attempts
+        WHERE training_id = :sc AND attempt_no = 1));
+UPDATE public.trainings SET step_advanced_at = now() - interval '20 minutes', last_progress_at = now() - interval '1 minute'
+ WHERE id = :sc;
+SELECT public.update_training_progress(:sc, :'sc_tok'::uuid, 'running', 0);
+SELECT public.update_training_progress(:sc, :'sc_tok'::uuid, 'running', 0, NULL, 1.5);
+SELECT pg_temp.ok('PASS T43c an idle running write (status running, same step) moves last_progress_at, never the stall clock',
+  (SELECT step_advanced_at BETWEEN now() - interval '21 minutes' AND now() - interval '19 minutes'
+          AND last_progress_at > now() - interval '5 seconds' FROM public.trainings WHERE id = :sc),
+  (SELECT (now() - step_advanced_at)::text FROM public.trainings WHERE id = :sc));
+SELECT public.update_training_progress(:sc, :'sc_tok'::uuid, NULL, 0);
+SELECT pg_temp.ok('PASS T43d a step-only write with the same step does not move it either',
+  (SELECT step_advanced_at < now() - interval '19 minutes' FROM public.trainings WHERE id = :sc));
+SELECT public.update_training_progress(:sc, :'sc_tok'::uuid, NULL, 100, NULL, 2.0);
+SELECT pg_temp.ok('PASS T43e a rising step moves it',
+  (SELECT step_advanced_at > now() - interval '5 seconds' AND current_step = 100 FROM public.trainings WHERE id = :sc));
+-- the honest worker: 'running' once (done above), then rising steps and same-step heartbeats; before
+-- every write the clock is pushed to 24 min ago (just under the sweep's STALL_S = 25 min)
+DO $$
+DECLARE v_id int; v_tok uuid; s int := 100; i int; v_age interval; v_worst interval := '0'; v_status text;
+BEGIN
+  SELECT id, worker_token INTO v_id, v_tok FROM public.trainings WHERE model_name = 'c052/stall';
+  FOR i IN 1..40 LOOP
+    UPDATE public.trainings SET step_advanced_at = now() - interval '24 minutes' WHERE id = v_id;
+    IF i % 4 = 0 THEN
+      PERFORM public.update_training_progress(v_id, v_tok, NULL, s);            -- a heartbeat: the last step again
+      SELECT now() - step_advanced_at INTO v_age FROM public.trainings WHERE id = v_id;
+      IF v_age <> interval '24 minutes' THEN RAISE NOTICE 'FAIL T43f a heartbeat moved the clock (%)', v_age; RETURN; END IF;
+      UPDATE public.trainings SET step_advanced_at = now() WHERE id = v_id;    -- the last rise was just now
+    ELSE
+      s := s + 100;
+      PERFORM public.update_training_progress(v_id, v_tok, NULL, s, NULL, 1.0 / i);
+      SELECT now() - step_advanced_at INTO v_age FROM public.trainings WHERE id = v_id;
+      IF v_age > v_worst THEN v_worst := v_age; END IF;
+    END IF;
+  END LOOP;
+  SELECT status INTO v_status FROM public.trainings WHERE id = v_id;
+  IF v_worst = interval '0' AND v_status = 'running' THEN
+    RAISE NOTICE 'PASS T43f an honest sequence (30 rising steps, 10 heartbeats) never leaves the clock older than its last rise';
+  ELSE
+    RAISE NOTICE 'FAIL T43f the clock lagged % behind a rise (status %)', v_worst, v_status;
+  END IF;
+END $$;
+-- a resume: requeue clears the clock, the next attempt's first running write starts it again
+SELECT public.requeue_training(:sc, 1, 'pod_gone', NULL, 0, 0);
+SELECT pg_temp.ok('PASS T43g a requeue clears the clock (the row queued)',
+  (SELECT status = 'queued' AND step_advanced_at IS NULL FROM public.trainings WHERE id = :sc));
+SELECT pg_temp.err(format($q$SELECT public.update_training_progress(%s, %L::uuid, 'running', 0)$q$, :sc, :'sc_tok'),
+  'P0001', 'PASS T43h the old host''s token is fenced (P0001)');
+SELECT o_worker_token AS sc_tok2 FROM public.claim_training_attempt(:sc, 1) \gset
+SELECT public.attach_training_attempt(:sc, 2, 'runpod_secure', 'pod-sc-2');
+SELECT public.update_training_progress(:sc, :'sc_tok2'::uuid, 'running', 0);
+SELECT pg_temp.ok('PASS T43i the resumed attempt''s first running write starts the clock again',
+  (SELECT status = 'running' AND step_advanced_at > now() - interval '5 seconds' FROM public.trainings WHERE id = :sc));
+-- the queued branch alone: a clock already set on a queued row is restarted by the first running write
+SELECT public.requeue_training(:sc, 2, 'pod_gone', NULL, 0, 0);
+SELECT o_worker_token AS sc_tok3 FROM public.claim_training_attempt(:sc, 2) \gset
+SELECT public.attach_training_attempt(:sc, 3, 'runpod_secure', 'pod-sc-3');
+UPDATE public.trainings SET step_advanced_at = now() - interval '2 hours' WHERE id = :sc;
+SELECT public.update_training_progress(:sc, :'sc_tok3'::uuid, 'running', 0);
+SELECT pg_temp.ok('PASS T43j the first running write of a queued row restarts a clock that was not NULL',
+  (SELECT step_advanced_at > now() - interval '5 seconds' FROM public.trainings WHERE id = :sc));
+SELECT public.finish_training(:sc, 3, 'failed', 'x', NULL);
+-- a legacy (unmanaged, derived) row: its stall rule reads last_progress_at, which every write still moves
+INSERT INTO public.trainings (user_id, status, dataset_name, model_name, model_type, training_params, total_steps, managed,
+                              credit_scheme, worker_token)
+VALUES (pg_temp.u('75'), 'queued', 'u/l', 'c052/stall-legacy', 'diffusion', '{"steps":1000}', 1000, false, 'derived',
+        gen_random_uuid());
+SELECT id AS lg, worker_token AS lg_tok FROM public.trainings WHERE model_name = 'c052/stall-legacy' \gset
+SELECT public.update_training_progress(:lg, :'lg_tok'::uuid, 'running', 0, 1000);
+SELECT pg_temp.ok('PASS T43k a legacy row: the running write runs it and starts both clocks',
+  (SELECT status = 'running' AND step_advanced_at > now() - interval '5 seconds' AND last_progress_at > now() - interval '5 seconds'
+     FROM public.trainings WHERE id = :lg));
+UPDATE public.trainings SET last_progress_at = now() - interval '30 minutes', step_advanced_at = now() - interval '30 minutes'
+ WHERE id = :lg;
+SELECT public.update_training_progress(:lg, :'lg_tok'::uuid, 'running', 0, 1000);
+SELECT pg_temp.ok('PASS T43l a legacy row''s repeated running write still moves last_progress_at (what its stall rule reads)',
+  (SELECT last_progress_at > now() - interval '5 seconds' AND step_advanced_at < now() - interval '29 minutes'
+     FROM public.trainings WHERE id = :lg));
+SELECT public.update_training_progress(:lg, :'lg_tok'::uuid, 'succeeded', 1000, 1000, NULL, NULL, 'https://x.test/log');
+SELECT pg_temp.ok('PASS T43m a legacy row''s terminal write still ends it (status, token, log url)',
+  (SELECT status = 'succeeded' AND worker_token IS NULL AND log_url = 'https://x.test/log' FROM public.trainings WHERE id = :lg));
+SELECT pg_temp.ok('PASS T43n update_training_progress: one overload, DEFINER, the 052 clock line, EXECUTE for anon and authenticated, not PUBLIC',
+  (SELECT count(*) = 1 FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname = 'update_training_progress')
+  AND (SELECT prosecdef AND strpos(prosrc, 'OR (p_status = ''running'' AND status = ''queued'') THEN NOW()') > 0
+              AND strpos(prosrc, 'WHEN step_advanced_at IS NULL OR p_status = ''running'' THEN NOW()') = 0
+         FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname = 'update_training_progress')
+  AND has_function_privilege('anon', 'public.update_training_progress(integer,uuid,text,integer,integer,real,text,text)', 'EXECUTE')
+  AND has_function_privilege('authenticated', 'public.update_training_progress(integer,uuid,text,integer,integer,real,text,text)', 'EXECUTE')
+  AND NOT has_function_privilege('public', 'public.update_training_progress(integer,uuid,text,integer,integer,real,text,text)', 'EXECUTE'));
 
 \echo '=== T29 / T30 the lock order of I9 (structure; the two-session races are the header''s manual steps) ==='
 SELECT pg_temp.ok('PASS T29a the two closes run AFTER DELETE, the delete settlement BEFORE DELETE (row triggers)',

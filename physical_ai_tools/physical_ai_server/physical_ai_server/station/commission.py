@@ -442,6 +442,15 @@ class Commission:
         self.marks = {}                 # (mark_id, turn) → (dx_m, dy_m)
         self.world = None               # dict rms_mm, max_mm
         self.targets = layout_data.world_check_marks(layout)
+        self.evidence_jpegs = {}        # name → JPEG bytes (evidence/<id>/)
+
+    def _keep_evidence(self, name, frame):
+        try:
+            ok, enc = _cv2().imencode('.jpg', frame, [_cv2().IMWRITE_JPEG_QUALITY, 85])
+            if ok:
+                self.evidence_jpegs[name] = enc.tobytes()
+        except Exception:  # noqa: BLE001 — evidence is best-effort
+            pass
 
     # §6.1
     def fit_views(self):
@@ -503,6 +512,7 @@ class Commission:
             return False, T.BOARD_REFS_BAD_DE
         self.board = {'T_cam_mat': T_cam_mat, 'reproj': reproj, 'ref_corners': ref_c,
                       'nominal_metrics': m}
+        self._keep_evidence('board.jpg', frames[0])
         self.marks = {}
         self.world = None
         return True, T.BOARD_OK_DE
@@ -544,6 +554,7 @@ class Commission:
         if best is None:
             return False, 'FAILED', T.MARK_NO_CUBE_DE
         self.marks[(mark_id, int(turn))] = (float(best[1][0]), float(best[1][1]))
+        self._keep_evidence(f'mark_{mark_id}_{90 * int(turn)}.jpg', frame)
         return True, 'OK', T.MARK_CAPTURED_DE.format(mark=mark_id, turn=90 * int(turn))
 
     def mark_solve(self):

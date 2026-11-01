@@ -349,7 +349,7 @@ class StationService:
                     'registration': {k: solution[k] for k in (
                         'registration_rms_mm', 'registration_max_mm',
                         'registration_shift_mm', 'registration_rot_deg')},
-                }, base=self.base)
+                }, jpegs=sorted(com.evidence_jpegs.items()), base=self.base)
             except Exception as e:  # noqa: BLE001 — evidence is best-effort
                 self._log('warning', f'station evidence not written: {e!r}')
             return True, T.COMMIT_DONE_DE, cal
@@ -659,6 +659,7 @@ class StationService:
             self._check_running = True
             token = self.machine.check_token(self.digest())
             cal = self.calibration
+        result = {'result': 'FAILED', 'message': T.COMMISSION_STALE_DE}
         try:
             result = self._camera_check(cal) if cmd == 'camera' else self._robot_check(cal)
         finally:

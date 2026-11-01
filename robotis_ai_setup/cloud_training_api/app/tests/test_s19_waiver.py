@@ -6,7 +6,9 @@ fresh start: ``resume_from_step`` 0 (NULL means ``/start`` never ran), state
 ``running``, no continuation, no counted training second and no ready checkpoint of the
 training. Otherwise a ``lerobot_error`` is requeued like a lost attempt (charged by E50)
 with ``MARK_LEROBOT_ERROR_NOT_FRESH``; ``resume_from_step > 0`` stays a resume_crash. If the
-database refuses the waiver anyway (P0073) the API logs an ERROR and requeues without it.
+database refuses the waiver anyway (P0073) the API logs an ERROR and requeues without it;
+only P0073 does that: any other finish_training error answers the worker 503 and changes
+nothing, so the worker's retry decides (fix round 3, mutant AW8).
 The two verifier scenarios (hosts that skip ``/start``; a waiver after an earlier ready
 checkpoint) are the first two tests and fail on the code before this round.
 """
@@ -116,6 +118,50 @@ class Waiver(WorkerBase):
         self.assertEqual((r["status"], r["error_message"], r["charge_waiver"]), ("queued", None, None))
         self.assertEqual(self.db.attempt(self.tid, 2)["end_reason"], route.MARK_LEROBOT_ERROR_WAIVER_REFUSED)
         self.assertEqual(self.logs, [], "no failed log: the training goes on")
+
+    async def test_only_p0073_becomes_the_requeue_every_other_finish_error_is_a_503(self):
+        # fix round 3 (mutant AW8): _finish's except turns ONLY P0073 into the fail-closed
+        # requeue. Any other error of finish_training (another SQLSTATE, a dropped connection)
+        # propagates: the worker route answers 503 „unavailable", nothing is requeued, ended or
+        # terminated, and the worker's retry of the finish then gets its waiver.
+        errors = {"XX000": PgError("XX000"), "57014": PgError("57014"), "22023": PgError("22023"),
+                  "P0050": PgError("P0050"), "transport": RuntimeError("connection reset by peer")}
+        for name, exc in errors.items():
+            with self.subTest(error=name):
+                self.db.rpcs.clear()
+                self.logs.clear()
+                # every case starts from the same fresh row (the previous case's retry finished it)
+                self.setup_attempts(current={}, train_seconds_used=0, charge_waiver=None, error_message=None,
+                                    terminated_at=None, charged_hours=None, settled_at=None, status_note=None)
+                self.db.errors["finish_training"] = [exc]
+                deletes = len(self.rp.deletes())
+                self.assertEqual(await self.lerobot_error(),
+                                 (503, {"detail": T.WORKER_UNAVAILABLE_DE, "code": "unavailable"}))
+                self.assertEqual(len(self.db.calls("finish_training")), 1, "the waived finish was asked once")
+                for rpc in ("requeue_training", "end_training_attempt", "cap_training_attempt"):
+                    self.assertEqual(self.db.calls(rpc), [], f"{rpc} after a {name} error")
+                r = self.db.row(self.tid)
+                self.assertEqual((r["status"], r["worker_token"], r["charge_waiver"]), ("running", TOKEN, None))
+                a = self.db.attempt(self.tid, 2)
+                self.assertEqual((a["state"], a["end_reason"]), ("running", None))
+                self.assertEqual(len(self.rp.deletes()), deletes, "the pod is not terminated")
+                self.assertEqual(self.logs, [])
+                # the worker retries a 5xx: the same finish now gets the waiver
+                self.assertEqual(await self.lerobot_error(), (200, {"status": "failed"}))
+                self.assertEqual(self.db.row(self.tid)["charge_waiver"], "lerobot_error")
+
+    async def test_a_lost_finish_race_is_not_requeued_either(self):
+        # P0049 never reaches _finish's except: fail_training swallows it (RpcConflict: the
+        # compare-and-set lost, the database changed nothing) and _finish goes on as for a
+        # failed training: the pod is terminated, the failed log scheduled, 200 „failed".
+        self.setup_attempts(current={})
+        self.db.errors["finish_training"] = [PgError("P0049")]
+        self.assertEqual(await self.lerobot_error(), (200, {"status": "failed"}))
+        for rpc in ("requeue_training", "end_training_attempt", "cap_training_attempt"):
+            self.assertEqual(self.db.calls(rpc), [], rpc)
+        self.assertEqual(self.db.attempt(self.tid, 2)["end_reason"], None)
+        self.assertEqual(self.rp.deletes(), ["pod1"])
+        self.assertEqual(self.logs, [self.tid])
 
     async def test_the_fake_database_refuses_an_unprovable_waiver_itself(self):
         # the API's fake models A's contract: finish_training raises P0073 for the waiver

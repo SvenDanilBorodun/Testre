@@ -33,6 +33,12 @@ import rosConnectionManager from '../../utils/rosConnectionManager';
 import { rsControlBase, usePiMode } from '../../utils/piMode';
 import Icon from '../icons/Icon';
 import { toastIcon } from '../icons/toast';
+import * as station from '../../features/station/controller';
+import { useStationValue } from '../../features/station/useStation';
+import { stationClaimHeld } from '../../features/station/gating';
+import { STATION_DE } from '../../features/station/stationCopy';
+
+let toggleInstances = 0;
 
 // Switching the leader on/off recreates the open_manipulator container, which
 // blips /joint_states + the camera topics. Doing that DURING an active
@@ -189,6 +195,23 @@ export default function LeaderToggle({ isActive, lockedReason = null }) {
   // overlay early on a status race).
   const busyRef = useRef(false);
   useEffect(() => { busyRef.current = busy; }, [busy]);
+
+  // The camera station (station spec §9.1 step 1, D7): a leader switch in
+  // flight — this tab's POST, the GUI reporting one busy, or the readiness
+  // overlay — holds the station's automatic enter back until it is over.
+  const instanceKeyRef = useRef(null);
+  if (instanceKeyRef.current === null) {
+    toggleInstances += 1;
+    instanceKeyRef.current = `leader-toggle-${toggleInstances}`;
+  }
+  useEffect(() => {
+    station.reportLeaderSwitching(instanceKeyRef.current, Boolean(busy || preparing));
+  }, [busy, preparing]);
+  useEffect(() => () => station.reportLeaderSwitching(instanceKeyRef.current, false), []);
+  // This tab holds the station session: switching the leader on means leaving
+  // the station first (§9.1 step 4), in ONE action.
+  const stationHeld = useStationValue(stationClaimHeld);
+  const stationWorkflowActive = useStationValue((st) => Boolean(st.held && st.workflowActive));
   // Mirror `preparing` so the background status poll skips ticks while we hold
   // the readiness overlay (a refreshStatus mid-prep could flip `available` and
   // unmount the overlay).
@@ -273,6 +296,21 @@ export default function LeaderToggle({ isActive, lockedReason = null }) {
       if (!enteredPrep) setTimeout(refreshStatus, 2000);
     }
   }, [refreshStatus, piMode]);
+
+  // „Station verlassen und Leader einschalten" (station spec §9.1 step 4): the
+  // station's leave — refused while a real program runs, waiting for any GUI
+  // stream POST in flight before its `off` — and only then `leader-enable`, so
+  // the GUI's 409 („Roboter Studio nutzt gerade die Stationskamera.") cannot
+  // meet it. Counts as an explicit „Station verlassen": no automatic re-entry
+  // until the next visit of the Roboter-Studio tab.
+  const leaveStationAndEnable = useCallback(async () => {
+    const r = await station.leave();
+    if (!r.left) {
+      toast.error(r.message || STATION_DE.stopProgramFirst);
+      return;
+    }
+    doToggle(false);
+  }, [doToggle]);
 
   // Readiness effect (Option A): while „preparing", watch the browser-observed
   // signals that the arm container is back — the scene camera delivering frames
@@ -387,11 +425,13 @@ export default function LeaderToggle({ isActive, lockedReason = null }) {
           <button
             type="button"
             className={TOGGLE_BUTTON_CLASS}
-            disabled={busy || taskBusy || !!lockedReason}
+            disabled={busy || taskBusy || !!lockedReason || (stationHeld && stationWorkflowActive)}
             onClick={() => setShowReconnect(true)}
-            title={lockedReason || (taskBusy ? 'Während Aufnahme/Inferenz nicht verfügbar.' : undefined)}
+            title={lockedReason || (taskBusy
+              ? 'Während Aufnahme/Inferenz nicht verfügbar.'
+              : (stationHeld && stationWorkflowActive ? STATION_DE.stopProgramFirst : undefined))}
           >
-            Leader verbinden
+            {stationHeld ? STATION_DE.leaveAndLeaderOn : 'Leader verbinden'}
           </button>
         </>
       )}
@@ -447,9 +487,13 @@ export default function LeaderToggle({ isActive, lockedReason = null }) {
                 type="button"
                 disabled={busy || taskBusy || !!lockedReason}
                 title={lockedReason || (taskBusy ? 'Während Aufnahme/Inferenz nicht verfügbar.' : undefined)}
-                onClick={() => { setShowReconnect(false); doToggle(false); }}
+                onClick={() => {
+                  setShowReconnect(false);
+                  if (stationHeld) leaveStationAndEnable();
+                  else doToggle(false);
+                }}
               >
-                Verbinden
+                {stationHeld ? STATION_DE.leaveAndLeaderOn : 'Verbinden'}
               </button>
             </div>
           </div>

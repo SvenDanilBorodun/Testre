@@ -22,6 +22,13 @@ export const STATION_PROTOCOL = 6;
 export const STATION_TOPIC = '/station_scene/image_raw/compressed';
 export const STATION_CAMERA = 'station_scene';
 
+/**
+ * The layout `begin` names when the station has none yet (§2.2, §6 „Layout"):
+ * the one printed layout of this round. The server refuses it until it is
+ * `released` in layout_data.py („Diese Matte ist noch nicht freigegeben.").
+ */
+export const DEFAULT_LAYOUT_ID = 'OMX-STATION-A';
+
 /** The three services (§8.1–§8.3). */
 export const SESSION_SERVICE = '/station/session';
 export const SESSION_SERVICE_TYPE = 'physical_ai_interfaces/srv/StationSession';

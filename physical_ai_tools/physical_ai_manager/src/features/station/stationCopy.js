@@ -202,6 +202,7 @@ export const STATION_DE = Object.freeze({
   cameraOpen: 'Kamera noch nicht geprüft',
   cameraRunning: 'Kamera wird geprüft …',
   robotOk: 'Roboter in Ordnung',
+  robotRunning: 'Roboter wird geprüft …',
   robotOpen: 'Roboter noch nicht geprüft',
   cameraClearlyMoved: 'Kamera deutlich verstellt – Turm oder Matte verschoben?',
   // §7.3: the re-solve's confirmation.

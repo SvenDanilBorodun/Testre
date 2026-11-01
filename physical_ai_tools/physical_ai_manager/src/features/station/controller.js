@@ -127,6 +127,10 @@ let pagehideAttached = false;
 const usedPairs = new Set();
 
 function set(patch) {
+  // An answer that changes nothing (most keepalives) notifies nobody, so a
+  // page reading the snapshot does not re-render every 2 s.
+  const changed = Object.keys(patch).some((k) => !Object.is(state[k], patch[k]));
+  if (!changed) return;
   state = { ...state, ...patch };
   listeners.forEach((fn) => {
     try { fn(); } catch { /* a listener never breaks the controller */ }

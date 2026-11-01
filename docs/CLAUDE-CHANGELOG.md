@@ -6,6 +6,84 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### v2.37.0, 2026-11-01 (build) — the training-hour ledger (migration 052)
+
+**Why.** At v2.36.0 a training credit was not a record: `start_training_safe` / `get_remaining_credits` counted
+`trainings WHERE status NOT IN ('failed','canceled')`, so every path that ended a row `failed` or `canceled` was a
+refund, whoever caused it and however much GPU time had run (`docs/plans/2026-10-28-credit-system/design.md` §1,
+verified in code). Seven holes: „Abbrechen" after 3 h 29 min gave the credit back while the public 10 000-step mirror
+kept usable weights (H1); „Konto löschen" was the same as a mass cancel (H2); every failure refunded, self-caused ones
+after GPU time included (H3); the policy choice was an environment setting, so a student calling the API directly
+could start a 10 h VLA on an A100 for one credit unless Railway set `ALLOWED_POLICIES=act` (H4); deleting a student
+or an empty workgroup gave its CONSUMED credits back to the teacher's pool, so delete + recreate was unlimited credit —
+the recycling hole (H5); the pool could be spent twice because any role could start (H6); and the start and the quota
+counted different rows after a group change (H7). The spec (`spec.md` beside the design, gitignored) was written by
+one architect and reviewed three times by fresh reviewers (review 1: B1, M1–M5; review 2: M1, a host faking a model's
+SHA-256 to bill the student an S7; review 3: minors only), every fold decided by the owner.
+
+**Owner decisions** (spec §21, design.md's answer rounds). The unit: 1 hour = 1 started hour of counted GPU training
+time; a start reserves min(3, free, member hours left), the training's limit is its reserved hours, the charge at the
+end is ceil(counted seconds / 3600), 0 possible, the rest released (rounds 1–2: 1B, 13A, 14A, 15A; D10); a reset at
+the release (11C: every balance 0, the admin re-grants, teachers hand out anew); never expiring (10A); students only,
+ACT only, enforced by role in the API AND the database (T2A, H4/H6); the teacher and the student may stop a running
+training (T5A); the Modal training app is stopped (T1B). D1 lost GPU time counts against the limit, never the hours
+(`lost_seconds`), refined by N2 B (lost time ends at the last real training evidence); D2 training time starts at the
+first running write; D3, replaced for S19/S7 by Q-C; D4 admin compensation (`POST /admin/credit-grants`, mandatory
+reason, outside the teacher pool); D5 one per-member limit per group, never reset; D6 a stopped training is
+continuable like a capped one; D7 `/me/delete` cancels without publishing and charges the started hours; D8 deleting a
+teacher with free hours revokes them; D9 no banner, the release outside lesson time; D11 no gate on
+`deletion_requested_at`. N1 A compensated hours are fungible; N3 A the S4/S37 split. Q-A B S4 and S18 publish a ready
+checkpoint like a cap (`attempts_out` / `no_gpu`); Q-B C lost attempts stay free and become visible; Q-C B a host's
+S19/S7 needs two distinct hosts; Q-D A a compensation naming a training restores the member's limit headroom; Q-E the
+Modal rung stays in the code and OFF. OQ-1 A R2 enforces the manifest's signed SHA-256 at upload, behind proof gate G0
+(G0 B: implementer B runs it on the TEST bucket); OQ-2 C a confirmed S19 charges 0; OQ-3 B `ckpt-bad` refuses only on
+proof. R3-1 B a confirmed S7 publishes the newest checkpoint that passed (`content_refused`); R3-2 B an intact
+`train_config` complaint needs two distinct hosts (`config_complaints`); R3-3 B a checkpoint is due every two
+intervals (`checkpoint_overdue`). OQ-R4 A by default: no time-based checkpoint rule (R18). OQ-B1 (after the build):
+a ready final beats a confirmed S7 and is published as the training — keep.
+
+**What it cost.** Gate G0 failed on its first live run (2026-10-29, `edubotics-training-test`, created that day: no
+test bucket had existed): R2 answers 400 InvalidRequest „You can only specify one non-default checksum at a time." to a
+PUT that carries `Content-MD5` AND `x-amz-checksum-sha256`, the honest one included. The owner allowed dropping
+`Content-MD5` (Q1 A); gate G0b probed eight variants in one live run: V1 (the SHA-256 signed, no `Content-MD5`, no
+algorithm header) passes — a wrong body 400 BadDigest and not stored, a missing or forged header 403, HEAD with
+`ChecksumMode=ENABLED` returns the signed SHA-256 — as do V2 and V4b; a query-string checksum is ignored (a wrong body
+is stored) and an unsigned checksum header is a signature mismatch; a plain upload carries only R2's CRC64NVME and a
+CopyObject copy no SHA-256 at all (a kept copy is therefore stream-hashed when judged). G0 on the shipped `presign_put`
+then passed (live run 2 of the 6 allowed). The worker sends the API's headers verbatim, so no trainer image, handler
+hash or Modal deploy was needed. Implementer B ran out of its weekly usage in the middle of the tests and resumed three
+days later.
+
+**Measured** (the build, 2026-11-01). 052's self-check passes inside the migration; its hand-run assertions passed
+265 PASS at the build (the fix round's own count is in the header of
+`supabase/tests/052_credit_ledger_assertions.sql`), 104/104 PostgREST checks, nine races without a deadlock, the
+rollback refuses while a `ledger` row is active and restores 051's 73 functions with their ACLs. The schema probe is
+23 tables, 23 column sets, 55 RPCs (passes on 052, fails on 051), and a v2.36.0 API boots against 052. Suites on the
+integration head before the fix round: cloud API 1183 (also on python:3.11-slim), setup 2716 (5 errors =
+`test_gui_theme` without `_tkinter`), pi 594, jetson 30, modal_inference 117, vitest 319 files / 5467 (+2 expected
+fail), eslint 0, both vite builds. After the fix round: cloud API 1195.
+
+**Verification and its fixes** (`verification.md` beside the spec; two fresh zero-trust verifiers on their own local
+Supabase stacks; the owner decided every finding). V1-M1 (major): `_finish` judged a fresh start by
+`resume_from_step` alone, which only `/start` writes, so two distinct hosts that skipped `/start` got the S19 waiver
+and the WHOLE training was charged 0, an earlier attempt's honestly trained hours included — fixed in the API AND
+the database: the waiver needs `resume_from_step` 0, a `running` attempt, no continuation, `train_seconds_used` 0 and
+no ready checkpoint (`training_worker._waiver_blockers`; `finish_training` raises P0073 otherwise, which the API logs
+at ERROR and answers with a requeue); anything else is requeued like a lost attempt
+(`host_unfit:lerobot_error_not_fresh`). V1-m1: 049's `update_training_progress` reset `step_advanced_at` on every
+running write, so heartbeats alone held an idle attempt to the limit — 052 now resets it only when NULL, on the first
+queued → running write or on a rising step (R18 restated). V1-m2: four surviving mutants (M19 a group history
+without its ownership assert, M17 a literal `p_max_hours=3`, M20 foreign reason texts in `/me/export`, M6 an intact
+content complaint counted as `train_config`) each got a test that kills it. V2-M1: this entry. V2-m1: the old
+v2.36.0 admin dashboard's PATCH still writes the dead `users.training_credits` after W1, and the old teacher web gets
+405 between W2 and W3 — DEPLOY says: no teacher or admin dashboard from W1 until W3 has finished. Not changed by
+decision: V1-m3 (an operator's raw classroom handover keeps the old teacher's account; no API route does it), V1-o1
+(lost time shortens the training while ceil still bills the started hour, D1), V2-m2 (052 is not re-runnable after its
+rollback, documented), V2-m3 (a fake fixture on another branch).
+
+**Open.** No real managed start, RunPod placement or W1 against production has run under the ledger; the residuals
+R1–R19 are in `docs/KNOWN-ISSUES.md` („Training-hour ledger (052, v2.37.0)").
+
 ### v2.36.0, 2026-10-26 — Roboter Studio review fixes
 
 **Why.** A review of v2.34.0 (`main` 593d7e71) RAN the shipped code — the arm64 images `physical-ai-server-opi:2.34.0`

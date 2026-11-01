@@ -40,6 +40,17 @@ from . import constants, win_camera
 _HEADER = struct.Struct(">BIQ")
 _RECONNECT_BACKOFF_S = (0.5, 1.0, 2.0, 3.0, 5.0)  # capped, then repeats last
 _MAX_READ_FAILURES = 10  # consecutive read() failures before reopening (phosphobot uses the same threshold)
+# ONE deadline for joining every thread in CameraBridge.stop(). It runs on the
+# Tk thread when the GUI closes, so closing blocks at most this long however
+# many threads the bridge owns.
+STOP_DEADLINE_S = 2.0
+
+# The Thread subclasses below keep their stop flag in `_stop_event`, never
+# `_stop`: on CPython 3.11/3.12 (the installer ships 3.11) `Thread.join()`
+# calls the private method `self._stop()`, so an instance attribute of that
+# name shadows it and `join()` raises `TypeError: 'Event' object is not
+# callable` — which aborted CameraBridge.stop() at the first finished thread
+# and skipped the camera joins and timeEndPeriod.
 
 
 class _CaptureWorker(threading.Thread):
@@ -50,7 +61,7 @@ class _CaptureWorker(threading.Thread):
         self.cam_id = cam_id
         self.role = role
         self.index = index
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self._cond = threading.Condition()
         self._latest = None          # (frame_bgr, capture_ns)
         self._latest_seq = 0         # monotonic; lets the sender detect new frames
@@ -80,7 +91,7 @@ class _CaptureWorker(threading.Thread):
             return self._latest, self._latest_seq
 
     def stop(self):
-        self._stop.set()
+        self._stop_event.set()
         # Wake any sender blocked in wait_new so stop() is prompt.
         with self._cond:
             self._cond.notify_all()
@@ -89,7 +100,7 @@ class _CaptureWorker(threading.Thread):
         cv2 = None
         cap = None
         failures = 0
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             if cap is None:
                 try:
                     import cv2 as _cv2
@@ -163,13 +174,13 @@ class _ConnectMixin:
 
     Both the per-camera sender and the phone external sender are CLIENTS to the
     container's TCP server and reconnect identically; only the frame source
-    differs. Subclasses set ``self.host`` / ``self.port`` / ``self._stop`` /
+    differs. Subclasses set ``self.host`` / ``self.port`` / ``self._stop_event`` /
     ``self.connected`` / ``self.last_error_de`` and call ``self._connect()``.
     """
 
     def _connect(self) -> "socket.socket | None":
         attempt = 0
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 sock = socket.create_connection((self.host, self.port), timeout=5.0)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -185,7 +196,7 @@ class _ConnectMixin:
                 backoff = _RECONNECT_BACKOFF_S[min(attempt, len(_RECONNECT_BACKOFF_S) - 1)]
                 attempt += 1
                 # Wait responsively so stop() returns promptly.
-                if self._stop.wait(backoff):
+                if self._stop_event.wait(backoff):
                     break
         return None
 
@@ -201,7 +212,7 @@ class _SenderWorker(_ConnectMixin, threading.Thread):
         self.worker = worker
         self.host = host
         self.port = port
-        self._stop = stop_event
+        self._stop_event = stop_event
         self.connected = False
         self.last_error_de = ""
 
@@ -210,7 +221,7 @@ class _SenderWorker(_ConnectMixin, threading.Thread):
         jpeg_params = [cv2.IMWRITE_JPEG_QUALITY, constants.CAMERA_JPEG_QUALITY]
         last_seq = -1
         sock = None
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             if sock is None:
                 sock = self._connect()
                 if sock is None:
@@ -286,7 +297,7 @@ class _ExternalSenderWorker(_ConnectMixin, threading.Thread):
         self.cam_id = cam_id
         self.host = host
         self.port = port
-        self._stop = stop_event
+        self._stop_event = stop_event
         self.stale_max_age_s = stale_max_age_s
         self.poll_interval_s = poll_interval_s
         self.connected = False
@@ -297,7 +308,7 @@ class _ExternalSenderWorker(_ConnectMixin, threading.Thread):
     def run(self):
         last_seq = -1
         sock = None
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             if sock is None:
                 sock = self._connect()
                 if sock is None:
@@ -307,7 +318,7 @@ class _ExternalSenderWorker(_ConnectMixin, threading.Thread):
             if (got is None
                     or got[2] == last_seq
                     or not self.slot.fresh_within(self.stale_max_age_s)):
-                if self._stop.wait(self.poll_interval_s):
+                if self._stop_event.wait(self.poll_interval_s):
                     break
                 continue
             jpeg, capture_ns, seq = got
@@ -399,6 +410,11 @@ class CameraBridge:
         except Exception:  # noqa: BLE001
             pass
 
+    def _threads_to_join(self) -> list:
+        """Every thread stop() joins, senders before the capture workers (a
+        sender blocked in wait_new is woken by its worker's stop())."""
+        return [*self._senders, *self._external_senders, *self.workers]
+
     def start(self):
         self._raise_timer_resolution()
         for w in self.workers:
@@ -408,21 +424,24 @@ class CameraBridge:
         for es in self._external_senders:
             es.start()
 
-    def stop(self, join_timeout: float = 3.0):
+    def stop(self, join_timeout: float = STOP_DEADLINE_S):
+        """Stop every thread, joining all of them against ONE shared deadline.
+
+        ``join_timeout`` is the budget for the WHOLE stop, not per thread: this
+        runs on the Tk thread (``gui_app._on_close``), and a per-thread timeout
+        multiplied by the thread count would freeze the window for that sum.
+        A thread still alive at the deadline is a daemon and dies with the
+        process.
+        """
+        deadline = time.monotonic() + join_timeout
         self._stop.set()
         for w in self.workers:
             w.stop()
         # `ident is None` until a thread is started — guard so stop() is safe
         # even if start() was never called (e.g. construction then teardown).
-        for s in self._senders:
-            if s.ident is not None:
-                s.join(timeout=join_timeout)
-        for es in self._external_senders:
-            if es.ident is not None:
-                es.join(timeout=join_timeout)
-        for w in self.workers:
-            if w.ident is not None:
-                w.join(timeout=join_timeout)
+        for t in self._threads_to_join():
+            if t.ident is not None:
+                t.join(timeout=max(0.0, deadline - time.monotonic()))
         if self._timer_raised:
             try:
                 import ctypes

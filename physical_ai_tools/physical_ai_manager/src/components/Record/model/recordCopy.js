@@ -222,6 +222,14 @@ export const RECORD_COPY = Object.freeze({
     followerStalled: 'Der Follower-Arm sendet keine Daten. Prüfe Kabel und Stromversorgung des Follower-Arms.',
     leaderOff: 'Der Leader-Arm ist ausgeschaltet (nur Follower-Arm). Schalte ihn im Roboter Studio wieder ein, '
       + 'dann kannst du aufnehmen.',
+    // On a camera station the leader comes back only by leaving the station
+    // (station spec §9.2, D7).
+    leaderOffStation: 'Der Leader-Arm ist ausgeschaltet (nur Follower-Arm). Schalte ihn wieder ein, dann kannst '
+      + 'du aufnehmen: im Roboter Studio („Station verlassen und Leader einschalten“)',
+    // The camera station holds the robot (station spec §9.2, D13): Start is off.
+    station: 'Roboter Studio nutzt gerade die Kamerastation.',
+    stationLeave: 'Station verlassen',
+    stationLeaveBlocked: 'Stoppe zuerst dein Programm.',
     leaderNotActivated: 'Der Roboter ist nicht aktiviert, der Leader-Arm sendet keine Daten. Aktiviere ihn auf '
       + 'der Startseite.',
     leaderStalled: 'Der Leader-Arm sendet keine Daten. Prüfe Kabel und Stromversorgung des Leader-Arms.',

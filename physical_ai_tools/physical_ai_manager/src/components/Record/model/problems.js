@@ -38,13 +38,17 @@ export function diskProblem(disk, { running = false } = {}) {
   return { kind: 'bad', textDe: P.diskLow(disk.free, disk.startFloor) };
 }
 
-/** The sentence for one stalled source (the leader's has three causes). */
-export function stalledSourceProblem(source, { bridge = null, activation = null } = {}) {
+/**
+ * The sentence for one stalled source (the leader's has three causes). On a
+ * camera station (`stationRig`) the switched-off leader comes back only by
+ * leaving the station (station spec §9.2), and the sentence says where.
+ */
+export function stalledSourceProblem(source, { bridge = null, activation = null, stationRig = false } = {}) {
   if (!source) return null;
   if (source.kind === 'camera') return { kind: 'bad', textDe: P.cameraStalled(source.name) };
   if (source.kind === 'follower') return { kind: 'bad', textDe: P.followerStalled };
   if (bridge && bridge.available === true && bridge.followerOnly === true) {
-    return { kind: 'bad', textDe: P.leaderOff };
+    return { kind: 'bad', textDe: stationRig ? P.leaderOffStation : P.leaderOff };
   }
   if (activation && activation.state && activation.state !== 'active') {
     return { kind: 'bad', textDe: P.leaderNotActivated, linkToHome: true };
@@ -92,6 +96,23 @@ export function hfTokenHintProblem(reason) {
   return { kind: 'warn', textDe: P.hfTokenHint[reason], linkToHome: true };
 }
 
+/**
+ * The camera station holds the robot (station spec §9.2, D13): the server
+ * refuses a recording start while the claim is held, so the page says so and
+ * offers „Station verlassen" — disabled while a real program runs (the
+ * server's `workflow_active`, §9.1 step 4).
+ * @param {{leaveDisabled?: boolean}} station
+ */
+export function stationProblem(station) {
+  if (!station) return null;
+  return {
+    kind: 'bad',
+    textDe: P.station,
+    stationLeave: true,
+    stationLeaveDisabled: Boolean(station.leaveDisabled),
+  };
+}
+
 /** The sentence for one slow source. */
 export function slowSourceProblem(source, fps) {
   if (!source) return null;
@@ -112,8 +133,9 @@ export function sourcesWith(verdicts, verdict) {
  *   3. the link lost while running
  *   4. disk low / critical
  *   5. stalled sources
- *   5b. any other reason Start is refused (the same dataset still uploading) —
- *       where Start is offered; disk and source blocks are rows 4 and 5 already
+ *   5b. any other reason Start is refused (the camera station holding the
+ *       robot, the student's token) — where Start is offered; disk and source
+ *       blocks are rows 4 and 5 already
  *   5c. the non-blocking Hugging-Face-Token hint (S2), where Start is offered
  *   6. a record [WARNUNG] notice, ≤ 12 s old
  *   7. slow sources
@@ -134,6 +156,7 @@ export function deriveProblems({
   fps = 0,
   startBlock = null,
   hfTokenHint = null,
+  stationRig = false,
   nowWallMs = Date.now(),
 } = {}) {
   const out = [];
@@ -156,9 +179,10 @@ export function deriveProblems({
   const diskP = diskProblem(disk, { running });
   if (diskP) out.push(diskP);
   for (const s of sourcesWith(verdicts, 'stalled')) {
-    out.push(stalledSourceProblem(s, { bridge, activation }));
+    out.push(stalledSourceProblem(s, { bridge, activation, stationRig }));
   }
-  // Start is off for a reason the rows above do not name (V2-R2-2): say it.
+  // Start is off for a reason the rows above do not name (V2-R2-2): say it —
+  // the camera station's claim among them (station spec §9.2).
   if (view === 'READY' && startBlock?.problem && startBlock.kind !== 'disk' && startBlock.kind !== 'source') {
     out.push(startBlock.problem);
   }

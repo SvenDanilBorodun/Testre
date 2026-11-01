@@ -39,11 +39,16 @@ function withHomeLink(text, homeLabel, onGoHome) {
   return [text.slice(0, at), link, text.slice(at + homeLabel.length)];
 }
 
-export default function ProblemBanner({ problem, homeLabel = '', onGoHome }) {
+// The camera station's block (station spec §9.2) carries „Station verlassen":
+// a real button, disabled (with its reason) while a program runs.
+export default function ProblemBanner({
+  problem, homeLabel = '', onGoHome, stationLeaveLabel = '', stationLeaveBlocked = '', onStationLeave,
+}) {
   if (!problem || !problem.textDe) return null;
   const kind = TONE[problem.kind] ? problem.kind : 'warn';
   const [lead, rest] = splitFirstSentence(problem.textDe);
   const linked = problem.linkToHome && typeof onGoHome === 'function';
+  const leave = problem.stationLeave && typeof onStationLeave === 'function' && stationLeaveLabel;
   return (
     <div className={clsx('rec-banner', kind)} role="status" aria-live="polite" data-testid="rec-banner" data-kind={kind}>
       <Led tone={TONE[kind]} size={10} className="rec-banner-led" />
@@ -51,6 +56,19 @@ export default function ProblemBanner({ problem, homeLabel = '', onGoHome }) {
         <b>{linked && !rest ? withHomeLink(lead, homeLabel, onGoHome) : lead}</b>
         {rest ? ' ' : null}
         {rest ? (linked ? withHomeLink(rest, homeLabel, onGoHome) : rest) : null}
+        {leave ? ' ' : null}
+        {leave ? (
+          <button
+            type="button"
+            className="rec-banner-link"
+            onClick={onStationLeave}
+            disabled={Boolean(problem.stationLeaveDisabled)}
+            title={problem.stationLeaveDisabled ? stationLeaveBlocked : undefined}
+            data-testid="rec-station-leave"
+          >
+            {stationLeaveLabel}
+          </button>
+        ) : null}
       </div>
     </div>
   );

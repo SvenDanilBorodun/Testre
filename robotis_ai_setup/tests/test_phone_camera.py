@@ -223,7 +223,7 @@ class TestBridgeExternalRegistration(unittest.TestCase):
         es = bridge._external_senders[0]
         self.assertEqual(es.cam_id, 2)
         self.assertIs(es.slot, slot)
-        self.assertIs(es._stop, bridge._stop)
+        self.assertIs(es._stop_event, bridge._stop)
 
     def test_connected_excludes_phone(self):
         # The phone (external) sender must NOT gate the camera-connected flag.

@@ -85,6 +85,9 @@ class RsSetLeaderModeTest(unittest.TestCase):
             _rs_phone_enabled=False,
             _rs_switch_in_flight=False,
             _rs_use_gpu=False,
+            # The camera-station flag this environment run started with; both
+            # regenerates must carry it (EDUBOTICS_STATION_ENABLED is MANAGED).
+            _rs_station_enabled=True,
         )
         return method, owner, calls
 
@@ -95,6 +98,7 @@ class RsSetLeaderModeTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["robot_type"], "omx_full")
         self.assertTrue(calls[0]["follower_only"])
+        self.assertIs(calls[0]["station_enabled"], True)
 
     def test_failed_restart_rollback_preserves_robot_type(self):
         method, owner, calls = self._make(restart_ok=False, prev_follower_only="0")
@@ -108,6 +112,10 @@ class RsSetLeaderModeTest(unittest.TestCase):
         # and restore the previous follower_only (0 → False).
         self.assertEqual(calls[1]["robot_type"], "omx_full")
         self.assertFalse(calls[1]["follower_only"])
+        # ... and the station flag on BOTH, or a failed switch would recreate
+        # open_manipulator with it at 0 while the server keeps 1.
+        self.assertIs(calls[0]["station_enabled"], True)
+        self.assertIs(calls[1]["station_enabled"], True)
 
     def test_follower_only_type_refuses_switch(self):
         method, owner, calls = self._make(restart_ok=True)
@@ -184,6 +192,8 @@ class ScanArmsTypeAwareTest(unittest.TestCase):
             _clear_arm_repair=lambda: None,
             _stop_camera_bridge=lambda: None,
             _stop_rs_control_server=lambda: None,
+            # Camera station: `_do_scan` switches the Studio stream off first.
+            _station_stream_off=lambda: None,
             _update_start_button=lambda: None,
             _show_arm_repair=lambda *a, **k: None,
             running=False,

@@ -31,10 +31,15 @@
 --      four tables, no 052 function survived, and update_training_progress is
 --      049's body (the md5 of its prosrc) that anon and authenticated execute.
 --
--- CONSEQUENCE: the old derived credits come back with the per-user and group
--- allocations as they were at 052 (users.training_credits /
--- workgroups.shared_credits were never touched), and every training started
--- under the ledger that is not failed/canceled counts as one used credit.
+-- CONSEQUENCE: the old derived credits come back from users.training_credits /
+-- workgroups.shared_credits as they stand at the rollback, and every training
+-- started under the ledger that is not failed/canceled counts as one used credit.
+-- 052 writes neither column, and from W1 on adjust_student_credits /
+-- adjust_workgroup_credits refuse (P0069) — but the v2.36.0 API writes
+-- users.training_credits directly in PATCH /admin/teachers/{id}/credits (measured
+-- after W1: 200, the ledger pool unchanged) and in POST /admin/teachers, so an old
+-- dashboard can still change a teacher's dead column between W1 and W3; the
+-- rollback brings back whatever it holds then, not the value at 052.
 --
 -- ORDER (spec §19; it replaces Rule §6's managed list where they overlap):
 --   (1) optionally MANAGED_MODAL_RUNG=1 after a `modal deploy`;

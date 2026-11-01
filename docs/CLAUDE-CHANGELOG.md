@@ -55,7 +55,8 @@ hash or Modal deploy was needed. Implementer B ran out of its weekly usage in th
 days later.
 
 **Measured** (the build, 2026-11-01). 052's self-check passes inside the migration; its hand-run assertions passed
-265 PASS at the build and 292 PASS after the fix round (T42 the waiver proof, T43 the stall clock; the
+265 PASS at the build, 292 PASS after the fix round (T42 the waiver proof, T43 the stall clock) and 326 PASS
+after fix round 2 (T44 the checkpoint-ready lock incl. two-connection races in both orders, T45/T46; the
 header of `supabase/tests/052_credit_ledger_assertions.sql` carries the count), 104/104 PostgREST checks, nine races without a deadlock, the
 rollback refuses while a `ledger` row is active and restores 051's 73 functions with their ACLs. The schema probe is
 23 tables, 23 column sets, 55 RPCs at the build, 56 after fix round 2 (passes on 052, fails on 051), and a v2.36.0 API boots against 052. Suites on the

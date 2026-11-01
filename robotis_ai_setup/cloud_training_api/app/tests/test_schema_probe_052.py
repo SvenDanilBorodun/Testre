@@ -143,13 +143,13 @@ class TestSchemaProbeKnows052(unittest.TestCase):
     def test_mark_checkpoint_ready_is_probed_and_writes_nothing(self):
         # V3-M1: training 0 never exists, so the call answers false and writes nothing.
         # The contract is (p_training_id INT, p_attempt INT, p_step INT) RETURNS BOOLEAN;
-        # once 052 defines it, the probe must name exactly its parameters.
+        # 052 defines it, and the probe must name exactly its parameters.
         self.assertEqual(self.rpcs["mark_checkpoint_ready"], {"p_training_id": 0, "p_attempt": 1, "p_step": 1})
-        if re.search(r"CREATE OR REPLACE FUNCTION public\.mark_checkpoint_ready\(", self.sql):
-            self.assertEqual(sorted(self.rpcs["mark_checkpoint_ready"]),
-                             sorted(_params(self.sql, "mark_checkpoint_ready")))
-            self.assertRegex(self.sql, r"FUNCTION public\.mark_checkpoint_ready\(p_training_id INT, p_attempt INT, "
-                                       r"p_step INT\)\s*RETURNS BOOLEAN")
+        self.assertRegex(self.sql, r"CREATE OR REPLACE FUNCTION public\.mark_checkpoint_ready\(")
+        self.assertEqual(sorted(self.rpcs["mark_checkpoint_ready"]),
+                         sorted(_params(self.sql, "mark_checkpoint_ready")))
+        self.assertRegex(self.sql, r"FUNCTION public\.mark_checkpoint_ready\(p_training_id INT, p_attempt INT, "
+                                   r"p_step INT\)\s*RETURNS BOOLEAN")
 
     def test_every_probed_rpc_is_a_callable_052_function_or_older(self):
         # a function 052 defines must not be one of its internal helpers (revoked from the

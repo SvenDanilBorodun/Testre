@@ -15,6 +15,10 @@ would break (spec §12.3, §20.2):
   grant, and one EXECUTE loop that names every function 052 defines; the
   in-migration self-check names every one too;
 * the P-code set (P0060–P0073 all raised, nothing outside the known set);
+* fix round 2 (2026-11-01): mark_checkpoint_ready is the only writer of a
+  ready checkpoint and decides under the trainings row lock, claim_checkpoint_mirror
+  is 049's text plus one status condition, the waiver needs current_step 0, and
+  the rollback drops the first and restores 049's mirror claim (md5 checked);
 * fix round 2026-11-01: finish_training raises P0073 for an unproven charge
   waiver before its first write, and update_training_progress is 049's body
   with exactly the stall-clock line changed (same signature and grants, and
@@ -61,7 +65,7 @@ DEFINER_CALLABLES = {
 }
 INVOKER_CALLABLES = {
     "stop_training", "cap_training_attempt", "requeue_training", "finish_training", "cancel_request_training",
-    "complete_cancel_training", "claim_training_publish",
+    "complete_cancel_training", "claim_training_publish", "mark_checkpoint_ready", "claim_checkpoint_mirror",
 }
 # the worker's own RPC: 049's body with one line changed, EXECUTE for anon/authenticated (not in the loop)
 WORKER_RPC = {"update_training_progress"}
@@ -79,6 +83,7 @@ RESTORED = {
     "requeue_training": "INT, INT, TEXT, TEXT, INT, INT",
     "finish_training": "INT, INT, TEXT, TEXT, TEXT, TEXT, INT, TIMESTAMPTZ",
     "complete_cancel_training": "INT, TEXT, TEXT",
+    "claim_checkpoint_mirror": "INT, INT, INT, INT, TEXT",
     "get_remaining_credits": "UUID",
     "get_teacher_credit_summary": "UUID",
     "adjust_student_credits": "UUID, UUID, INTEGER",
@@ -541,6 +546,73 @@ class FixRound20261101(unittest.TestCase):
         self.assertIn("'charge waiver refused'", body)
 
 
+MIRROR_ADDED = ("     AND EXISTS (SELECT 1 FROM public.trainings t WHERE t.id = c.training_id\n"
+                "                  AND t.status IN ('queued','running','succeeded'))\n")
+
+
+def _fn_049(name: str) -> str:
+    raw = _read(_MIG / "20261020130000_049_managed_training.sql")
+    start = raw.index(f"CREATE OR REPLACE FUNCTION public.{name}(")
+    return raw[start:raw.index("$$;", start) + 3]
+
+
+class FixRound2(unittest.TestCase):
+    """Fix round 2 (2026-11-01): the checkpoint writers and the waiver's step condition."""
+
+    def setUp(self):
+        self.raw = _read(M052)
+        self.defs = _defs_by_name(_code(self.raw))
+
+    def test_mark_checkpoint_ready_signature_and_security(self):
+        ((header, body, _f),) = self.defs["mark_checkpoint_ready"]
+        self.assertEqual(_norm(_args(header)), "p_training_id INT, p_attempt INT, p_step INT")
+        self.assertIn("RETURNS BOOLEAN", header)
+        self.assertIn("SECURITY INVOKER", header)
+        self.assertIn("SET search_path = public", header)
+
+    def test_mark_checkpoint_ready_locks_the_row_first_and_writes_only_a_live_attempts_uploading_checkpoint(self):
+        ((_h, body, _f),) = self.defs["mark_checkpoint_ready"]
+        lock = body.index("FROM public.trainings t WHERE t.id = p_training_id FOR UPDATE;")
+        self.assertLess(lock, body.index("training_attempts"))
+        self.assertLess(lock, body.index("UPDATE public.training_checkpoints"))
+        n = _norm(body)
+        for needle in ("NOT v_t.managed", "v_t.status <> 'running'", "v_t.current_attempt IS DISTINCT FROM p_attempt",
+                       "IF v_state IS DISTINCT FROM 'running' THEN RETURN false;",
+                       "SET state = 'ready', ready_at = now()", "AND c.state = 'uploading';",
+                       "AND c.state = 'ready');"):
+            self.assertIn(needle, n, needle)
+        self.assertEqual(n.count("UPDATE "), 1, "one write only")
+
+    def test_no_other_052_function_writes_a_ready_checkpoint(self):
+        for name, _h, body, _f in _definitions(_code(self.raw)):
+            if name != "mark_checkpoint_ready":
+                self.assertNotRegex(_norm(body),
+                                    r"UPDATE (public\.)?training_checkpoints( \w+)? SET ((?!WHERE)[^;])*\bstate = 'ready'",
+                                    name)
+        self.assertRegex(_norm(self.defs["mark_checkpoint_ready"][0][1]),
+                         r"UPDATE (public\.)?training_checkpoints( \w+)? SET ((?!WHERE)[^;])*\bstate = 'ready'")
+
+    def test_claim_checkpoint_mirror_is_049_with_one_condition(self):
+        old = _fn_049("claim_checkpoint_mirror")
+        anchor = "     AND c.state = 'ready' AND c.mirrored_at IS NULL\n"
+        self.assertEqual(old.count(anchor), 1)
+        self.assertEqual(self.raw.count(old.replace(anchor, anchor + MIRROR_ADDED)), 1)
+
+    def test_the_two_are_service_role_only_through_the_loop_and_checked(self):
+        code = _code(self.raw)
+        tail = code[code.rindex("DO $$"):]
+        for name in ("mark_checkpoint_ready", "claim_checkpoint_mirror"):
+            self.assertIn(name, _array(tail, "callables"))
+            self.assertIn(name, _array(tail, "invokers"))
+        self.assertIn("claim_checkpoint_mirror does not refuse a failed or canceled training", tail)
+        self.assertIn("lacks the waiver''s step condition", tail)
+
+    def test_the_waiver_needs_step_zero(self):
+        ((_h, body, _f),) = self.defs["finish_training"]
+        proof = _norm(body[body.index("IF NOT ("):body.index("ERRCODE = 'P0073'")])
+        self.assertIn("v_t.current_step IS NOT DISTINCT FROM 0", proof)
+
+
 class Rollback052(unittest.TestCase):
     def setUp(self):
         self.raw = _read(R052)
@@ -588,6 +660,18 @@ class Rollback052(unittest.TestCase):
         import hashlib
         self.assertIn(hashlib.md5(old[b0:old.index("$$;", b0)].encode()).hexdigest(), tail)
 
+    def test_it_drops_mark_checkpoint_ready_and_restores_049s_mirror_claim(self):
+        drop_loop = self.code[:self.code.index("DROP FUNCTION public.start_training_safe")]
+        self.assertIn("'mark_checkpoint_ready'", drop_loop)
+        old = _fn_049("claim_checkpoint_mirror")
+        self.assertEqual(self.raw.count(old), 1)
+        self.assertNotIn("AND t.status IN ('queued','running','succeeded')", self.code)
+        tail = self.code[self.code.rindex("DO $$"):]
+        import hashlib
+        b0 = old.index("AS $$") + len("AS $$")
+        self.assertIn(hashlib.md5(old[b0:old.index("$$;", b0)].encode()).hexdigest(), tail)
+        self.assertIn("mark_checkpoint_ready survived", tail)
+
     def test_the_restored_bodies_come_from_049_050_and_the_baseline(self):
         sources = {}
         for name in RESTORED:
@@ -596,6 +680,7 @@ class Rollback052(unittest.TestCase):
                     sources[name] = f.name
         self.assertEqual(sources["start_training_safe"], "20261020130000_049_managed_training.sql")
         self.assertEqual(sources["complete_cancel_training"], "20261020130000_049_managed_training.sql")
+        self.assertEqual(sources["claim_checkpoint_mirror"], "20261020130000_049_managed_training.sql")
         for name in ("start_continuation_safe", "cancel_request_training", "claim_training_publish", "cap_training_attempt",
                      "requeue_training", "finish_training"):
             self.assertEqual(sources[name], "20261021120000_050_training_continuation.sql", name)
@@ -623,7 +708,7 @@ class AssertionFile(unittest.TestCase):
     def test_every_label_of_spec_19a_is_asserted(self):
         text = _read(A052)
         labels = set(re.findall(r"PASS (T\d+)[a-z]?\b", text))
-        self.assertEqual(labels, {f"T{n}" for n in range(1, 44)})
+        self.assertEqual(labels, {f"T{n}" for n in range(1, 47)})
         self.assertIn("PASS T21w (W8)", text)
 
     def test_it_never_calls_a_function_under_set_role(self):

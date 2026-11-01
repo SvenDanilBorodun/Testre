@@ -531,6 +531,22 @@ describe('leaving (§9.1 step 4)', () => {
   });
 });
 
+describe('a page that never opened Roboter Studio (§9.1 step 4)', () => {
+  it('a resumed session on Start knows workflow_active: „Station verlassen" off, the server refuses', async () => {
+    fake.session_({ command: 'enter', client_id: 'tab-A' });
+    fake.workflowActive = true;
+    await boot({ workshop: false });
+    await advance(2100);
+    expect(snap().held).toBe(true);
+    expect(snap().workflowActive).toBe(true);
+    const p = controller.leave();
+    await advance(200);
+    expect((await p).left).toBe(false);
+    expect(snap().held).toBe(true);
+    expect(fake.postsOff()).toHaveLength(0);
+  });
+});
+
 describe('pagehide (§9.1 step 5)', () => {
   it('only the tab that holds the session sends the beacon, and no leave', async () => {
     await boot({ workshop: true });

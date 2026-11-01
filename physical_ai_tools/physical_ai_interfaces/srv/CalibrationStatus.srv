@@ -17,3 +17,12 @@ bool has_color_profile
 # Touch-off table measurement solved (scene extrinsic YAML carries a measured
 # table_plane). Optional accuracy step — recommended, not gating.
 bool has_table_plane
+# OMX camera station (plan v6.13 §8.4), additive: an old client ignores them.
+# Filled getattr-safely by the server; the manual has_* fields keep governing
+# manual rigs only.
+uint32 station_protocol
+bool station_rig
+bool station_configured
+bool station_verified
+string station_state
+string station_reason

@@ -1,0 +1,25 @@
+# OMX camera station (plan v6.13 §8.1): the app-wide station session (/station/session).
+# Server-observed, one claim; message is German (Rule §1). The codes below are the
+# wire contract with the React controller (features/station/), read by
+# robotis_ai_setup/tests/test_station_lockstep.py.
+string command        # enter | leave | keepalive | status
+string session_id     # empty on enter and status
+string client_id      # per-tab id (§9.1); the owner's id is required for enter-resume, keepalive and leave
+---
+string end_reason     # on SESSION_ENDED for that session_id: NATIVE_TIMEOUT | LEADER_ACTIVE | KEEPALIVE_LOST | LEFT | '' (unknown)
+uint32 camera_check_epoch   # the revocation counter (§5.2, §7.1)
+bool accepted
+string state          # OFF | IDLE | ENTERING | ACTIVE
+string reason_code    # RESUMED | LEADER_ACTIVE | OTHER_MODE_ACTIVE | RETORQUE_PENDING | BUSY_OTHER_TAB | NATIVE_TIMEOUT | NOT_STATION_RIG | OWNER_MISMATCH | SESSION_ENDED | WORKFLOW_ACTIVE
+string message        # German
+string session_id     # only to the owner; empty otherwise
+uint32 generation
+bool station_configured
+bool source_ok
+bool camera_ok
+bool robot_ok
+bool verified
+bool workflow_active  # a real (non-sim) program is running or paused (§9.1 step 4)
+string layout_id
+string calibration_digest   # sha256 of station.yaml bytes; empty when not configured
+uint32 station_protocol   # 6

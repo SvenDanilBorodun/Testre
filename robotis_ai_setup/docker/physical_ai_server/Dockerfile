@@ -73,6 +73,10 @@ RUN set -e && \
     test -f "$install_root/msg/_sensor_snapshot.py" && \
     test -f "$install_root/srv/_daten_command.py" && \
     test -f "$install_root/srv/_start_cloud_inference.py" && \
+    # OMX camera station (plan v6.13 §8): the three station services.
+    test -f "$install_root/srv/_station_session.py" && \
+    test -f "$install_root/srv/_station_check.py" && \
+    test -f "$install_root/srv/_station_commission.py" && \
     rm -rf /tmp/interfaces_src && \
     echo "physical_ai_interfaces re-built with audit additions"
 

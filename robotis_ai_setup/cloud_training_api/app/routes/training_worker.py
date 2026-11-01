@@ -599,10 +599,11 @@ async def _host_claim_confirmed(row, att, marker: str) -> bool:
 # call shares.
 # The asking attempt is in the key (fix round 2026-10-19): a checkpoint's PUT
 # links stay usable for r2_client.PUT_TTL_S after they were minted (an upload
-# begun before then may end later), and a same-length body with the same MD5
-# (both are signed) replaces an object with its size and ETag unchanged, so no
-# verdict may be reused for another attempt: each hashes the checkpoint as it
-# then is. Reusing it for the attempt that asked equals that attempt not asking
+# begun before then may end later). Since 052 such a link signs the manifest's
+# SHA-256 and R2 refuses other bytes (gates G0/G0b), so a late PUT through it can
+# only store the same bytes again. An object R2 holds no SHA-256 for (a link
+# minted before 052, still inside its TTL) is not bound that way, so no verdict
+# is reused for another attempt: each hashes the checkpoint as it then is. Reusing it for the attempt that asked equals that attempt not asking
 # again (`kept` changes nothing; its worker then gives the GPU up). The cost
 # stays one hash per asking attempt, at most MAX_ATTEMPTS per checkpoint.
 _HASH_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ckpt-hash")

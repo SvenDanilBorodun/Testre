@@ -1,8 +1,10 @@
 """r2_client against REAL botocore (spec §3.4, FR-11: CI installs boto3/botocore 1.43.107).
 
-A presigned PUT must sign Content-Type, Content-Length and Content-MD5, so a
-body of another length (or, F13 permitting, another MD5) is refused by R2's
-signature check; the key layout and the expiries are the spec's; head/get
+A presigned PUT signs exactly content-length;content-type;host;x-amz-checksum-sha256
+(the manifest's SHA-256) and never Content-MD5: R2 refuses Content-MD5 together with
+the SHA-256 (gate G0b, 2026-10-29, variant V1), and with the SHA-256 signed it refuses
+a body of another length (signature) or other bytes (400 BadDigest); the key layout
+and the expiries are the spec's; head/get
 errors are classified (404 → R2Missing, anything else propagates). Offline:
 botocore signs locally; its Stubber answers the HEAD/GET/DELETE calls.
 
@@ -589,10 +591,12 @@ class _StoreR2:
 
 class _R2Http:
     """The R2 side of a PUT: ``mode`` 'aws' validates the signed checksum against the body
-    (like AWS S3), 'refuse_header' answers 400 InvalidRequest to any request carrying
-    x-amz-checksum-sha256 before the signature (what the 2026-10-29 run measured) and
-    validates a query checksum, and
-    'ignore' never validates a checksum. A changed or missing signed value is 403."""
+    (like AWS S3); 'measured' is what G0b measured on R2 (2026-10-29): Content-MD5 AND
+    x-amz-checksum-sha256 together are 400 InvalidRequest „You can only specify one
+    non-default checksum at a time." before the signature, a SHA-256 header alone is
+    validated (400 BadDigest) and stored, a query-string checksum is IGNORED (a wrong
+    body is stored); 'ignore' never validates a checksum. A changed or missing signed
+    value is 403."""
 
     def __init__(self, store, mode):
         self.store, self.mode = store, mode
@@ -610,18 +614,20 @@ class _R2Http:
         key = urlparse(url).path.split("/", 2)[2]
         sent = {k.lower(): v for k, v in headers.items()}
         q = parse_qs(urlparse(url).query)
-        if self.mode == "refuse_header" and "x-amz-checksum-sha256" in sent:
-            return httpx.Response(400, content=b"<Error><Code>InvalidRequest</Code>"
-                                               b"<Message>Header x-amz-checksum-sha256 not allowed</Message></Error>")
+        if self.mode == "measured" and "x-amz-checksum-sha256" in sent and "content-md5" in sent:
+            return httpx.Response(400, content=b"<Error><Code>InvalidRequest</Code><Message>You can only specify "
+                                               b"one non-default checksum at a time.</Message></Error>")
         signed_hdrs, signed_q, names = self.signed[key]
         for name in names:
             if name != "host" and sent.get(name) != signed_hdrs.get(name):
                 return httpx.Response(403, content=b"<Error><Code>SignatureDoesNotMatch</Code></Error>")
         if q.get("x-amz-checksum-sha256", [None])[0] != signed_q:
             return httpx.Response(403, content=b"<Error><Code>SignatureDoesNotMatch</Code></Error>")
-        claimed = sent.get("x-amz-checksum-sha256") or q.get("x-amz-checksum-sha256", [None])[0]
+        claimed = sent.get("x-amz-checksum-sha256")
+        if self.mode != "measured":                    # R2 ignores a query-string checksum
+            claimed = claimed or q.get("x-amz-checksum-sha256", [None])[0]
         claimed_hex = base64.b64decode(claimed).hex() if claimed else None
-        validate = self.mode in ("aws", "refuse_header")
+        validate = self.mode in ("aws", "measured")
         if validate and claimed_hex and claimed_hex != hashlib.sha256(body).hexdigest():
             return httpx.Response(400, content=b"<Error><Code>BadDigest</Code><Message>The SHA256 you specified "
                                                b"did not match the calculated checksum.</Message></Error>")
@@ -723,14 +729,29 @@ class ChecksumGateVariants(unittest.TestCase):
         for secret in ("X-Amz-Signature", "test-secret", "test-access-key", "r2.cloudflarestorage.com"):
             self.assertNotIn(secret, text)
 
-    def test_the_measured_r2_passes_only_the_query_variants(self):
-        code, out, _ = self._run("refuse_header")
-        self.assertEqual(code, 0)
-        self.assertEqual(out["passing"], ["V6", "V6m"])
-        v0 = out["variants"]["V0"]
-        self.assertEqual((v0["honest"]["status"], v0["honest"]["code"]), (400, "InvalidRequest"))
-        self.assertEqual(v0["honest"]["message"], "Header x-amz-checksum-sha256 not allowed")
-        self.assertFalse(v0["pass"])
+    def test_the_measured_r2_passes_exactly_v1_v2_v4b(self):
+        # G0b's live result (2026-10-29): the SHA-256 alone is enforced; with Content-MD5 it
+        # is a 400 before the signature; a query-string checksum is ignored.
+        code, out, store = self._run("measured")
+        self.assertEqual((code, out["verdict"]), (0, "pass"))
+        self.assertEqual(out["passing"], ["V1", "V2", "V4b"])
+        for name in ("V0", "V3", "V4a"):
+            v = out["variants"][name]
+            self.assertEqual((v["honest"]["status"], v["honest"]["code"], v["honest"]["message"]),
+                             (400, "InvalidRequest", "You can only specify one non-default checksum at a time."), name)
+            self.assertFalse(v["pass"], name)
+        v1 = out["variants"]["V1"]
+        self.assertEqual((v1["honest"]["status"], v1["wrong"]["status"], v1["wrong"]["code"], v1["wrong"]["stored"]),
+                         (200, 400, "BadDigest", False))
+        self.assertEqual((v1["missing"]["status"], v1["forged"]["status"], v1["forged"]["stored"]), (403, 403, False))
+        self.assertTrue(v1["honest"]["head_sha256_ok"])
+        for name in ("V6", "V6m"):
+            v = out["variants"][name]
+            self.assertEqual((v["honest"]["status"], v["wrong"]["status"]), (200, 200), name)
+            self.assertTrue(v["wrong"]["stored"], f"{name}: R2 ignores a query checksum, the wrong body is stored")
+            self.assertFalse(v["honest"]["head_sha256_ok"], name)
+            self.assertFalse(v["pass"], name)
+        self.assertEqual(store.objects, {})
 
     def test_an_r2_that_ignores_checksums_passes_nothing(self):
         code, out, _ = self._run("ignore", ["V1", "V6"])

@@ -58,10 +58,10 @@ days later.
 265 PASS at the build and 292 PASS after the fix round (T42 the waiver proof, T43 the stall clock; the
 header of `supabase/tests/052_credit_ledger_assertions.sql` carries the count), 104/104 PostgREST checks, nine races without a deadlock, the
 rollback refuses while a `ledger` row is active and restores 051's 73 functions with their ACLs. The schema probe is
-23 tables, 23 column sets, 55 RPCs (passes on 052, fails on 051), and a v2.36.0 API boots against 052. Suites on the
+23 tables, 23 column sets, 55 RPCs at the build, 56 after fix round 2 (passes on 052, fails on 051), and a v2.36.0 API boots against 052. Suites on the
 integration head before the fix round: cloud API 1183 (also on python:3.11-slim), setup 2716 (5 errors =
 `test_gui_theme` without `_tkinter`), pi 594, jetson 30, modal_inference 117, vitest 319 files / 5467 (+2 expected
-fail), eslint 0, both vite builds. After the fix round: cloud API 1195.
+fail), eslint 0, both vite builds. After the fix round: cloud API 1195; after fix round 2: 1215.
 
 **Verification and its fixes** (`verification.md` beside the spec; two fresh zero-trust verifiers on their own local
 Supabase stacks; the owner decided every finding). V1-M1 (major): `_finish` judged a fresh start by
@@ -82,6 +82,23 @@ v2.36.0 admin dashboard's PATCH still writes the dead `users.training_credits` a
 decision: V1-m3 (an operator's raw classroom handover keeps the old teacher's account; no API route does it), V1-o1
 (lost time shortens the training while ceil still bills the started hour, D1), V2-m2 (052 is not re-runnable after its
 rollback, documented), V2-m3 (a fake fixture on another branch).
+
+**Fix round 2** (the fix round's own fresh verifiers, owner decisions 2026-11-01). V3-M1: `_ckpt_done` authorised
+once, verified the R2 objects (seconds to minutes) and then wrote `state = 'ready'` filtering only the checkpoint
+row, so a ckpt-done held back until its attempt had been requeued — or until the training was failed with the S19
+waiver — still made the checkpoint ready afterwards, beating E50 and the waiver's „no ready checkpoint". 052 gains
+`mark_checkpoint_ready` (the one writer of a ready checkpoint, under the trainings row lock: only while the row is
+running, the attempt current and running and the checkpoint uploading); on false the API runs nothing after it and
+answers 409 `not_uploading`, which the worker answers with „skipped"; the boot probe calls it with training 0 (56
+RPCs). `claim_checkpoint_mirror` and `hf_publish.mirror_sync` refuse a row that is not queued, running or succeeded.
+The waiver gains a sixth condition, `current_step` 0 (an honest worker sends `lerobot_error` only when it logged no
+new step), in `_waiver_blockers` and in P0073. The two S19 marks that cannot lead to the waiver
+(`host_unfit:lerobot_error_not_fresh`, `host_unfit:lerobot_error_waiver_refused`) became dataset-class, so two of
+them end in S4. Every waiver condition got a test of its own (removing the `no_start` blocker had kept the suite
+green, and `resumed` is unreachable from `_finish`, kept as defence in depth), and every new guard was proven by a
+mutant that makes a test fail. The docs were corrected where they had said too much: a confirmed S19 never waives
+an earlier attempt's charge, R2's pair can waive at most the confirming attempt's own time, and idle heartbeats had
+defeated only the stall rule — `_checkpoint_overdue` never reads `step_advanced_at`.
 
 **Open.** No real managed start, RunPod placement or W1 against production has run under the ledger; the residuals
 R1–R19 are in `docs/KNOWN-ISSUES.md` („Training-hour ledger (052, v2.37.0)").

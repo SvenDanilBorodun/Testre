@@ -304,11 +304,12 @@ def solve_board_burst(manager, frames, K, dist, layout):
     """§6.2 on a burst: per frame ≥ 20 corners and reprojection ≤ 1.0 px, ≥ 4
     pass, MAD outlier rejection, SO(3) chordal mean (CalibrationManager's
     helpers), composed with the layout's board pose. Returns
-    (T_cam_mat | None, reproj_px, passing frames' T list, German message)."""
+    (T_cam_mat | None, reproj_px, indices of the frames that passed the per-frame
+    gate, German message)."""
     cv2 = _cv2()
     board = mat_board()
     samples = []
-    for frame in frames[:BOARD_BURST]:
+    for index, frame in enumerate(frames[:BOARD_BURST]):
         corners, ids = detect_charuco(board, frame)
         if ids is None or len(ids) < BOARD_MIN_CORNERS:
             continue
@@ -328,7 +329,7 @@ def solve_board_burst(manager, frames, K, dist, layout):
         if not math.isfinite(reproj) or reproj > BOARD_MAX_REPROJ_PX:
             continue
         R, _ = cv2.Rodrigues(rvec)
-        samples.append((R, tvec.reshape(3, 1), float(reproj)))
+        samples.append((R, tvec.reshape(3, 1), float(reproj), index))
     if len(samples) < BOARD_MIN_PASS:
         return None, 0.0, [], T.BOARD_FAILED_DE
     kept = manager._reject_reproj_outliers(samples, BOARD_MIN_PASS)
@@ -339,12 +340,8 @@ def solve_board_burst(manager, frames, K, dist, layout):
     T_cam_mat = manager.board_pose() @ np.linalg.inv(T_board_cam)
     if T_cam_mat[2, 3] <= CAMERA_MIN_Z_M:
         return None, 0.0, [], T.BOARD_CAMERA_LOW_DE
-    per_frame = []
-    for Rs, ts, _ in kept:
-        Tb = np.eye(4)
-        Tb[:3, :3], Tb[:3, 3] = Rs, ts.reshape(3)
-        per_frame.append(manager.board_pose() @ np.linalg.inv(Tb))
-    return T_cam_mat, float(np.mean([s[2] for s in kept])), per_frame, ''
+    passed = [s[3] for s in samples]
+    return T_cam_mat, float(np.mean([s[2] for s in kept])), passed, ''
 
 
 def nominal_ref_corners(layout):
@@ -375,6 +372,14 @@ def solve_touch(taps, layout, tip_below_ee_m, board_table_z=0.0):
     from physical_ai_server.workflow import calibration_manager as cm
     if len(taps) != 4:
         return False, T.DOT_ORDER_DE.format(dot=len(taps) + 1), None
+    # Pair every tap with its dot BY ID (as check_tap looks the dot up), in the
+    # layout's dot order, never by list position.
+    by_id = {int(t['dot_id']): t for t in taps}
+    dot_ids = [int(d['id']) for d in layout['dots']]
+    missing = [i for i in dot_ids if i not in by_id]
+    if missing or len(by_id) != len(dot_ids):
+        return False, T.DOT_ORDER_DE.format(dot=missing[0] if missing else len(taps)), None
+    taps = [by_id[i] for i in dot_ids]
     ee = np.array([t['ee'] for t in taps], dtype=np.float64)
     tips = np.array([t['tip'] for t in taps], dtype=np.float64)
     xy = ee[:, :2] - ee[:, :2].mean(axis=0)
@@ -485,6 +490,13 @@ class Commission:
         rms, K, dist = calibrate(self.board_lens, fit, f0)
         errs = heldout_errors(self.board_lens, held, K, dist)
         ok, why = accept_intrinsics(K, dist, rms, errs, fit, f0)
+        # The board pose, the commissioned reference corners and the world check
+        # were all computed under the previous intrinsics: a solve that replaces
+        # them invalidates every one of them (as board_solve resets the marks and
+        # the world check), so a commit can never pair a new K with old results.
+        self.board = None
+        self.marks = {}
+        self.world = None
         if not ok:
             self.intrinsics = None
             return False, T.LENS_REJECTED_DE.format(why=why)
@@ -498,12 +510,14 @@ class Commission:
         if self.intrinsics is None:
             return False, T.LENS_MISSING_DE
         K, dist = self.intrinsics['K'], self.intrinsics['dist']
-        T_cam_mat, reproj, per_frame, msg = solve_board_burst(manager, frames, K, dist,
-                                                              self.layout)
+        T_cam_mat, reproj, passed, msg = solve_board_burst(manager, frames, K, dist,
+                                                           self.layout)
         if T_cam_mat is None:
             return False, msg
         nominal = nominal_ref_corners(self.layout)
-        ref_c, msg = commissioned_ref_corners(frames, [T_cam_mat] * len(frames), K, dist,
+        # §6.2: the mean over the burst frames that PASSED the board gate only.
+        passing = [frames[i] for i in passed]
+        ref_c, msg = commissioned_ref_corners(passing, [T_cam_mat] * len(passing), K, dist,
                                               self.layout)
         if ref_c is None:
             return False, msg

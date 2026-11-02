@@ -158,6 +158,13 @@ RELOCK_FAILED_DE = (
 RESTORE_INVALID_DE = 'Die vorherige Kalibrierung fehlt oder ist ungültig.'
 RESTORE_OK_DE = 'Vorherige Kalibrierung wiederhergestellt.'
 WRITE_FAILED_DE = 'Die Kalibrierung konnte nicht gespeichert werden.'
+# A station job (commission step, re-solve, restore) that raised: the worker
+# ends it and keeps the robot usable (plan §6 invariant 3).
+JOB_INTERNAL_ERROR_DE = (
+    'Der Auftrag ist an einem internen Fehler gescheitert – bitte erneut versuchen.')
+# A /station/* service call that raised: answered instead of killing the node.
+COMMAND_INTERNAL_ERROR_DE = (
+    'Bei der Kamerastation ist ein interner Fehler aufgetreten – bitte erneut versuchen.')
 
 # Lens (§6.1)
 LENS_VIEW_TOO_FEW_DE = 'Zu wenige Ecken der Linsentafel erkannt – bitte die Tafel ganz zeigen.'

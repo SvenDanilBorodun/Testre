@@ -17,7 +17,11 @@ the world around it is a model:
   that can run at the same time, as on the reentrant ``_preempt_cb_group``;
 * the manual idle watchdog, a workflow start (torque assert), a server respawn
   (flag None, every in-memory claim gone, the arm and the FIFO kept);
-* the station session (enter / end / takeover / re-enter) and the owner's commands.
+* the station session (enter / end / takeover / re-enter) and the owner's commands;
+* a station job that RAISES (budget ``exc``): before a step changes anything,
+  before its effect sends anything, or when a torque call it made returns (the
+  call confirmed, unavailable or timed out, its request possibly still applied
+  later); the service then runs the worker's catch-all ``fail_running``.
 
 Invariants (plan §6), checked in every reachable state:
 
@@ -67,9 +71,9 @@ def load_worker_module(source: str | None = None, tag: str = 'real'):
  MLOCK, WORKER) = range(16)
 # budgets
 (B_FAIL, B_ABORT, B_BEGIN, B_TB, B_HT, B_HF, B_WF, B_WD, B_RESP, B_COMMIT,
- B_RS, B_SID, B_CID, B_SOLVE) = range(14)
+ B_RS, B_SID, B_CID, B_SOLVE, B_EXC) = range(15)
 _BKEYS = ('fail', 'abort', 'begin', 'tb', 'ht', 'hf', 'wf', 'wd', 'resp',
-          'commit', 'rs', 'sid', 'cid', 'solve')
+          'commit', 'rs', 'sid', 'cid', 'solve', 'exc')
 FLAG_FALSE, FLAG_TRUE, FLAG_NONE = 0, 1, 2
 
 DEFAULT_CONFIG = dict(
@@ -78,7 +82,7 @@ DEFAULT_CONFIG = dict(
     ATT=3,             # attempts of _retorque_follower_or_keep_locked / a claim re-lock
     INIT_ARM=(1, 0),   # boot: arm locked or left limp by a previous server; flag None
     budgets=dict(fail=2, abort=2, begin=2, tb=2, ht=0, hf=0, wf=0, wd=0, resp=0,
-                 commit=1, rs=0, sid=2, cid=9, solve=2),
+                 commit=1, rs=0, sid=2, cid=9, solve=2, exc=0),
     stop_on_violation=False,
     max_states=3_000_000,
 )
@@ -210,6 +214,12 @@ class Checker:
                 L[slot] = a[:-1] + (None,)
                 self.cont(L, slot, False)
                 out.append((f'unavail{owner}{kind}', tuple(L)))
+                if slot == WKC and self.ok(s, B_EXC):
+                    L = list(s)
+                    self.inc(L, B_FAIL)
+                    self.apply_unconfirmed(L, kind)
+                    L[slot] = None
+                    self.job_raised(L, out)
         else:
             kind, served = call[1], call[2]
             if served:
@@ -219,6 +229,12 @@ class Checker:
                 L[slot] = a[:-1] + (None,)
                 self.cont(L, slot, True)
                 out.append((f'confirm{owner}{kind}', tuple(L)))
+                if slot == WKC and self.ok(s, B_EXC):
+                    L = list(s)
+                    L[FLAG] = FLAG_TRUE if kind == 1 else FLAG_FALSE
+                    L[TLOCK] = None
+                    L[slot] = None
+                    self.job_raised(L, out)
             if self.ok(s, B_FAIL):
                 L = list(s)
                 self.inc(L, B_FAIL)
@@ -229,6 +245,15 @@ class Checker:
                 L[slot] = a[:-1] + (None,)
                 self.cont(L, slot, False)
                 out.append((f'timeout{owner}{kind}', tuple(L)))
+                if slot == WKC and self.ok(s, B_EXC):
+                    L = list(s)
+                    self.inc(L, B_FAIL)
+                    L[FIFO] = tuple((r[0], r[1], r[2], 0) if (r[2] == owner and r[3]) else r
+                                    for r in s[FIFO])
+                    L[TLOCK] = None
+                    self.apply_unconfirmed(L, kind)
+                    L[slot] = None
+                    self.job_raised(L, out)
 
     def driver_events(self, s, out):
         if not s[FIFO]:
@@ -293,6 +318,18 @@ class Checker:
             L[WKC] = None
             self._deliver(L, ok)
 
+    def job_raised(self, L, out):
+        """The running job raised: the service's catch-all
+        (``StationService._fail_running_job``) ends it through the worker's
+        ``fail_running`` under the locks."""
+        self.inc(L, B_EXC)
+        w = self.worker(L)
+        run = w.running
+        label = 'exc_' + run.job.kind + '_' + run.pc
+        w.fail_running(Env(L, self), 'internal')
+        L[WORKER] = w.snapshot()
+        out.append((label, tuple(L)))
+
     def worker_events(self, s, out):
         if s[WKC] is not None:
             return
@@ -308,6 +345,9 @@ class Checker:
             return
         if running.pc in self.wm._WAIT_NEXT:
             return  # an effect without a call is delivered in the same transition
+        if self.ok(s, B_EXC):
+            # The step raises before it changes anything.
+            self.job_raised(list(s), out)
         w = self.worker(s)
         L = list(s)
         env = Env(L, self)
@@ -325,6 +365,10 @@ class Checker:
         if eff is None or eff.kind == self.wm.E_CLEANUP:
             out.append((label, tuple(L)))
             return
+        if self.ok(s, B_EXC):
+            # The effect raises before it sends anything.
+            self.job_raised(list(L), out)
+            w.restore(snap_after)   # job_raised rebinds the shared worker
         k = eff.kind
         if k in (self.wm.E_TORQUE_ON, self.wm.E_RETORQUE):
             if eff.args and eff.args[0] and L[FLAG] == FLAG_TRUE:

@@ -234,10 +234,14 @@ class StationService:
     # ── the one station worker thread ─────────────────────────────────────────
     def _worker_loop(self):
         while not self._stop:
-            with self.mode_lock, self.lock:
-                self.worker.promote_due(self.clock())
-                started = self.worker.take_next()
-                self._sync_commission_locked()
+            try:
+                with self.mode_lock, self.lock:
+                    self.worker.promote_due(self.clock())
+                    started = self.worker.take_next()
+                    self._sync_commission_locked()
+            except Exception as e:  # noqa: BLE001 — nothing may kill the worker
+                self._log('error', f'station worker step failed: {type(e).__name__}: {e!r}')
+                started = False
             if not started:
                 self._wake.wait(0.2)
                 self._wake.clear()
@@ -245,10 +249,21 @@ class StationService:
             try:
                 self.run_current_job()
             except Exception as e:  # noqa: BLE001 — a job must never kill the worker
-                self._log('error', f'station job failed: {e!r}')
-                with self.mode_lock, self.lock:
-                    if self.worker.running is not None:
-                        self.worker._end(CW.FAILED, T.COMMISSION_STALE_DE)
+                self._log('error', f'station job failed: {type(e).__name__}: {e!r}')
+                self._fail_running_job()
+
+    def _fail_running_job(self):
+        """The running job raised: end it through the worker's catch-all, which
+        releases a claim the job holds and re-schedules a live record's ABORT or
+        RELOCK (plan §6 invariant 3), so the robot never stays wedged."""
+        try:
+            with self.mode_lock, self.lock:
+                if self.worker.running is not None:
+                    self.worker.fail_running(self.env, T.JOB_INTERNAL_ERROR_DE)
+                self._sync_commission_locked()
+        except Exception as e:  # noqa: BLE001
+            self._log('error', f'station job recovery failed: {type(e).__name__}: {e!r}')
+        self._wake.set()
 
     def run_current_job(self):
         """Step the running job to its end, executing effects outside the locks."""
@@ -358,15 +373,17 @@ class StationService:
             return False, T.WRITE_FAILED_DE, None
 
     def _work(self, kind, token):
+        """A re-solve or a restore. Never raises: a failure is a FAILED result
+        with a German sentence (the job then releases its claim as usual)."""
         if kind == CW.RESTORE:
             try:
                 ok, msg = store.restore_previous(self.base, self.layouts)
+                if not ok:
+                    return False, msg, None
+                cal, reason = store.load(store.yaml_path(self.base), self.layouts)
             except Exception as e:  # noqa: BLE001
-                self._log('error', f'station restore failed: {e!r}')
-                return False, T.RESTORE_INVALID_DE, None
-            if not ok:
-                return False, msg, None
-            cal, reason = store.load(store.yaml_path(self.base), self.layouts)
+                self._log('error', f'station restore failed: {type(e).__name__}: {e!r}')
+                return False, T.JOB_INTERNAL_ERROR_DE, None
             return (cal is not None), (msg if cal is not None else reason), {'cal': cal}
         return self._resolve(token)
 
@@ -383,20 +400,31 @@ class StationService:
         return frames
 
     def _resolve(self, token):
+        """§7.3. Never raises: a failure (the staging mkdir, an OpenCV error in the
+        solve, the write) is a FAILED result with a German sentence, and the
+        staging directory is removed on every path."""
         cal = self.calibration
         if cal is None:
             return False, T.NOT_CONFIGURED_DE, None
+        stage = store.station_dir(self.base) / '.staging-resolve'
+        try:
+            return self._resolve_steps(cal, token, stage)
+        except Exception as e:  # noqa: BLE001
+            self._log('error', f'station re-solve failed: {type(e).__name__}: {e!r}')
+            return False, T.JOB_INTERNAL_ERROR_DE, None
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+
+    def _resolve_steps(self, cal, token, stage):
         f = cal.fields
         frames = self._burst()
         if len(frames) < CM.BOARD_MIN_PASS:
             return False, T.COMMISSION_NO_FRAME_DE, None
         from physical_ai_server.workflow.calibration_manager import CalibrationManager
         layout = store.layout_entry(cal.layout_id, self.layouts)
-        stage = store.station_dir(self.base) / '.staging-resolve'
         mgr = CalibrationManager(root=stage, board_to_base=store.board_to_mat(layout))
         K, dist = f['camera_matrix'], f['distortion_coefficients']
         T_new, _, _, msg = CM.solve_board_burst(mgr, frames, K, dist, layout)
-        shutil.rmtree(stage, ignore_errors=True)
         if T_new is None:
             return False, msg, None
         check_cal = {'K': K, 'dist': dist, 'T_cam_mat': T_new, 'ref_ids': f['ref_ids'],
@@ -529,7 +557,23 @@ class StationService:
         resp.calibration_digest = self.digest()
         resp.station_protocol = T.STATION_PROTOCOL
 
+    def _callback_failed(self, service, e):
+        """F5: an exception never leaves a ROS service callback (it would kill the
+        node); log its type, answer with a German sentence."""
+        self._log('error', f'station {service} callback failed: {type(e).__name__}: {e!r}')
+
     def session_command(self, req, resp):
+        try:
+            return self._session_command(req, resp)
+        except Exception as e:  # noqa: BLE001 — never let a callback raise
+            self._callback_failed('session', e)
+            resp.accepted = False
+            resp.reason_code = ''
+            resp.end_reason = ''
+            resp.message = T.COMMAND_INTERNAL_ERROR_DE
+            return resp
+
+    def _session_command(self, req, resp):
         cmd = (req.command or '').strip()
         cid = (req.client_id or '').strip()
         sid = (req.session_id or '').strip()
@@ -597,6 +641,16 @@ class StationService:
         resp.dot_dz_mm = float(d.get('dot_dz_mm', 0.0))
 
     def check_command(self, req, resp):
+        try:
+            return self._check_command(req, resp)
+        except Exception as e:  # noqa: BLE001 — never let a callback raise
+            self._callback_failed('check', e)
+            resp.success = False
+            resp.result = 'FAILED'
+            resp.message = T.COMMAND_INTERNAL_ERROR_DE
+            return resp
+
+    def _check_command(self, req, resp):
         cmd = (req.command or '').strip()
         resp.accepted = False
         resp.success = False
@@ -656,9 +710,9 @@ class StationService:
             if cmd == 'camera' and not self.machine.source_ok:
                 resp.result, resp.message = 'NO_FRAME', T.NO_FRAME_DE
                 return resp
-            self._check_running = True
             token = self.machine.check_token(self.digest())
             cal = self.calibration
+            self._check_running = True
         result = {'result': 'FAILED', 'message': T.COMMISSION_STALE_DE}
         try:
             result = self._camera_check(cal) if cmd == 'camera' else self._robot_check(cal)
@@ -767,6 +821,16 @@ class StationService:
         return resp
 
     def commission_command(self, req, resp):
+        try:
+            return self._commission_command(req, resp)
+        except Exception as e:  # noqa: BLE001 — never let a callback raise
+            self._callback_failed('commission', e)
+            resp.success = False
+            resp.result = 'FAILED'
+            resp.message = T.COMMAND_INTERNAL_ERROR_DE
+            return resp
+
+    def _commission_command(self, req, resp):
         cmd = (req.command or '').strip()
         resp.accepted = False
         resp.success = False

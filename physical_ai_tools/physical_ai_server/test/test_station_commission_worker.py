@@ -8,10 +8,11 @@ arm limp, concurrent hand-guide open/close actors (the reentrant
 for ``_manual_lock``, D16 re-check, torque off), the idle watchdog, a workflow
 start, explicit session end / takeover / re-enter, and every owner command.
 
-Coverage is split over five configurations (a single all-actors run with four
+Coverage is split over six configurations (a single all-actors run with four
 failing torque switches is beyond a CI Python budget); together they hold the
-plan's "up to 4 failing torque switches and up to 3 abort events" (CORE) and every
-actor (SESS, HG, HG2, RESP). Each must-fail mutation of §12.1 is applied as ONE
+plan's "up to 4 failing torque switches and up to 3 abort events" (CORE), every
+actor (SESS, HG, HG2, RESP), and a station job that raises anywhere (EXC: the
+service's catch-all, ``fail_running``, keeps every invariant, liveness included). Each must-fail mutation of §12.1 is applied as ONE
 source edit of the real module (or one fake-server switch for D15 / D16) and must
 make the checker report a violation.
 """
@@ -32,7 +33,8 @@ HG2 = dict(fail=2, abort=1, begin=2, tb=0, commit=0, rs=1, sid=2, solve=0,
            ht=1, hf=1, wd=0)
 RESP = dict(fail=1, abort=1, begin=1, tb=1, commit=1, rs=0, sid=1, solve=1,
             ht=1, hf=1, wd=1, wf=1, resp=1)
-CONFIGS = dict(CORE=CORE, SESS=SESS, HG=HG, HG2=HG2, RESP=RESP)
+EXC = dict(fail=2, abort=2, begin=2, tb=2, commit=1, rs=1, sid=2, solve=2, exc=1)
+CONFIGS = dict(CORE=CORE, SESS=SESS, HG=HG, HG2=HG2, RESP=RESP, EXC=EXC)
 
 # Labels each configuration must reach, so a silently pruned model cannot pass.
 REACHED = {
@@ -44,6 +46,9 @@ REACHED = {
     'HG': {'ht_d16_refuse', 'hf_ml', 'wd_fire', 'step_CLAIM_claim'},
     'HG2': {'ht_d16_refuse', 'step_CLAIM_relocked'},
     'RESP': {'RESPAWN', 'wf_start', 'wd_fire'},
+    'EXC': {'exc_ABORT_rt_wait', 'exc_RELOCK_rt_wait', 'exc_TOUCH_OFF_off_wait',
+            'exc_TOUCH_SOLVE_rt_wait', 'exc_CLAIM_relock_wait',
+            'exc_RESOLVE_relock_wait', 'exc_COMMIT_check'},
 }
 
 
@@ -92,6 +97,17 @@ SRC_MUTATIONS = {
     'the claim hold without its is-True check': (
         [("                    and env.torque_is_true()):", "                    ):")],
         'HG', {'INV1_release_maybe_limp', 'INV2_limp_without_touch'}),
+    # F3: the worker's catch-all for a job that raised.
+    'a raising re-solve or restore keeps its claim': (
+        [("            if run.pc in ('work_wait', 'worked'):\n"
+          "                env.release_calibration()",
+          "            if False:\n"
+          "                env.release_calibration()")],
+        'EXC', 'stuck'),
+    'a raising ABORT or RELOCK is not re-scheduled': (
+        [("        if job.kind in (RELOCK, ABORT) and self._current(job.commission_id):",
+          "        if False and self._current(job.commission_id):")],
+        'EXC', 'stuck'),
     'the COMMIT touch check together with solved := false': (
         [("                    and not rec.touch_active and not rec.abort_marked",
           "                    and not rec.abort_marked"),

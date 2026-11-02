@@ -457,6 +457,41 @@ class CommissionWorker:
             return self._step_abort(env, run)
         raise RuntimeError(f'unknown job kind {kind!r}')
 
+    # ── the worker thread's catch-all (a job raised) ──────────────────────────
+    def fail_running(self, env, message):
+        """The running job raised (its effect, or a step under the locks). Ends it
+        so invariant 3 (liveness) still holds; the caller holds the locks.
+
+        * A claim job past its claim (pc ``work_wait`` / ``worked``: the re-solve
+          or restore work) releases ``on_calibration``: its own re-lock confirmed
+          the arm locked at the claim, and its work switches no torque.
+        * A RELOCK or ABORT of the live record waits 2 s and runs again, exactly
+          as after a failed re-torque (rules 6 and 7), so an abort mark or an
+          owed re-lock never stays without its job.
+        * Any other job ends FAILED; a touch it leaves active (maybe limp) is
+          then owed a re-lock, scheduled 2 s later as after a failed re-torque
+          (rules 3 and 5), unless an abort is marked (its ABORT re-torques)."""
+        run = self._running
+        if run is None:
+            return None
+        job = run.job
+        if job.kind in CLAIM_KINDS:
+            if run.pc in ('work_wait', 'worked'):
+                env.release_calibration()
+            return self._end(FAILED, message)
+        if job.kind in (RELOCK, ABORT) and self._current(job.commission_id):
+            self._running = None
+            self._schedule_retry(env, job)
+            return None
+        self._end(FAILED, message)
+        rec = self._record
+        if (rec is not None and rec.touch_active and not rec.abort_marked
+                and not self._touch_jobs(rec.commission_id, rec.touch_counter)):
+            self._set_record(relock_owed=True)
+            self._schedule_retry(env, self._new_job(
+                RELOCK, rec.commission_id, rec.touch_counter))
+        return None
+
     # Rule 9: check → re-lock (≤ 3 attempts, mode flags re-checked and the torque
     # state marked unknown before each) → claim (one hold: session, mode flags,
     # a confirmed True, on_calibration, and the record for CLAIM).
@@ -485,11 +520,15 @@ class CommissionWorker:
             if not (self._session_ok(env, job) and self._arm_idle(env)
                     and env.torque_is_true()):
                 return self._end(STALE, T.COMMISSION_STALE_DE)
+            # The id is drawn BEFORE the claim, so nothing that can raise runs
+            # between claim_calibration() and the record (fail_running relies on
+            # "past its claim" being exactly pc work_wait / worked).
+            commission_id = env.new_commission_id() if job.kind == CLAIM else ''
             if not env.claim_calibration():
                 return self._end(STALE, T.COMMISSION_STALE_DE)
             if job.kind == CLAIM:
                 self._record = Record(
-                    env.new_commission_id(), 0, False, (), False, False, False,
+                    commission_id, 0, False, (), False, False, False,
                     False, '', None, False)
                 return self._end(DONE, T.COMMISSION_STARTED_DE)
             return self._effect('work_wait', E_WORK, job.kind, job.session_id)

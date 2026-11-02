@@ -124,6 +124,20 @@ def trial_numbers(t_start, t_end, poll_ends):
     }
 
 
+def trial_record(k, t_start, t_end, detects, hits, poll_ends, poll_seen, *, interrupted):
+    """Pure: one trial's row, or None for a trial the run's stop cut short
+    (the hat thread ends at once on Ctrl+C, so its last gap would read as a
+    stall)."""
+    if interrupted:
+        return None
+    rec = {'trial': k, 'grasp_s': t_end - t_start, 'detects': detects, 'grasp_tag_hits': hits}
+    rec.update(trial_numbers(t_start, t_end, poll_ends))
+    rec['hat_seen_polls'] = sum(1 for t, f in zip(poll_ends, poll_seen)
+                                if t_start <= t <= t_end and f)
+    rec['pass_grasp'] = rec['grasp_s'] <= B.B4_GRASP_YAW_MAX_S
+    return rec
+
+
 def build_parser():
     p = argparse.ArgumentParser(description='B4: hat poll rate during a grasp\'s yaw sampling, '
                                             'real perception on live 1080p station frames.')
@@ -275,11 +289,11 @@ def main(argv=None):
         with plock:
             ends = list(poll_ends)
             seen_flags = list(poll_seen)
-        rec = {'trial': k, 'grasp_s': t_end - t_start, 'detects': n, 'grasp_tag_hits': hits}
-        rec.update(trial_numbers(t_start, t_end, ends))
-        rec['hat_seen_polls'] = sum(1 for t, f in zip(ends, seen_flags)
-                                    if t_start <= t <= t_end and f)
-        rec['pass_grasp'] = rec['grasp_s'] <= B.B4_GRASP_YAW_MAX_S
+        rec = trial_record(k, t_start, t_end, n, hits, ends, seen_flags,
+                           interrupted=stop.is_set())
+        if rec is None:
+            print(f'trial {k} was cut short by the stop: not counted', flush=True)
+            break
         rate = rec['hat_polls_per_s_interval']
         tlog.write(rec)
         trials.append(rec)

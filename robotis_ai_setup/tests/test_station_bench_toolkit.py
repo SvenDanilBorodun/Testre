@@ -521,6 +521,15 @@ class Tools(unittest.TestCase):
         self.assertFalse(r['pass_hat'])
         ok = P.trial_numbers(0.5, 1.7, [0.0, 0.45, 0.9, 1.35, 1.8, 2.25])
         self.assertTrue(ok['pass_hat'])
+        # A trial cut by Ctrl+C (the hat thread stops at once) is not judged.
+        ends = [0.0, 0.2, 0.4]
+        self.assertIsNone(P.trial_record(7, 0.3, 0.9, 14, 0, ends, [False] * 3,
+                                         interrupted=True))
+        rec = P.trial_record(1, 0.1, 0.35, 14, 3, ends, [True, True, False],
+                             interrupted=False)
+        self.assertEqual((rec['trial'], rec['detects'], rec['grasp_tag_hits'],
+                          rec['hat_seen_polls']), (1, 14, 3, 1))
+        self.assertTrue(rec['pass_grasp'])
         self.assertAlmostEqual(B.B4_HAT_MAX_GAP_S, 0.5)
 
     def test_perception_trial_numbers(self):

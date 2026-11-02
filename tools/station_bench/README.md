@@ -217,7 +217,7 @@ detect p95, v6.3's informational ≤ 200 ms). **Limits:** it runs in its own pro
 the node: the CPU contention is real, the node's own detector lock is not shared (the
 hat-versus-grasp contention is modelled inside the one instance, as in the node). Motion,
 claims and the yaw maths are not run (microseconds next to a 1080p detect), nor the hat's
-first firing (its body under the motion lock). A failure here is the
+first firing (its body under the motion lock). A trial cut short by Ctrl+C is not counted. A failure here is the
 owner's go / no-go; the prepared remedy is detecting on the accepted zone's bounding box.
 
 ## B7 — the real unit's focal length

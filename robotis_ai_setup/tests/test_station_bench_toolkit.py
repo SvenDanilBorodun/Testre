@@ -118,6 +118,12 @@ class ClockOffset(unittest.TestCase):
         est = B.estimate_clock_offset(samples)
         self.assertEqual(est['rtt_min_ns'], 500_000)
         self.assertLessEqual(abs(est['offset_ns'] - true), est['uncertainty_ns'])
+        # Pinned: the fastest trip (0.2 ms up, 0.3 ms down) puts the estimate at
+        # its midpoint and the uncertainty at exactly half its round trip.
+        self.assertEqual(est['offset_ns'], true - 50_000)
+        self.assertEqual(est['uncertainty_ns'], 250_000)
+        odd = [(0, 5_000_001_000, 1_001)]                 # an odd RTT rounds UP
+        self.assertEqual(B.estimate_clock_offset(odd)['uncertainty_ns'], 501)
         self.assertEqual(est['n'], 4)
         with self.assertRaises(ValueError):
             B.estimate_clock_offset([])
@@ -382,6 +388,19 @@ class MirroredContracts(unittest.TestCase):
         wm = (PAS / 'workflow' / 'workflow_manager.py').read_text(encoding='utf-8')
         body = wm.split('def _wait_object_visible', 1)[1].split('\n    def ', 1)[0]
         self.assertIn(f'time.sleep({P.HAT_POLL_SLEEP_S})', body)
+        # Seen and already fired: _run_hat_handler's edge gate sleeps 0.1 s and
+        # polls again (no 0.2 s sleep: _wait_object_visible returned at once).
+        hat = wm.split('def _run_hat_handler', 1)[1].split('\n    def ', 1)[0]
+        m = re.search(r'if not edge_armed:\s*\n\s*time\.sleep\(([\d.]+)\)', hat)
+        self.assertIsNotNone(m, '_run_hat_handler no longer sleeps in its edge gate')
+        self.assertEqual(P.HAT_SEEN_SLEEP_S, float(m.group(1)))
+        self.assertEqual(P.hat_sleep_s(True), P.HAT_SEEN_SLEEP_S)
+        self.assertEqual(P.hat_sleep_s(False), P.HAT_POLL_SLEEP_S)
+        cat = (PAS / 'workflow' / 'object_catalog.py').read_text(encoding='utf-8')
+        ids = re.findall(r"'wuerfel': \{.*?'tag_ids': \[([\d, ]+)\]", cat, re.S)
+        self.assertTrue(ids)
+        for found in ids:                                  # every profile's Würfel
+            self.assertEqual(tuple(int(x) for x in found.split(',')), P.HAT_TAG_IDS_DEFAULT)
         pb = PAS / 'workflow' / 'handlers' / 'perception_blocks.py'
         self.assertEqual(P.YAW_INTERVAL_DEFAULT_S, _assign(pb, '_TAG_YAW_FRAME_INTERVAL_S'))
         self.assertRegex(pb.read_text(encoding='utf-8'),
@@ -440,6 +459,47 @@ class Tools(unittest.TestCase):
         self.assertEqual(R.pick_gui_pid(dev), 20)
         self.assertIsNone(R.pick_gui_pid([]))
 
+    def test_camera_open_fails_a_variant_without_1080p_frames(self):
+        C = _load('camera_open.py', 'station_bench_camera_open')
+
+        class Frame:
+            def __init__(self, w, h):
+                self.shape = (h, w, 3)
+
+        class Cap:
+            def __init__(self, w, h):
+                self.size = (w, h)
+
+            def read(self):
+                return True, Frame(*self.size)
+
+            def release(self):
+                pass
+
+            def getBackendName(self):
+                return 'MSMF'
+
+        def cam(w, h, fail=False):
+            def open_station_capture(index):
+                if fail:
+                    raise RuntimeError('Kamera nicht verfügbar')
+                return Cap(w, h), {'width': w, 'height': h}
+            return types.SimpleNamespace(open_station_capture=open_station_capture)
+
+        consts = types.SimpleNamespace(STATION_OPEN_METHOD='fourcc_only',
+                                       STATION_NATIVE_WIDTH=1920, STATION_NATIVE_HEIGHT=1080)
+        rec, _ = C.open_once(cam(1280, 720), consts, 1, 'fourcc_only', 0.05)
+        self.assertEqual(rec['frames_native_size'], 0)
+        self.assertEqual(rec['b1_native_rate_ok'], 'FAIL')        # never UNKNOWN
+        rec, _ = C.open_once(cam(0, 0, fail=True), consts, 1, 'fourcc_size_fps', 0.05)
+        self.assertEqual(rec['b1_native_rate_ok'], 'FAIL')
+        rec, _ = C.open_once(cam(1920, 1080), consts, 1, 'fourcc_only', 0.05)
+        self.assertIn(rec['b1_native_rate_ok'], ('PASS', 'FAIL'))  # measured, either way
+        self.assertEqual(C.native_rate_verdict(0, None), 'FAIL')
+        self.assertEqual(C.native_rate_verdict(1, None), 'FAIL')
+        self.assertEqual(C.native_rate_verdict(300, 30.0), 'PASS')
+        self.assertEqual(C.native_rate_verdict(300, 25.0), 'FAIL')
+
     def test_camera_open_frame_summary(self):
         C = _load('camera_open.py', 'station_bench_camera_open')
         frames = [(0.0, False, 0, 0)] + [(0.1 + i / 30.0, True, 1920, 1080) for i in range(31)]
@@ -450,6 +510,18 @@ class Tools(unittest.TestCase):
         self.assertAlmostEqual(s['measured_fps_native'], 30.0, places=6)
         self.assertEqual(s['sizes_seen'], {'1920x1080': 31, '1280x720': 1})
         self.assertAlmostEqual(s['first_frame_s'], 0.1)
+
+    def test_the_hat_verdict_judges_the_worst_gap(self):
+        P = _load('container/perception_load.py', 'station_bench_perception_load')
+        # Fast polls around one 0.9 s stall: the mean interval says 4.3 polls/s
+        # (the old verdict passed it), the worst gap says the hat stalled.
+        r = P.trial_numbers(0.05, 1.35, [0.0, 0.1, 0.2, 0.3, 1.2, 1.3, 1.4])
+        self.assertGreater(r['hat_polls_per_s_interval'], 2.0)
+        self.assertAlmostEqual(r['hat_max_gap_s'], 0.9)
+        self.assertFalse(r['pass_hat'])
+        ok = P.trial_numbers(0.5, 1.7, [0.0, 0.45, 0.9, 1.35, 1.8, 2.25])
+        self.assertTrue(ok['pass_hat'])
+        self.assertAlmostEqual(B.B4_HAT_MAX_GAP_S, 0.5)
 
     def test_perception_trial_numbers(self):
         P = _load('container/perception_load.py', 'station_bench_perception_load')
@@ -877,6 +949,54 @@ class RunLoggerToggle(unittest.TestCase):
         self.assertEqual(v[key[0]], 'FAIL')
 
 
+def _logical_lines(text):
+    """Dockerfile instructions with ``\\`` continuations joined (comment
+    lines inside a continuation are dropped, as Docker does)."""
+    out, cur = [], ''
+    for raw in text.splitlines():
+        if cur and raw.lstrip().startswith('#'):
+            continue
+        line = raw.rstrip()
+        if line.endswith('\\'):
+            cur += line[:-1] + ' '
+            continue
+        out.append(cur + line)
+        cur = ''
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _copy_sources(text):
+    """``[(instruction_text, [sources])]`` of every COPY / ADD that reads the
+    build context (``--from`` stages excluded), in the shell form, the JSON
+    form and across ``\\`` continuation lines."""
+    out = []
+    for line in _logical_lines(text):
+        m = re.match(r'\s*(COPY|ADD)\s+(.*)$', line, re.I)
+        if not m:
+            continue
+        words = m.group(2).split()
+        flags = [w for w in words if w.startswith('--')]
+        if any(f.startswith('--from') for f in flags):
+            continue
+        rest = ' '.join(w for w in words if not w.startswith('--')).strip()
+        if rest.startswith('['):
+            try:
+                args = [str(a) for a in json.loads(rest)]
+            except ValueError:
+                args = rest.strip('[]').replace('"', ' ').replace(',', ' ').split()
+        else:
+            args = rest.split()
+        out.append((' '.join(line.split()), args[:-1]))
+    return out
+
+
+def _from_tools(src):
+    return src.lstrip('./').startswith('tools/') or src.startswith('../tools') \
+        or 'station_bench' in src
+
+
 class NeverShipped(unittest.TestCase):
     """Nothing under tools/ reaches an image, the installer or the GUI build."""
 
@@ -884,26 +1004,35 @@ class NeverShipped(unittest.TestCase):
         return [p for p in REPO.rglob('Dockerfile*')
                 if 'node_modules' not in p.parts and p.is_file()]
 
+    def test_the_fence_reads_continued_and_json_instructions(self):
+        text = ('FROM x\n'
+                'COPY \\\n'
+                '    tools/station_bench/run_logger.py \\\n'
+                '    /opt/x/\n'
+                'RUN echo tools/ok\n'
+                'COPY --chown=1:1 \\\n  ./tools/a.py /b/\n'
+                'ADD ["tools/station_bench", "/opt/y"]\n'
+                'COPY --from=build /tools/z /c\n'
+                'COPY robotis_ai_setup/x /d\n')
+        found = [s for _, srcs in _copy_sources(text) for s in srcs if _from_tools(s)]
+        self.assertEqual(found, ['tools/station_bench/run_logger.py', './tools/a.py',
+                                 'tools/station_bench'])
+
     def test_no_dockerfile_copies_from_tools(self):
         files = self._dockerfiles()
         self.assertGreater(len(files), 5)
         for df in files:
-            for line in df.read_text(encoding='utf-8').splitlines():
-                m = re.match(r'\s*(COPY|ADD)\s+(.*)$', line, re.I)
-                if not m or '--from' in m.group(2):
-                    continue
-                srcs = [w for w in m.group(2).split() if not w.startswith('--')][:-1]
+            for instr, srcs in _copy_sources(df.read_text(encoding='utf-8')):
                 for s in srcs:
-                    self.assertFalse(s.startswith(('tools/', './tools/', '../tools')),
-                                     f'{df.relative_to(REPO)}: {line.strip()}')
-                    self.assertNotIn('station_bench', s, f'{df.relative_to(REPO)}')
+                    self.assertFalse(_from_tools(s), f'{df.relative_to(REPO)}: {instr}')
 
     def test_the_repo_root_build_context_copies_named_files_only(self):
         df = REPO / 'robotis_ai_setup' / 'runpod_training' / 'Dockerfile'
-        for line in df.read_text(encoding='utf-8').splitlines():
-            m = re.match(r'\s*COPY\s+(.*)$', line)
-            if m and '--from' not in m.group(1):
-                self.assertTrue(m.group(1).split()[0].startswith('robotis_ai_setup/'), line)
+        copies = _copy_sources(df.read_text(encoding='utf-8'))
+        self.assertTrue(copies)
+        for instr, srcs in copies:
+            for src in srcs:
+                self.assertTrue(src.startswith('robotis_ai_setup/'), instr)
 
     def test_build_scripts_installer_and_gui_spec_name_no_tools_path(self):
         for rel in ('robotis_ai_setup/docker/build-images.sh',

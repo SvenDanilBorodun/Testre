@@ -48,6 +48,7 @@ B2_AGE_P95_S = 0.3              # arrival age p95 <= 0.3 s
 B3_LATENCY_P95_S = 0.35         # capture-to-arrival p95 <= 0.35 s
 B4_LENS_SOLVE_S = 3.0           # lens solve on 30 views <= 3 s
 B4_HAT_MIN_POLLS_PER_S = 2.0    # the hat keeps >= 2 polls/s during the grasp
+B4_HAT_MAX_GAP_S = 1.0 / B4_HAT_MIN_POLLS_PER_S   # ... i.e. no gap above 0.5 s
 B4_GRASP_YAW_MAX_S = 2.0        # the grasp's yaw sampling ends within 2 s
 B4_DETECT_P95_S = 0.2           # (v6.3 note) 1080p detect p95 <= 200 ms, informational
 G8_MIN_PICKS = 50

@@ -23,23 +23,29 @@ its one ``threading.Lock``, exactly what the node shares between a program's
 threads), fed live ``/station_scene`` frames decoded the way the node does
 (``cv2.imdecode(…, IMREAD_COLOR)`` of the newest JPEG):
 
-* a „Wenn … gesehen" hat thread polls like ``workflow_manager.
-  _wait_object_visible``: decode the newest frame, detect every tag, sleep
-  0.2 s, repeat;
+* a „Wenn … gesehen" hat thread polls like ``workflow_manager``: decode the
+  newest frame, detect every tag, then sleep 0.2 s when none of the hat's tags
+  is seen (``_wait_object_visible``) or 0.1 s when one is (the object is in
+  view and the hat has already fired for it: ``_run_hat_handler``'s edge gate
+  sleeps 0.1 s and polls again), repeat;
 * a composite „Greife"'s yaw sampling, like ``perception_blocks.
   _multiframe_tag_yaw``: up to ``2 * _TAG_YAW_FRAMES`` (14) detects with the
   tag filter, ``_TAG_YAW_FRAME_INTERVAL_S`` (0.03 s) apart — read from the
   server package when it imports, else the mirrored defaults.
 
 Per trial it reports the time the 14 detects take (pass ≤ 2 s) and the hat's
-poll rate while they run (pass ≥ 2 polls/s), plus a single-thread 1080p detect
-baseline (v6.3's informational p95 ≤ 200 ms).
+poll rate while they run: pass ≥ 2 polls/s judged on the WORST gap (no gap
+above 0.5 s; the mean interval alone would hide a stall), plus a single-thread
+1080p detect baseline (v6.3's informational p95 ≤ 200 ms).
 
 Honest limits: this runs in its OWN process, beside the node. It contends with
 the node for CPU (the real situation) but not for the node's own detector
 lock; the hat-versus-grasp contention is modelled inside this one instance,
 exactly as the node would see it. The motion, the claims, the yaw maths and
-the reclaim are not run (they cost microseconds next to a 1080p detect).
+the reclaim are not run (they cost microseconds next to a 1080p detect). The
+hat's FIRST sighting runs its body under the motion lock (not modelled: the
+hat is taken to have fired already), and claimed tags are not filtered out
+(no program ran, so none are claimed).
 Run it with NO program running on the robot, or say which one ran.
 Read-only. SIGINT ends it with a summary.
 """
@@ -56,13 +62,25 @@ sys.path.insert(1, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import bench_common as B  # noqa: E402
 
-# workflow_manager._wait_object_visible: ``time.sleep(0.2)`` after each look.
+# workflow_manager._wait_object_visible: ``time.sleep(0.2)`` after a look that
+# saw none of the hat's tags.
 HAT_POLL_SLEEP_S = 0.2
+# workflow_manager._run_hat_handler's edge gate: seen, already fired →
+# ``time.sleep(0.1)`` and poll again.
+HAT_SEEN_SLEEP_S = 0.1
+# object_catalog: the shipped „Würfel"'s tag ids (both profiles).
+HAT_TAG_IDS_DEFAULT = (20, 21)
 YAW_FRAMES_DEFAULT = 7
 YAW_INTERVAL_DEFAULT_S = 0.03
 TRIAL_FIELDS = ['trial', 'grasp_s', 'detects', 'grasp_tag_hits', 'hat_polls_in_window',
                 'hat_polls_per_s_count', 'hat_polls_per_s_interval', 'hat_max_gap_s',
-                'pass_grasp', 'pass_hat']
+                'hat_seen_polls', 'pass_grasp', 'pass_hat']
+
+
+def hat_sleep_s(seen):
+    """The hat's sleep after one look: 0.1 s when one of its tags was seen
+    (fired already; the edge gate), else 0.2 s."""
+    return HAT_SEEN_SLEEP_S if seen else HAT_POLL_SLEEP_S
 
 
 def yaw_constants():
@@ -93,12 +111,16 @@ def trial_numbers(t_start, t_end, poll_ends):
         gaps.append(win)                      # the hat never finished a poll
     elif ts[-1] < t_end:                      # a poll still running at the end
         gaps.append(t_end - max(ts[-1], t_start))
+    rate = (len(ivals) / sum(ivals)) if ivals and sum(ivals) > 0 else None
+    worst = max(gaps) if gaps else None
     return {
         'hat_polls_in_window': len(inside),
         'hat_polls_per_s_count': len(inside) / win,
-        'hat_polls_per_s_interval': (len(ivals) / sum(ivals)) if ivals and sum(ivals) > 0
-        else None,
-        'hat_max_gap_s': max(gaps) if gaps else None,
+        'hat_polls_per_s_interval': rate,
+        'hat_max_gap_s': worst,
+        # >= 2 polls/s means every gap <= 0.5 s: the worst gap decides.
+        'pass_hat': (rate is not None and rate >= B.B4_HAT_MIN_POLLS_PER_S
+                     and worst is not None and worst <= B.B4_HAT_MAX_GAP_S),
     }
 
 
@@ -108,6 +130,9 @@ def build_parser():
     p.add_argument('--out', required=True)
     p.add_argument('--trials', type=int, default=10)
     p.add_argument('--tag-id', type=int, default=20, help='the grasp\'s tag filter')
+    p.add_argument('--hat-tag-id', type=int, action='append', default=None,
+                   help='a tag of the hat\'s object type (repeatable; default the '
+                        '„Würfel" ids 20, 21): seen → 0.1 s sleep, else 0.2 s')
     p.add_argument('--baseline-frames', type=int, default=20)
     p.add_argument('--wait-s', type=float, default=15.0, help='wait for the first frame')
     p.add_argument('--topic', default=B.STATION_TOPIC)
@@ -202,18 +227,23 @@ def main(argv=None):
         detect_s.append(t2 - t1)
         time.sleep(0.07)
 
-    # 2) the hat thread.
+    # 2) the hat thread: the 0.2 s / 0.1 s cadence by what it saw.
+    hat_tags = set(args.hat_tag_id or HAT_TAG_IDS_DEFAULT)
     poll_ends = []
+    poll_seen = []
     plock = threading.Lock()
 
     def hat():
         while not stop.is_set():
             img = decode()
+            seen = False
             if img is not None:
-                perception.detect(img, camera='scene', mode='apriltag', aruco_id=None)
+                dets = perception.detect(img, camera='scene', mode='apriltag', aruco_id=None)
+                seen = any(getattr(d, 'aruco_id', None) in hat_tags for d in (dets or []))
             with plock:
                 poll_ends.append(time.monotonic())
-            time.sleep(HAT_POLL_SLEEP_S)
+                poll_seen.append(seen)
+            time.sleep(hat_sleep_s(seen))
 
     ht = threading.Thread(target=hat, daemon=True)
     ht.start()
@@ -244,11 +274,13 @@ def main(argv=None):
         time.sleep(HAT_POLL_SLEEP_S + max(detect_s or [0.0]) + 0.1)   # let the hat's last poll end
         with plock:
             ends = list(poll_ends)
+            seen_flags = list(poll_seen)
         rec = {'trial': k, 'grasp_s': t_end - t_start, 'detects': n, 'grasp_tag_hits': hits}
         rec.update(trial_numbers(t_start, t_end, ends))
+        rec['hat_seen_polls'] = sum(1 for t, f in zip(ends, seen_flags)
+                                    if t_start <= t <= t_end and f)
         rec['pass_grasp'] = rec['grasp_s'] <= B.B4_GRASP_YAW_MAX_S
         rate = rec['hat_polls_per_s_interval']
-        rec['pass_hat'] = rate is not None and rate >= B.B4_HAT_MIN_POLLS_PER_S
         tlog.write(rec)
         trials.append(rec)
         shown = None if rate is None else round(rate, 2)
@@ -282,9 +314,15 @@ def main(argv=None):
             'v6.3 1080p detect p95 <= 200 ms (informational)': B.verdict(
                 B.summarize(detect_s)['p95'], B.B4_DETECT_P95_S, at_least=False),
         },
+        'hat_tag_ids': sorted(hat_tags),
+        'hat_cadence_s': {'unseen': HAT_POLL_SLEEP_S, 'seen_and_fired': HAT_SEEN_SLEEP_S},
         'notes': ['Separate process beside the node: CPU contention is real, the node\'s own '
                   'detector lock is not shared. Lens-solve time (B4\'s first half) runs inside '
-                  'the commission service call and is timed from the wizard (README).'],
+                  'the commission service call and is timed from the wizard (README).',
+                  'The hat sleeps 0.2 s after a look without its tags and 0.1 s after one '
+                  'with them (taken to have fired already). Its first firing (the body under '
+                  'the motion lock) and claims are not modelled.',
+                  'pass_hat judges the worst gap (<= 0.5 s) as well as the mean interval.'],
     }
     jp = B.out_path(args.out, 'perception_load', run_stamp, '_summary.json')
     B.write_json(jp, summary)

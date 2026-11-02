@@ -52,8 +52,10 @@ py camera_open.py --index 1 --out C:\bench\b5 --variants all --duration 15 --rep
   MJPG plus 1920×1080 and 30 fps), each on a fresh capture, `--pause` seconds apart.
 * Per open: the read-back (fourcc, width, height, fps as the driver reports them), the open
   time, the time to the first frame, every frame's size, the measured rate of 1920×1080
-  frames and the frame-interval p50/p95/max. `--probe` also runs the GUI's enrollment
-  probe (`probe_station_camera`: 60 frames of exactly 1920×1080 at ≥ 29 fps).
+  frames and the frame-interval p50/p95/max. A variant that delivers fewer than two
+  1920×1080 frames (another size, or an open that failed) is `FAIL`, never `UNKNOWN`.
+  `--probe` also runs the GUI's enrollment probe (`probe_station_camera`: 60 frames of
+  exactly 1920×1080 at ≥ 29 fps).
 * It refuses while the GUI's bridge on `127.0.0.1:8769` answers (a second MSMF open of the
   same camera returns a frameless handle). That is best effort: an `omx_follower` GUI with
   the station off runs no bridge, so close the GUI yourself.
@@ -204,14 +206,18 @@ It loads the server's real `workflow.perception.Perception` (pupil_apriltags tag
 behind its one thread lock — the instance the node shares between a program's threads) and
 decodes live 1920×1080 station frames the way the node does, subscribed like the node's
 station store (BEST_EFFORT, KEEP_LAST 2). One thread polls like the
-„wenn … erkannt" hat (look, then 0.2 s sleep); per trial, the composite „Greife"'s yaw
-sampling makes 14 detects 0.03 s apart (both numbers read from `perception_blocks` in the
-image). **Pass/fail (spec):** the hat keeps ≥ 2 polls/s during the grasp, and the 14
-detects end within 2 s, in every trial (also reported: the single-thread 1080p detect p95,
-v6.3's informational ≤ 200 ms). **Limits:** it runs in its own process beside the node:
-the CPU contention is real, the node's own detector lock is not shared (the hat-versus-
-grasp contention is modelled inside the one instance, as in the node). Motion, claims and
-the yaw maths are not run (microseconds next to a 1080p detect). A failure here is the
+„wenn … erkannt" hat: a look, then 0.2 s sleep when none of the hat's tags is seen, or
+0.1 s when one is (the object in view and the hat already fired: `_run_hat_handler`'s edge
+gate); `--hat-tag-id` sets the hat's tags (default the „Würfel" ids 20, 21). Per trial,
+the composite „Greife"'s yaw sampling makes 14 detects 0.03 s apart (read from
+`perception_blocks` in the image). **Pass/fail (spec):** the hat keeps ≥ 2 polls/s during
+the grasp — judged on the WORST gap (no gap above 0.5 s) as well as the mean interval —
+and the 14 detects end within 2 s, in every trial (also reported: the single-thread 1080p
+detect p95, v6.3's informational ≤ 200 ms). **Limits:** it runs in its own process beside
+the node: the CPU contention is real, the node's own detector lock is not shared (the
+hat-versus-grasp contention is modelled inside the one instance, as in the node). Motion,
+claims and the yaw maths are not run (microseconds next to a 1080p detect), nor the hat's
+first firing (its body under the motion lock). A failure here is the
 owner's go / no-go; the prepared remedy is detecting on the accepted zone's bounding box.
 
 ## B7 — the real unit's focal length
@@ -284,7 +290,9 @@ py pick_tally.py stopwatch --out C:\bench\entry --gate entry
 ## Unit tests
 
 The pure parts (parsers, statistics, CSV writing, the clock-offset estimate, the toggle
-guard, the check tally, the pick tally) and the never-shipped fence:
+guard and loop, the check tally, the pick tally, container_run's Ctrl+C handling) and the
+never-shipped fence (COPY / ADD in every Dockerfile, continuation lines and the JSON form
+included):
 
 ```
 cd robotis_ai_setup

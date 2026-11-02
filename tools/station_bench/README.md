@@ -17,7 +17,10 @@ while no station session exists.
 **Output.** Every tool needs `--out <folder>` and writes `<tool>_<YYYYmmdd-HHMMSS>…csv`
 (rows, flushed as they happen, so Ctrl+C keeps them) and `…_summary.json` (the numbers, the
 gate verdicts and the honest limits) there. Container tools write inside the container and
-`container_run.py` copies their folder back into yours.
+`container_run.py` copies their folder back into yours. It relays the tool's console here,
+and Ctrl+C stops the tool (SIGINT, it writes its summary) and waits until the summary exists
+or the tool's process has ended (at most 60 s; a second Ctrl+C stops waiting) before it
+copies, so the summary is never left behind.
 
 ## Setup on the bench PC
 
@@ -49,8 +52,10 @@ py camera_open.py --index 1 --out C:\bench\b5 --variants all --duration 15 --rep
   MJPG plus 1920×1080 and 30 fps), each on a fresh capture, `--pause` seconds apart.
 * Per open: the read-back (fourcc, width, height, fps as the driver reports them), the open
   time, the time to the first frame, every frame's size, the measured rate of 1920×1080
-  frames and the frame-interval p50/p95/max. `--probe` also runs the GUI's enrollment
-  probe (`probe_station_camera`: 60 frames of exactly 1920×1080 at ≥ 29 fps).
+  frames and the frame-interval p50/p95/max. A variant that delivers fewer than two
+  1920×1080 frames (another size, or an open that failed) is `FAIL`, never `UNKNOWN`.
+  `--probe` also runs the GUI's enrollment probe (`probe_station_camera`: 60 frames of
+  exactly 1920×1080 at ≥ 29 fps).
 * It refuses while the GUI's bridge on `127.0.0.1:8769` answers (a second MSMF open of the
   same camera returns a frameless handle). That is best effort: an `omx_follower` GUI with
   the station off runs no bridge, so close the GUI yourself.
@@ -76,7 +81,9 @@ py camera_open.py --index 1 --out C:\bench\b5 --variants all --duration 15 --rep
 * the gripper and scene camera rates the SERVER measures (`/edubotics/signal_status`), read
   by an in-container watcher (`container/watch_stream.py`) that also polls
   `/station/session status` once a second and reports, per second, the largest arrival gap
-  of `/scene/image_raw/compressed` on the container's clock.
+  of `/scene/image_raw/compressed` on the container's clock. It subscribes `/scene` with
+  the recorder's own QoS (BEST_EFFORT, KEEP_LAST 32, `communicator.init_subscribers`), so
+  a gap it reports is one the recorder sees.
 
 The four B1 runs, same PC, same cameras:
 
@@ -97,10 +104,24 @@ py run_logger.py --out C:\bench\b1 --label toggle --toggle 200 --on-s 2 --off-s 
   CPU recorded for both; 200 switches without a camera reopen or a recording-stream gap.
 * The summary reports the crop's mean AND every 2 s window below 29: the spec gives no
   window, so both are there to judge.
-* `--toggle N` first checks, read-only, that `/station/session` is `IDLE` and the bridge
-  reports the station enabled with the stream off; it re-checks before every cycle and
-  stops if a session appears. Each `on` phase is `--on-s` (≤ 8 s, inside the 10 s lease),
-  sent with the page's `Origin: http://localhost`; Ctrl+C always sends `off`.
+* `--toggle N` needs the in-container watcher (it refuses `--no-container`). It first
+  checks, read-only, that `/station/session` is `IDLE` and the bridge reports the station
+  enabled with the stream off; during the run the watcher polls the session at 4 Hz and
+  every phase checks it every 0.25 s. Once a non-`IDLE` state — or no answer fresher than
+  2 s — is seen, toggling stops and NO further `off` is sent (a page that holds a session
+  owns the stream; our last `on` ends by the bridge's 10 s lease). Each `on` phase is
+  `--on-s` (≤ 8 s, inside the lease), sent with the page's `Origin: http://localhost`.
+  The final `off` (also on Ctrl+C) is sent only when this tool turned the stream on and no
+  session appeared.
+* **Toggle mode has no crop or Studio verdict:** the bridge's `station_fps` moves only after
+  2 s of sending, so a short `on` reads ≈ 0 (a false FAIL), and the crop's 2 s windows
+  straddle the switches. Delivery is proven per cycle instead: the watcher also subscribes
+  `/station_scene` (the server's own QoS, one more DDS copy of the 1080p stream while
+  toggling) and each cycle's `station_frames` counts the frames that reached the server
+  from its `on` to the end of its `off` phase (the watcher reports per second, so keep
+  `--off-s` ≥ 1 s or a count can slip into the next cycle). The summary reports
+  `cycles_without_station_frames`; any cycle with 0 fails the delivery verdict. The steady
+  rates (crop ≥ 29, Studio ≥ 14) are runs 2 and 3.
 * **Limits (reopen / gap):** the bridge has no reopen counter. Its only evidence is
   `error_de` („Stationskamera liefert keine Bilder — wird neu geöffnet …", visible for
   the ~3 s a reopen takes; polled at 4 Hz during toggling) and a dip of `scene_fps`. The
@@ -130,8 +151,13 @@ the Studio stream on):
 py container_run.py arrival_rate --out C:\bench\b2 --offset-json C:\bench\b2\clock_offset_<stamp>.json -- --duration 120
 ```
 
-* Subscribes `/station_scene/image_raw/compressed` with the publisher's own QoS
-  (RELIABLE, KEEP_LAST 5) and logs per frame `recv_ns`, `stamp_ns`, raw and corrected age.
+* Subscribes `/station_scene/image_raw/compressed` with the SERVER's own QoS for it
+  (BEST_EFFORT, KEEP_LAST 2, `communicator.enable_station_store`; any other `--topic` with
+  the recorder's BEST_EFFORT, KEEP_LAST 32) and logs per frame `recv_ns`, `stamp_ns`, raw
+  and corrected age. A RELIABLE subscriber would also get the retransmissions the server's
+  BEST_EFFORT subscription loses and so overstate B2; `-- --reliable` subscribes with the
+  publisher's RELIABLE, KEEP_LAST 5 for a comparison run only (the summary's `qos` block
+  says which was used).
 * **Pass/fail (spec):** B2 ≥ 14 fps and arrival-age p95 ≤ 0.3 s (also: the preview shows
   in the browser — look at it). A p95 within the clock uncertainty of 0.3 s is reported
   `UNDECIDED`, never PASS.
@@ -178,15 +204,20 @@ py container_run.py perception_load --out C:\bench\b4 -- --trials 10 --tag-id 20
 
 It loads the server's real `workflow.perception.Perception` (pupil_apriltags tag36h11
 behind its one thread lock — the instance the node shares between a program's threads) and
-decodes live 1920×1080 station frames the way the node does. One thread polls like the
-„wenn … erkannt" hat (look, then 0.2 s sleep); per trial, the composite „Greife"'s yaw
-sampling makes 14 detects 0.03 s apart (both numbers read from `perception_blocks` in the
-image). **Pass/fail (spec):** the hat keeps ≥ 2 polls/s during the grasp, and the 14
-detects end within 2 s, in every trial (also reported: the single-thread 1080p detect p95,
-v6.3's informational ≤ 200 ms). **Limits:** it runs in its own process beside the node:
-the CPU contention is real, the node's own detector lock is not shared (the hat-versus-
-grasp contention is modelled inside the one instance, as in the node). Motion, claims and
-the yaw maths are not run (microseconds next to a 1080p detect). A failure here is the
+decodes live 1920×1080 station frames the way the node does, subscribed like the node's
+station store (BEST_EFFORT, KEEP_LAST 2). One thread polls like the
+„wenn … erkannt" hat: a look, then 0.2 s sleep when none of the hat's tags is seen, or
+0.1 s when one is (the object in view and the hat already fired: `_run_hat_handler`'s edge
+gate); `--hat-tag-id` sets the hat's tags (default the „Würfel" ids 20, 21). Per trial,
+the composite „Greife"'s yaw sampling makes 14 detects 0.03 s apart (read from
+`perception_blocks` in the image). **Pass/fail (spec):** the hat keeps ≥ 2 polls/s during
+the grasp — judged on the WORST gap (no gap above 0.5 s) as well as the mean interval —
+and the 14 detects end within 2 s, in every trial (also reported: the single-thread 1080p
+detect p95, v6.3's informational ≤ 200 ms). **Limits:** it runs in its own process beside
+the node: the CPU contention is real, the node's own detector lock is not shared (the
+hat-versus-grasp contention is modelled inside the one instance, as in the node). Motion,
+claims and the yaw maths are not run (microseconds next to a 1080p detect), nor the hat's
+first firing (its body under the motion lock). A trial cut short by Ctrl+C is not counted. A failure here is the
 owner's go / no-go; the prepared remedy is detecting on the accepted zone's bounding box.
 
 ## B7 — the real unit's focal length
@@ -209,20 +240,29 @@ py container_run.py check_log --out C:\bench\s1 -- --interval 0.5
 
 It polls `/station/check` and `/station/session` with `{command: status}` (the same
 read-only calls as `ros2 service call … "{command: status}"`, through an rclpy client so the
-answer needs no text parsing) and appends every NEW check result with its kind, result,
-rms / max / centroid / rotation, dot id / dxy / dz and per-reference residuals, plus every
-session change. The console shows a running tally against S1's half-threshold criterion.
+answer needs no text parsing) and appends every NEW check result with its kind (`camera`,
+`robot` or `resolve`), result, rms / max / centroid / rotation, dot id / dxy / dz and
+per-reference residuals, every session change, and every change of the owner's last re-solve
+job (`…_jobs.csv`: `job_id`, `job_state`, message). The console shows a running S1 tally.
 
 * **S1:** 50 static camera checks („Kamera prüfen") all `OK` with every metric at most half
   its threshold (rms ≤ 1.5 mm, max ≤ 3.0 mm, centroid ≤ 1.5 mm, rotation ≤ 0.25°), and 30
-  static robot checks („Roboter prüfen", then „Prüfen") all `OK` (the half-threshold
-  column, dxy ≤ 2.0 mm and dz ≤ 1.5 mm, is reported as well).
+  static robot checks („Roboter prüfen", then „Prüfen") all `OK`. For the robot the
+  half-threshold count (dxy ≤ 2.0 mm and dz ≤ 1.5 mm) is reported, never a gate (spec
+  §12.3 says „all OK" for the robot).
 * **S2:** after a deliberate ≈ 1° camera rotation, 10/10 `MOVED`; after a 5 mm base shift,
   10/10 `ROBOT_MOVED` (count them in the `result` column).
-* **S3:** a re-solve („Kamera neu ausrichten (Lehrkraft)") after a 1–2° bump passes (its
-  result shows as the next camera check) and picks still succeed; after > 3° it is refused
-  („Kamera zu stark verstellt – vollständige Einrichtung nötig.", which is not a stored
-  check: watch the page).
+* **S3:** a re-solve („Kamera neu ausrichten (Lehrkraft)") stores its OWN result
+  (`service.py::_finish_work_locked`) as a row of kind `resolve`: `OK` when it passes,
+  `RESOLVE_REFUSED` when the new pose's own check is not `OK` or the pose moved beyond the
+  re-solve bounds (more than 3° or 25 mm from commissioning). The row carries that check's
+  rms / max / centroid / rotation (all 0 when the check found no refs) and no ref ids and
+  no dot. After a 1–2° bump expect `resolve` `OK`, then picks still succeed (and the next
+  „Kamera prüfen" is an ordinary `camera` row); after > 3° expect `resolve`
+  `RESOLVE_REFUSED` (the page says „Kamera zu stark verstellt – vollständige Einrichtung
+  nötig."). A re-solve that fails before its check (too few board frames, the board solve,
+  the write) stores no result: it shows only in the jobs CSV (`job_state` `failed`, the
+  German message) and on the page.
 * **S5:** a page reload in ACTIVE keeps the session's `generation` and `robot_ok`, and a new
   camera check follows by itself; the session CSV shows both.
 * **Limits:** the server keeps ONE last check per session generation with no counter: a
@@ -244,12 +284,15 @@ py pick_tally.py stopwatch --out C:\bench\entry --gate entry
   der Roboter darf sich bewegen". **Pass/fail (spec):** typical ≤ 2 min, p50 / p95 reported.
   `check_log.py` also measures it automatically from the first poll that sees a new session
   generation to the first `verified` (`entry_to_verified_s`); that leaves out the click and
-  the page's own start.
+  the page's own start. A session already running when `check_log` starts is not timed
+  (start the log first, then „Station starten").
 
 ## Unit tests
 
 The pure parts (parsers, statistics, CSV writing, the clock-offset estimate, the toggle
-guard, the check tally, the pick tally) and the never-shipped fence:
+guard and loop, the check tally, the pick tally, container_run's Ctrl+C handling) and the
+never-shipped fence (COPY / ADD in every Dockerfile, continuation lines and the JSON form
+included):
 
 ```
 cd robotis_ai_setup

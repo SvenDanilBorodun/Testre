@@ -48,6 +48,7 @@ B2_AGE_P95_S = 0.3              # arrival age p95 <= 0.3 s
 B3_LATENCY_P95_S = 0.35         # capture-to-arrival p95 <= 0.35 s
 B4_LENS_SOLVE_S = 3.0           # lens solve on 30 views <= 3 s
 B4_HAT_MIN_POLLS_PER_S = 2.0    # the hat keeps >= 2 polls/s during the grasp
+B4_HAT_MAX_GAP_S = 1.0 / B4_HAT_MIN_POLLS_PER_S   # ... i.e. no gap above 0.5 s
 B4_GRASP_YAW_MAX_S = 2.0        # the grasp's yaw sampling ends within 2 s
 B4_DETECT_P95_S = 0.2           # (v6.3 note) 1080p detect p95 <= 200 ms, informational
 G8_MIN_PICKS = 50
@@ -77,6 +78,43 @@ SIGNAL_TOPIC = '/edubotics/signal_status'
 
 # Time-target QR payload (time_target.py → container/arrival_rate.py --qr).
 QR_PREFIX = 'EBT1:'
+
+# The SERVER's own image subscriptions (communication/communicator.py; held
+# equal by the unit test). A bench subscriber that wants to count what reaches
+# the server must use them: a RELIABLE subscriber gets the retransmissions the
+# server's BEST_EFFORT subscription loses, so it would overstate delivery.
+SERVER_SENSOR_QOS_DEPTH = 32    # SENSOR_QOS_DEPTH: every recorder camera (/scene, /gripper)
+SERVER_STATION_QOS_DEPTH = 2    # enable_station_store: the station frame store
+# The publisher's own QoS (camera_ingest_node.py: RELIABLE, KEEP_LAST 5), for
+# the --reliable comparison only.
+PUBLISHER_QOS_DEPTH = 5
+
+
+def image_qos(topic: str, reliable: bool = False) -> tuple:
+    """``(reliability, depth, source)`` for subscribing ``topic`` the way the
+    server does: ``'best_effort'`` with the station store's depth 2 for
+    ``/station_scene``, the recorder's ``SENSOR_QOS_DEPTH`` (32) for every other
+    camera. ``reliable=True`` is the comparison: the publisher's own QoS.
+    The container tools map the names onto rclpy's enums."""
+    if reliable:
+        return ('reliable', PUBLISHER_QOS_DEPTH,
+                'comparison: the publisher\'s QoS (camera_ingest_node.py, RELIABLE, KEEP_LAST 5)')
+    if topic == STATION_TOPIC:
+        return ('best_effort', SERVER_STATION_QOS_DEPTH,
+                'server: communicator.enable_station_store (BEST_EFFORT, KEEP_LAST 2)')
+    if topic in (SCENE_TOPIC, GRIPPER_TOPIC):
+        return ('best_effort', SERVER_SENSOR_QOS_DEPTH,
+                'server: communicator.init_subscribers camera_qos (BEST_EFFORT, KEEP_LAST 32)')
+    return ('best_effort', SERVER_SENSOR_QOS_DEPTH,
+            'not a server subscription; the recorder\'s camera QoS (BEST_EFFORT, KEEP_LAST 32)')
+
+
+def rclpy_qos(spec: tuple):
+    """An rclpy ``QoSProfile`` from :func:`image_qos`'s tuple (container only)."""
+    from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy  # noqa: PLC0415
+    rel = (ReliabilityPolicy.RELIABLE if spec[0] == 'reliable'
+           else ReliabilityPolicy.BEST_EFFORT)
+    return QoSProfile(depth=int(spec[1]), reliability=rel, history=HistoryPolicy.KEEP_LAST)
 
 
 # ── Output files ─────────────────────────────────────────────────────────────
@@ -332,18 +370,33 @@ def reopen_suspected(error_de: str) -> bool:
 # ── Station checks (StationCheck status) ─────────────────────────────────────
 CAMERA_RESULTS = ('OK', 'MOVED', 'WRONG_MAT', 'REFS_MISSING')
 ROBOT_RESULTS = ('OK', 'ROBOT_MOVED', 'NO_DOT', 'NOT_VERTICAL')
+RESOLVE_RESULTS = ('OK', 'RESOLVE_REFUSED')
+CHECK_KINDS = ('camera', 'robot', 'resolve')
 
 
 def check_kind(d: dict) -> str:
-    """``'robot'`` / ``'camera'`` / ``''`` for a StationCheck status answer.
-    A robot result carries ``dot_id`` 1..4; a camera result the ref ids."""
+    """``'robot'`` / ``'camera'`` / ``'resolve'`` / ``''`` for a StationCheck
+    status answer, from the fields the status really carries:
+
+    * a robot check (``station/check.py::robot_check``) carries ``dot_id``
+      1..4, or is ``NOT_VERTICAL`` (no dot);
+    * a camera check (``service.py::_camera_check``) always carries the
+      layout's ``ref_ids``;
+    * a re-solve (``service.py::_finish_work_locked``) stores its own
+      ``camera_check`` dict as ``OK`` / ``RESOLVE_REFUSED``: no ``ref_ids``
+      (only ``_camera_check`` adds them) and no ``dot_id``.
+    """
     result = d.get('result') or ''
     if not result:
         return ''
     if int(d.get('dot_id') or 0) > 0 or result in ('ROBOT_MOVED', 'NO_DOT', 'NOT_VERTICAL'):
         return 'robot'
+    if result == 'RESOLVE_REFUSED':
+        return 'resolve'
     if d.get('ref_ids') or result in ('MOVED', 'WRONG_MAT', 'REFS_MISSING'):
         return 'camera'
+    if result == 'OK':
+        return 'resolve'
     return ''
 
 
@@ -377,10 +430,15 @@ def half_threshold_ok(kind: str, d: dict) -> Optional[bool]:
 
 
 class CheckTally:
-    """Running counts per kind: results, OK, OK at half the thresholds."""
+    """Running counts per kind: results, OK, OK at half the thresholds.
+
+    S1 (spec §12.3): „50 static camera checks, all OK, every metric ≤ half its
+    threshold. 30 static robot checks, all OK." The half-threshold rule gates
+    the CAMERA only; for the robot its count is reported, never a gate.
+    Re-solves (S3) are counted on their own and are not S1 checks."""
 
     def __init__(self):
-        self.counts = {'camera': {}, 'robot': {}}
+        self.counts = {k: {} for k in CHECK_KINDS}
         self.half = {'camera': 0, 'robot': 0}
 
     def add(self, kind: str, d: dict) -> None:
@@ -388,7 +446,7 @@ class CheckTally:
             return
         r = d.get('result') or '?'
         self.counts[kind][r] = self.counts[kind].get(r, 0) + 1
-        if half_threshold_ok(kind, d):
+        if kind in self.half and half_threshold_ok(kind, d):
             self.half[kind] += 1
 
     def total(self, kind: str) -> int:
@@ -400,8 +458,13 @@ class CheckTally:
             c = self.counts[kind]
             parts.append(
                 f"{kind}: {self.total(kind)} checks (S1 target {target}), OK {c.get('OK', 0)}, "
-                f"OK at half the thresholds {self.half[kind]}, "
+                f"OK at half the thresholds {self.half[kind]}"
+                + (' (gate)' if kind == 'camera' else ' (report only)') + ', '
                 + ', '.join(f'{k} {v}' for k, v in sorted(c.items()) if k != 'OK'))
+        if self.counts['resolve']:
+            parts.append(f"resolve: {self.total('resolve')} ("
+                         + ', '.join(f'{k} {v}' for k, v in sorted(self.counts['resolve'].items()))
+                         + ')')
         return ' | '.join(p.rstrip(', ') for p in parts)
 
     def summary(self) -> dict:
@@ -409,27 +472,50 @@ class CheckTally:
         for kind, target in (('camera', S1_CAMERA_CHECKS), ('robot', S1_ROBOT_CHECKS)):
             n = self.total(kind)
             ok = self.counts[kind].get('OK', 0)
+            if kind == 'camera':
+                # S1: all OK AND every metric at most half its threshold.
+                passed = ok == n and self.half[kind] == n
+            else:
+                # S1: all OK. The half-threshold count is an extra report.
+                passed = ok == n
             out[kind] = {
                 'checks': n, 'by_result': dict(self.counts[kind]), 'ok': ok,
                 'ok_at_half_thresholds': self.half[kind], 's1_target': target,
-                # S1 (static): all OK and every metric at most half its threshold.
                 's1_static_verdict': ('PENDING' if n < target else
-                                      'PASS' if (ok == n and self.half[kind] == n) else 'FAIL'),
+                                      'PASS' if passed else 'FAIL'),
             }
+        out['robot']['ok_at_half_thresholds_note'] = (
+            'dxy <= 2.0 mm and dz <= 1.5 mm, reported for information; not a gate '
+            '(spec §12.3: 30 static robot checks, all OK)')
+        out['resolve'] = {'checks': self.total('resolve'),
+                          'by_result': dict(self.counts['resolve']),
+                          'note': 'S3 re-solves (stored as OK / RESOLVE_REFUSED); not S1 checks'}
         return out
 
 
 # ── Session timeline (entry plus both checks) ────────────────────────────────
 class EntryTimer:
     """From the first sight of a new session generation (ENTERING or ACTIVE)
-    to the first ``verified`` in that generation. Resolution: the poll period."""
+    to the first ``verified`` in that generation. Resolution: the poll period.
+
+    Only sessions ENTERED after logging started are timed: a session already
+    ENTERING or ACTIVE at the first poll began before we looked, so its
+    generation is ignored (its time would be an undercount)."""
 
     def __init__(self):
         self._gen = None
         self._t0 = None
+        self._first = True
+        self._ignored_gen = None
         self.durations = []
 
     def update(self, t_s: float, state: str, generation: int, verified: bool) -> Optional[float]:
+        if self._first:
+            self._first = False
+            if state in ('ENTERING', 'ACTIVE'):
+                self._ignored_gen = generation
+        if state in ('ENTERING', 'ACTIVE') and generation == self._ignored_gen:
+            return None
         if state in ('ENTERING', 'ACTIVE') and generation != self._gen:
             self._gen, self._t0 = generation, t_s
         if state not in ('ENTERING', 'ACTIVE'):

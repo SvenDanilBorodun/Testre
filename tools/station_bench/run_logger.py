@@ -66,8 +66,8 @@ FIELDS = ['t_iso', 't_s', 'label', 'bridge_http', 'enabled', 'stream', 'scene_fp
           'signal_recv_age_s', 'session_state', 'session_generation', 'scene_max_gap_ms_1s',
           'scene_frames_1s', 'toggle_cycle', 'toggle_phase']
 TOGGLE_FIELDS = ['cycle', 't_on_iso', 'on_http', 'on_ok', 'off_http', 'scene_fps_min',
-                 'station_fps_max', 'error_de_seen', 'reopen_suspected',
-                 'scene_max_gap_ms', 'session_state']
+                 'station_fps_max', 'station_frames', 'error_de_seen', 'reopen_suspected',
+                 'scene_max_gap_ms', 'session_state', 'completed', 'stopped_reason']
 
 
 # ── GUI process CPU (Windows, ctypes) ────────────────────────────────────────
@@ -150,6 +150,7 @@ class Latest:
         self.session_t = None
         self.scene = {'frames_1s': None, 'max_gap_ms_1s': None}
         self.scene_gap_window_max = 0.0     # reset by the toggle loop per cycle
+        self.station_frames_total = 0       # /station_scene arrivals at the server (toggling)
         self.lines = 0
 
     def feed(self, line):
@@ -174,12 +175,155 @@ class Latest:
                 for g in (d.get('max_gap_ms'), d.get('since_last_ms')):
                     if g is not None:
                         self.scene_gap_window_max = max(self.scene_gap_window_max, float(g))
+            elif k == 'arrival' and d.get('topic') == B.STATION_TOPIC:
+                self.station_frames_total += int(d.get('frames') or 0)
+
+    def station_total(self):
+        with self.lock:
+            return self.station_frames_total
 
     def session_state(self):
         with self.lock:
             if self.session is None:
                 return None, None
             return self.session.get('state'), time.monotonic() - self.session_t
+
+
+# During toggling the session is polled at ~4 Hz (the watcher's
+# --session-every 0.25). An answer older than this counts as unknown.
+TOGGLE_POLL_S = 0.25
+TOGGLE_SESSION_MAX_AGE_S = 2.0
+
+
+def watcher_args(toggle):
+    """Pure: the in-container watcher's arguments. Toggling polls the session
+    at 4 Hz and also counts /station_scene arrivals (the delivery proof)."""
+    args = ['--session-every', '0.25' if toggle else '1.0', '--topic', B.SCENE_TOPIC]
+    if toggle:
+        args += ['--topic', B.STATION_TOPIC]
+    return args
+
+
+class Toggler:
+    """The --toggle loop with its dependencies injected (unit-tested).
+
+    The stream is OURS only while no station session exists. The session is
+    checked before every cycle (``toggle_guard``) and every ``TOGGLE_POLL_S``
+    during both phases; once a non-IDLE state — or no fresh answer — is seen,
+    toggling stops and no further ``off`` is sent (a page that holds a
+    session owns the stream; our last ``on`` ends by the bridge's 10 s lease
+    anyway). The final ``off`` is sent only when this tool turned the stream
+    on and no session appeared."""
+
+    def __init__(self, *, on_s, off_s, session_state, bridge_status, stream, write_row,
+                 reset_gap, gap, record, station_total=lambda: None, clock=time.monotonic,
+                 sleep=time.sleep, say=print):
+        self.on_s, self.off_s = on_s, off_s
+        self.session_state, self.bridge_status, self.stream = session_state, bridge_status, stream
+        self.write_row, self.reset_gap, self.gap, self.record = write_row, reset_gap, gap, record
+        self.station_total = station_total
+        self.clock, self.sleep, self.say = clock, sleep, say
+        self.stop = threading.Event()
+        self.sent_on = False
+        self.hands_off = False          # a session (or an unknown state) was seen
+        self.hands_off_reason = ''
+        self.toggles = []
+
+    def _let_go(self, reason):
+        if not self.hands_off:
+            self.say(f'toggling stopped: {reason}. No further `off` is sent (the bridge\'s '
+                     f'{B.STATION_LEASE_S:.0f} s lease ends our last `on`).')
+        self.hands_off = True
+        self.hands_off_reason = reason
+
+    def _still_ours(self):
+        """Poll the session; False (and hands off) unless it is fresh IDLE."""
+        state, age = self.session_state()
+        if state is None or age is None or age > TOGGLE_SESSION_MAX_AGE_S:
+            self._let_go('the station session state is unknown or stale')
+            return False
+        if state != 'IDLE':
+            self._let_go(f'a station session appeared (state {state})')
+            return False
+        return True
+
+    def _phase(self, i, phase, until, mins, maxs, errs):
+        """Rows and session polls every TOGGLE_POLL_S. ``'done'``, ``'session'``
+        (a session appeared or the state is unknown) or ``'stopped'``."""
+        while self.clock() < until:
+            if self.stop.is_set():
+                return 'stopped'
+            r = self.write_row(i, phase)
+            if r.get('scene_fps') is not None:
+                mins.append(float(r['scene_fps']))
+            if phase == 'on' and r.get('station_fps') is not None:
+                maxs.append(float(r['station_fps']))
+            if r.get('error_de'):
+                errs.append(r['error_de'])
+            if not self._still_ours():
+                return 'session'
+            self.sleep(TOGGLE_POLL_S)
+        return 'done'
+
+    def cycle(self, i):
+        state, age = self.session_state()
+        bridge = self.bridge_status()
+        ok, why = B.toggle_guard(state, bridge, age)
+        if not ok:
+            self.say(f'toggle stopped before cycle {i}: {why}')
+            if self.sent_on:
+                # After our own cycles a refusal means the stream may be a
+                # page's now: no final `off`.
+                self._let_go(why)
+            return False
+        self.reset_gap()
+        frames0 = self.station_total()
+        rec = {'cycle': i, 't_on_iso': B.iso_now(), 'session_state': state}
+        self.sent_on = True
+        code, ans = self.stream(True)
+        rec['on_http'], rec['on_ok'] = code, bool(ans and ans.get('ok'))
+        mins, maxs, errs = [], [], []
+        on_end = 'stopped'
+        try:
+            on_end = self._phase(i, 'on', self.clock() + self.on_s, mins, maxs, errs)
+        finally:
+            # Ctrl+C lands here too: the `off` is sent unless a session
+            # appeared (then the page owns the stream).
+            if not self.hands_off:
+                rec['off_http'], _ = self.stream(False)
+            else:
+                rec['off_http'] = None
+        if on_end == 'done':
+            self._phase(i, 'off', self.clock() + self.off_s, mins, maxs, errs)
+        frames1 = self.station_total()
+        gap = self.gap()
+        rec.update(scene_fps_min=min(mins) if mins else None,
+                   station_fps_max=max(maxs) if maxs else None,
+                   error_de_seen=' / '.join(sorted(set(errs))),
+                   reopen_suspected=any(B.reopen_suspected(e) for e in errs),
+                   scene_max_gap_ms=gap,
+                   station_frames=(frames1 - frames0
+                                   if frames0 is not None and frames1 is not None else None),
+                   # One whole switch: the full on-phase, then OUR `off`.
+                   completed=on_end == 'done' and rec['off_http'] is not None,
+                   stopped_reason=self.hands_off_reason)
+        self.record(rec)
+        self.toggles.append(rec)
+        self.say(f"toggle {i}: on {rec['on_http']} off {rec['off_http']} crop min "
+                 f"{rec['scene_fps_min']} fps, Studio frames at the server "
+                 f"{rec['station_frames']}, recording gap {gap} ms"
+                 f"{', REOPEN?' if rec['reopen_suspected'] else ''}")
+        return not self.hands_off
+
+    def run(self, n):
+        for i in range(1, n + 1):
+            if self.stop.is_set() or not self.cycle(i):
+                break
+
+    def final_off(self):
+        """Never leave OUR stream on; never fight a page that holds a session."""
+        if self.sent_on and not self.hands_off:
+            self.stream(False)
 
 
 def build_parser():
@@ -209,6 +353,10 @@ def main(argv=None):
         if not ok:
             print(f'refused: {why}')
             return 2
+        if args.no_container:
+            print('refused: --toggle needs the in-container watcher (it polls /station/session '
+                  'at 4 Hz and counts the Studio frames at the server); drop --no-container')
+            return 2
     run_stamp = B.stamp()
     csv_path = B.out_path(args.out, 'run_logger', run_stamp, '.csv')
     log = B.CsvLog(csv_path, FIELDS)
@@ -231,18 +379,14 @@ def main(argv=None):
     latest = Latest()
     stream = None
     if not args.no_container:
-        topics = ['--topic', B.SCENE_TOPIC]
         stream = W.ContainerStream(HERE / 'container' / 'watch_stream.py',
-                                   ['--session-every', '1.0'] + topics,
-                                   distro=W.distro_name())
+                                   watcher_args(bool(args.toggle)), distro=W.distro_name())
         stream.start()
         threading.Thread(target=lambda: [latest.feed(x) for x in stream.lines()],
                          daemon=True).start()
 
     rows = []
-    toggles = []
     stop = threading.Event()
-    sent_on = []        # an `on` was sent: only then does the final `off` belong to us
     t0 = time.monotonic()
 
     def write_row(cycle='', phase=''):
@@ -275,57 +419,24 @@ def main(argv=None):
         rows.append(row)
         return row
 
-    def toggle_cycle(i):
-        if stream:
-            state, age = latest.session_state()
-        else:
-            state, age = W.session_state_via_cli()[0], 0.0
-        _, bridge = W.bridge_get('/station/status', timeout=1.0)
-        ok, why = B.toggle_guard(state, bridge, age)
-        if not ok:
-            print(f'toggle stopped before cycle {i}: {why}')
-            return False
+    def gap_window():
+        with latest.lock:
+            return latest.scene_gap_window_max if stream else None
+
+    def reset_gap():
         with latest.lock:
             latest.scene_gap_window_max = 0.0
-        rec = {'cycle': i, 't_on_iso': B.iso_now(), 'session_state': state}
-        sent_on.append(i)
-        code, ans = W.bridge_stream(True)
-        rec['on_http'], rec['on_ok'] = code, bool(ans and ans.get('ok'))
-        mins, maxs, errs = [], [], []
-        try:
-            t_end = time.monotonic() + args.on_s
-            while time.monotonic() < t_end and not stop.is_set():
-                r = write_row(i, 'on')
-                if r['scene_fps'] is not None:
-                    mins.append(float(r['scene_fps']))
-                if r['station_fps'] is not None:
-                    maxs.append(float(r['station_fps']))
-                if r['error_de']:
-                    errs.append(r['error_de'])
-                time.sleep(0.25)
-        finally:
-            rec['off_http'], _ = W.bridge_stream(False)
-        t_end = time.monotonic() + args.off_s
-        while time.monotonic() < t_end and not stop.is_set():
-            r = write_row(i, 'off')
-            if r['scene_fps'] is not None:
-                mins.append(float(r['scene_fps']))
-            if r['error_de']:
-                errs.append(r['error_de'])
-            time.sleep(0.25)
-        with latest.lock:
-            gap = latest.scene_gap_window_max if stream else None
-        rec.update(scene_fps_min=min(mins) if mins else None,
-                   station_fps_max=max(maxs) if maxs else None,
-                   error_de_seen=' / '.join(sorted(set(errs))),
-                   reopen_suspected=any(B.reopen_suspected(e) for e in errs),
-                   scene_max_gap_ms=gap)
-        tlog.write(rec)
-        toggles.append(rec)
-        print(f"toggle {i}: on {rec['on_http']} off {rec['off_http']} crop min "
-              f"{rec['scene_fps_min']} fps, studio max {rec['station_fps_max']} fps, "
-              f"recording gap {gap} ms{', REOPEN?' if rec['reopen_suspected'] else ''}")
-        return True
+
+    def session_state():
+        if stream:
+            return latest.session_state()
+        return None, None           # --toggle refuses --no-container (above)
+
+    toggler = Toggler(on_s=args.on_s, off_s=args.off_s, session_state=session_state,
+                      bridge_status=lambda: W.bridge_get('/station/status', timeout=1.0)[1],
+                      stream=W.bridge_stream, write_row=write_row, reset_gap=reset_gap,
+                      gap=gap_window, record=(tlog.write if tlog else (lambda r: None)),
+                      station_total=(latest.station_total if stream else (lambda: None)))
 
     try:
         if stream:
@@ -334,9 +445,7 @@ def main(argv=None):
             while latest.session_state()[0] is None and time.monotonic() < deadline:
                 time.sleep(0.25)
         if args.toggle:
-            for i in range(1, args.toggle + 1):
-                if not toggle_cycle(i):
-                    break
+            toggler.run(args.toggle)
         else:
             t_end = t0 + args.duration
             while time.monotonic() < t_end:
@@ -346,16 +455,14 @@ def main(argv=None):
         pass
     finally:
         stop.set()
-        if sent_on:
-            # Never leave OUR stream on. Not sent after a refusal: a page that
-            # holds a session owns the stream then, and an `off` would fight it.
-            W.bridge_stream(False)
+        toggler.stop.set()
+        toggler.final_off()
         if stream:
             stream.stop()
         log.close()
         if tlog:
             tlog.close()
-    summary = summarize(rows, toggles, args)
+    summary = summarize(rows, toggler.toggles, args)
     json_path = B.out_path(args.out, 'run_logger', run_stamp, '_summary.json')
     B.write_json(json_path, summary)
     print(json.dumps(summary.get('verdicts', {}), indent=2))
@@ -399,13 +506,24 @@ def summarize(rows, toggles, args):
         ],
     }
     v = {}
-    if crop_off:
+    # Toggle mode: no crop or Studio verdicts. The bridge's station_fps needs
+    # 2 s of sending before it moves, so a short on-phase reads ~0 (a false
+    # FAIL), and the crop windows straddle the switches. Delivery is proven per
+    # cycle from the container's /station_scene arrivals instead (below).
+    toggling = bool(getattr(args, 'toggle', 0))
+    if toggling:
+        out['notes'].append(
+            'Toggle mode: the crop and Studio verdicts are skipped (the bridge\'s station_fps '
+            'moves only after 2 s of sending). Studio delivery per cycle is the number of '
+            '/station_scene frames that reached the server (container arrivals, server QoS); '
+            'the steady-state rates are runs 2 and 3.')
+    if crop_off and not toggling:
         v['B1 crop >= 29 fps, stream off (mean)'] = B.verdict(
             out['stream_off']['crop_fps']['mean'], B.B1_CROP_MIN_FPS, at_least=True)
-    if crop_on:
+    if crop_on and not toggling:
         v['B1 crop >= 29 fps, stream on (mean)'] = B.verdict(
             out['stream_on']['crop_fps']['mean'], B.B1_CROP_MIN_FPS, at_least=True)
-    if studio_on:
+    if studio_on and not toggling:
         v['B1 Studio >= 14 fps under id 200 (mean)'] = B.verdict(
             out['stream_on']['studio_fps']['mean'], B.B1_STUDIO_MIN_FPS, at_least=True)
     base = getattr(args, 'gripper_baseline_hz', None)
@@ -415,15 +533,28 @@ def summarize(rows, toggles, args):
             v[f'B1 gripper within 1 fps of baseline, {name}'] = B.verdict(
                 base - mean, B.B1_GRIPPER_MAX_DROP_FPS, at_least=False)
     if toggles:
-        n = len(toggles)
+        done = [t for t in toggles if t.get('completed', True)]
+        n = len(done)
         reopen = sum(1 for t in toggles if t.get('reopen_suspected'))
-        out['toggles'] = {'cycles': n, 'reopen_suspected': reopen,
+        counted = [t for t in done if t.get('station_frames') is not None]
+        no_frames = sum(1 for t in counted if t['station_frames'] <= 0)
+        out['toggles'] = {'cycles': n, 'cycles_started': len(toggles),
+                          'reopen_suspected': reopen,
                           'on_refused': sum(1 for t in toggles if not t.get('on_ok')),
                           'scene_max_gap_ms': B.summarize(
                               [t['scene_max_gap_ms'] for t in toggles
-                               if t.get('scene_max_gap_ms') is not None])}
+                               if t.get('scene_max_gap_ms') is not None]),
+                          'station_frames_per_cycle': B.summarize(
+                              [t['station_frames'] for t in counted]),
+                          'cycles_without_station_frames': no_frames,
+                          'stopped_reason': next((t.get('stopped_reason') for t in toggles
+                                                  if t.get('stopped_reason')), '')}
         v['B1 200 switches without a reopen (bridge evidence)'] = (
             'PENDING' if n < B.B1_TOGGLES else ('PASS' if reopen == 0 else 'FAIL'))
+        if counted:
+            v['B1 toggles: Studio frames reached the server in every cycle (container '
+              'arrivals)'] = ('FAIL' if no_frames else
+                              'PENDING' if n < B.B1_TOGGLES else 'PASS')
         out['toggles']['note'] = (
             'A recording-stream gap is the container-side arrival gap of /scene; judge it '
             'against the same measure from a run without toggling (the camera\'s own jitter).')

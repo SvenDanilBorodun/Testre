@@ -17,6 +17,7 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
 import tempfile
 import types
@@ -117,6 +118,12 @@ class ClockOffset(unittest.TestCase):
         est = B.estimate_clock_offset(samples)
         self.assertEqual(est['rtt_min_ns'], 500_000)
         self.assertLessEqual(abs(est['offset_ns'] - true), est['uncertainty_ns'])
+        # Pinned: the fastest trip (0.2 ms up, 0.3 ms down) puts the estimate at
+        # its midpoint and the uncertainty at exactly half its round trip.
+        self.assertEqual(est['offset_ns'], true - 50_000)
+        self.assertEqual(est['uncertainty_ns'], 250_000)
+        odd = [(0, 5_000_001_000, 1_001)]                 # an odd RTT rounds UP
+        self.assertEqual(B.estimate_clock_offset(odd)['uncertainty_ns'], 501)
         self.assertEqual(est['n'], 4)
         with self.assertRaises(ValueError):
             B.estimate_clock_offset([])
@@ -227,6 +234,69 @@ class Checks(unittest.TestCase):
         self.assertEqual(t.summary()['camera']['s1_static_verdict'], 'FAIL')
         self.assertIn('camera: 51 checks', t.line())
 
+    def test_s1_robot_verdict_is_all_ok_and_the_half_count_only_a_report(self):
+        # Spec §12.3: „30 static robot checks, all OK"; the half-threshold rule
+        # is the camera's. A robot OK at dxy 3.0 mm (OK <= 4.0, half 2.0) passes
+        # S1 and is merely not counted at half the thresholds.
+        t = B.CheckTally()
+        robot_ok = {'result': 'OK', 'dot_id': 1, 'dot_dxy_mm': 3.0, 'dot_dz_mm': 2.5}
+        for _ in range(B.S1_ROBOT_CHECKS):
+            t.add('robot', robot_ok)
+        s = t.summary()['robot']
+        self.assertEqual(s['s1_static_verdict'], 'PASS')
+        self.assertEqual(s['ok_at_half_thresholds'], 0)
+        self.assertIn('not a gate', s['ok_at_half_thresholds_note'])
+        t.add('robot', dict(robot_ok, result='ROBOT_MOVED'))
+        self.assertEqual(t.summary()['robot']['s1_static_verdict'], 'FAIL')
+        # The camera keeps both halves of its criterion.
+        c = B.CheckTally()
+        for _ in range(B.S1_CAMERA_CHECKS):
+            c.add('camera', dict(self.CAM_OK, max_mm=3.5))       # OK, not at half
+        self.assertEqual(c.summary()['camera']['s1_static_verdict'], 'FAIL')
+
+    def test_the_camera_half_thresholds_are_pinned(self):
+        self.assertEqual((B.CAMERA_OK_RMS_MM / 2, B.CAMERA_OK_MAX_MM / 2,
+                          B.CAMERA_OK_CENTROID_MM / 2, B.CAMERA_OK_ROTATION_DEG / 2),
+                         (1.5, 3.0, 1.5, 0.25))
+        at = dict(self.CAM_OK, rms_mm=1.5, max_mm=3.0, centroid_mm=1.5, rotation_deg=0.25)
+        self.assertTrue(B.half_threshold_ok('camera', at))
+        for key, over in (('rms_mm', 1.5001), ('max_mm', 3.0001), ('centroid_mm', 1.5001),
+                          ('rotation_deg', 0.2501)):
+            self.assertFalse(B.half_threshold_ok('camera', dict(at, **{key: over})), key)
+
+    def test_a_re_solve_result_is_its_own_kind(self):
+        # station/service.py::_finish_work_locked stores the re-solve's own
+        # camera_check dict as OK / RESOLVE_REFUSED; camera_check adds no ref_ids
+        # (only _camera_check does) and no dot_id.
+        resolve_ok = {'result': 'OK', 'generation': 3, 'rms_mm': 0.8, 'max_mm': 1.4,
+                      'centroid_mm': 0.5, 'rotation_deg': 0.1, 'dot_id': 0,
+                      'dot_dxy_mm': 0.0, 'dot_dz_mm': 0.0, 'ref_ids': [],
+                      'ref_residual_mm': [0.7, 0.8, 0.9, 0.8]}
+        self.assertEqual(B.check_kind(resolve_ok), 'resolve')
+        self.assertEqual(B.check_kind({'result': 'RESOLVE_REFUSED', 'dot_id': 0,
+                                       'ref_ids': []}), 'resolve')
+        self.assertIsNone(B.half_threshold_ok('resolve', resolve_ok))
+        self.assertEqual(B.check_kind(self.CAM_OK), 'camera')
+        t = B.CheckTally()
+        t.add('resolve', resolve_ok)
+        t.add('resolve', dict(resolve_ok, result='RESOLVE_REFUSED'))
+        self.assertEqual(t.summary()['resolve']['by_result'], {'OK': 1, 'RESOLVE_REFUSED': 1})
+        self.assertEqual(t.total('camera'), 0)
+        self.assertIn('resolve: 2', t.line())
+
+    def test_the_resolve_shape_is_the_servers(self):
+        svc = (PAS / 'station' / 'service.py').read_text(encoding='utf-8')
+        finish = svc.split('def _finish_work_locked', 1)[1].split('\n    def ', 1)[0]
+        self.assertIn("'OK' if ok else 'RESOLVE_REFUSED'", finish)
+        steps = svc.split('def _resolve_steps', 1)[1].split('\n    def ', 1)[0]
+        self.assertIn('C.camera_check(', steps)
+        self.assertNotIn("res['ref_ids']", steps)               # no ref_ids on a re-solve
+        cam = svc.split('def _camera_check', 1)[1].split('\n    def ', 1)[0]
+        self.assertIn("res['ref_ids'] = list(f['ref_ids'])", cam)   # every camera check has them
+        srv = (REPO / 'physical_ai_tools' / 'physical_ai_interfaces' / 'srv'
+               / 'StationCheck.srv').read_text(encoding='utf-8')
+        self.assertIn('RESOLVE_REFUSED', srv)
+
     def test_the_fingerprint_tells_two_checks_apart(self):
         a = B.check_fingerprint(self.CAM_OK)
         self.assertEqual(a, B.check_fingerprint(dict(self.CAM_OK)))
@@ -254,6 +324,20 @@ class Checks(unittest.TestCase):
         self.assertEqual(e.update(100.0, 'ACTIVE', 3, True), 20.0)
         self.assertEqual(e.durations, [60.0, 20.0])
 
+    def test_entry_timer_ignores_a_session_running_when_logging_started(self):
+        e = B.EntryTimer()
+        self.assertIsNone(e.update(0.0, 'ACTIVE', 7, False))     # already running
+        self.assertIsNone(e.update(30.0, 'ACTIVE', 7, True))     # not an entry we saw
+        self.assertIsNone(e.update(40.0, 'IDLE', 7, False))
+        self.assertIsNone(e.update(50.0, 'ENTERING', 8, False))  # entered after the start
+        self.assertEqual(e.update(65.0, 'ACTIVE', 8, True), 15.0)
+        self.assertEqual(e.durations, [15.0])
+        # A first poll in ENTERING is the same: that entry began before we looked.
+        f = B.EntryTimer()
+        self.assertIsNone(f.update(0.0, 'ENTERING', 2, False))
+        self.assertIsNone(f.update(5.0, 'ACTIVE', 2, True))
+        self.assertEqual(f.durations, [])
+
 
 class MirroredContracts(unittest.TestCase):
     def test_lease_port_and_topics(self):
@@ -264,11 +348,59 @@ class MirroredContracts(unittest.TestCase):
         texts = PAS / 'station' / 'texts_de.py'
         self.assertEqual(B.STATION_TOPIC, _assign(texts, 'STATION_TOPIC'))
 
+    def test_image_qos_is_the_servers_own_subscription(self):
+        """B2 counts frames TO THE SERVER: a RELIABLE bench subscriber gets the
+        retransmissions the server's BEST_EFFORT subscription loses."""
+        comm = PAS / 'communication' / 'communicator.py'
+        src = comm.read_text(encoding='utf-8')
+        self.assertEqual(B.SERVER_SENSOR_QOS_DEPTH, _assign(comm, 'SENSOR_QOS_DEPTH'))
+        station = src.split('def enable_station_store', 1)[1].split('\n    def ', 1)[0]
+        m = re.search(r'QoSProfile\(depth=(\d+), reliability=ReliabilityPolicy\.(\w+)', station)
+        self.assertIsNotNone(m, 'enable_station_store no longer builds its QoS as expected')
+        self.assertEqual((B.SERVER_STATION_QOS_DEPTH, 'BEST_EFFORT'), (int(m.group(1)),
+                                                                       m.group(2)))
+        subs = src.split('def init_subscribers', 1)[1].split('\n    def ', 1)[0]
+        cam = subs.split('camera_qos = QoSProfile(', 1)[1].split(')', 1)[0]
+        self.assertIn('depth=SENSOR_QOS_DEPTH', cam)
+        self.assertIn('ReliabilityPolicy.BEST_EFFORT', cam)
+        self.assertEqual(B.image_qos(B.STATION_TOPIC)[:2], ('best_effort', 2))
+        self.assertEqual(B.image_qos(B.SCENE_TOPIC)[:2], ('best_effort', 32))
+        self.assertEqual(B.image_qos(B.GRIPPER_TOPIC)[:2], ('best_effort', 32))
+        # The comparison flag: the publisher's own QoS (camera_ingest_node.py).
+        ingest = (REPO / 'robotis_ai_setup' / 'docker' / 'open_manipulator'
+                  / 'camera_ingest_node.py').read_text(encoding='utf-8')
+        self.assertRegex(ingest, r'QoSProfile\(\s*depth=5,\s*reliability=ReliabilityPolicy'
+                                 r'\.RELIABLE')
+        self.assertEqual(B.image_qos(B.STATION_TOPIC, reliable=True)[:2], ('reliable', 5))
+
+    def test_the_container_tools_subscribe_images_with_the_server_qos(self):
+        for rel in ('container/arrival_rate.py', 'container/watch_stream.py',
+                    'container/perception_load.py'):
+            src = (BENCH / rel).read_text(encoding='utf-8')
+            self.assertTrue('B.image_qos(' in src, f'{rel}: not built by B.image_qos')
+            self.assertIsNone(re.search(r'depth=5,\s*reliability=ReliabilityPolicy\.RELIABLE',
+                                        src), f'{rel}: a hard-coded RELIABLE image QoS')
+        A = _load('container/arrival_rate.py', 'station_bench_arrival_rate_qos')
+        self.assertTrue(A.build_parser().parse_args(['--out', '/o', '--reliable']).reliable)
+
     def test_the_hat_and_yaw_cadence_the_b4_tool_mirrors(self):
         P = _load('container/perception_load.py', 'station_bench_perception_load')
         wm = (PAS / 'workflow' / 'workflow_manager.py').read_text(encoding='utf-8')
         body = wm.split('def _wait_object_visible', 1)[1].split('\n    def ', 1)[0]
         self.assertIn(f'time.sleep({P.HAT_POLL_SLEEP_S})', body)
+        # Seen and already fired: _run_hat_handler's edge gate sleeps 0.1 s and
+        # polls again (no 0.2 s sleep: _wait_object_visible returned at once).
+        hat = wm.split('def _run_hat_handler', 1)[1].split('\n    def ', 1)[0]
+        m = re.search(r'if not edge_armed:\s*\n\s*time\.sleep\(([\d.]+)\)', hat)
+        self.assertIsNotNone(m, '_run_hat_handler no longer sleeps in its edge gate')
+        self.assertEqual(P.HAT_SEEN_SLEEP_S, float(m.group(1)))
+        self.assertEqual(P.hat_sleep_s(True), P.HAT_SEEN_SLEEP_S)
+        self.assertEqual(P.hat_sleep_s(False), P.HAT_POLL_SLEEP_S)
+        cat = (PAS / 'workflow' / 'object_catalog.py').read_text(encoding='utf-8')
+        ids = re.findall(r"'wuerfel': \{.*?'tag_ids': \[([\d, ]+)\]", cat, re.S)
+        self.assertTrue(ids)
+        for found in ids:                                  # every profile's Würfel
+            self.assertEqual(tuple(int(x) for x in found.split(',')), P.HAT_TAG_IDS_DEFAULT)
         pb = PAS / 'workflow' / 'handlers' / 'perception_blocks.py'
         self.assertEqual(P.YAW_INTERVAL_DEFAULT_S, _assign(pb, '_TAG_YAW_FRAME_INTERVAL_S'))
         self.assertRegex(pb.read_text(encoding='utf-8'),
@@ -327,6 +459,47 @@ class Tools(unittest.TestCase):
         self.assertEqual(R.pick_gui_pid(dev), 20)
         self.assertIsNone(R.pick_gui_pid([]))
 
+    def test_camera_open_fails_a_variant_without_1080p_frames(self):
+        C = _load('camera_open.py', 'station_bench_camera_open')
+
+        class Frame:
+            def __init__(self, w, h):
+                self.shape = (h, w, 3)
+
+        class Cap:
+            def __init__(self, w, h):
+                self.size = (w, h)
+
+            def read(self):
+                return True, Frame(*self.size)
+
+            def release(self):
+                pass
+
+            def getBackendName(self):
+                return 'MSMF'
+
+        def cam(w, h, fail=False):
+            def open_station_capture(index):
+                if fail:
+                    raise RuntimeError('Kamera nicht verfügbar')
+                return Cap(w, h), {'width': w, 'height': h}
+            return types.SimpleNamespace(open_station_capture=open_station_capture)
+
+        consts = types.SimpleNamespace(STATION_OPEN_METHOD='fourcc_only',
+                                       STATION_NATIVE_WIDTH=1920, STATION_NATIVE_HEIGHT=1080)
+        rec, _ = C.open_once(cam(1280, 720), consts, 1, 'fourcc_only', 0.05)
+        self.assertEqual(rec['frames_native_size'], 0)
+        self.assertEqual(rec['b1_native_rate_ok'], 'FAIL')        # never UNKNOWN
+        rec, _ = C.open_once(cam(0, 0, fail=True), consts, 1, 'fourcc_size_fps', 0.05)
+        self.assertEqual(rec['b1_native_rate_ok'], 'FAIL')
+        rec, _ = C.open_once(cam(1920, 1080), consts, 1, 'fourcc_only', 0.05)
+        self.assertIn(rec['b1_native_rate_ok'], ('PASS', 'FAIL'))  # measured, either way
+        self.assertEqual(C.native_rate_verdict(0, None), 'FAIL')
+        self.assertEqual(C.native_rate_verdict(1, None), 'FAIL')
+        self.assertEqual(C.native_rate_verdict(300, 30.0), 'PASS')
+        self.assertEqual(C.native_rate_verdict(300, 25.0), 'FAIL')
+
     def test_camera_open_frame_summary(self):
         C = _load('camera_open.py', 'station_bench_camera_open')
         frames = [(0.0, False, 0, 0)] + [(0.1 + i / 30.0, True, 1920, 1080) for i in range(31)]
@@ -337,6 +510,27 @@ class Tools(unittest.TestCase):
         self.assertAlmostEqual(s['measured_fps_native'], 30.0, places=6)
         self.assertEqual(s['sizes_seen'], {'1920x1080': 31, '1280x720': 1})
         self.assertAlmostEqual(s['first_frame_s'], 0.1)
+
+    def test_the_hat_verdict_judges_the_worst_gap(self):
+        P = _load('container/perception_load.py', 'station_bench_perception_load')
+        # Fast polls around one 0.9 s stall: the mean interval says 4.3 polls/s
+        # (the old verdict passed it), the worst gap says the hat stalled.
+        r = P.trial_numbers(0.05, 1.35, [0.0, 0.1, 0.2, 0.3, 1.2, 1.3, 1.4])
+        self.assertGreater(r['hat_polls_per_s_interval'], 2.0)
+        self.assertAlmostEqual(r['hat_max_gap_s'], 0.9)
+        self.assertFalse(r['pass_hat'])
+        ok = P.trial_numbers(0.5, 1.7, [0.0, 0.45, 0.9, 1.35, 1.8, 2.25])
+        self.assertTrue(ok['pass_hat'])
+        # A trial cut by Ctrl+C (the hat thread stops at once) is not judged.
+        ends = [0.0, 0.2, 0.4]
+        self.assertIsNone(P.trial_record(7, 0.3, 0.9, 14, 0, ends, [False] * 3,
+                                         interrupted=True))
+        rec = P.trial_record(1, 0.1, 0.35, 14, 3, ends, [True, True, False],
+                             interrupted=False)
+        self.assertEqual((rec['trial'], rec['detects'], rec['grasp_tag_hits'],
+                          rec['hat_seen_polls']), (1, 14, 3, 1))
+        self.assertTrue(rec['pass_grasp'])
+        self.assertAlmostEqual(B.B4_HAT_MAX_GAP_S, 0.5)
 
     def test_perception_trial_numbers(self):
         P = _load('container/perception_load.py', 'station_bench_perception_load')
@@ -376,12 +570,25 @@ class Tools(unittest.TestCase):
         self.assertIsNone(r.check(dict(Checks.CAM_OK)))          # the same stored check
         self.assertEqual(r.check(dict(Checks.CAM_OK, rms_mm=1.3)), 'camera')
         self.assertEqual(r.tally.total('camera'), 2)
-        changed, dur = r.session(0.0, {'state': 'ENTERING', 'generation': 5, 'verified': False})
+        resolved = dict(Checks.CAM_OK, ref_ids=[], rms_mm=0.9)
+        self.assertEqual(r.check(resolved), 'resolve')           # never 'unknown'
+        self.assertEqual(r.check(dict(resolved, result='RESOLVE_REFUSED')), 'resolve')
+        self.assertEqual(r.tally.total('camera'), 2)             # not a camera check
+        self.assertEqual(r.tally.total('resolve'), 2)
+        # The owner's last re-solve job: a change is logged once.
+        self.assertFalse(r.job({'job_id': 0, 'job_state': 'none', 'message': ''}))
+        self.assertTrue(r.job({'job_id': 4, 'job_state': 'running', 'message': ''}))
+        self.assertFalse(r.job({'job_id': 4, 'job_state': 'running', 'message': ''}))
+        self.assertTrue(r.job({'job_id': 4, 'job_state': 'failed', 'message': 'x'}))
+        # Logging starts while no session runs; the entry is seen from its start.
+        changed, dur = r.session(0.0, {'state': 'IDLE', 'generation': 4, 'verified': False})
+        self.assertTrue(changed)
+        changed, dur = r.session(1.0, {'state': 'ENTERING', 'generation': 5, 'verified': False})
         self.assertTrue(changed)
         self.assertIsNone(dur)
-        changed, dur = r.session(1.0, {'state': 'ENTERING', 'generation': 5, 'verified': False})
+        changed, dur = r.session(2.0, {'state': 'ENTERING', 'generation': 5, 'verified': False})
         self.assertFalse(changed)
-        changed, dur = r.session(40.0, {'state': 'ACTIVE', 'generation': 5, 'verified': True})
+        changed, dur = r.session(41.0, {'state': 'ACTIVE', 'generation': 5, 'verified': True})
         self.assertEqual((changed, dur), (True, 40.0))
 
     def test_pick_tally(self):
@@ -450,6 +657,355 @@ class WslPlumbing(unittest.TestCase):
                          (['check_log', '--out', 'x'], []))
 
 
+class _FakeClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+    def sleep(self, dt):
+        self.t += dt
+
+
+class _FakeProc:
+    """A wsl client. ``script`` lists what each TIMED wait does: 'timeout',
+    'ctrl_c' or an exit code. An UNTIMED wait fails the test: on Windows it is
+    the uninterruptible ``WaitForSingleObject(INFINITE)``, so Ctrl+C is never
+    seen while a long tool (check_log, the README's Ctrl+C case) runs."""
+
+    def __init__(self, script, events, stdout=b''):
+        self.script = list(script)
+        self.events = events
+        self.waits = []
+        self.killed = False
+        self.stdin = io.BytesIO()
+        self.stdout = io.BytesIO(stdout)
+
+    def wait(self, timeout=None):
+        if timeout is None:
+            raise AssertionError('an untimed proc.wait(): Ctrl+C cannot interrupt it on Windows')
+        self.waits.append(timeout)
+        step = self.script.pop(0) if self.script else 0
+        if step == 'timeout':
+            raise subprocess.TimeoutExpired('wsl', timeout)
+        if step == 'ctrl_c':
+            raise KeyboardInterrupt
+        self.events.append(('exit', step))
+        return step
+
+    def kill(self):
+        self.killed = True
+
+
+class ContainerRun(unittest.TestCase):
+    def setUp(self):
+        self.R = _load('container_run.py', 'station_bench_container_run_sup')
+
+    def test_waits_in_short_slices_so_ctrl_c_is_seen(self):
+        events = []
+        proc = _FakeProc(['timeout', 'timeout', 0], events)
+        rc, _ = self.R.supervise(proc, interrupt=lambda: events.append('interrupt'),
+                                 tool_state=lambda: 'gone', say=lambda *_: None)
+        self.assertEqual(rc, 0)
+        self.assertTrue(proc.waits and all(t <= 0.5 for t in proc.waits), proc.waits)
+        self.assertNotIn('interrupt', events)
+
+    def test_ctrl_c_waits_for_the_summary_before_the_copy(self):
+        # The race reproduced: after the interrupt the local client is gone at
+        # once, while the container tool is still writing its summary.
+        events, states = [], ['running', 'running', 'running', 'summary']
+        clock = _FakeClock()
+        proc = _FakeProc(['timeout', 'ctrl_c', 130], events)
+
+        def state():
+            s = states.pop(0)
+            events.append(('state', s))
+            return s
+
+        rc, end = self.R.supervise(proc, interrupt=lambda: events.append('interrupt'),
+                                   tool_state=state, clock=clock, sleep=clock.sleep,
+                                   say=lambda *_: None)
+        self.assertEqual(end, 'summary')
+        self.assertEqual(events[0], 'interrupt')
+        self.assertEqual([e for e in events if e[0] == 'state'][-1], ('state', 'summary'))
+        self.assertEqual(states, [])                    # it waited for the summary
+        self.assertNotIn(None, proc.waits)
+
+    def test_the_wait_for_the_summary_is_bounded(self):
+        clock = _FakeClock()
+        proc = _FakeProc(['ctrl_c', 130], [])
+        rc, end = self.R.supervise(proc, interrupt=lambda: None,
+                                   tool_state=lambda: 'running', done_timeout_s=60.0,
+                                   clock=clock, sleep=clock.sleep, say=lambda *_: None)
+        self.assertEqual(end, 'timeout')
+        self.assertGreaterEqual(clock.t, 60.0)
+        self.assertLess(clock.t, 62.0)
+
+    def test_main_relays_the_console_and_copies_after_the_summary(self):
+        R, W = self.R, self.R.W
+        events = []
+        popen_kwargs = {}
+        proc = _FakeProc(['timeout', 'ctrl_c', 130], events,
+                         stdout='listening …\nwrote /tmp/x_summary.json\n'.encode('utf-8'))
+        states = ['running', 'summary']
+
+        def fake_popen(argv, **kw):
+            popen_kwargs.update(kw)
+            return proc
+
+        saved = {n: getattr(W, n, None) for n in (
+            'push_file', 'pull_dir', 'interrupt', 'container_tool_state', 'distro_name')}
+        saved_popen = R.subprocess.Popen
+        out = io.StringIO()
+        try:
+            W.push_file = lambda *a, **k: None
+            W.distro_name = lambda: 'EduBotics'
+            W.interrupt = lambda *a, **k: events.append('interrupt')
+            W.container_tool_state = lambda *a, **k: (events.append('state'), states.pop(0))[1]
+            W.pull_dir = lambda *a, **k: (events.append('pull'), ['a_summary.json'])[1]
+            R.subprocess.Popen = fake_popen
+            with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(out):
+                R.main(['check_log', '--out', d])
+        finally:
+            for n, v in saved.items():
+                if v is None:
+                    if hasattr(W, n):
+                        delattr(W, n)
+                else:
+                    setattr(W, n, v)
+            R.subprocess.Popen = saved_popen
+        order = [e for e in events if e in ('interrupt', 'state', 'pull')]
+        self.assertEqual(order, ['interrupt', 'state', 'state', 'pull'])
+        self.assertIs(popen_kwargs.get('stdout'), subprocess.PIPE)   # relayed, never lost
+        self.assertIn('wrote /tmp/x_summary.json', out.getvalue())
+
+    def test_the_tool_state_script_and_its_answer(self):
+        W = _load('wsl_docker.py', 'wsl_docker')
+        s = W.tool_state_script('/tmp/station_bench/check_log.pid',
+                                '/tmp/station_bench/out/check_log_1').decode()
+        self.assertIn('/tmp/station_bench/out/check_log_1/*_summary.json', s)
+        self.assertIn('kill -0', s)
+        self.assertEqual(W.parse_tool_state('summary\n'), 'summary')
+        self.assertEqual(W.parse_tool_state('noise\nrunning\n'), 'running')
+        self.assertEqual(W.parse_tool_state('gone'), 'gone')
+        self.assertIsNone(W.parse_tool_state(''))
+        self.assertIsNone(W.parse_tool_state('Error: No such container'))
+
+
+class _ToggleWorld:
+    """A fake bridge + session for run_logger's Toggler, on a fake clock. A
+    session (the page's „Station starten") appears at ``session_at``; the
+    Studio stream sends frames to the server while it is on."""
+
+    def __init__(self, session_at=None, stale_at=None):
+        self.clock = _FakeClock()
+        self.session_at = session_at
+        self.stale_at = stale_at
+        self.sent = []                  # (t, on) of every POST /station/stream
+        self.state_calls = []
+        self.frames = 0
+        self._last_t = 0.0
+
+    def _session(self):
+        return self.session_at is not None and self.clock.t >= self.session_at
+
+    def _advance_frames(self):
+        on = bool(self.sent) and self.sent[-1][1]
+        if on or self._session():
+            self.frames += int(round((self.clock.t - self._last_t) * 15))
+        self._last_t = self.clock.t
+
+    def session_state(self):
+        self.state_calls.append(self.clock.t)
+        if self.stale_at is not None and self.clock.t >= self.stale_at:
+            return 'IDLE', 30.0
+        return ('ACTIVE' if self._session() else 'IDLE'), 0.1
+
+    def bridge_status(self):
+        on = (bool(self.sent) and self.sent[-1][1]) or self._session()
+        return {'enabled': True, 'stream': 'on' if on else 'off'}
+
+    def stream(self, on):
+        self._advance_frames()
+        self.sent.append((self.clock.t, on))
+        return 200, {'ok': True}
+
+    def station_total(self):
+        self._advance_frames()
+        return self.frames
+
+    def toggler(self, R, on_s=2.0, off_s=2.0):
+        return R.Toggler(on_s=on_s, off_s=off_s, session_state=self.session_state,
+                         bridge_status=self.bridge_status, stream=self.stream,
+                         write_row=lambda c, ph: {'scene_fps': 30.0, 'station_fps': None},
+                         reset_gap=lambda: None, gap=lambda: 33.0, record=lambda r: None,
+                         station_total=self.station_total, clock=self.clock,
+                         sleep=self.clock.sleep, say=lambda *_: None)
+
+
+class RunLoggerToggle(unittest.TestCase):
+    def setUp(self):
+        self.R = _load('run_logger.py', 'station_bench_run_logger_toggle')
+
+    def _offs_after(self, w, t):
+        return [x for x in w.sent if not x[1] and x[0] >= t]
+
+    def test_a_session_during_an_on_phase_stops_toggling_and_sends_no_off(self):
+        w = _ToggleWorld(session_at=5.0)        # cycle 2's on phase is 4..6
+        t = w.toggler(self.R)
+        t.run(10)
+        t.final_off()
+        self.assertEqual(self._offs_after(w, 5.0), [], w.sent)   # the page owns it now
+        self.assertEqual([x for x in w.sent if x[1]], [(0.0, True), (4.0, True)])
+        self.assertLessEqual(len(t.toggles), 2)
+
+    def test_a_guard_refusal_after_cycle_one_sends_no_final_off(self):
+        w = _ToggleWorld(session_at=3.0)        # appears in cycle 1's off phase
+        t = w.toggler(self.R)
+        t.run(10)
+        t.final_off()
+        self.assertEqual(w.sent, [(0.0, True), (2.0, False)])
+
+    def test_an_unknown_session_answer_is_treated_like_a_session(self):
+        w = _ToggleWorld(stale_at=5.0)
+        t = w.toggler(self.R)
+        t.run(10)
+        t.final_off()
+        self.assertEqual(self._offs_after(w, 5.0), [], w.sent)
+
+    def test_ctrl_c_in_an_on_phase_sends_off_only_without_a_session(self):
+        w = _ToggleWorld()
+        t = w.toggler(self.R)
+        calls = [0]
+
+        def sleep(dt):
+            calls[0] += 1
+            if calls[0] == 3:
+                raise KeyboardInterrupt
+            w.clock.sleep(dt)
+
+        t.sleep = sleep
+        with self.assertRaises(KeyboardInterrupt):
+            t.run(5)
+        t.final_off()
+        self.assertEqual(w.sent[-1][1], False)            # ours: switched off
+        self.assertFalse(t.toggles)                        # the cycle never finished
+        w2 = _ToggleWorld(session_at=0.5)
+        t2 = w2.toggler(self.R)
+        t2.run(5)
+        t2.final_off()
+        self.assertEqual(w2.sent, [(0.0, True)])           # the page's: left alone
+        self.assertEqual([r['completed'] for r in t2.toggles], [False])
+
+    def test_without_a_session_the_stream_is_left_off(self):
+        w = _ToggleWorld()
+        t = w.toggler(self.R)
+        t.run(2)
+        t.final_off()
+        self.assertEqual(w.sent[-1][1], False)
+        self.assertEqual(len(t.toggles), 2)
+
+    def test_the_session_is_polled_at_about_4_hz_during_the_on_phase(self):
+        w = _ToggleWorld()
+        t = w.toggler(self.R, on_s=2.0)
+        t.run(1)
+        in_on = [c for c in w.state_calls if 0.0 < c < 2.0]
+        self.assertGreaterEqual(len(in_on), 7, w.state_calls)
+
+    def test_each_cycle_records_the_station_frames_that_reached_the_server(self):
+        w = _ToggleWorld()
+        t = w.toggler(self.R)
+        t.run(2)
+        self.assertEqual([r['station_frames'] for r in t.toggles], [30, 30])
+
+    def test_the_watcher_polls_the_session_at_4_hz_and_counts_station_frames(self):
+        R = self.R
+        args = R.watcher_args(toggle=True)
+        self.assertEqual(args[args.index('--session-every') + 1], '0.25')
+        self.assertIn(B.STATION_TOPIC, args)
+        self.assertIn(B.SCENE_TOPIC, args)
+        plain = R.watcher_args(toggle=False)
+        self.assertNotIn(B.STATION_TOPIC, plain)
+        latest = R.Latest()
+        for n in (3, 0, 14):
+            latest.feed(json.dumps({'kind': 'arrival', 'topic': B.STATION_TOPIC, 'frames': n}))
+        self.assertEqual(latest.station_total(), 17)
+
+    def test_toggle_needs_the_container_watcher(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = self.R.main(['--out', d, '--toggle', '3', '--no-container'])
+        self.assertEqual(rc, 2)
+        self.assertIn('--no-container', out.getvalue())
+
+    def test_toggle_mode_skips_the_studio_and_crop_verdicts(self):
+        rows = ([{'stream': 'off', 'scene_fps': 30.0, 'gripper_hz': 25.0}] * 4
+                + [{'stream': 'on', 'scene_fps': 29.5, 'station_fps': 0.0,
+                    'gripper_hz': 25.0}] * 4)
+        toggles = [{'reopen_suspected': False, 'on_ok': True, 'scene_max_gap_ms': 40.0,
+                    'station_frames': 30}] * 3 + [{'reopen_suspected': False, 'on_ok': True,
+                                                   'scene_max_gap_ms': 40.0,
+                                                   'station_frames': 0}]
+        args = types.SimpleNamespace(label='toggle', gripper_baseline_hz=25.0, toggle=200)
+        s = self.R.summarize(rows, toggles, args)
+        v = s['verdicts']
+        self.assertFalse([k for k in v if 'Studio >= 14' in k or 'crop >= 29' in k], v)
+        self.assertEqual(s['toggles']['cycles_without_station_frames'], 1)
+        key = [k for k in v if 'reached the server' in k]
+        self.assertEqual(len(key), 1, v)
+        self.assertEqual(v[key[0]], 'FAIL')
+
+
+def _logical_lines(text):
+    """Dockerfile instructions with ``\\`` continuations joined (comment
+    lines inside a continuation are dropped, as Docker does)."""
+    out, cur = [], ''
+    for raw in text.splitlines():
+        if cur and raw.lstrip().startswith('#'):
+            continue
+        line = raw.rstrip()
+        if line.endswith('\\'):
+            cur += line[:-1] + ' '
+            continue
+        out.append(cur + line)
+        cur = ''
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _copy_sources(text):
+    """``[(instruction_text, [sources])]`` of every COPY / ADD that reads the
+    build context (``--from`` stages excluded), in the shell form, the JSON
+    form and across ``\\`` continuation lines."""
+    out = []
+    for line in _logical_lines(text):
+        m = re.match(r'\s*(COPY|ADD)\s+(.*)$', line, re.I)
+        if not m:
+            continue
+        words = m.group(2).split()
+        flags = [w for w in words if w.startswith('--')]
+        if any(f.startswith('--from') for f in flags):
+            continue
+        rest = ' '.join(w for w in words if not w.startswith('--')).strip()
+        if rest.startswith('['):
+            try:
+                args = [str(a) for a in json.loads(rest)]
+            except ValueError:
+                args = rest.strip('[]').replace('"', ' ').replace(',', ' ').split()
+        else:
+            args = rest.split()
+        out.append((' '.join(line.split()), args[:-1]))
+    return out
+
+
+def _from_tools(src):
+    return src.lstrip('./').startswith('tools/') or src.startswith('../tools') \
+        or 'station_bench' in src
+
+
 class NeverShipped(unittest.TestCase):
     """Nothing under tools/ reaches an image, the installer or the GUI build."""
 
@@ -457,26 +1013,35 @@ class NeverShipped(unittest.TestCase):
         return [p for p in REPO.rglob('Dockerfile*')
                 if 'node_modules' not in p.parts and p.is_file()]
 
+    def test_the_fence_reads_continued_and_json_instructions(self):
+        text = ('FROM x\n'
+                'COPY \\\n'
+                '    tools/station_bench/run_logger.py \\\n'
+                '    /opt/x/\n'
+                'RUN echo tools/ok\n'
+                'COPY --chown=1:1 \\\n  ./tools/a.py /b/\n'
+                'ADD ["tools/station_bench", "/opt/y"]\n'
+                'COPY --from=build /tools/z /c\n'
+                'COPY robotis_ai_setup/x /d\n')
+        found = [s for _, srcs in _copy_sources(text) for s in srcs if _from_tools(s)]
+        self.assertEqual(found, ['tools/station_bench/run_logger.py', './tools/a.py',
+                                 'tools/station_bench'])
+
     def test_no_dockerfile_copies_from_tools(self):
         files = self._dockerfiles()
         self.assertGreater(len(files), 5)
         for df in files:
-            for line in df.read_text(encoding='utf-8').splitlines():
-                m = re.match(r'\s*(COPY|ADD)\s+(.*)$', line, re.I)
-                if not m or '--from' in m.group(2):
-                    continue
-                srcs = [w for w in m.group(2).split() if not w.startswith('--')][:-1]
+            for instr, srcs in _copy_sources(df.read_text(encoding='utf-8')):
                 for s in srcs:
-                    self.assertFalse(s.startswith(('tools/', './tools/', '../tools')),
-                                     f'{df.relative_to(REPO)}: {line.strip()}')
-                    self.assertNotIn('station_bench', s, f'{df.relative_to(REPO)}')
+                    self.assertFalse(_from_tools(s), f'{df.relative_to(REPO)}: {instr}')
 
     def test_the_repo_root_build_context_copies_named_files_only(self):
         df = REPO / 'robotis_ai_setup' / 'runpod_training' / 'Dockerfile'
-        for line in df.read_text(encoding='utf-8').splitlines():
-            m = re.match(r'\s*COPY\s+(.*)$', line)
-            if m and '--from' not in m.group(1):
-                self.assertTrue(m.group(1).split()[0].startswith('robotis_ai_setup/'), line)
+        copies = _copy_sources(df.read_text(encoding='utf-8'))
+        self.assertTrue(copies)
+        for instr, srcs in copies:
+            for src in srcs:
+                self.assertTrue(src.startswith('robotis_ai_setup/'), instr)
 
     def test_build_scripts_installer_and_gui_spec_name_no_tools_path(self):
         for rel in ('robotis_ai_setup/docker/build-images.sh',

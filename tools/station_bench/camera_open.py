@@ -73,6 +73,16 @@ def summarize_frames(frames, want=(1920, 1080)):
     }
 
 
+def native_rate_verdict(frames_native_size, measured_fps_native):
+    """Pure: B1's native-rate verdict for one open. A variant that read for
+    its whole duration and delivered fewer than two 1920×1080 frames (no
+    native frame at all, another size, or an open that failed) has no rate
+    ≥ 29 fps: that is a FAIL, never UNKNOWN."""
+    if not frames_native_size or measured_fps_native is None:
+        return 'FAIL'
+    return B.verdict(measured_fps_native, B.B1_CROP_MIN_FPS, at_least=True)
+
+
 def open_once(win_camera, constants, index, method, duration_s):
     old = constants.STATION_OPEN_METHOD
     constants.STATION_OPEN_METHOD = method
@@ -81,7 +91,9 @@ def open_once(win_camera, constants, index, method, duration_s):
     try:
         cap, info = win_camera.open_station_capture(index)
     except Exception as e:  # noqa: BLE001 — CameraUnavailableError carries German text
-        rec.update(open_s=time.perf_counter() - t0, error=str(e))
+        rec.update(open_s=time.perf_counter() - t0, error=str(e), frames_native_size=0,
+                   measured_fps_native=None,
+                   b1_native_rate_ok=native_rate_verdict(0, None))
         return rec, []
     finally:
         constants.STATION_OPEN_METHOD = old
@@ -107,8 +119,8 @@ def open_once(win_camera, constants, index, method, duration_s):
         cap.release()
     rec.update(summarize_frames(frames, (constants.STATION_NATIVE_WIDTH,
                                          constants.STATION_NATIVE_HEIGHT)))
-    rec['b1_native_rate_ok'] = B.verdict(rec['measured_fps_native'], B.B1_CROP_MIN_FPS,
-                                         at_least=True)
+    rec['b1_native_rate_ok'] = native_rate_verdict(rec['frames_native_size'],
+                                                   rec['measured_fps_native'])
     return rec, frames
 
 

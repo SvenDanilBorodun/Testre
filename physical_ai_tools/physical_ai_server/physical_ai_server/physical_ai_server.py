@@ -6889,6 +6889,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             except Exception as e:  # noqa: BLE001
                 self.get_logger().warning(f'replay publisher pre-create failed: {e}')
 
+        _calibration_changed_de = ''
+        if getattr(_station, 'rig', False):
+            from physical_ai_server.station import texts_de as _station_texts
+            _calibration_changed_de = _station_texts.GATE_CALIBRATION_CHANGED_DE
         # F1 — atomic claim: hold _mode_lock around the ownership re-check AND the
         # on_manual claim so a concurrent recording/inference/workflow start can't
         # slip in. The claim MUST live here (not in the daemon) so success=True
@@ -6909,13 +6913,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # check was built from. A writer that swapped since revoked
             # verification; none can claim while this replay holds on_manual.
             if getattr(_station, 'rig', False):
-                from physical_ai_server.station import texts_de as _station_texts
                 cal_now, station_refusal = _station.bind_operation()
                 if station_refusal:
                     response.message = station_refusal
                     return response
                 if cal_now is not station_cal:
-                    response.message = _station_texts.GATE_CALIBRATION_CHANGED_DE
+                    response.message = _calibration_changed_de
                     return response
             existing = self._manual_replay_thread
             if existing is not None and existing.is_alive():

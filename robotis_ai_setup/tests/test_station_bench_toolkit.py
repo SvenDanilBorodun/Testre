@@ -712,6 +712,171 @@ class ContainerRun(unittest.TestCase):
         self.assertIsNone(W.parse_tool_state('Error: No such container'))
 
 
+class _ToggleWorld:
+    """A fake bridge + session for run_logger's Toggler, on a fake clock. A
+    session (the page's „Station starten") appears at ``session_at``; the
+    Studio stream sends frames to the server while it is on."""
+
+    def __init__(self, session_at=None, stale_at=None):
+        self.clock = _FakeClock()
+        self.session_at = session_at
+        self.stale_at = stale_at
+        self.sent = []                  # (t, on) of every POST /station/stream
+        self.state_calls = []
+        self.frames = 0
+        self._last_t = 0.0
+
+    def _session(self):
+        return self.session_at is not None and self.clock.t >= self.session_at
+
+    def _advance_frames(self):
+        on = bool(self.sent) and self.sent[-1][1]
+        if on or self._session():
+            self.frames += int(round((self.clock.t - self._last_t) * 15))
+        self._last_t = self.clock.t
+
+    def session_state(self):
+        self.state_calls.append(self.clock.t)
+        if self.stale_at is not None and self.clock.t >= self.stale_at:
+            return 'IDLE', 30.0
+        return ('ACTIVE' if self._session() else 'IDLE'), 0.1
+
+    def bridge_status(self):
+        on = (bool(self.sent) and self.sent[-1][1]) or self._session()
+        return {'enabled': True, 'stream': 'on' if on else 'off'}
+
+    def stream(self, on):
+        self._advance_frames()
+        self.sent.append((self.clock.t, on))
+        return 200, {'ok': True}
+
+    def station_total(self):
+        self._advance_frames()
+        return self.frames
+
+    def toggler(self, R, on_s=2.0, off_s=2.0):
+        return R.Toggler(on_s=on_s, off_s=off_s, session_state=self.session_state,
+                         bridge_status=self.bridge_status, stream=self.stream,
+                         write_row=lambda c, ph: {'scene_fps': 30.0, 'station_fps': None},
+                         reset_gap=lambda: None, gap=lambda: 33.0, record=lambda r: None,
+                         station_total=self.station_total, clock=self.clock,
+                         sleep=self.clock.sleep, say=lambda *_: None)
+
+
+class RunLoggerToggle(unittest.TestCase):
+    def setUp(self):
+        self.R = _load('run_logger.py', 'station_bench_run_logger_toggle')
+
+    def _offs_after(self, w, t):
+        return [x for x in w.sent if not x[1] and x[0] >= t]
+
+    def test_a_session_during_an_on_phase_stops_toggling_and_sends_no_off(self):
+        w = _ToggleWorld(session_at=5.0)        # cycle 2's on phase is 4..6
+        t = w.toggler(self.R)
+        t.run(10)
+        t.final_off()
+        self.assertEqual(self._offs_after(w, 5.0), [], w.sent)   # the page owns it now
+        self.assertEqual([x for x in w.sent if x[1]], [(0.0, True), (4.0, True)])
+        self.assertLessEqual(len(t.toggles), 2)
+
+    def test_a_guard_refusal_after_cycle_one_sends_no_final_off(self):
+        w = _ToggleWorld(session_at=3.0)        # appears in cycle 1's off phase
+        t = w.toggler(self.R)
+        t.run(10)
+        t.final_off()
+        self.assertEqual(w.sent, [(0.0, True), (2.0, False)])
+
+    def test_an_unknown_session_answer_is_treated_like_a_session(self):
+        w = _ToggleWorld(stale_at=5.0)
+        t = w.toggler(self.R)
+        t.run(10)
+        t.final_off()
+        self.assertEqual(self._offs_after(w, 5.0), [], w.sent)
+
+    def test_ctrl_c_in_an_on_phase_sends_off_only_without_a_session(self):
+        w = _ToggleWorld()
+        t = w.toggler(self.R)
+        calls = [0]
+
+        def sleep(dt):
+            calls[0] += 1
+            if calls[0] == 3:
+                raise KeyboardInterrupt
+            w.clock.sleep(dt)
+
+        t.sleep = sleep
+        with self.assertRaises(KeyboardInterrupt):
+            t.run(5)
+        t.final_off()
+        self.assertEqual(w.sent[-1][1], False)            # ours: switched off
+        self.assertFalse(t.toggles)                        # the cycle never finished
+        w2 = _ToggleWorld(session_at=0.5)
+        t2 = w2.toggler(self.R)
+        t2.run(5)
+        t2.final_off()
+        self.assertEqual(w2.sent, [(0.0, True)])           # the page's: left alone
+        self.assertEqual([r['completed'] for r in t2.toggles], [False])
+
+    def test_without_a_session_the_stream_is_left_off(self):
+        w = _ToggleWorld()
+        t = w.toggler(self.R)
+        t.run(2)
+        t.final_off()
+        self.assertEqual(w.sent[-1][1], False)
+        self.assertEqual(len(t.toggles), 2)
+
+    def test_the_session_is_polled_at_about_4_hz_during_the_on_phase(self):
+        w = _ToggleWorld()
+        t = w.toggler(self.R, on_s=2.0)
+        t.run(1)
+        in_on = [c for c in w.state_calls if 0.0 < c < 2.0]
+        self.assertGreaterEqual(len(in_on), 7, w.state_calls)
+
+    def test_each_cycle_records_the_station_frames_that_reached_the_server(self):
+        w = _ToggleWorld()
+        t = w.toggler(self.R)
+        t.run(2)
+        self.assertEqual([r['station_frames'] for r in t.toggles], [30, 30])
+
+    def test_the_watcher_polls_the_session_at_4_hz_and_counts_station_frames(self):
+        R = self.R
+        args = R.watcher_args(toggle=True)
+        self.assertEqual(args[args.index('--session-every') + 1], '0.25')
+        self.assertIn(B.STATION_TOPIC, args)
+        self.assertIn(B.SCENE_TOPIC, args)
+        plain = R.watcher_args(toggle=False)
+        self.assertNotIn(B.STATION_TOPIC, plain)
+        latest = R.Latest()
+        for n in (3, 0, 14):
+            latest.feed(json.dumps({'kind': 'arrival', 'topic': B.STATION_TOPIC, 'frames': n}))
+        self.assertEqual(latest.station_total(), 17)
+
+    def test_toggle_needs_the_container_watcher(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = self.R.main(['--out', d, '--toggle', '3', '--no-container'])
+        self.assertEqual(rc, 2)
+        self.assertIn('--no-container', out.getvalue())
+
+    def test_toggle_mode_skips_the_studio_and_crop_verdicts(self):
+        rows = ([{'stream': 'off', 'scene_fps': 30.0, 'gripper_hz': 25.0}] * 4
+                + [{'stream': 'on', 'scene_fps': 29.5, 'station_fps': 0.0,
+                    'gripper_hz': 25.0}] * 4)
+        toggles = [{'reopen_suspected': False, 'on_ok': True, 'scene_max_gap_ms': 40.0,
+                    'station_frames': 30}] * 3 + [{'reopen_suspected': False, 'on_ok': True,
+                                                   'scene_max_gap_ms': 40.0,
+                                                   'station_frames': 0}]
+        args = types.SimpleNamespace(label='toggle', gripper_baseline_hz=25.0, toggle=200)
+        s = self.R.summarize(rows, toggles, args)
+        v = s['verdicts']
+        self.assertFalse([k for k in v if 'Studio >= 14' in k or 'crop >= 29' in k], v)
+        self.assertEqual(s['toggles']['cycles_without_station_frames'], 1)
+        key = [k for k in v if 'reached the server' in k]
+        self.assertEqual(len(key), 1, v)
+        self.assertEqual(v[key[0]], 'FAIL')
+
+
 class NeverShipped(unittest.TestCase):
     """Nothing under tools/ reaches an image, the installer or the GUI build."""
 

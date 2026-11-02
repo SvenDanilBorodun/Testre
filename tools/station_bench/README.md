@@ -102,10 +102,24 @@ py run_logger.py --out C:\bench\b1 --label toggle --toggle 200 --on-s 2 --off-s 
   CPU recorded for both; 200 switches without a camera reopen or a recording-stream gap.
 * The summary reports the crop's mean AND every 2 s window below 29: the spec gives no
   window, so both are there to judge.
-* `--toggle N` first checks, read-only, that `/station/session` is `IDLE` and the bridge
-  reports the station enabled with the stream off; it re-checks before every cycle and
-  stops if a session appears. Each `on` phase is `--on-s` (≤ 8 s, inside the 10 s lease),
-  sent with the page's `Origin: http://localhost`; Ctrl+C always sends `off`.
+* `--toggle N` needs the in-container watcher (it refuses `--no-container`). It first
+  checks, read-only, that `/station/session` is `IDLE` and the bridge reports the station
+  enabled with the stream off; during the run the watcher polls the session at 4 Hz and
+  every phase checks it every 0.25 s. Once a non-`IDLE` state — or no answer fresher than
+  2 s — is seen, toggling stops and NO further `off` is sent (a page that holds a session
+  owns the stream; our last `on` ends by the bridge's 10 s lease). Each `on` phase is
+  `--on-s` (≤ 8 s, inside the lease), sent with the page's `Origin: http://localhost`.
+  The final `off` (also on Ctrl+C) is sent only when this tool turned the stream on and no
+  session appeared.
+* **Toggle mode has no crop or Studio verdict:** the bridge's `station_fps` moves only after
+  2 s of sending, so a short `on` reads ≈ 0 (a false FAIL), and the crop's 2 s windows
+  straddle the switches. Delivery is proven per cycle instead: the watcher also subscribes
+  `/station_scene` (the server's own QoS, one more DDS copy of the 1080p stream while
+  toggling) and each cycle's `station_frames` counts the frames that reached the server
+  from its `on` to the end of its `off` phase (the watcher reports per second, so keep
+  `--off-s` ≥ 1 s or a count can slip into the next cycle). The summary reports
+  `cycles_without_station_frames`; any cycle with 0 fails the delivery verdict. The steady
+  rates (crop ≥ 29, Studio ≥ 14) are runs 2 and 3.
 * **Limits (reopen / gap):** the bridge has no reopen counter. Its only evidence is
   `error_de` („Stationskamera liefert keine Bilder — wird neu geöffnet …", visible for
   the ~3 s a reopen takes; polled at 4 Hz during toggling) and a dip of `scene_fps`. The

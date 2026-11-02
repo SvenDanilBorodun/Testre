@@ -612,14 +612,18 @@ def _segment(name):
     return ast.get_source_segment(src, fn)
 
 
-@pytest.mark.parametrize('name,claim', [
-    ('workshop_jog_callback', "self._assert_no_other_active('manual')"),
-    ('workshop_replay_callback', "self._assert_no_other_active('manual')"),
+@pytest.mark.parametrize('name,gate', [
+    ('workshop_jog_callback', '_station.gate_motion()'),
+    ('workshop_replay_callback', '_station.bind_operation()'),
 ])
-def test_the_d4_gate_runs_at_operation_start_before_the_claim(name, claim):
+def test_the_d4_gate_runs_at_operation_start_before_the_claim(name, gate):
+    """Text fence beside the behaviour tests (test_station_d4_manual_gate.py): the
+    gate's first check precedes the arbiter; its re-check sits inside the claim."""
     seg = _segment(name)
-    i_gate = seg.index('_station.gate_motion()')
-    assert i_gate < seg.index(claim), name
+    claim = "self._assert_no_other_active('manual')"
+    assert seg.index(gate) < seg.index(claim), name
+    hold = seg.index('with self._mode_lock:')
+    assert hold < seg.index('_station.bind_operation()', hold), name
 
 
 def test_a_real_run_binds_before_the_torque_assert_and_continue_step_check_the_digest():

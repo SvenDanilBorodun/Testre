@@ -530,6 +530,22 @@ class StationService:
                 return None, reason
             return {'camera': T.STATION_CAMERA, 'calibration': self.calibration}, ''
 
+    def bind_operation(self):
+        """(StationCalibration, '') or (None, reason) for a jog, a replay or a
+        click-to-Ziel (§5.4): the D4 gate and the calibration it was verified
+        against, captured in ONE hold of _station_lock. A jog or a replay calls it
+        again inside its _mode_lock claim, so a commit, re-solve or restore that
+        claimed, swapped and released since its first check is refused (the swap
+        revoked verification), and none can claim while the operation holds
+        on_manual."""
+        if not self.rig:
+            return None, ''
+        with self.lock:
+            reason = self.gate_refusal_locked()
+            if reason:
+                return None, reason
+            return self.calibration, ''
+
     def continue_refusal(self, bound_digest):
         if not self.rig:
             return ''

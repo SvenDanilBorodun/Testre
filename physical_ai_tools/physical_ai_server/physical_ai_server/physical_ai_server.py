@@ -412,6 +412,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # never the reverse; every hold O(1); nothing blocking under it.
         self._station_lock = threading.Lock()
         self._station = None
+        # The StationCalibration a jog or a replay captured at its start (plan
+        # §5.4), per thread: _load_workflow_calibration serves it while it is set.
+        self._station_op = threading.local()
         # F4 — one-shot cleanup timer + flag when a manual recording hits
         # RECORD_MAX_S (re-torque + clear on_manual on the executor, off the
         # sampler which must never block).
@@ -741,6 +744,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         if station is None or not station.rig:
             return ''
         return station.gate_motion()
+
+    def _station_bind_op(self, cal):
+        """Serve ``cal`` (a jog's or a replay's captured StationCalibration) to
+        _load_workflow_calibration on this thread; None clears it."""
+        local = getattr(self, '_station_op', None)
+        if local is not None:
+            local.calibration = cal
 
     def _station_run_binding(self, binding):
         """The per-run binding of a verified station rig (§5.4): the station
@@ -5037,7 +5047,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         from physical_ai_server.station import texts_de as ST
         response.success = False
         response.world_x = response.world_y = response.world_z = 0.0
-        refusal = self._station.gate_motion()
+        # D4 and the calibration read in ONE hold of _station_lock (§5.4), so a
+        # writer's swap can never slip between the check and the read.
+        cal, refusal = self._station.bind_operation()
         if refusal:
             response.message = refusal
             return response
@@ -5050,8 +5062,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 and 0.0 <= px < width and 0.0 <= py < height):
             response.message = ST.MARK_OUT_OF_IMAGE_DE
             return response
-        with self._station_lock:
-            cal = self._station.calibration
         if cal is None:
             response.message = ST.GATE_NOT_CONFIGURED_DE
             return response
@@ -5539,6 +5549,17 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             if not ok:
                 response.message = msg
                 return response
+            # D4, atomic with the claim (plan v6.13 §5.4): re-check verified and
+            # capture the station calibration under _mode_lock → _station_lock. A
+            # commit / re-solve / restore that claimed, swapped and released since
+            # the check above revoked verification and is refused here; none can
+            # claim while this jog holds on_manual.
+            station_cal = None
+            if getattr(_station, 'rig', False):
+                station_cal, station_refusal = _station.bind_operation()
+                if station_refusal:
+                    response.message = station_refusal
+                    return response
             self._manual_transient_ops += 1
             self._recompute_on_manual_locked()
             exit_gen = self._manual_exit_gen
@@ -5547,6 +5568,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # can never zero this fresh ref while re-torquing an "idle" session.
             self._manual_last_activity_mono = time.monotonic()
         keep_session = False  # set True to retain the ref (limp-arm protection)
+        if station_cal is not None:
+            self._station_bind_op(station_cal)
         try:
             # Batch 2b: a driven jog while a hand-guide RECORDING is in flight would
             # move the limp arm out from under the student's hand and corrupt the
@@ -5695,6 +5718,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 except RuntimeError:
                     pass
         finally:
+            if station_cal is not None:
+                self._station_bind_op(None)
             # FIX 1 — release this transient jog's ref under the arbiter lock,
             # unless we must retain it to protect a possibly-limp arm (a torque-ON
             # failure left keep_session True; the idle watchdog resets a retained
@@ -6705,10 +6730,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             return response
         # D4 (owner sign-off 2026-11-01, Rule §2): on a camera-station rig no
         # real Roboter Studio motion until this session's camera and robot
-        # checks passed. Checked at operation start only.
+        # checks passed. Checked at operation start, capturing the station
+        # calibration the lead-in floor check below is built from (plan §5.4);
+        # re-checked atomically with the claim under _mode_lock below.
         _station = getattr(self, '_station', None)
-        station_refusal = (_station.gate_motion()
-                           if getattr(_station, 'rig', False) else '')
+        station_cal, station_refusal = (_station.bind_operation()
+                                        if getattr(_station, 'rig', False) else (None, ''))
         if station_refusal:
             response.message = station_refusal
             return response
@@ -6792,7 +6819,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # above-table by construction; the current-pose→start interpolation is
         # not). Returns None (no check) when the floor is unknown → lead-in behaves
         # exactly as before.
-        lead_floor = self._build_replay_lead_floor_check()
+        if station_cal is None:
+            lead_floor = self._build_replay_lead_floor_check()
+        else:
+            self._station_bind_op(station_cal)
+            try:
+                lead_floor = self._build_replay_lead_floor_check()
+            finally:
+                self._station_bind_op(None)
         from physical_ai_server.workflow.trajectory_builder import (
             JOINT_VELOCITY_LIMIT_RAD_S as _VL_DEFAULT,
         )
@@ -6870,6 +6904,19 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             if not ok:
                 response.message = msg
                 return response
+            # D4, atomic with the claim (plan v6.13 §5.4): still verified under
+            # _mode_lock → _station_lock, and under the very calibration the floor
+            # check was built from. A writer that swapped since revoked
+            # verification; none can claim while this replay holds on_manual.
+            if getattr(_station, 'rig', False):
+                from physical_ai_server.station import texts_de as _station_texts
+                cal_now, station_refusal = _station.bind_operation()
+                if station_refusal:
+                    response.message = station_refusal
+                    return response
+                if cal_now is not station_cal:
+                    response.message = _station_texts.GATE_CALIBRATION_CHANGED_DE
+                    return response
             existing = self._manual_replay_thread
             if existing is not None and existing.is_alive():
                 response.message = 'Es läuft bereits eine Wiedergabe.'
@@ -7891,7 +7938,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # YAMLs; an unconfigured station rig gets nothing (motion is gated).
         station = getattr(self, '_station', None)
         if station is not None and station.rig:
-            cal = station.calibration
+            bound = getattr(getattr(self, '_station_op', None), 'calibration', None)
+            cal = bound if bound is not None else station.calibration
             return dict(cal.calibration) if cal is not None else {}
         from pathlib import Path
         import os

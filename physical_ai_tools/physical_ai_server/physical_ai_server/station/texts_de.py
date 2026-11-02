@@ -80,6 +80,9 @@ GATE_NOT_CONFIGURED_DE = (
     'ungültig – bitte Lehrkraft: Station einrichten.')
 GATE_NOT_VERIFIED_DE = 'Bitte zuerst den Stations-Check abschließen (Kamera und Roboter).'
 GATE_DIGEST_CHANGED_DE = 'Die Kalibrierung hat sich geändert – bitte das Programm neu starten.'
+# A replay whose floor check was built under a calibration that was replaced
+# (and verified again) before its claim: built again on the next press.
+GATE_CALIBRATION_CHANGED_DE = 'Die Kalibrierung hat sich gerade geändert – bitte noch einmal versuchen.'
 MANUAL_CALIBRATION_REFUSED_DE = (
     'Auf einer Kamerastation wird über „Station einrichten“ kalibriert.')
 MARK_SCENE_REFUSED_DE = 'Im Stationsbetrieb bitte das Stationsbild verwenden.'

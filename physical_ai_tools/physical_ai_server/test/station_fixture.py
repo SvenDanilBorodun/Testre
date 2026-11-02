@@ -8,7 +8,7 @@ way ``code_e2e_smoke.py`` mounts ``rig_emulation.py``). numpy + OpenCV only.
 The shipped ``layout_data.py`` keeps ``OMX-STATION-A`` as ``draft``, which can
 never validate; this module builds a RELEASED copy under its own id
 (``OMX-STATION-TEST``) that tests monkeypatch into ``LAYOUTS`` and the e2e
-bind-mounts as a fixture ``layout_data.py``. Ported from
+copies over the installed module as a fixture ``layout_data.py``. Ported from
 ``v6/evidence-2026-11-01/render_detect.py``.
 """
 

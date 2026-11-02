@@ -1137,24 +1137,28 @@ jobs:
         # → resume (camera re-checked, robot_ok kept) → leave → IDLE; /scene keeps
         # arriving; a recording start is refused while ACTIVE and accepted after.
         # The shipped layout_data.py keeps OMX-STATION-A draft, so a fixture
-        # layout_data.py (a released TEST layout) is bind-mounted read-only over
-        # the installed module; the renderer comes from the checkout's test/.
-        # After both revision checks, so it never runs a stale retag. Image names
-        # go through env: (no expression inside run:).
+        # layout_data.py (a released TEST layout) is mounted next to the script
+        # and copied, inside the throwaway container, over the file that
+        # `import physical_ai_server.station.layout_data` resolves to. Resolved at
+        # run time because the layout differs by image: the amd64 package is a
+        # colcon --symlink-install (site-packages holds only an egg-link and
+        # PYTHONPATH puts build/physical_ai_server, a symlink to src/, first), so
+        # a mount over site-packages is never imported. The renderer comes from
+        # the checkout's test/. After both revision checks, so it never runs a
+        # stale retag. Image names go through env: (no expression inside run:).
         if: matrix.platform == 'amd64'
         timeout-minutes: 10
         env:
           SERVER_IMAGE: ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest
         run: |
           set -e
-          site=/root/ros2_ws/install/physical_ai_server/lib/python3.12/site-packages/physical_ai_server
           docker run --rm --network none --entrypoint bash \
             -v "$GITHUB_WORKSPACE/.github/scripts/station_e2e_smoke.py:/tmp/smoke/station_e2e_smoke.py:ro" \
             -v "$GITHUB_WORKSPACE/robotis_ai_setup/docker/open_manipulator/camera_ingest_node.py:/tmp/smoke/camera_ingest_node.py:ro" \
             -v "$GITHUB_WORKSPACE/physical_ai_tools/physical_ai_server/test/station_fixture.py:/tmp/smoke/station_fixture.py:ro" \
-            -v "$GITHUB_WORKSPACE/.github/scripts/station_fixtures/layout_data.py:$site/station/layout_data.py:ro" \
+            -v "$GITHUB_WORKSPACE/.github/scripts/station_fixtures/layout_data.py:/tmp/smoke/fixture_layout_data.py:ro" \
             "$SERVER_IMAGE" \
-            -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && python3 /tmp/smoke/station_e2e_smoke.py'
+            -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && target=$(python3 -c "import physical_ai_server.station.layout_data as m; print(m.__file__)") && echo "fixture layout_data.py -> $target" && cp /tmp/smoke/fixture_layout_data.py "$target" && python3 /tmp/smoke/station_e2e_smoke.py'
       - name: Pull + assert open-manipulator has Dynamixel SDK + pyserial
         # `serial` is asserted EXPLICITLY, not left to ride on dynamixel_sdk.
         # It is the Feetech driver's only third-party dependency: `feetech_bus.py`

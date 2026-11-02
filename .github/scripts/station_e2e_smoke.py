@@ -8,8 +8,10 @@ mounted next to this file:
   image is not pulled; ``image_source_parity.sh`` proves it ships those bytes);
 * ``station_fixture.py`` — the synthetic mat render and station YAML
   (``physical_ai_server/test/station_fixture.py``);
-* a fixture ``layout_data.py`` (a RELEASED test layout) bind-mounted read-only
-  over the installed module — the shipped one keeps ``OMX-STATION-A`` draft.
+* a fixture ``layout_data.py`` (a RELEASED test layout), which the step copies
+  over the file ``import physical_ai_server.station.layout_data`` resolves to
+  (resolved at run time: the amd64 package is a ``--symlink-install``) — the
+  shipped one keeps ``OMX-STATION-A`` draft.
 
 A fake GUI sender streams 640×480 JPEGs as cam 1 (``scene``) and 1080p renders as
 cam 200 into the real ingest node and server; ``/joint_states`` is faked at a
@@ -54,7 +56,7 @@ def prepare():
     from physical_ai_server.station import layout_data, store
     layout = layout_data.LAYOUTS.get(F.TEST_LAYOUT_ID)
     if layout is None or layout.get('layout_state') != 'released':
-        fail('the fixture layout_data.py is not mounted over the installed module')
+        fail('the fixture layout_data.py was not copied over the imported module')
     frame = F.render(layout, F.camera_pose(), seed=1)
     fields = F.station_fields(layout, F.camera_pose(), frames=[frame])
     store.write_station(fields, CALIB)

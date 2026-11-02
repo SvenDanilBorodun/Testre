@@ -560,7 +560,11 @@ class _StationSenderWorker(_ConnectMixin, threading.Thread):
         jpeg_params = None
         sock = None
         last_seq = -1
-        last_send = 0.0
+        # The earliest time of the next pick: a fixed grid of 1/STATION_SEND_FPS
+        # set at PICK time, so the encode, the send and the wait for a frame
+        # never add to the period (a stamp taken after the send made the stream
+        # 9.5 fps with a 20 ms encode, below the server's 10 fps health line).
+        next_due = 0.0
         want = (constants.STATION_NATIVE_HEIGHT, constants.STATION_NATIVE_WIDTH)
         while not self._stop_event.is_set():
             if not self._active.is_set():
@@ -579,19 +583,37 @@ class _StationSenderWorker(_ConnectMixin, threading.Thread):
                 self._rate_count = 0
                 self._rate_t0 = time.monotonic()
             latest, seq = self.worker.wait_new_native(last_seq, 0.5)
-            if latest is None or seq == last_seq:
+            if latest is None:
+                # No native frame at all (the camera failed to open, its worker
+                # stopped on a wrong size, reads fail): take this seq as seen, so
+                # the next wait BLOCKS on the worker's condition instead of
+                # returning at once and spinning.
+                last_seq = seq
                 continue
-            # At most STATION_SEND_FPS: wait out the interval, then take the
+            if seq == last_seq:
+                continue  # no new frame within 0.5 s
+            # At most STATION_SEND_FPS: wait for the deadline, then take the
             # NEWEST native frame (it may have moved on meanwhile).
-            wait_s = last_send + self._min_interval_s - time.monotonic()
+            wait_s = next_due - time.monotonic()
             if wait_s > 0:
                 if self._stop_event.wait(wait_s):
                     break
                 latest, seq = self.worker.latest_native()
                 if latest is None:
+                    last_seq = seq
                     continue  # switched off while waiting
             if not self._active.is_set():
                 continue
+            # Pick: this frame is consumed whatever happens below (a frame that
+            # is skipped must never be looked at again, or the loop spins), and
+            # the next deadline is one period on, on the same grid. A pick more
+            # than a period late (the stream idle, the camera paused) starts a
+            # new grid one period from now, so a late pick never bursts.
+            now = time.monotonic()
+            next_due = (next_due + self._min_interval_s
+                        if now - next_due < self._min_interval_s
+                        else now + self._min_interval_s)
+            last_seq = seq
             frame, ns = latest
             if tuple(frame.shape[:2]) != want:
                 continue  # never send anything but a native frame
@@ -613,7 +635,6 @@ class _StationSenderWorker(_ConnectMixin, threading.Thread):
                 sock = None
                 continue
             last_send = time.monotonic()
-            last_seq = seq
             self.sent += 1
             self._rate_count += 1
             if last_send - self._rate_t0 >= 2.0:

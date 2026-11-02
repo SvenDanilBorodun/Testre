@@ -514,5 +514,98 @@ class TheTwoStreamsOverTheWire(unittest.TestCase):
         self.assertGreater(len(rec), 0.8 * elapsed * 60 * 0.5)
 
 
+
+@unittest.skipIf(cv2 is None, "needs OpenCV + numpy")
+class TheStudioStreamKeepsItsRate(unittest.TestCase):
+    """Fix round 1, F4: the Studio stream is paced on a deadline fixed at PICK
+    time, so the encode and the send never add to its period. With a 30 fps
+    camera and up to +20 ms of extra encode time it stays at >= 14 fps (the
+    server's health line is 10 fps) and never above 15."""
+
+    def _rate(self, extra_s):
+        ingest = _FakeIngest()
+        cap = _FakeCap(fps=30.0)
+        real = cv2.imencode
+
+        def slow_imencode(ext, img, *a, **k):
+            if extra_s and getattr(img, "shape", (0, 0))[:2] == (1080, 1920):
+                time.sleep(extra_s)
+            return real(ext, img, *a, **k)
+
+        with patch.object(win_camera, "open_station_capture",
+                          side_effect=lambda index: (cap, {"fps": 30.0})), \
+                patch.object(cv2, "imencode", side_effect=slow_imencode):
+            bridge = camera_bridge.CameraBridge(
+                {"scene": 4}, host="127.0.0.1", port=ingest.port, station=True)
+            bridge.start()
+            try:
+                self.assertTrue(bridge.set_station_stream(True))
+                self.assertTrue(_wait_until(lambda: len(ingest.by_cam(200)) >= 3))
+                time.sleep(0.5)
+                t0, n0 = time.monotonic(), len(ingest.by_cam(200))
+                time.sleep(3.0)
+                t1, n1 = time.monotonic(), len(ingest.by_cam(200))
+            finally:
+                bridge.stop()
+                ingest.close()
+        return (n1 - n0) / (t1 - t0), n1 - n0, t1 - t0
+
+    def _check(self, extra_s):
+        rate, n, dur = self._rate(extra_s)
+        self.assertGreaterEqual(rate, 14.0, (extra_s, rate))
+        # Never above 15 fps: at most one frame per 1/15 s slot of the window.
+        self.assertLessEqual(n, 15.0 * dur + 1, (extra_s, rate))
+
+    def test_no_extra_encode_cost(self):
+        self._check(0.0)
+
+    def test_10_ms_extra_encode_cost(self):
+        self._check(0.010)
+
+    def test_20_ms_extra_encode_cost(self):
+        self._check(0.020)
+
+
+@unittest.skipIf(cv2 is None, "needs OpenCV + numpy")
+class TheStudioSenderNeverSpins(unittest.TestCase):
+    """Fix round 1, F9: with the stream on and no native frame at all (here the
+    camera stopped delivering before the stream was switched on, so its reads
+    fail), the station sender blocks on the worker's condition instead of
+    looping: a handful of waits per second and almost no CPU."""
+
+    def test_no_native_frame_means_no_busy_loop(self):
+        ingest = _FakeIngest()
+        cap = _FakeCap(fps=30.0, limit=10)
+        with patch.object(win_camera, "open_station_capture",
+                          side_effect=lambda index: (cap, {"fps": 30.0})):
+            bridge = camera_bridge.CameraBridge(
+                {"scene": 4}, host="127.0.0.1", port=ingest.port, station=True)
+            worker = bridge.workers[0]
+            calls = [0]
+            real_wait = worker.wait_new_native
+
+            def counted(last_seq, timeout):
+                calls[0] += 1
+                return real_wait(last_seq, timeout)
+            worker.wait_new_native = counted
+            bridge.start()
+            try:
+                # The recording stream got its frames, then the camera stopped.
+                self.assertTrue(_wait_until(
+                    lambda: len(ingest.by_cam(_SCENE_ID)) >= 10, 5.0))
+                self.assertTrue(bridge.set_station_stream(True))
+                self.assertTrue(_wait_until(lambda: bridge._station_sender.connected))
+                time.sleep(0.2)
+                c0, cpu0, t0 = calls[0], time.process_time(), time.monotonic()
+                time.sleep(1.5)
+                c1, cpu1, t1 = calls[0], time.process_time(), time.monotonic()
+            finally:
+                bridge.stop()
+                ingest.close()
+        self.assertLessEqual(c1 - c0, 10, "the station sender loops without blocking")
+        self.assertLess((cpu1 - cpu0) / (t1 - t0), 0.25, "the process burns CPU")
+        self.assertEqual(ingest.by_cam(200), [])
+
+
 if __name__ == "__main__":
     unittest.main()

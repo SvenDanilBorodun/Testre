@@ -2,9 +2,10 @@
 
 The other start tests replace ``dataset_preflight.preflight_dataset``; here only
 the Hub is fake (``dataset_preflight._hub``), so the twin, its classification
-and the route's 400/502 split run as they do on Railway, on the DEFAULT legacy
-path (every ACT start under ``TRAINING_DISPATCH=legacy``, every other policy
-always) and on the managed one.
+and the route's 400/502 split run as they do on Railway. Since the training-hour
+ledger (052, §8.2) every start is a managed ACT start (anonymous, at the commit
+the v3.0 tag points to); the matrix that used to run on the legacy path runs on
+it, and another policy is refused before any Hub call.
 
 Pinned (fix round E): a Hub that could not be asked — an HTTP 429 or 5xx, a
 network or transport error, a timeout (the module's own 60 s thread bound
@@ -268,15 +269,15 @@ class _RealPreflight(StartBase):
         return None
 
 
-class LegacyPathDatasetCheck(_RealPreflight):
-    """The DEFAULT path: TRAINING_DISPATCH=legacy (every start a legacy start)."""
+class StartDatasetCheck(_RealPreflight):
+    """Every start (052: managed ACT only)."""
 
-    dispatch = "legacy"
+    dispatch = "managed"
 
     async def test_a_good_dataset_starts(self):
         self.assertIsNone(await self.answer())
         self.assertEqual(len(self.db.calls("start_training_safe")), 1)
-        self.assertEqual(self.hub.calls[0], ("meta/info.json", "v3.0", "hf_platform"))
+        self.assertEqual(self.hub.calls[0], ("meta/info.json", self.resolved, False))
 
     async def test_a_hub_that_could_not_be_asked_is_502_with_the_retry_sentence(self):
         for name, hub in transient_cases().items():
@@ -325,9 +326,12 @@ class LegacyPathDatasetCheck(_RealPreflight):
                 await self.start()
         self.assertEqual((ctx.exception.status_code, ctx.exception.detail), (502, T.HF_UNREACHABLE_DE))
 
-    async def test_another_policy_takes_the_same_path(self):
+    async def test_another_policy_is_refused_before_any_hub_call(self):
+        from app.services.credit_texts_de import POLICY_REFUSED_DE
+
         exc = await self.answer(request(model_type="diffusion"), info=local_from(http(E.HfHubHTTPError, 503)))
-        self.assertEqual((exc.status_code, exc.detail), (502, T.HF_UNREACHABLE_DE))
+        self.assertEqual((exc.status_code, exc.detail), (400, POLICY_REFUSED_DE))
+        self.assertEqual(self.hub.calls, [])
 
 
 class ManagedPathDatasetCheck(_RealPreflight):

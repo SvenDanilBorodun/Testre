@@ -8,7 +8,10 @@ argument-name set), so every probe names EXACTLY the migration's parameters
 id 0, which never exists, so each call answers P0002, P0049 or false and
 writes nothing (proven through PostgREST on a local stack, spec §3.1).
 
-The 19 / 18 / 46 totals are pinned in ``test_schema_probe_040.py``.
+The 23 / 23 / 56 totals are pinned in ``test_schema_probe_040.py``. Migration 052
+re-created start_training_safe (ten arguments), finish_training (nine) and
+cancel_request_training (three), so those three probes name 052's parameters
+(LATEST_DEFINITION; the new ones are checked in ``test_schema_probe_052.py``).
 """
 
 from __future__ import annotations
@@ -25,9 +28,13 @@ MIGRATION = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
                          "20261020130000_049_managed_training.sql")
 MIGRATION_050 = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HERE))), "supabase", "migrations",
                              "20261021120000_050_training_continuation.sql")
-# 050 widened finish_training to 8 arguments and dropped the 5-arg overload; the probe
-# names all eight, so its parameter source is the 050 text.
-LATEST_DEFINITION = {"finish_training": MIGRATION_050}
+MIGRATION_052 = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HERE))), "supabase", "migrations",
+                             "20261028120000_052_credit_ledger.sql")
+# 050 widened finish_training to 8 arguments, 052 to 9 (p_charge_waiver) and re-created
+# start_training_safe (10) and cancel_request_training (3, p_actor_role); the probe names
+# the latest shape, so its parameter source is the 052 text.
+LATEST_DEFINITION = {"finish_training": MIGRATION_052, "start_training_safe": MIGRATION_052,
+                     "cancel_request_training": MIGRATION_052}
 NEW_RPCS = ("claim_training_attempt", "attach_training_attempt", "release_training_attempt", "requeue_training",
             "end_training_attempt", "finish_training", "cancel_request_training", "complete_cancel_training",
             "claim_training_publish", "claim_checkpoint_mirror")
@@ -77,15 +84,19 @@ class TestSchemaProbeKnows049(unittest.TestCase):
                        "state, created_at, started_at, first_heartbeat_at, ended_at, end_reason, resume_from_step, "
                        "resume_from_attempt, allowed_dcs, publish_claimed_at, publish_owner, publish_first_at, "
                        "publish_tries"), self.columns)
+        # 052 (R3-2) appended config_complaints to the 049 set
         self.assertIn(("training_checkpoints",
                        "training_id, attempt_no, step, state, manifest, created_at, ready_at, mirrored_at, mirror_tries, "
-                       "refused_reason, refused_by, crash_attempts, mirror_claimed_at, mirror_owner"), self.columns)
+                       "refused_reason, refused_by, crash_attempts, mirror_claimed_at, mirror_owner, "
+                       "config_complaints"), self.columns)
 
     def test_every_probed_column_exists_in_the_migration(self):
         for table, cols in self.columns:
             if table not in ("training_attempts", "training_checkpoints") and not cols.startswith("managed"):
                 continue
             for col in (c.strip() for c in cols.split(",")):
+                if col == "config_complaints":
+                    continue  # 052's (test_schema_probe_052.py)
                 with self.subTest(table=table, col=col):
                     self.assertRegex(self.sql, rf"\n  (ADD COLUMN IF NOT EXISTS )?{col}\s+[A-Z]")
 
@@ -100,9 +111,14 @@ class TestSchemaProbeKnows049(unittest.TestCase):
                     sql = self.sql
                 self.assertEqual(sorted(self.rpcs[name]), sorted(_params(sql, name)))
 
-    def test_start_training_safe_probes_the_eight_argument_shape(self):
-        self.assertEqual(sorted(self.rpcs["start_training_safe"]), sorted(_params(self.sql, "start_training_safe")))
+    def test_start_training_safe_probes_the_ten_argument_shape(self):
+        with open(MIGRATION_052, encoding="utf-8") as fh:
+            sql = fh.read()
+        self.assertEqual(sorted(self.rpcs["start_training_safe"]), sorted(_params(sql, "start_training_safe")))
+        self.assertEqual(len(self.rpcs["start_training_safe"]), 10)
         self.assertIs(self.rpcs["start_training_safe"]["p_managed"], False)
+        # 049's eight still resolve against 052 (an older API's call): a subset
+        self.assertLessEqual(set(_params(self.sql, "start_training_safe")), set(self.rpcs["start_training_safe"]))
 
     def test_the_probe_values_write_nothing(self):
         for name in NEW_RPCS:

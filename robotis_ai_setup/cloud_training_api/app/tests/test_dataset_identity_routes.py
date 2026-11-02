@@ -262,6 +262,13 @@ class _MeSupabase:
     def __init__(self):
         self.updated = []
 
+    def rpc(self, name, args):
+        # 052: PATCH /me returns _build_my_profile, which reads a student's credit_quota
+        assert name == "credit_quota", name
+        row = {"o_role": "student", "o_account_kind": "student", "o_account_id": args["p_user_id"], "o_free": 2,
+               "o_reserved": 1, "o_spent": 4, "o_member_limit": None, "o_member_used": None, "o_next_hours": 2}
+        return SimpleNamespace(execute=lambda: SimpleNamespace(data=[row]))
+
     def table(self, _name):
         outer = self
 
@@ -321,6 +328,7 @@ class TestUpdateMe(unittest.TestCase):
         result, sb = self._call("alice")
         self.assertEqual(sb.updated, [{"hf_username": "alice"}])
         self.assertEqual(result.hf_username, "alice")
+        self.assertEqual(result.training_credits, 7, "052: the quota's legacy training_credits (2 + 1 + 4)")
 
     def test_malformed_username_returns_400(self):
         with self.assertRaises(HTTPException) as cm:

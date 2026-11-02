@@ -771,8 +771,10 @@ class TestSourceFences(unittest.TestCase):
             _rpc_names(os.path.join(ROUTES_DIR, "workflows.py")),
             {"update_workflow_blockly", "restore_workflow_version", "update_workflow_code"},
         )
+        # 052: the teacher routes move hours only through the ledger's functions
         self.assertEqual(
-            _rpc_names(os.path.join(ROUTES_DIR, "teacher.py")), {"adjust_student_credits"}
+            _rpc_names(os.path.join(ROUTES_DIR, "teacher.py")),
+            {"credit_assign", "credit_reclaim", "credit_history", "credit_teacher_summary"},
         )
 
 

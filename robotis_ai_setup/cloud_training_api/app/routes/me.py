@@ -19,13 +19,17 @@ router = APIRouter(prefix="/me", tags=["me"])
 
 # GDPR export (E16): every trainings column EXCEPT worker_token (a per-row
 # credential; 047 hides it from the request roles, and the service-role
-# export must not hand it out either). Migration 049's seven columns included.
+# export must not hand it out either). Migration 049's seven columns included,
+# and 052's (§8.6) except idempotency_key (a client nonce, not data about anyone).
+# No column of the row holds another person's id (stop_requested_by was dropped).
 _EXPORT_TRAINING_COLUMNS = (
     "id, user_id, status, dataset_name, model_name, model_type, training_params, cloud_job_id, "
     "current_step, total_steps, current_loss, requested_at, terminated_at, error_message, "
     "last_progress_at, loss_history, workgroup_id, cancel_attempted_at, cancel_attempts, log_url, "
     "managed, current_attempt, train_seconds_used, status_note, step_advanced_at, dataset_fps, unplaced_since, "
-    "capped_step, continuable_until, continued_from"
+    "capped_step, continuable_until, continued_from, "
+    "credit_scheme, reserved_hours, charged_hours, settled_at, stop_requested_at, stop_requested_by_role, "
+    "lost_seconds, lost_reasons, charge_waiver"
 )
 _PROVIDER_OF_BACKEND = {
     "runpod_community": ("runpod", "community"),
@@ -78,14 +82,19 @@ class MyProfile(BaseModel):
     classroom_id: str | None
     workgroup_id: str | None = None
     workgroup_name: str | None = None
+    # 052: a student's is the quota's legacy training_credits (startable free +
+    # reserved + spent); 0 for everybody else. Never the dead users column.
     training_credits: int
-    # Only populated for teachers. None for students/admin.
+    # Only populated for teachers. None for students/admin. Read from
+    # credit_teacher_summary with the pre-052 meaning (pool_available = free …).
     pool_total: int | None = None
     allocated_total: int | None = None
     pool_available: int | None = None
     student_count: int | None = None
     group_count: int | None = None
     group_credits_total: int | None = None
+    # 052 (C's gap 1): the admin's compensations into this teacher's accounts, ever.
+    compensated: int | None = None
 
 
 def _build_my_profile(profile: dict) -> MyProfile:
@@ -101,7 +110,7 @@ def _build_my_profile(profile: dict) -> MyProfile:
         "hf_username": profile.get("hf_username"),
         "classroom_id": profile.get("classroom_id"),
         "workgroup_id": profile.get("workgroup_id"),
-        "training_credits": profile["training_credits"],
+        "training_credits": 0,
     }
     supabase = get_supabase()
 
@@ -126,23 +135,18 @@ def _build_my_profile(profile: dict) -> MyProfile:
                 exc,
             )
 
-    if profile["role"] == "teacher":
-        summary = supabase.rpc(
-            "get_teacher_credit_summary", {"p_teacher_id": profile["id"]}
-        ).execute()
-        row = (summary.data or [{}])[0]
-        data.update(
-            {
-                "pool_total": row.get("pool_total", profile["training_credits"]),
-                "allocated_total": row.get("allocated_total", 0),
-                "pool_available": row.get(
-                    "pool_available", profile["training_credits"]
-                ),
-                "student_count": row.get("student_count", 0),
-                "group_count": row.get("group_count", 0),
-                "group_credits_total": row.get("group_credits_total", 0),
-            }
-        )
+    if profile["role"] == "student":
+        from app.routes.training import credit_quota_row, quota_view
+
+        q = credit_quota_row(profile["id"], sb=supabase)
+        if q is not None:
+            data["training_credits"] = quota_view(q)["training_credits"]
+    elif profile["role"] == "teacher":
+        from app.routes.teacher import pool_fields, teacher_summary
+
+        fields = pool_fields(teacher_summary(profile["id"], sb=supabase))
+        data.update({k: fields[k] for k in ("pool_total", "allocated_total", "pool_available", "student_count",
+                                             "group_count", "group_credits_total", "compensated")})
 
     return MyProfile(**data)
 
@@ -266,6 +270,12 @@ async def export_my_data(profile=Depends(get_current_profile)):
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "profile": profile,
     }
+    # 052 (§8.6, §13): the caller's view of the hour ledger and the refused starts.
+    bundle["credit_ledger"] = _export_ledger(supabase, uid, profile.get("role"))
+    bundle["training_start_refusals"] = (
+        supabase.table("training_start_refusals").select("at, request_kind, code, model_type")
+        .eq("user_id", uid).order("id", desc=True).execute()
+    ).data or []
 
     trainings = (
         supabase.table("trainings").select(_EXPORT_TRAINING_COLUMNS).eq("user_id", uid).execute()
@@ -399,12 +409,45 @@ async def export_my_data(profile=Depends(get_current_profile)):
     )
 
 
+def _export_ledger(supabase, uid: str, role) -> list:
+    """The caller's ledger rows (scope ``student`` / ``teacher``) as ``{at, kind, hours,
+    account_kind, training_id, actor_role}`` — no ids of other people, no member or actor
+    ids. ``reason`` (the current text, when not erased) only on a teacher's own grant /
+    revoke rows and on a compensation into the caller's own account (the admin wrote it
+    about this person)."""
+    scope = {"student": "student", "teacher": "teacher"}.get(role)
+    if scope is None:
+        return []
+    from app.routes.teacher import _account_side
+
+    out, before = [], None
+    for _ in range(50):  # 200 a page; an export takes them all
+        page = supabase.rpc("credit_history", {"p_scope": scope, "p_id": uid, "p_before": before,
+                                               "p_limit": 200}).execute().data or []
+        for r in page:
+            kind = r.get("kind")
+            account_kind, account_id = _account_side(r)
+            entry = {"at": r.get("at"), "kind": kind, "hours": r.get("hours"), "account_kind": account_kind,
+                     "training_id": r.get("training_id"), "actor_role": r.get("actor_role")}
+            own = str(account_id) == str(uid)
+            if r.get("reason") is not None and (
+                    (scope == "teacher" and kind in ("grant", "revoke") and own)
+                    or (kind == "compensate" and str(r.get("to_id")) == str(uid))):
+                entry["reason"] = r.get("reason")
+            out.append(entry)
+        if len(page) < 200:
+            break
+        before = page[-1].get("id")
+    return out
+
+
 async def _cancel_managed_for_deletion(supabase, training_id: int, uid: str) -> bool:
     from app.services import training_dispatch
 
     try:
         data = supabase.rpc(
-            "cancel_request_training", {"p_training_id": training_id, "p_user_id": uid}
+            "cancel_request_training", {"p_training_id": training_id, "p_user_id": uid,
+                                        "p_actor_role": "student"}
         ).execute().data
     except Exception as exc:
         code = training_dispatch.pg_code(exc)

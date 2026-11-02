@@ -1,15 +1,14 @@
-"""Policy types allowed for the current user.
+"""Policy types the cloud trains.
 
-Mirrors the env-driven gate enforced by `POST /trainings/start`. The React
-frontend uses this when the ROS service `/training/get_available_policy` is
-unreachable — namely cloud-only mode, where `physical_ai_server` is not
-started so rosbridge has nothing behind it and the dropdown would otherwise
-be permanently empty.
+Mirrors the gate enforced by `POST /trainings/start`. The React frontend uses
+this when the ROS service `/training/get_available_policy` is unreachable —
+namely cloud-only mode, where `physical_ai_server` is not started so rosbridge
+has nothing behind it and the dropdown would otherwise be permanently empty.
 
-Authoritative source: `app.routes.training.ALLOWED_POLICIES` (driven by the
-`ALLOWED_POLICIES` env var). Keeping the cloud response in sync with the
-validator means a client that uses this endpoint to populate its dropdown
-can never select a policy that `/trainings/start` will then reject.
+Authoritative source: `app.routes.training.TRAINABLE_POLICIES` — since the
+training-hour ledger (migration 052, spec §8.2) exactly `act`, refused again in
+`start_training_safe` (P0061). The `ALLOWED_POLICIES` Railway variable is no
+longer read.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from app.auth import get_current_user
-from app.routes.training import ALLOWED_POLICIES, POLICY_MAX_TIMEOUT_HOURS
+from app.routes.training import POLICY_MAX_TIMEOUT_HOURS, TRAINABLE_POLICIES
 
 router = APIRouter(prefix="/policies", tags=["policies"])
 
@@ -39,6 +38,6 @@ def list_policies(user=Depends(get_current_user)) -> PolicyListResponse:
             name=name,
             max_timeout_hours=POLICY_MAX_TIMEOUT_HOURS.get(name),
         )
-        for name in sorted(ALLOWED_POLICIES)
+        for name in sorted(TRAINABLE_POLICIES)
     ]
     return PolicyListResponse(policies=items)

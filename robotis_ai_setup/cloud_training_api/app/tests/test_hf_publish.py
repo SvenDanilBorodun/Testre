@@ -523,6 +523,59 @@ class CappedPublish(PublishBase):
         self.assertIn("trained model", self.hub.commits[0][2])
 
 
+class CapLikePublishes(PublishBase):
+    """052 (§9.3, owner Q-A, R3-1): every cap-like end publishes the newest ready checkpoint
+    with its own note and commit message; S23 names the row's own limit with hours_de."""
+
+    def setUp(self):
+        super().setUp()
+        self.db.row(self.tid).update(capped_step=42500, status_note=T.S34)
+        files = checkpoint_files(self.row, 42500, final=False)
+        self.r2.put_checkpoint(self.tid, 1, 42500, files)
+        self.db.add_checkpoint(self.tid, 1, 42500, state="ready", manifest=manifest_of(files))
+
+    def publish(self, end_reason, **row):
+        self.db.attempt(self.tid, 1).update(end_reason=end_reason)
+        self.db.row(self.tid).update(**row)
+        self.assertEqual(P.publish_sync(self.tid, 1), "succeeded")
+        (commit,) = self.hub.commits
+        r = self.db.row(self.tid)
+        self.assertEqual((r["status"], r["current_step"]), ("succeeded", 42500))
+        self.assertIsNotNone(r["continuable_until"])
+        return r["status_note"], commit[2]
+
+    def why(self, text):
+        return f"EduBotics: model at step 42500 of 50000 (training {self.tid}, {text})"
+
+    def test_a_students_stop(self):
+        self.assertEqual(self.publish("stopped", stop_requested_by_role="student"),
+                         (T.s31(42500, 50000), self.why("stopped")))
+
+    def test_a_teachers_stop(self):
+        self.assertEqual(self.publish("stopped", stop_requested_by_role="teacher"),
+                         (T.s33(42500, 50000), self.why("stopped")))
+
+    def test_four_attempts(self):
+        self.assertEqual(self.publish("attempts_out"), (T.s35(42500, 50000), self.why("4 attempts")))
+
+    def test_no_gpu(self):
+        self.assertEqual(self.publish("no_gpu"), (T.s36(42500, 50000), self.why("no GPU")))
+
+    def test_a_later_checkpoint_refused(self):
+        self.assertEqual(self.publish("content_refused"),
+                         (T.s38(42500, 50000), self.why("later checkpoint refused")))
+
+    def test_the_cap_names_the_rows_own_limit(self):
+        note, msg = self.publish("capped", reserved_hours=1)
+        self.assertEqual((note, msg), (T.s23(3600, 42500, 50000), self.why("time cap")))
+        self.assertIn("Nach 1 Stunde bei Schritt", note)
+        self.assertNotIn("1 Stunden", note)
+
+    def test_a_pre_ledger_row_keeps_three_and_a_half_hours(self):
+        note, _ = self.publish("capped", reserved_hours=None)
+        self.assertIn("3,5 Stunden", note)
+
+
 class Hashes(unittest.TestCase):
     def test_git_blob_sha1(self):
         self.assertEqual(P.git_blob_sha1(b"hello\n"), "ce013625030ba8dba906f756967f9e9ca394464a")

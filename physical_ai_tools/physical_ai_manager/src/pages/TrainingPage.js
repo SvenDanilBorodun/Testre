@@ -42,6 +42,8 @@ import useDatasetLocalChanges from '../features/editDataset/hooks/useDatasetLoca
 import DATEN_COPY from '../features/editDataset/datenCopy';
 import { moveToPage } from '../features/ui/uiSlice';
 import PageType from '../constants/pageType';
+import { MEMBER_LIMIT_DE, NO_HOURS_DE, noHoursKind } from '../components/StartTrainingDialog';
+import { hoursDe, numberDe } from '../utils/hoursDe';
 
 // Names no provider (RunPod spec §4.11): a training runs on a RunPod GPU or on
 // Modal, whichever the API placed it on, so the monitor says „Cloud".
@@ -87,8 +89,12 @@ export default function TrainingPage() {
   const profileError = useSelector((state) => state.auth.profileError);
   const hfUsername = useSelector((state) => state.auth.hfUsername);
   const session = useSelector((state) => state.auth.session);
-  const trainingCredits = useSelector((state) => state.auth.trainingCredits);
-  const trainingsUsed = useSelector((state) => state.auth.trainingsUsed);
+  const hoursFree = useSelector((state) => state.auth.hoursFree);
+  const hoursReserved = useSelector((state) => state.auth.hoursReserved);
+  const nextReservationHours = useSelector((state) => state.auth.nextReservationHours);
+  const account = useSelector((state) => state.auth.account);
+  const memberLimitHours = useSelector((state) => state.auth.memberLimitHours);
+  const memberLeftHours = useSelector((state) => state.auth.memberLeftHours);
   const selectedTrainingId = useSelector((state) => state.training.selectedTrainingId);
   const cloudJobsRefreshCounter = useSelector((state) => state.training.cloudJobsRefreshCounter);
 
@@ -177,7 +183,7 @@ export default function TrainingPage() {
   }
 
   // Session is live but GET /me hasn't resolved yet — slim spinner, exactly
-  // like InferencePage's profileLoaded gate. Without this the credit pill +
+  // like InferencePage's profileLoaded gate. Without this the hours readout +
   // dataset list rendered with stale zeros before the profile landed.
   if (!profileLoaded) {
     return (
@@ -187,10 +193,16 @@ export default function TrainingPage() {
     );
   }
 
-  const remaining = trainingCredits - trainingsUsed;
-  const creditTone = remaining <= 0 ? 'danger' : remaining <= 2 ? 'amber' : 'success';
-  // The credits readout's light colour for the old pill tone.
-  const creditRead = creditTone === 'danger' ? 'rec' : creditTone === 'amber' ? 'warn' : 'ok';
+  // The hours readout (credit system v2, spec §10.1): the free hours, toned by
+  // what a start would reserve now; „—" until the quota has answered.
+  const hoursKnown = typeof nextReservationHours === 'number';
+  const hoursRead = !hoursKnown ? null
+    : nextReservationHours <= 0 ? 'rec' : nextReservationHours <= 2 ? 'warn' : 'ok';
+  const hoursCaption = 'Std. frei'
+    + (typeof hoursReserved === 'number' && hoursReserved > 0 ? ` · ${numberDe(hoursReserved)} Std. reserviert` : '')
+    + (account === 'group' ? ' · Gruppenguthaben' : '');
+  const showMemberLimit = typeof memberLimitHours === 'number' && typeof memberLeftHours === 'number';
+  const noHours = noHoursKind({ nextReservationHours, hoursFree, memberLimitHours, memberLeftHours });
 
   const status = selectedJob?.status;
   const subtitle = statusSubtitle(status);
@@ -213,12 +225,18 @@ export default function TrainingPage() {
           right={
             <div className="flex items-center gap-3 flex-wrap justify-end">
               <HeartbeatStatus />
-              <span className="su-read su-read--md su-trn-credits">
-                <span className={`su-read--${creditRead}`}>{remaining}</span>
-                <span className="su-trn-credits__of">/{trainingCredits}</span>
-                <span className="su-trn-credits__text">
-                  Trainingsguthaben{trainingsUsed > 0 ? ` · ${trainingsUsed} verbraucht` : ''}
+              <span className="inline-flex flex-col items-end gap-1">
+                <span className="su-read su-read--md su-trn-credits" data-testid="hours-readout">
+                  <span className={hoursRead ? `su-read--${hoursRead}` : undefined} data-testid="hours-free">
+                    {typeof hoursFree === 'number' ? numberDe(hoursFree) : '—'}
+                  </span>
+                  <span className="su-trn-credits__text">{hoursCaption}</span>
                 </span>
+                {showMemberLimit && (
+                  <span className="text-[12.5px] text-[var(--ink-2)]">
+                    {`Dein Gruppenlimit: noch ${hoursDe(memberLeftHours)}`}
+                  </span>
+                )}
               </span>
             </div>
           }
@@ -313,10 +331,15 @@ export default function TrainingPage() {
               <TrainingControlPanel />
             </div>
           </div>
-          <TrainingLiveChart jobs={jobs} isRealtime={isRealtime} remaining={remaining} onContinued={refetchQuota} />
-          {remaining <= 0 && (
-            <div className="su-trn-monitor__nocredit">
-              Kein Guthaben mehr. Kontaktiere deinen Lehrer für mehr Credits.
+          <TrainingLiveChart
+            jobs={jobs}
+            isRealtime={isRealtime}
+            nextReservationHours={nextReservationHours}
+            onContinued={refetchQuota}
+          />
+          {noHours && (
+            <div className="su-trn-monitor__nocredit" role="status">
+              {noHours === 'member_limit' ? MEMBER_LIMIT_DE : NO_HOURS_DE}
             </div>
           )}
         </Screen>
@@ -328,8 +351,9 @@ export default function TrainingPage() {
             loading={loading}
             refetch={refetch}
             isRealtime={isRealtime}
-            remaining={remaining}
+            nextReservationHours={nextReservationHours}
             onContinued={refetchQuota}
+            onHoursChanged={refetchQuota}
           />
         </Plate>
       </div>

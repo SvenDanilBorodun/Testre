@@ -93,7 +93,7 @@ export default function AdminDashboard({ onLogout }) {
         <StatBig
           label="Pool Gesamt"
           value={totals.pool}
-          sub="Credits zugewiesen"
+          sub="Stunden vergeben"
         />
         <Divider className="hidden md:block" />
         <StatBig
@@ -120,7 +120,7 @@ export default function AdminDashboard({ onLogout }) {
         {teachers.length > 0 && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-5 lg:gap-6">
             <Card
-              title="Credit-Verteilung"
+              title="Stundenverteilung"
               subtitle="Pool vs. Verteilt je Lehrer"
               className="lg:col-span-2"
             >
@@ -132,7 +132,7 @@ export default function AdminDashboard({ onLogout }) {
                 <Row k="Klassen" v={totals.classrooms} />
                 <Row k="Schüler" v={totals.students} />
                 <Row
-                  k="Credits verbraucht"
+                  k="Stunden verteilt"
                   v={
                     <span className="font-mono">
                       {totals.alloc} / {totals.pool}
@@ -148,7 +148,7 @@ export default function AdminDashboard({ onLogout }) {
                 <div className="text-[11px] text-[var(--ink-3)] mt-2 font-mono">
                   {totals.pool > 0
                     ? `${Math.round((totals.alloc / totals.pool) * 100)}% ausgelastet`
-                    : 'Keine Credits zugewiesen'}
+                    : 'Keine Stunden vergeben'}
                 </div>
               </div>
             </Card>
@@ -179,9 +179,7 @@ export default function AdminDashboard({ onLogout }) {
                 <thead className="bg-[var(--bg-sunk)] border-b border-[var(--line)]">
                   <tr className="text-[11px] font-semibold uppercase tracking-wider text-[var(--ink-3)]">
                     <th className="text-left py-3 px-5">Lehrer</th>
-                    <th className="text-center py-3 px-3">Pool</th>
-                    <th className="text-center py-3 px-3">Verteilt</th>
-                    <th className="text-center py-3 px-3">Verfügbar</th>
+                    <th className="text-left py-3 px-3">Stunden</th>
                     <th className="text-center py-3 px-3">Klassen</th>
                     <th className="text-center py-3 px-3">Schüler</th>
                     <th className="text-right py-3 px-5">Aktionen</th>
@@ -189,7 +187,7 @@ export default function AdminDashboard({ onLogout }) {
                 </thead>
                 <tbody>
                   {teachers.map((t) => (
-                    <TeacherRow key={t.id} teacher={t} />
+                    <TeacherRow key={t.id} teacher={t} onChanged={fetchTeachers} />
                   ))}
                 </tbody>
               </table>

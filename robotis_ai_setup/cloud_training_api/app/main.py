@@ -317,6 +317,13 @@ def _validate_required_schema() -> None:
         "training_attempts",  # 049 — managed training: one row per placement (service-role only)
         "training_checkpoints",  # 049 — managed training: one row per uploaded checkpoint
         "training_kept_checkpoints",  # 050 — the 7-day continuable kept checkpoint (service-role only)
+        # 052 — the training-hour ledger (service-role SELECT only; every write is a
+        # SECURITY DEFINER function): the accounts cache, the append-only ledger, the
+        # erasable admin reasons and the refused starts.
+        "credit_accounts",
+        "credit_ledger",
+        "credit_reasons",
+        "training_start_refusals",
     )
     missing_tables: list[str] = []
     for table in required_tables:
@@ -400,12 +407,25 @@ def _validate_required_schema() -> None:
          "resume_from_attempt, allowed_dcs, publish_claimed_at, publish_owner, publish_first_at, publish_tries"),
         ("training_checkpoints",
          "training_id, attempt_no, step, state, manifest, created_at, ready_at, mirrored_at, mirror_tries, "
-         "refused_reason, refused_by, crash_attempts, mirror_claimed_at, mirror_owner"),
+         "refused_reason, refused_by, crash_attempts, mirror_claimed_at, mirror_owner, "
+         # 052 (R3-2): the attempts whose intact train_config complaint was counted
+         "config_complaints"),
         # Migration 050 — the capped publish + „Fortsetzen": routes/training.py,
         # routes/training_worker.py and training_dispatch read/write these.
         ("trainings", "capped_step, continuable_until, continued_from"),
         ("training_kept_checkpoints",
          "training_id, step, manifest, state, kept_at, expires_at, refused_reason, bad_attempts"),
+        # Migration 052 — the training-hour ledger: the routes, training_dispatch and the
+        # stop path read these columns and tables; a deploy landing the code before the
+        # migration would 500 every start, quota, history and summary — fail it fast.
+        ("trainings", "credit_scheme, reserved_hours, charged_hours, settled_at, idempotency_key, "
+         "stop_requested_at, stop_requested_by_role, lost_seconds, lost_reasons, charge_waiver"),
+        ("credit_accounts", "kind, owner_id, parent_teacher_id, free, reserved, spent, member_hour_limit, "
+         "closed_at, created_at"),
+        ("credit_ledger", "id, at, kind, hours, from_kind, from_id, from_bucket, to_kind, to_id, to_bucket, "
+         "training_id, member_id, actor_id, actor_role, request_id, reason_id, meta"),
+        ("credit_reasons", "id, text, subject_kind, subject_id, created_at"),
+        ("training_start_refusals", "id, at, user_id, role, request_kind, code, model_type"),
     )
     for table, cols in required_columns:
         try:
@@ -422,8 +442,12 @@ def _validate_required_schema() -> None:
                 ) from None
     # 2) RPCs the code calls directly. Probe with the actual argument
     #    shape; any "user not found" / "no rows" response proves the
-    #    RPC exists. We fail only on PostgREST's PGRST202 (function
-    #    not found in the schema cache).
+    #    RPC exists. We fail on PostgREST's PGRST202 (function not found
+    #    in the schema cache) AND, since 052 (review B1), on 42501 /
+    #    „permission denied": a function the service role cannot execute
+    #    is as useless as a missing one (an INVOKER caller of a revoked
+    #    internal helper answers exactly that), and it used to read as
+    #    „exists" and pass the deploy gate.
     #
     #    Probes are scoped to RPCs that take a single p_*_id UUID arg
     #    so the probe shape is uniform. RPCs with complex required
@@ -436,21 +460,10 @@ def _validate_required_schema() -> None:
     #    that added them ran, the tables they touch exist.
     dummy = "00000000-0000-0000-0000-000000000000"
     required_rpcs = (
-        ("get_remaining_credits", {"p_user_id": dummy}),      # base
-        ("get_teacher_credit_summary", {"p_teacher_id": dummy}),  # 002
-        # Audit A3: previously skipped on the theory that "if 011 ran
-        # the workgroup tables exist". That's true today but doesn't
-        # cover the case where 011 was applied partially via SQL Editor
-        # copy-paste and the function body was missed. The probes below
-        # pass concrete UUIDs to bypass the zero-arg/overload ambiguity
-        # — PostgREST resolves on (name, arg-name set), so passing
-        # p_teacher_id/p_workgroup_id/p_delta together picks exactly
-        # one overload. A P0011/P0022 (ownership) or P0002 (not found)
-        # response proves the RPC exists; PGRST202 means it doesn't.
-        ("adjust_student_credits",
-            {"p_teacher_id": dummy, "p_student_id": dummy, "p_delta": 0}),
-        ("adjust_workgroup_credits",
-            {"p_teacher_id": dummy, "p_workgroup_id": dummy, "p_delta": 0}),
+        # 052 dropped the four pre-052 credit RPCs from the probe (get_remaining_credits,
+        # get_teacher_credit_summary, adjust_student_credits, adjust_workgroup_credits):
+        # the code calls none of them. PostgREST resolves on (name, arg-name set), so
+        # every probe names exactly the function's parameters (test_schema_probe_052.py).
         ("start_training_safe", {
             "p_user_id": dummy,
             "p_dataset_name": "_probe",
@@ -461,6 +474,10 @@ def _validate_required_schema() -> None:
             "p_worker_token": dummy,
             # 049: the eighth argument; a database without 049 answers PGRST202.
             "p_managed": False,
+            # 052: the reservation's key and ceiling; a database without 052 answers
+            # PGRST202, the dummy user P0002 (the first statement locks the users row).
+            "p_idempotency_key": None,
+            "p_max_hours": 3,
         }),
         # Migration 018 — the SECURITY DEFINER wrappers that set
         # app.user_id GUC inside the transaction so the
@@ -630,42 +647,65 @@ def _validate_required_schema() -> None:
         # 050 widened finish_training to 8 arguments (p_note/p_final_step/
         # p_continuable_until, all DEFAULT NULL); probe all eight so a database
         # without 050 fails its own /health (the 5-named-arg call still resolves).
+        # 052 added the ninth, p_charge_waiver (a confirmed S19 charges 0).
         ("finish_training", {"p_training_id": 0, "p_attempt": 1, "p_status": "failed", "p_message": None,
-                             "p_log_url": None, "p_note": None, "p_final_step": None, "p_continuable_until": None}),
-        ("cancel_request_training", {"p_training_id": 0, "p_user_id": dummy}),
+                             "p_log_url": None, "p_note": None, "p_final_step": None, "p_continuable_until": None,
+                             "p_charge_waiver": None}),
+        # 052 re-created it with p_actor_role (the first stop request's role).
+        ("cancel_request_training", {"p_training_id": 0, "p_user_id": dummy, "p_actor_role": None}),
         ("complete_cancel_training", {"p_training_id": 0, "p_final": "canceled", "p_message": None}),
         ("claim_training_publish", {"p_training_id": 0, "p_attempt": 1, "p_lease_s": 900, "p_owner": "_probe"}),
         ("claim_checkpoint_mirror", {"p_training_id": 0, "p_attempt": 1, "p_step": 1, "p_lease_s": 900, "p_owner": "_probe"}),
+        # 052 fix round 2 (V3-M1): ckpt-done's ready write under the row lock; training 0
+        # answers false and writes nothing.
+        ("mark_checkpoint_ready", {"p_training_id": 0, "p_attempt": 1, "p_step": 1}),
         # Migration 050 — the capped publish + continuation. Training id 0 never
         # exists: cap answers P0049, start_continuation_safe P0002; both write nothing.
         ("cap_training_attempt", {"p_training_id": 0, "p_attempt": 1, "p_step": 1, "p_reason": "capped",
                                   "p_note": None, "p_train_seconds": 0}),
-        ("start_continuation_safe", {"p_user_id": dummy, "p_parent_id": 0, "p_note": None}),
+        # 052: the continuation is a new reservation, capped like a start.
+        ("start_continuation_safe", {"p_user_id": dummy, "p_parent_id": 0, "p_note": None, "p_max_hours": 3}),
+        # Migration 052 — the training-hour ledger's thirteen callable functions. Each
+        # answers its P-code (P0002 / P0066 / P0067) or an empty result for the dummy ids
+        # and writes nothing (proven through PostgREST, spec §12.1).
+        ("credit_quota", {"p_user_id": dummy, "p_max_hours": 3}),
+        ("credit_admin_grant", {"p_admin_id": dummy, "p_teacher_id": dummy, "p_hours": 1, "p_reason": None,
+                                "p_request_id": None}),
+        ("credit_admin_revoke", {"p_admin_id": dummy, "p_teacher_id": dummy, "p_hours": 1, "p_reason": None,
+                                 "p_request_id": None}),
+        ("credit_assign", {"p_teacher_id": dummy, "p_target_kind": "student", "p_target_id": dummy, "p_hours": 1,
+                           "p_request_id": None}),
+        ("credit_reclaim", {"p_teacher_id": dummy, "p_target_kind": "student", "p_target_id": dummy, "p_hours": 1,
+                            "p_request_id": None}),
+        ("credit_set_member_limit", {"p_teacher_id": dummy, "p_group_id": dummy, "p_hours": None}),
+        ("credit_teacher_summary", {"p_teacher_id": dummy}),
+        ("credit_history", {"p_scope": "student", "p_id": dummy, "p_before": None, "p_limit": 1}),
+        ("stop_training", {"p_training_id": 0, "p_user_id": dummy, "p_actor_id": dummy, "p_actor_role": "student",
+                           "p_note": None}),
+        ("record_training_refusal", {"p_user_id": dummy, "p_request_kind": "start", "p_code": "no_hours",
+                                     "p_model_type": None}),
+        ("credit_reconcile", {}),
+        ("credit_admin_compensate", {"p_admin_id": dummy, "p_target_kind": "student", "p_target_id": dummy,
+                                     "p_hours": 1, "p_reason": "_probe", "p_training_id": None,
+                                     "p_request_id": None}),
+        ("credit_erase_reason", {"p_admin_id": dummy, "p_reason_id": 0}),
     )
     missing_rpcs: list[str] = []
+    denied_rpcs: list[str] = []
     for name, args in required_rpcs:
-        try:
-            sb.rpc(name, args).execute()
-        except Exception as exc:
-            msg = str(exc)
-            # PostgREST PGRST202: function not found in the schema
-            # cache. The "function X does not exist" string is also
-            # what Postgres raises for a missing overload, but since
-            # we probe with the correct signature here, that response
-            # only happens when the function is truly absent.
-            if "PGRST202" in msg or (
-                "function" in msg.lower() and "does not exist" in msg.lower()
-            ):
-                missing_rpcs.append(name)
-            # Everything else (P0001 token mismatch, P0002 user not
-            # found, P0003 no credits, P0011/P0022 ownership, etc.)
-            # proves the RPC exists.
-    if missing_tables or missing_rpcs:
+        verdict = _probe_rpc_verdict(sb, name, args)
+        if verdict == "missing":
+            missing_rpcs.append(name)
+        elif verdict == "denied":
+            denied_rpcs.append(name)
+    if missing_tables or missing_rpcs or denied_rpcs:
         details = []
         if missing_tables:
             details.append(f"tables: {', '.join(missing_tables)}")
         if missing_rpcs:
             details.append(f"RPCs: {', '.join(missing_rpcs)}")
+        if denied_rpcs:
+            details.append(f"RPCs the service role cannot execute (42501): {', '.join(denied_rpcs)}")
         raise RuntimeError(
             "Cloud API cannot start — Supabase schema is behind the deployed "
             f"code. Missing {' and '.join(details)}. Apply the on-disk "
@@ -673,6 +713,24 @@ def _validate_required_schema() -> None:
             "database and redeploy. Override with "
             "EDUBOTICS_SKIP_SCHEMA_CHECK=1 only for local unit-test runs."
         )
+
+
+def _probe_rpc_verdict(sb, name: str, args: dict) -> str:
+    """One schema-probe call: 'missing' (PostgREST PGRST202, or „function … does not
+    exist" — we probe with the right signature, so only an absent function answers it),
+    'denied' (42501 / „permission denied", review B1: an RPC the service role cannot
+    execute stops the boot like a missing one), else 'ok' (P0001 token mismatch, P0002
+    not found, P0049, P0066, P0067 and every other answer prove it exists and runs)."""
+    try:
+        sb.rpc(name, args).execute()
+    except Exception as exc:
+        msg = str(exc)
+        if "PGRST202" in msg or ("function" in msg.lower() and "does not exist" in msg.lower()):
+            return "missing"
+        code = getattr(exc, "code", None)
+        if code == "42501" or "42501" in msg or "permission denied" in msg.lower():
+            return "denied"
+    return "ok"
 
 
 def _parse_and_validate_origins() -> list[str]:
@@ -762,6 +820,13 @@ _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     # teacher legitimately bursts a few member-adds back-to-back when
     # setting up a group but 20/min is comfortable.
     ("POST", "/teacher/workgroups", 20, 60.0),
+    # 052 — hour assign/reclaim, „Training stoppen" and password resets under
+    # /teacher/students. After the reset (D9) every teacher re-assigns hours to
+    # every student, one POST each: 60/min per teacher (per-user keyed below)
+    # covers a class of 30 twice. Not appended last on purpose (review 3 m2:
+    # the middleware sorts by prefix length, the position changes nothing, and
+    # test_inference_routes.py pins the literal's last two entries).
+    ("POST", "/teacher/students", 60, 60.0),
     # Datasets registry: students POST after every recording upload —
     # 20/min is more than enough for any classroom while stopping a
     # broken recording loop from spamming.
@@ -915,8 +980,15 @@ def _user_key_from_jwt(request: Request) -> str | None:
 #
 # /inference/ (Cloud-Inferenz, 048) likewise: every route requires
 # Depends(get_current_profile), so a JWT is always present.
+#
+# /teacher/ and /admin/ (052, review m9) likewise: every route requires
+# get_current_teacher / get_current_admin. Several teachers behind one school
+# NAT must not share one bucket when they re-assign hours after the reset; this
+# also keys the existing POST /teacher/classrooms and /teacher/workgroups rules
+# per teacher, which is what those limits meant anyway.
 _PER_USER_RATE_LIMIT_PREFIXES = (
     "/jetson/", "/trainings/", "/workflows", "/me/hf-token", "/me/group-members", "/inference/",
+    "/teacher/", "/admin/",
 )
 
 
@@ -1115,6 +1187,24 @@ async def _start_training_cancel_sweep() -> None:
         logger.info("training_cancel_sweep: disabled via env")
         return
     _asyncio.create_task(_training_cancel_sweep_loop())
+
+
+@app.on_event("startup")
+async def _start_credit_reconcile() -> None:
+    """052 (§4.12, review 3 m7): the report-only ``credit_reconcile()`` every RECHECK_S
+    in its OWN periodic task — independent of TRAINING_DISPATCH and of the managed
+    supervisor (which returns once the managed loops run). It logs one ERROR naming the
+    four counts when any is above 0 and writes nothing. Disable via
+    CREDIT_RECONCILE_DISABLED=1 for unit tests."""
+    import asyncio as _asyncio
+
+    if os.environ.get("CREDIT_RECONCILE_DISABLED") == "1":
+        logger.info("credit reconcile: disabled via env")
+        return
+    from app.services import training_dispatch as _training_dispatch
+
+    _keep_task(_asyncio.create_task(_training_dispatch._forever(
+        "credit reconcile", _training_dispatch.reconcile_tick, _training_dispatch.RECHECK_S, initial_delay=60)))
 
 
 @app.on_event("startup")

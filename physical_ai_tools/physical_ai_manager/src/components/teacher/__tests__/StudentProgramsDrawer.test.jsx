@@ -48,11 +48,12 @@ vi.mock('../../../services/teacherApi', () => ({
   deleteStudent: vi.fn(() => Promise.resolve({})),
   patchStudent: vi.fn(() => Promise.resolve({})),
   resetStudentPassword: vi.fn(() => Promise.resolve({})),
-  adjustStudentCredits: vi.fn(() => Promise.resolve({ new_amount: 0 })),
+  changeStudentHours: vi.fn(() => Promise.resolve({ new_amount: 0, hours_free: 0 })),
+  getStudentCreditHistory: vi.fn(() => Promise.resolve({ entries: [], refusals: [] })),
 }));
 vi.mock('../../../services/meApi', () => ({
   __esModule: true,
-  getMe: () => Promise.resolve({ credits_pool: 0 }),
+  getMe: () => Promise.resolve({ pool_available: 0 }),
 }));
 vi.mock('react-hot-toast', () => ({
   __esModule: true,

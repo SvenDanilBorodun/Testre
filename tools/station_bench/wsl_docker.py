@@ -259,6 +259,34 @@ class ContainerStream:
             self.proc.kill()
 
 
+TOOL_STATES = ('summary', 'running', 'gone')
+
+
+def tool_state_script(pid_file: str, out_dir: str) -> bytes:
+    """Read-only: ``summary`` when the tool's summary JSON exists (it is
+    written last, by an atomic rename), ``running`` while its process lives,
+    else ``gone``."""
+    return (f'if ls {out_dir}/*_summary.json >/dev/null 2>&1; then echo summary; '
+            f'elif kill -0 "$(cat {pid_file} 2>/dev/null)" 2>/dev/null; then echo running; '
+            f'else echo gone; fi\n').encode('utf-8')
+
+
+def parse_tool_state(text: str):
+    """The last line of :func:`tool_state_script`'s answer, or None."""
+    lines = [ln.strip() for ln in (text or '').splitlines() if ln.strip()]
+    return lines[-1] if lines and lines[-1] in TOOL_STATES else None
+
+
+def container_tool_state(pid_file, out_dir, distro='EduBotics'):
+    """``'summary'`` / ``'running'`` / ``'gone'``, None when the container
+    could not be asked."""
+    try:
+        r = run_bash(tool_state_script(pid_file, out_dir), distro=distro, timeout=30)
+    except Exception:  # noqa: BLE001
+        return None
+    return parse_tool_state(r.stdout.decode('utf-8', 'replace'))
+
+
 def interrupt(pid_file, distro='EduBotics'):
     """SIGINT the container tool whose pid is in ``pid_file`` (best effort)."""
     try:

@@ -17,7 +17,10 @@ while no station session exists.
 **Output.** Every tool needs `--out <folder>` and writes `<tool>_<YYYYmmdd-HHMMSS>…csv`
 (rows, flushed as they happen, so Ctrl+C keeps them) and `…_summary.json` (the numbers, the
 gate verdicts and the honest limits) there. Container tools write inside the container and
-`container_run.py` copies their folder back into yours.
+`container_run.py` copies their folder back into yours. It relays the tool's console here,
+and Ctrl+C stops the tool (SIGINT, it writes its summary) and waits until the summary exists
+or the tool's process has ended (at most 60 s; a second Ctrl+C stops waiting) before it
+copies, so the summary is never left behind.
 
 ## Setup on the bench PC
 

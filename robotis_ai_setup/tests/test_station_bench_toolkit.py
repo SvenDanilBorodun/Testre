@@ -17,6 +17,7 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
 import tempfile
 import types
@@ -573,6 +574,142 @@ class WslPlumbing(unittest.TestCase):
                          (['check_log', '--out', 'C:/b'], ['--duration', '9']))
         self.assertEqual(R.split_argv(['check_log', '--out', 'x']),
                          (['check_log', '--out', 'x'], []))
+
+
+class _FakeClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+    def sleep(self, dt):
+        self.t += dt
+
+
+class _FakeProc:
+    """A wsl client. ``script`` lists what each TIMED wait does: 'timeout',
+    'ctrl_c' or an exit code. An UNTIMED wait fails the test: on Windows it is
+    the uninterruptible ``WaitForSingleObject(INFINITE)``, so Ctrl+C is never
+    seen while a long tool (check_log, the README's Ctrl+C case) runs."""
+
+    def __init__(self, script, events, stdout=b''):
+        self.script = list(script)
+        self.events = events
+        self.waits = []
+        self.killed = False
+        self.stdin = io.BytesIO()
+        self.stdout = io.BytesIO(stdout)
+
+    def wait(self, timeout=None):
+        if timeout is None:
+            raise AssertionError('an untimed proc.wait(): Ctrl+C cannot interrupt it on Windows')
+        self.waits.append(timeout)
+        step = self.script.pop(0) if self.script else 0
+        if step == 'timeout':
+            raise subprocess.TimeoutExpired('wsl', timeout)
+        if step == 'ctrl_c':
+            raise KeyboardInterrupt
+        self.events.append(('exit', step))
+        return step
+
+    def kill(self):
+        self.killed = True
+
+
+class ContainerRun(unittest.TestCase):
+    def setUp(self):
+        self.R = _load('container_run.py', 'station_bench_container_run_sup')
+
+    def test_waits_in_short_slices_so_ctrl_c_is_seen(self):
+        events = []
+        proc = _FakeProc(['timeout', 'timeout', 0], events)
+        rc, _ = self.R.supervise(proc, interrupt=lambda: events.append('interrupt'),
+                                 tool_state=lambda: 'gone', say=lambda *_: None)
+        self.assertEqual(rc, 0)
+        self.assertTrue(proc.waits and all(t <= 0.5 for t in proc.waits), proc.waits)
+        self.assertNotIn('interrupt', events)
+
+    def test_ctrl_c_waits_for_the_summary_before_the_copy(self):
+        # The race reproduced: after the interrupt the local client is gone at
+        # once, while the container tool is still writing its summary.
+        events, states = [], ['running', 'running', 'running', 'summary']
+        clock = _FakeClock()
+        proc = _FakeProc(['timeout', 'ctrl_c', 130], events)
+
+        def state():
+            s = states.pop(0)
+            events.append(('state', s))
+            return s
+
+        rc, end = self.R.supervise(proc, interrupt=lambda: events.append('interrupt'),
+                                   tool_state=state, clock=clock, sleep=clock.sleep,
+                                   say=lambda *_: None)
+        self.assertEqual(end, 'summary')
+        self.assertEqual(events[0], 'interrupt')
+        self.assertEqual([e for e in events if e[0] == 'state'][-1], ('state', 'summary'))
+        self.assertEqual(states, [])                    # it waited for the summary
+        self.assertNotIn(None, proc.waits)
+
+    def test_the_wait_for_the_summary_is_bounded(self):
+        clock = _FakeClock()
+        proc = _FakeProc(['ctrl_c', 130], [])
+        rc, end = self.R.supervise(proc, interrupt=lambda: None,
+                                   tool_state=lambda: 'running', done_timeout_s=60.0,
+                                   clock=clock, sleep=clock.sleep, say=lambda *_: None)
+        self.assertEqual(end, 'timeout')
+        self.assertGreaterEqual(clock.t, 60.0)
+        self.assertLess(clock.t, 62.0)
+
+    def test_main_relays_the_console_and_copies_after_the_summary(self):
+        R, W = self.R, self.R.W
+        events = []
+        popen_kwargs = {}
+        proc = _FakeProc(['timeout', 'ctrl_c', 130], events,
+                         stdout='listening …\nwrote /tmp/x_summary.json\n'.encode('utf-8'))
+        states = ['running', 'summary']
+
+        def fake_popen(argv, **kw):
+            popen_kwargs.update(kw)
+            return proc
+
+        saved = {n: getattr(W, n, None) for n in (
+            'push_file', 'pull_dir', 'interrupt', 'container_tool_state', 'distro_name')}
+        saved_popen = R.subprocess.Popen
+        out = io.StringIO()
+        try:
+            W.push_file = lambda *a, **k: None
+            W.distro_name = lambda: 'EduBotics'
+            W.interrupt = lambda *a, **k: events.append('interrupt')
+            W.container_tool_state = lambda *a, **k: (events.append('state'), states.pop(0))[1]
+            W.pull_dir = lambda *a, **k: (events.append('pull'), ['a_summary.json'])[1]
+            R.subprocess.Popen = fake_popen
+            with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(out):
+                R.main(['check_log', '--out', d])
+        finally:
+            for n, v in saved.items():
+                if v is None:
+                    if hasattr(W, n):
+                        delattr(W, n)
+                else:
+                    setattr(W, n, v)
+            R.subprocess.Popen = saved_popen
+        order = [e for e in events if e in ('interrupt', 'state', 'pull')]
+        self.assertEqual(order, ['interrupt', 'state', 'state', 'pull'])
+        self.assertIs(popen_kwargs.get('stdout'), subprocess.PIPE)   # relayed, never lost
+        self.assertIn('wrote /tmp/x_summary.json', out.getvalue())
+
+    def test_the_tool_state_script_and_its_answer(self):
+        W = _load('wsl_docker.py', 'wsl_docker')
+        s = W.tool_state_script('/tmp/station_bench/check_log.pid',
+                                '/tmp/station_bench/out/check_log_1').decode()
+        self.assertIn('/tmp/station_bench/out/check_log_1/*_summary.json', s)
+        self.assertIn('kill -0', s)
+        self.assertEqual(W.parse_tool_state('summary\n'), 'summary')
+        self.assertEqual(W.parse_tool_state('noise\nrunning\n'), 'running')
+        self.assertEqual(W.parse_tool_state('gone'), 'gone')
+        self.assertIsNone(W.parse_tool_state(''))
+        self.assertIsNone(W.parse_tool_state('Error: No such container'))
 
 
 class NeverShipped(unittest.TestCase):

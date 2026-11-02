@@ -411,7 +411,8 @@ class CalibrationManager:
         self._root = Path(root) if root is not None else CALIB_DIR
         # And an optional board pose (4x4 board→base): the station's board solve
         # uses the released layout's pose, never _board_to_base_transform's
-        # EDUBOTICS_BOARD_* globals. None keeps the manual behaviour.
+        # board-placement globals (BOARD_ORIGIN_X_M, BOARD_ORIGIN_Y_M,
+        # BOARD_TABLE_Z_M, BOARD_YAW_DEG). None keeps the manual behaviour.
         self._board_to_base = (None if board_to_base is None
                                else np.asarray(board_to_base, dtype=np.float64).reshape(4, 4))
         self._get_frame = get_frame
@@ -1013,7 +1014,7 @@ class CalibrationManager:
     def board_pose(self) -> np.ndarray:
         """The board→base transform this instance solves against: the one
         passed at construction (the station's released layout), else the manual
-        rig's EDUBOTICS_BOARD_* placement."""
+        rig's board-placement globals (BOARD_ORIGIN_X_M … BOARD_YAW_DEG)."""
         if self._board_to_base is not None:
             return self._board_to_base.copy()
         return self._board_to_base_transform()

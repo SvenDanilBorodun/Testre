@@ -224,6 +224,115 @@ def test_a_raising_touch_solve_owes_a_relock_that_ends_the_touch(tmp_path, monke
     assert node._follower_torque_on is True
 
 
+def _raise_right_after_taking(svc, monkeypatch, kind):
+    """Make the worker loop's step raise once, in the SAME lock hold, right after
+    ``take_next()`` took the first job of ``kind`` (the step's sync raises)."""
+    real_take = svc.worker.take_next
+    real_sync = svc._sync_commission_locked
+    state = {'armed': False, 'raised': 0}
+
+    def take_next():
+        took = real_take()
+        if took and not state['raised'] and svc.worker.running.job.kind == kind:
+            state['armed'] = True
+        return took
+
+    def sync():
+        if state['armed']:
+            state['armed'] = False
+            state['raised'] += 1
+            raise RuntimeError('sync after take')
+        return real_sync()
+    monkeypatch.setattr(svc.worker, 'take_next', take_next)
+    monkeypatch.setattr(svc, '_sync_commission_locked', sync)
+    return state
+
+
+def test_a_job_taken_when_the_worker_step_raises_ends_failed_and_frees_the_station(
+        tmp_path, monkeypatch):
+    """Fix round 2: the worker loop's own step (promote, take, sync) raises AFTER
+    ``take_next()`` took a RESTORE. The job ends FAILED in German instead of
+    staying ``running`` forever, so no station job is pending and a later
+    ``begin`` is not refused „Eine Einrichtung läuft noch.“."""
+    svc, node = _svc(tmp_path, configured=True)
+    sid = _activate(svc, node)
+    state = _raise_right_after_taking(svc, monkeypatch, CW.RESTORE)
+    monkeypatch.setattr(svc, '_work', lambda kind, token: (True, 'ok', None))
+    svc.start_worker()
+    try:
+        r = _commission(svc, 'restore_previous', sid)
+        assert r.result == 'QUEUED', r.message
+        assert _wait(lambda: svc.worker.job_state(r.job_id)[0] not in ('queued', 'running'),
+                     timeout=4)
+        assert state['raised'] == 1
+        assert svc.worker.job_state(r.job_id) == ('failed', T.JOB_INTERNAL_ERROR_DE)
+        assert svc.worker.running is None and not svc.worker.station_job_pending()
+        assert node.on_calibration is False
+        r = _commission(svc, 'begin', sid, layout_id=F.TEST_LAYOUT_ID)
+        assert (r.result, r.message) != ('REFUSED', T.JOB_PENDING_DE)
+        assert r.result == 'QUEUED', r.message
+        assert _wait(lambda: svc.worker.job_state(r.job_id)[0] == 'done')
+        assert node.on_calibration is True and svc.worker.record is not None
+    finally:
+        svc.stop()
+
+
+def test_an_abort_taken_when_the_worker_step_raises_still_releases_the_claim(
+        tmp_path, monkeypatch):
+    """Fix round 2: the step raises right after taking the live record's ABORT
+    (the arm limp, ``on_calibration`` held by the commission). The ABORT waits
+    2 s and runs again, re-locks the arm and releases the claim; without the fix
+    it stayed ``running`` with ``on_calibration`` held for good."""
+    svc, node = _svc(tmp_path, configured=False)
+    sid = _activate(svc, node)
+    svc.start_worker()
+    try:
+        cid = _begin_and_free_the_arm(svc, sid)
+        assert node.on_calibration is True and node._follower_torque_on is False
+        state = _raise_right_after_taking(svc, monkeypatch, CW.ABORT)
+        r = _commission(svc, 'cancel', sid, commission_id=cid)
+        assert r.result == 'QUEUED', r.message
+        assert _wait(lambda: state['raised'] == 1 and svc.worker.running is None,
+                     timeout=4)
+        assert [x.job.kind for x in svc.worker.retries] == [CW.ABORT]
+        node.clock.t += CW.RETRY_DELAY_S + 0.1
+        svc._wake.set()
+        assert _wait(lambda: svc.worker.record is None and _idle(svc))
+        assert svc.worker.job_state(r.job_id) == ('done', T.CANCELLED_DE)
+        assert state['raised'] == 1
+        assert node.on_calibration is False and node._follower_torque_on is True
+        r = _commission(svc, 'begin', sid, layout_id=F.TEST_LAYOUT_ID)
+        assert r.result == 'QUEUED', r.message
+    finally:
+        svc.stop()
+
+
+def test_a_step_that_raises_before_taking_fails_no_job(tmp_path, monkeypatch):
+    """The other half of the guard: a step that raises before ``take_next()``
+    (here the retry promotion) fails nothing; the queued job runs on the next
+    round and ends done."""
+    svc, node = _svc(tmp_path, configured=True)
+    sid = _activate(svc, node)
+    real_promote = svc.worker.promote_due
+    state = {'raised': 0}
+
+    def promote_due(now):
+        if svc.worker.queue and not state['raised']:
+            state['raised'] += 1
+            raise RuntimeError('promote')
+        return real_promote(now)
+    monkeypatch.setattr(svc.worker, 'promote_due', promote_due)
+    monkeypatch.setattr(svc, '_work', lambda kind, token: (True, 'ok', None))
+    r = _commission(svc, 'restore_previous', sid)
+    assert r.result == 'QUEUED', r.message
+    svc.start_worker()
+    try:
+        assert _wait(lambda: svc.worker.job_state(r.job_id)[0] == 'done')
+    finally:
+        svc.stop()
+    assert state['raised'] == 1 and not svc.worker.station_job_pending()
+
+
 def test_the_worker_thread_survives_a_raise_outside_any_job(tmp_path, monkeypatch):
     svc, node = _svc(tmp_path, configured=True)
     sid = _activate(svc, node)

@@ -234,14 +234,22 @@ class StationService:
     # ── the one station worker thread ─────────────────────────────────────────
     def _worker_loop(self):
         while not self._stop:
+            taken = None    # the job THIS round's take_next() took, if any
             try:
                 with self.mode_lock, self.lock:
                     self.worker.promote_due(self.clock())
                     started = self.worker.take_next()
+                    if started:
+                        taken = self.worker.running.job
                     self._sync_commission_locked()
             except Exception as e:  # noqa: BLE001 — nothing may kill the worker
                 self._log('error', f'station worker step failed: {type(e).__name__}: {e!r}')
                 started = False
+                if taken is not None:
+                    # The step raised after taking a job: end that job like a job
+                    # that raised, or it stays running forever (every claim then
+                    # answers JOB_PENDING, an ABORT / RELOCK keeps on_calibration).
+                    self._fail_running_job(taken)
             if not started:
                 self._wake.wait(0.2)
                 self._wake.clear()
@@ -252,13 +260,15 @@ class StationService:
                 self._log('error', f'station job failed: {type(e).__name__}: {e!r}')
                 self._fail_running_job()
 
-    def _fail_running_job(self):
+    def _fail_running_job(self, job=None):
         """The running job raised: end it through the worker's catch-all, which
         releases a claim the job holds and re-schedules a live record's ABORT or
-        RELOCK (plan §6 invariant 3), so the robot never stays wedged."""
+        RELOCK (plan §6 invariant 3), so the robot never stays wedged. With
+        ``job``, only while that very job is the one running."""
         try:
             with self.mode_lock, self.lock:
-                if self.worker.running is not None:
+                run = self.worker.running
+                if run is not None and (job is None or run.job is job):
                     self.worker.fail_running(self.env, T.JOB_INTERNAL_ERROR_DE)
                 self._sync_commission_locked()
         except Exception as e:  # noqa: BLE001

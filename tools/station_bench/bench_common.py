@@ -78,6 +78,43 @@ SIGNAL_TOPIC = '/edubotics/signal_status'
 # Time-target QR payload (time_target.py → container/arrival_rate.py --qr).
 QR_PREFIX = 'EBT1:'
 
+# The SERVER's own image subscriptions (communication/communicator.py; held
+# equal by the unit test). A bench subscriber that wants to count what reaches
+# the server must use them: a RELIABLE subscriber gets the retransmissions the
+# server's BEST_EFFORT subscription loses, so it would overstate delivery.
+SERVER_SENSOR_QOS_DEPTH = 32    # SENSOR_QOS_DEPTH: every recorder camera (/scene, /gripper)
+SERVER_STATION_QOS_DEPTH = 2    # enable_station_store: the station frame store
+# The publisher's own QoS (camera_ingest_node.py: RELIABLE, KEEP_LAST 5), for
+# the --reliable comparison only.
+PUBLISHER_QOS_DEPTH = 5
+
+
+def image_qos(topic: str, reliable: bool = False) -> tuple:
+    """``(reliability, depth, source)`` for subscribing ``topic`` the way the
+    server does: ``'best_effort'`` with the station store's depth 2 for
+    ``/station_scene``, the recorder's ``SENSOR_QOS_DEPTH`` (32) for every other
+    camera. ``reliable=True`` is the comparison: the publisher's own QoS.
+    The container tools map the names onto rclpy's enums."""
+    if reliable:
+        return ('reliable', PUBLISHER_QOS_DEPTH,
+                'comparison: the publisher\'s QoS (camera_ingest_node.py, RELIABLE, KEEP_LAST 5)')
+    if topic == STATION_TOPIC:
+        return ('best_effort', SERVER_STATION_QOS_DEPTH,
+                'server: communicator.enable_station_store (BEST_EFFORT, KEEP_LAST 2)')
+    if topic in (SCENE_TOPIC, GRIPPER_TOPIC):
+        return ('best_effort', SERVER_SENSOR_QOS_DEPTH,
+                'server: communicator.init_subscribers camera_qos (BEST_EFFORT, KEEP_LAST 32)')
+    return ('best_effort', SERVER_SENSOR_QOS_DEPTH,
+            'not a server subscription; the recorder\'s camera QoS (BEST_EFFORT, KEEP_LAST 32)')
+
+
+def rclpy_qos(spec: tuple):
+    """An rclpy ``QoSProfile`` from :func:`image_qos`'s tuple (container only)."""
+    from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy  # noqa: PLC0415
+    rel = (ReliabilityPolicy.RELIABLE if spec[0] == 'reliable'
+           else ReliabilityPolicy.BEST_EFFORT)
+    return QoSProfile(depth=int(spec[1]), reliability=rel, history=HistoryPolicy.KEEP_LAST)
+
 
 # ── Output files ─────────────────────────────────────────────────────────────
 def stamp(now: Optional[datetime] = None) -> str:

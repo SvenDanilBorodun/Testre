@@ -76,7 +76,9 @@ py camera_open.py --index 1 --out C:\bench\b5 --variants all --duration 15 --rep
 * the gripper and scene camera rates the SERVER measures (`/edubotics/signal_status`), read
   by an in-container watcher (`container/watch_stream.py`) that also polls
   `/station/session status` once a second and reports, per second, the largest arrival gap
-  of `/scene/image_raw/compressed` on the container's clock.
+  of `/scene/image_raw/compressed` on the container's clock. It subscribes `/scene` with
+  the recorder's own QoS (BEST_EFFORT, KEEP_LAST 32, `communicator.init_subscribers`), so
+  a gap it reports is one the recorder sees.
 
 The four B1 runs, same PC, same cameras:
 
@@ -130,8 +132,13 @@ the Studio stream on):
 py container_run.py arrival_rate --out C:\bench\b2 --offset-json C:\bench\b2\clock_offset_<stamp>.json -- --duration 120
 ```
 
-* Subscribes `/station_scene/image_raw/compressed` with the publisher's own QoS
-  (RELIABLE, KEEP_LAST 5) and logs per frame `recv_ns`, `stamp_ns`, raw and corrected age.
+* Subscribes `/station_scene/image_raw/compressed` with the SERVER's own QoS for it
+  (BEST_EFFORT, KEEP_LAST 2, `communicator.enable_station_store`; any other `--topic` with
+  the recorder's BEST_EFFORT, KEEP_LAST 32) and logs per frame `recv_ns`, `stamp_ns`, raw
+  and corrected age. A RELIABLE subscriber would also get the retransmissions the server's
+  BEST_EFFORT subscription loses and so overstate B2; `-- --reliable` subscribes with the
+  publisher's RELIABLE, KEEP_LAST 5 for a comparison run only (the summary's `qos` block
+  says which was used).
 * **Pass/fail (spec):** B2 ≥ 14 fps and arrival-age p95 ≤ 0.3 s (also: the preview shows
   in the browser — look at it). A p95 within the clock uncertainty of 0.3 s is reported
   `UNDECIDED`, never PASS.
@@ -178,7 +185,8 @@ py container_run.py perception_load --out C:\bench\b4 -- --trials 10 --tag-id 20
 
 It loads the server's real `workflow.perception.Perception` (pupil_apriltags tag36h11
 behind its one thread lock — the instance the node shares between a program's threads) and
-decodes live 1920×1080 station frames the way the node does. One thread polls like the
+decodes live 1920×1080 station frames the way the node does, subscribed like the node's
+station store (BEST_EFFORT, KEEP_LAST 2). One thread polls like the
 „wenn … erkannt" hat (look, then 0.2 s sleep); per trial, the composite „Greife"'s yaw
 sampling makes 14 detects 0.03 s apart (both numbers read from `perception_blocks` in the
 image). **Pass/fail (spec):** the hat keeps ≥ 2 polls/s during the grasp, and the 14

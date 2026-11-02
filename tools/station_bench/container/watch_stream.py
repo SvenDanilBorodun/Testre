@@ -93,9 +93,10 @@ def main(argv=None):
 
     node.create_subscription(String, B.SIGNAL_TOPIC, on_signal, latched)
 
-    # The image topics: the publisher's own QoS (camera_ingest_node.py).
-    img_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE,
-                         history=HistoryPolicy.KEEP_LAST)
+    # The image topics: the SERVER's own subscription QoS for each topic
+    # (BEST_EFFORT; the recorder's depth 32 for /scene, the station store's 2
+    # for /station_scene), so a gap here is a gap the server sees, not one a
+    # RELIABLE retransmission would have filled.
     lock = threading.Lock()
     arrivals = {t: [] for t in args.topic}
     last_seen = {t: None for t in args.topic}
@@ -108,7 +109,10 @@ def main(argv=None):
         return cb
 
     for t in args.topic:
-        node.create_subscription(CompressedImage, t, make_cb(t), img_qos)
+        spec = B.image_qos(t)
+        node.create_subscription(CompressedImage, t, make_cb(t), B.rclpy_qos(spec))
+        _emit({'kind': 'qos', 'topic': t, 'reliability': spec[0], 'depth': spec[1],
+               'source': spec[2]})
 
     session_client = None
     session_req_type = None

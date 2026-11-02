@@ -124,7 +124,6 @@ def main(argv=None):
     import rclpy  # noqa: PLC0415
     from rclpy.signals import SignalHandlerOptions  # noqa: PLC0415
     from rclpy.executors import SingleThreadedExecutor  # noqa: PLC0415
-    from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy  # noqa: PLC0415
     from sensor_msgs.msg import CompressedImage  # noqa: PLC0415
 
     from physical_ai_server.workflow.perception import Perception  # noqa: PLC0415
@@ -147,9 +146,10 @@ def main(argv=None):
             latest['data'] = bytes(msg.data)
             latest['n'] += 1
 
+    # The node's own station-store subscription (BEST_EFFORT, depth 2): the
+    # frames the node's Perception would see.
     node.create_subscription(CompressedImage, args.topic, on_frame,
-                             QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE,
-                                        history=HistoryPolicy.KEEP_LAST))
+                             B.rclpy_qos(B.image_qos(args.topic)))
     ex = SingleThreadedExecutor()
     ex.add_node(node)
 

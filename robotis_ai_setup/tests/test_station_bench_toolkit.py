@@ -341,6 +341,41 @@ class MirroredContracts(unittest.TestCase):
         texts = PAS / 'station' / 'texts_de.py'
         self.assertEqual(B.STATION_TOPIC, _assign(texts, 'STATION_TOPIC'))
 
+    def test_image_qos_is_the_servers_own_subscription(self):
+        """B2 counts frames TO THE SERVER: a RELIABLE bench subscriber gets the
+        retransmissions the server's BEST_EFFORT subscription loses."""
+        comm = PAS / 'communication' / 'communicator.py'
+        src = comm.read_text(encoding='utf-8')
+        self.assertEqual(B.SERVER_SENSOR_QOS_DEPTH, _assign(comm, 'SENSOR_QOS_DEPTH'))
+        station = src.split('def enable_station_store', 1)[1].split('\n    def ', 1)[0]
+        m = re.search(r'QoSProfile\(depth=(\d+), reliability=ReliabilityPolicy\.(\w+)', station)
+        self.assertIsNotNone(m, 'enable_station_store no longer builds its QoS as expected')
+        self.assertEqual((B.SERVER_STATION_QOS_DEPTH, 'BEST_EFFORT'), (int(m.group(1)),
+                                                                       m.group(2)))
+        subs = src.split('def init_subscribers', 1)[1].split('\n    def ', 1)[0]
+        cam = subs.split('camera_qos = QoSProfile(', 1)[1].split(')', 1)[0]
+        self.assertIn('depth=SENSOR_QOS_DEPTH', cam)
+        self.assertIn('ReliabilityPolicy.BEST_EFFORT', cam)
+        self.assertEqual(B.image_qos(B.STATION_TOPIC)[:2], ('best_effort', 2))
+        self.assertEqual(B.image_qos(B.SCENE_TOPIC)[:2], ('best_effort', 32))
+        self.assertEqual(B.image_qos(B.GRIPPER_TOPIC)[:2], ('best_effort', 32))
+        # The comparison flag: the publisher's own QoS (camera_ingest_node.py).
+        ingest = (REPO / 'robotis_ai_setup' / 'docker' / 'open_manipulator'
+                  / 'camera_ingest_node.py').read_text(encoding='utf-8')
+        self.assertRegex(ingest, r'QoSProfile\(\s*depth=5,\s*reliability=ReliabilityPolicy'
+                                 r'\.RELIABLE')
+        self.assertEqual(B.image_qos(B.STATION_TOPIC, reliable=True)[:2], ('reliable', 5))
+
+    def test_the_container_tools_subscribe_images_with_the_server_qos(self):
+        for rel in ('container/arrival_rate.py', 'container/watch_stream.py',
+                    'container/perception_load.py'):
+            src = (BENCH / rel).read_text(encoding='utf-8')
+            self.assertTrue('B.image_qos(' in src, f'{rel}: not built by B.image_qos')
+            self.assertIsNone(re.search(r'depth=5,\s*reliability=ReliabilityPolicy\.RELIABLE',
+                                        src), f'{rel}: a hard-coded RELIABLE image QoS')
+        A = _load('container/arrival_rate.py', 'station_bench_arrival_rate_qos')
+        self.assertTrue(A.build_parser().parse_args(['--out', '/o', '--reliable']).reliable)
+
     def test_the_hat_and_yaw_cadence_the_b4_tool_mirrors(self):
         P = _load('container/perception_load.py', 'station_bench_perception_load')
         wm = (PAS / 'workflow' / 'workflow_manager.py').read_text(encoding='utf-8')

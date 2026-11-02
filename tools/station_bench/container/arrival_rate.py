@@ -18,8 +18,12 @@
 server (inside ``physical_ai_server``; dev only; run via ``container_run.py``).
 
 Subscribes ``/station_scene/image_raw/compressed`` (and any other ``--topic``)
-with the publisher's own QoS (``camera_ingest_node.py``: RELIABLE, KEEP_LAST
-5) and records per frame the receive time on this container's clock and the
+with the SERVER's own QoS for that topic (``bench_common.image_qos``: the
+station store's BEST_EFFORT, KEEP_LAST 2; the recorder's BEST_EFFORT,
+KEEP_LAST 32 for ``/scene``), so it counts what reaches the server, not the
+retransmissions a RELIABLE subscriber would get. ``--reliable`` subscribes
+with the publisher's RELIABLE, KEEP_LAST 5 instead, for comparison. It records
+per frame the receive time on this container's clock and the
 ``header.stamp``, which is the WINDOWS capture time (``capture_ns``).
 
 * B2: rate ≥ 14 fps and arrival-age p95 ≤ 0.3 s. The age is only honest with
@@ -108,6 +112,9 @@ def build_parser():
                    help='container = windows + offset (clock_offset.py)')
     p.add_argument('--offset-unc-ns', type=int, default=None)
     p.add_argument('--qr', action='store_true', help='decode the B3 time target')
+    p.add_argument('--reliable', action='store_true',
+                   help='comparison only: subscribe RELIABLE, KEEP_LAST 5 (the publisher\'s '
+                        'QoS) instead of the server\'s BEST_EFFORT subscription')
     p.add_argument('--label', default='')
     p.add_argument('--stamp', default=None, help='file-name stamp (container_run passes the '
                                                  'Windows one)')
@@ -119,7 +126,6 @@ def main(argv=None):
     topics = args.topic or [B.STATION_TOPIC]
     import rclpy  # noqa: PLC0415
     from rclpy.signals import SignalHandlerOptions  # noqa: PLC0415
-    from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy  # noqa: PLC0415
     from sensor_msgs.msg import CompressedImage  # noqa: PLC0415
 
     stop = threading.Event()
@@ -167,8 +173,7 @@ def main(argv=None):
     # rclpy's would shut the context down under the running loop instead.
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     node = rclpy.create_node('station_bench_arrival')
-    qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE,
-                     history=HistoryPolicy.KEEP_LAST)
+    qos_specs = {t: B.image_qos(t, reliable=args.reliable) for t in topics}
 
     def make_cb(topic):
         def cb(msg):
@@ -190,7 +195,8 @@ def main(argv=None):
         return cb
 
     for t in topics:
-        node.create_subscription(CompressedImage, t, make_cb(t), qos)
+        node.create_subscription(CompressedImage, t, make_cb(t), B.rclpy_qos(qos_specs[t]))
+        print(f'{t}: {qos_specs[t][2]}', flush=True)
     print(f'listening on {topics} for {args.duration:.0f} s …', flush=True)
     t_end = time.monotonic() + args.duration
     next_print = time.monotonic() + 5.0
@@ -211,12 +217,16 @@ def main(argv=None):
         'gate': 'B2 (rate, age)' + (' / B3 (latency)' if args.qr else ''),
         'label': args.label, 'duration_s': args.duration,
         'clock_offset_ns': args.offset_ns, 'clock_offset_uncertainty_ns': args.offset_unc_ns,
+        'qos': {t: {'reliability': q[0], 'depth': q[1], 'source': q[2]}
+                for t, q in qos_specs.items()},
         'topics': {t: summarize_topic(v, args.offset_ns, args.offset_unc_ns,
                                       t == B.STATION_TOPIC) for t, v in recs.items()},
         'notes': ['recv is this container\'s clock; stamp is the Windows capture time '
                   '(capture_ns). Age = recv - (stamp + offset).',
                   'An extra subscriber adds one more DDS copy of every 1080p JPEG; a '
-                  'browser preview is another. Report which were open.'],
+                  'browser preview is another. Report which were open.',
+                  'Subscribed with the qos above: the server\'s own BEST_EFFORT subscription '
+                  'unless --reliable was given (then a comparison, not the B2 number).'],
     }
     if args.qr:
         summary['qr'] = summarize_qr(qr_rows, args.offset_unc_ns)

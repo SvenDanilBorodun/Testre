@@ -1,10 +1,16 @@
 """Test doubles for the managed-training tests (not a test module itself).
 
 * ``Clock`` — one time source for the code under test and the fakes.
-* ``FakeDB`` — supabase-py's query builder over three tables plus the 049
-  RPCs, written to follow migration 049's SQL statement by statement (the SQL
-  itself is proven by ``supabase/tests/049_managed_training_assertions.sql``).
-  ``fail`` makes the next N reads or RPCs raise (outage tests).
+* ``FakeDB`` — supabase-py's query builder over three tables plus the 049/050
+  RPCs and 052's changes to them, written to follow the SQL statement by
+  statement (the SQL itself is proven by the hand-run ``supabase/tests/049_*``,
+  ``050_*`` and ``052_credit_ledger_assertions.sql``). For 052 it carries a SMALL
+  hour model (``hours``: free hours per funding account, ``member_limit`` /
+  ``member_used`` per group member) — enough for the start reservation, the quota
+  and the settlement trigger (``_settle``) a route test reads back; the ledger
+  itself is A's and its accounting is proven there. ``fail`` makes the next N
+  reads or RPCs raise (outage tests); ``errors[name] = [PgError, …]`` makes the
+  next calls of one RPC raise exactly that SQLSTATE.
 * ``FakeR2`` — R2 objects in memory behind ``r2_client``'s function names.
 * ``FakeRunpod`` — the RunPod REST v2 surface of spec §3.6 as an
   ``httpx.MockTransport`` handler, with programmable answers.
@@ -65,6 +71,11 @@ TRAINING_DEFAULTS = {
     "cancel_attempted_at": None, "current_step": 0, "worker_token": None, "cloud_job_id": None,
     "error_message": None, "loss_history": [], "workgroup_id": None, "current_loss": None, "model_type": "act",
     "capped_step": None, "continuable_until": None, "continued_from": None,
+    # 052: a row added directly is a pre-052 ('derived') row unless a test says otherwise;
+    # start_training_safe creates 'ledger' rows with their reservation.
+    "credit_scheme": "derived", "reserved_hours": None, "charged_hours": None, "settled_at": None,
+    "idempotency_key": None, "stop_requested_at": None, "stop_requested_by_role": None,
+    "lost_seconds": 0, "lost_reasons": [], "charge_waiver": None,
 }
 KEPT_DEFAULTS = {"state": "kept", "refused_reason": None, "bad_attempts": [], "kept_at": None,
                  "expires_at": None, "manifest": {}}
@@ -77,6 +88,7 @@ ATTEMPT_DEFAULTS = {
 CHECKPOINT_DEFAULTS = {
     "state": "uploading", "ready_at": None, "mirrored_at": None, "mirror_tries": 0, "refused_reason": None,
     "refused_by": None, "crash_attempts": [], "mirror_claimed_at": None, "mirror_owner": None,
+    "config_complaints": [],
 }
 PKS = {"trainings": ("id",), "training_attempts": ("training_id", "attempt_no"),
        "training_checkpoints": ("training_id", "attempt_no", "step"),
@@ -280,6 +292,9 @@ class _Rpc:
         with db.lock:
             db.rpcs.append((self.name, copy.deepcopy(self.args)))
             db.maybe_fail(f"rpc:{self.name}")
+            queued = db.errors.get(self.name)
+            if queued:
+                raise queued.pop(0)
             fn = getattr(db, "_rpc_" + self.name)
             return SimpleNamespace(data=fn(**self.args))
 
@@ -295,9 +310,19 @@ class FakeDB:
         self.max_rows = None
         self.lock = threading.RLock()
         self._next_id = 100
-        self.credits: dict = {}
         self.workgroup_of: dict = {}   # user id -> group id (review m5)
-        self.pools: dict = {}          # group id -> shared_credits
+        self.errors: dict = {}         # rpc name -> [PgError, …] raised by the next calls
+        # 052's small hour model (see the module docstring)
+        self.roles: dict = {}          # user id -> role (default 'student')
+        self.hours: dict = {}          # ('student'|'group', id) -> free hours (default DEFAULT_HOURS)
+        self.reserved: dict = {}       # account -> reserved hours
+        self.spent: dict = {}          # account -> spent hours
+        self.member_limit: dict = {}   # group id -> per-member limit
+        self.member_used: dict = {}    # (group id, user id) -> hours reserved − released
+        self.refusals: list = []       # record_training_refusal calls that wrote (dicts)
+        self.row_account: dict = {}    # training id -> the account its reservation came from
+        self.ledger: list = []         # credit_history rows (tests append them)
+        self.tables["training_start_refusals"] = []
 
     # helpers ------------------------------------------------------------
     def maybe_fail(self, key):
@@ -376,6 +401,52 @@ class FakeDB:
     def calls(self, name):
         return [a for n, a in self.rpcs if n == name]
 
+    # 052: the hour model -------------------------------------------------------
+    DEFAULT_HOURS = 100
+
+    def account_of(self, user_id):
+        gid = self.workgroup_of.get(user_id)
+        return ("group", gid) if gid is not None else ("student", user_id)
+
+    def free(self, account):
+        return self.hours.get(account, self.DEFAULT_HOURS)
+
+    def _startable(self, user_id):
+        acct = self.account_of(user_id)
+        free = self.free(acct)
+        limit = self.member_limit.get(acct[1]) if acct[0] == "group" else None
+        used = self.member_used.get((acct[1], user_id), 0) if acct[0] == "group" else None
+        left = None if limit is None else limit - used
+        return acct, free, limit, used, left
+
+    @staticmethod
+    def _next_hours(free, left, max_hours):
+        return min(3, max(1, max_hours if max_hours is not None else 3), free, left if left is not None else 3)
+
+    def _settle(self, t):
+        """The 052 settlement trigger on a terminal transition of a 'ledger' row."""
+        if t.get("credit_scheme") != "ledger" or t.get("charged_hours") is not None:
+            return
+        heartbeat = any(a["first_heartbeat_at"] for a in self.tables["training_attempts"]
+                        if a["training_id"] == t["id"])
+        reserved = int(t["reserved_hours"] or 0)
+        charge = 0
+        if heartbeat and t.get("charge_waiver") is None:
+            charge = min(reserved, math.ceil(max(int(t["train_seconds_used"] or 0), 0) / 3600))
+        acct = self.row_account.get(t["id"]) or self.account_of(t["user_id"])
+        self.reserved[acct] = self.reserved.get(acct, 0) - reserved
+        self.spent[acct] = self.spent.get(acct, 0) + charge
+        self.hours[acct] = self.free(acct) + reserved - charge
+        if acct[0] == "group":
+            key = (acct[1], t["user_id"])
+            self.member_used[key] = self.member_used.get(key, 0) - (reserved - charge)
+        t.update(charged_hours=charge, settled_at=self.now())
+
+    def _set_status(self, t, status):
+        t["status"] = status
+        if status in ("succeeded", "failed", "canceled"):
+            self._settle(t)
+
     # the 049 RPCs (statement by statement) ------------------------------------
     def _rpc_claim_training_attempt(self, p_training_id, p_expected_attempt):
         t = self.row(p_training_id)
@@ -430,6 +501,7 @@ class FakeDB:
                 and t["current_attempt"] == p_attempt and t["status"] in ("queued", "running")):
             raise PgError("P0049")
         a.update(state="lost", ended_at=self.now(), end_reason=p_reason)
+        advanced_before = t["step_advanced_at"]
         resume = p_resume_step or 0
         hist = [e for e in t["loss_history"] or [] if int(e["s"]) <= resume]
         last = hist[-1].get("l") if hist else None
@@ -445,7 +517,21 @@ class FakeDB:
                      and _ts(c["created_at"]) is not None]
             if steps:
                 saved = max(int(max(steps) - first), 0)
-        t["train_seconds_used"] += min(max(p_train_seconds or 0, 0), saved)
+        charged = min(max(p_train_seconds or 0, 0), saved)
+        t["train_seconds_used"] += charged
+        if t.get("credit_scheme") == "ledger":  # 052 [D1, N2, Q-B]: the unsaved rest to lost_seconds
+            if first is None:
+                counted = 0
+            else:
+                if p_reason in ("stalled", "checkpoint_overdue"):
+                    end = _ts(advanced_before) if advanced_before else self.clock.t
+                elif p_reason in ("heartbeat_lost", "pod_gone", "modal_ended"):
+                    end = _ts(t["last_progress_at"]) if t.get("last_progress_at") else self.clock.t
+                else:
+                    end = self.clock.t
+                counted = max(int(min(end, self.clock.t) - first), 0)
+            t["lost_seconds"] = int(t["lost_seconds"] or 0) + max(counted - charged, 0)
+            t["lost_reasons"] = list(t["lost_reasons"] or []) + [p_reason]
         return None
 
     def _rpc_end_training_attempt(self, p_training_id, p_attempt, p_reason, p_note, p_train_seconds):
@@ -461,16 +547,25 @@ class FakeDB:
         return None
 
     def _rpc_finish_training(self, p_training_id, p_attempt, p_status, p_message, p_log_url,
-                             p_note=None, p_final_step=None, p_continuable_until=None):
+                             p_note=None, p_final_step=None, p_continuable_until=None, p_charge_waiver=None):
         if p_status not in ("succeeded", "failed"):
+            raise PgError("22023")
+        if p_charge_waiver is not None and (p_charge_waiver != "lerobot_error" or p_status != "failed"):
             raise PgError("22023")
         t = self.row(p_training_id)
         if not (t and t["managed"] and t["current_attempt"] == p_attempt and t["status"] in ("queued", "running")):
             raise PgError("P0049")
         a = self.attempt(p_training_id, p_attempt)
+        if p_charge_waiver is not None and not (  # 052 fix round (V1-M1): only a provable fresh start
+                a is not None and a["resume_from_step"] == 0 and a["state"] == "running"
+                and t.get("continued_from") is None and int(t["train_seconds_used"] or 0) == 0
+                and int(t["current_step"] or 0) == 0
+                and not any(c["training_id"] == p_training_id and c["state"] == "ready"
+                            for c in self.tables["training_checkpoints"])):
+            raise PgError("P0073")
         first = _ts(a["first_heartbeat_at"]) if a and a["state"] not in ("lost", "ended") else None
         t["train_seconds_used"] += max(int(self.clock.t - first), 0) if first is not None else 0
-        t.update(status=p_status, terminated_at=self.now(), worker_token=None, status_note=p_note)
+        t.update(terminated_at=self.now(), worker_token=None, status_note=p_note, charge_waiver=p_charge_waiver)
         if p_status == "failed":
             t["error_message"] = p_message
         t["log_url"] = p_log_url if p_log_url is not None else t["log_url"]
@@ -480,10 +575,12 @@ class FakeDB:
         a = self.attempt(p_training_id, p_attempt)
         if a and a["state"] not in ("lost", "ended"):
             a.update(state="ended", ended_at=a["ended_at"] or self.now(), end_reason=a["end_reason"] or p_status)
+        self._set_status(t, p_status)
         return None
 
     def _rpc_cap_training_attempt(self, p_training_id, p_attempt, p_step, p_reason, p_note, p_train_seconds):
-        if p_reason not in ("capped", "wall_capped") or p_step is None or p_step < 1:
+        if (p_reason not in ("capped", "wall_capped", "attempts_out", "no_gpu", "content_refused")
+                or p_step is None or p_step < 1):
             raise PgError("22023")
         t = self.row(p_training_id)
         if t is not None and t["total_steps"] is not None and p_step >= t["total_steps"]:
@@ -498,7 +595,17 @@ class FakeDB:
         t["train_seconds_used"] += 0 if v_prev in ("lost", "ended") else max(p_train_seconds or 0, 0)
         return None
 
-    def _rpc_cancel_request_training(self, p_training_id, p_user_id):
+    PUBLISH_REASONS = ("succeeded", "capped", "wall_capped", "stopped", "attempts_out", "no_gpu", "content_refused")
+
+    def _first_stop(self, t, role):
+        """§4.9 step 2: the first stop request writes time and role together, once."""
+        if t["stop_requested_at"] is None:
+            t["stop_requested_by_role"] = role
+        t["stop_requested_at"] = t["stop_requested_at"] or self.now()
+
+    def _rpc_cancel_request_training(self, p_training_id, p_user_id, p_actor_role=None):
+        if p_actor_role not in (None, "student", "teacher"):
+            raise PgError("22023")
         t = self.row(p_training_id)
         if t is None or t["user_id"] != p_user_id:
             raise PgError("P0002")
@@ -507,8 +614,9 @@ class FakeDB:
         a = None
         if t["managed"] and t["current_attempt"] > 0:
             a = self.attempt(p_training_id, t["current_attempt"])
-            if a and a["state"] == "ended" and a["end_reason"] in ("succeeded", "capped", "wall_capped"):
+            if a and a["state"] == "ended" and a["end_reason"] in self.PUBLISH_REASONS:
                 raise PgError("P0051")
+        self._first_stop(t, p_actor_role)
         before = t["cancel_attempts"]
         t.update(status="cancel_requested", cancel_attempted_at=self.now(), cancel_attempts=before + 1)
         return [{"o_managed": t["managed"], "o_cloud_job_id": t["cloud_job_id"],
@@ -524,12 +632,15 @@ class FakeDB:
             raise PgError("P0049")
         a = self.attempt(p_training_id, t["current_attempt"])
         first = _ts(a["first_heartbeat_at"]) if a and a["state"] not in ("lost", "ended") else None
-        t["train_seconds_used"] += max(int(self.clock.t - first), 0) if first is not None else 0
-        t.update(status=p_final, terminated_at=self.now(), worker_token=None, status_note=None)
+        stop = _ts(t["stop_requested_at"]) if t.get("stop_requested_at") else self.clock.t
+        end = min(self.clock.t, stop)  # 052: counted only to the first stop request
+        t["train_seconds_used"] += max(int(end - first), 0) if first is not None else 0
+        t.update(terminated_at=self.now(), worker_token=None, status_note=None)
         if p_final == "failed":
             t["error_message"] = p_message
         if a and a["state"] not in ("lost", "ended"):
             a.update(state="ended", ended_at=self.now(), end_reason="canceled")
+        self._set_status(t, p_final)
         return None
 
     def _lease(self, holder, claimed_key, owner_key, p_lease_s, p_owner):
@@ -539,7 +650,7 @@ class FakeDB:
     def _rpc_claim_training_publish(self, p_training_id, p_attempt, p_lease_s, p_owner):
         t = self.row(p_training_id)
         a = self.attempt(p_training_id, p_attempt)
-        if not (t and a and a["state"] == "ended" and a["end_reason"] in ("succeeded", "capped", "wall_capped")
+        if not (t and a and a["state"] == "ended" and a["end_reason"] in self.PUBLISH_REASONS
                 and t["current_attempt"] == p_attempt and t["status"] == "running"):
             return False
         if not self._lease(a, "publish_claimed_at", "publish_owner", p_lease_s, p_owner):
@@ -548,9 +659,30 @@ class FakeDB:
                  publish_first_at=a["publish_first_at"] or self.now())
         return True
 
+    def _rpc_mark_checkpoint_ready(self, p_training_id, p_attempt, p_step):
+        """052 fix round 2 (V3-M1), statement by statement as the migration's function:
+        under the trainings row lock, false unless the row exists, is managed, is
+        'running' and has this attempt current, and the attempt is 'running'; then
+        'uploading' → 'ready' (ready_at now) answers true, an already ready checkpoint
+        true (ready_at kept), anything else (absent, refused, deleted) false."""
+        t = self.row(p_training_id)
+        if not t or not t["managed"] or t["status"] != "running" or t["current_attempt"] != p_attempt:
+            return False
+        a = self.attempt(p_training_id, p_attempt)
+        if not a or a["state"] != "running":
+            return False
+        c = self.checkpoint(p_training_id, p_attempt, p_step)
+        if c and c["state"] == "uploading":
+            c.update(state="ready", ready_at=self.now())
+            return True
+        return bool(c and c["state"] == "ready")
+
     def _rpc_claim_checkpoint_mirror(self, p_training_id, p_attempt, p_step, p_lease_s, p_owner):
         c = self.checkpoint(p_training_id, p_attempt, p_step)
+        t = self.row(p_training_id)
         if not (c and c["state"] == "ready" and c["mirrored_at"] is None):
+            return False
+        if not (t and t["status"] in ("queued", "running", "succeeded")):  # 052 fix round 2
             return False
         if not self._lease(c, "mirror_claimed_at", "mirror_owner", p_lease_s, p_owner):
             return False
@@ -583,7 +715,11 @@ class FakeDB:
         trimmed = p_status == "running" and p_current_step is not None and p_current_step < prev_step
         if trimmed:
             hist = [e for e in hist if int(e["s"]) <= p_current_step]
-        if t["step_advanced_at"] is None or p_status == "running" or (
+        # 052 fix round (V1-m1): reset only when NULL, on the first queued → running write
+        # (a new attempt) or when the step rises — whatever the write carries. Before, every
+        # running write reset it, so heartbeats alone kept the sweep's stall rule (the only
+        # reader of step_advanced_at) from firing; `_checkpoint_overdue` never reads it
+        if t["step_advanced_at"] is None or (p_status == "running" and prev_status == "queued") or (
                 p_current_step is not None and p_current_step > prev_step):
             t["step_advanced_at"] = self.now()
         t["status"] = p_status or t["status"]
@@ -608,29 +744,44 @@ class FakeDB:
         return None
 
     def _rpc_start_training_safe(self, p_user_id, p_dataset_name, p_model_name, p_model_type, p_training_params,
-                                 p_total_steps, p_worker_token, p_managed=False):
-        # review m5: a user in a workgroup spends the group's shared_credits pool and the
-        # new row carries that workgroup_id; a user without one keeps the per-user credits.
-        gid = self.workgroup_of.get(p_user_id)
-        extra = {}
-        if gid is not None:
-            credits = self.pools.get(gid, 0)
-            used = sum(1 for r in self.tables["trainings"]
-                       if r["workgroup_id"] == gid and r["status"] not in ("failed", "canceled"))
-            extra["workgroup_id"] = gid
-        else:
-            credits = self.credits.get(p_user_id, 100)
-            used = sum(1 for r in self.tables["trainings"]
-                       if r["user_id"] == p_user_id and r["status"] not in ("failed", "canceled"))
-        if used >= credits:
-            raise PgError("P0003", "No training credits remaining")
+                                 p_total_steps, p_worker_token, p_managed=False, p_idempotency_key=None,
+                                 p_max_hours=3):
+        """052 §4.3: students only (P0060), managed ACT only (P0061), the key replay (P0071),
+        then a reservation of min(3, p_max_hours, free, member hours left) hours."""
+        if self.roles.get(p_user_id, "student") != "student":
+            raise PgError("P0060")
+        if str(p_model_type).lower() != "act" or not p_managed:
+            raise PgError("P0061")
+        if p_idempotency_key is not None:
+            for r in self.tables["trainings"]:
+                if r["user_id"] == p_user_id and r.get("idempotency_key") == p_idempotency_key:
+                    same = (r["dataset_name"] == p_dataset_name and str(r["model_type"]).lower() ==
+                            str(p_model_type).lower() and (r["training_params"] or {}).get("steps") ==
+                            (p_training_params or {}).get("steps"))
+                    if not same:
+                        raise PgError("P0071")
+                    return [{"training_id": r["id"], "remaining": None, "reserved_hours": r["reserved_hours"],
+                             "replay": True}]
+        acct, free, limit, used, left = self._startable(p_user_id)
+        n = self._next_hours(free, left, p_max_hours)
+        if left is not None and left < 1 and free >= 1:
+            raise PgError("P0063")
+        if n < 1:
+            raise PgError("P0003", "No training hours left")
+        extra = {"workgroup_id": acct[1]} if acct[0] == "group" else {}
         row = self.add_training(user_id=p_user_id, dataset_name=p_dataset_name, model_name=p_model_name,
                                 model_type=p_model_type, training_params=copy.deepcopy(p_training_params),
                                 total_steps=p_total_steps, worker_token=p_worker_token, managed=bool(p_managed),
-                                status="queued", **extra)
-        return [{"training_id": row["id"], "remaining": credits - used - 1}]
+                                status="queued", credit_scheme="ledger", reserved_hours=n,
+                                idempotency_key=p_idempotency_key, **extra)
+        self.row_account[row["id"]] = acct
+        self.hours[acct] = free - n
+        self.reserved[acct] = self.reserved.get(acct, 0) + n
+        if acct[0] == "group":
+            self.member_used[(acct[1], p_user_id)] = (used or 0) + n
+        return [{"training_id": row["id"], "remaining": free - n, "reserved_hours": n, "replay": False}]
 
-    def _rpc_start_continuation_safe(self, p_user_id, p_parent_id, p_note):
+    def _rpc_start_continuation_safe(self, p_user_id, p_parent_id, p_note, p_max_hours=3):
         t = self.row(p_parent_id)
         if t is None or t["user_id"] != p_user_id:
             raise PgError("P0002")
@@ -645,13 +796,93 @@ class FakeDB:
         if any(c["continued_from"] == p_parent_id and c["status"] not in ("failed", "canceled")
                for c in self.tables["trainings"]):
             raise PgError("P0054")
-        child_id, remaining = self._rpc_start_training_safe(
+        res = self._rpc_start_training_safe(
             p_user_id, t["dataset_name"], t["model_name"], t["model_type"], t["training_params"],
-            t["total_steps"], None, True)[0].values()
-        child = self.row(child_id)
+            t["total_steps"], None, True, None, p_max_hours)[0]
+        child = self.row(res["training_id"])
         child.update(continued_from=p_parent_id, current_step=t["capped_step"], status_note=p_note,
                      dataset_fps=t["dataset_fps"])
-        return [{"o_training_id": child_id, "o_remaining": remaining}]
+        return [{"o_training_id": res["training_id"], "o_remaining": res["remaining"],
+                 "o_reserved_hours": res["reserved_hours"]}]
+
+    # 052's new callable functions (only what the API's tests need) --------------
+    def _rpc_stop_training(self, p_training_id, p_user_id, p_actor_id, p_actor_role, p_note):
+        """§4.9, statement by statement (INVOKER; under the row lock)."""
+        if p_actor_role not in ("student", "teacher"):
+            raise PgError("22023")
+        t = self.row(p_training_id)
+        if t is None or t["user_id"] != p_user_id:
+            raise PgError("P0002")
+        if t["status"] not in ("queued", "running", "cancel_requested"):
+            raise PgError("P0050")
+        a = self.attempt(p_training_id, t["current_attempt"]) if t["current_attempt"] else None
+        if a and a["state"] == "ended" and a["end_reason"] in self.PUBLISH_REASONS:
+            raise PgError("P0051")
+        self._first_stop(t, p_actor_role)
+        trained = any(x["first_heartbeat_at"] for x in self.tables["training_attempts"]
+                      if x["training_id"] == p_training_id)
+        out = {"o_attempt": t["current_attempt"], "o_backend": a["backend"] if a else None,
+               "o_cloud_ref": a["cloud_ref"] if a else None, "o_attempt_state": a["state"] if a else None,
+               "o_managed": t["managed"], "o_cloud_job_id": t["cloud_job_id"]}
+        if (t["status"] != "cancel_requested" and t["managed"] and t["credit_scheme"] == "ledger" and trained
+                and t["current_attempt"] > 0 and a and a["state"] in ("placing", "starting", "running", "lost")):
+            ready = [c for c in self.tables["training_checkpoints"]
+                     if c["training_id"] == p_training_id and c["state"] == "ready"]
+            final = [c for c in ready if c["step"] == t["total_steps"]]
+            below = [c for c in ready if c["step"] < t["total_steps"]]
+            if final or below:
+                if a["state"] != "lost" and a["first_heartbeat_at"]:
+                    t["train_seconds_used"] += max(int(self.clock.t - _ts(a["first_heartbeat_at"])), 0)
+                if final:
+                    a.update(state="ended", ended_at=self.now(), end_reason="succeeded")
+                    t.update(status="running", worker_token=None, status_note=p_note)
+                    return [dict(out, o_outcome="publish_final", o_step=t["total_steps"],
+                                 o_cancel_attempts=t["cancel_attempts"])]
+                step = max(c["step"] for c in below)
+                a.update(state="ended", ended_at=self.now(), end_reason="stopped")
+                t.update(status="running", worker_token=None, status_note=p_note, capped_step=step)
+                return [dict(out, o_outcome="publish", o_step=step, o_cancel_attempts=t["cancel_attempts"])]
+        t.update(status="cancel_requested", cancel_attempted_at=self.now(),
+                 cancel_attempts=t["cancel_attempts"] + 1)
+        return [dict(out, o_outcome="cancel", o_step=None, o_cancel_attempts=t["cancel_attempts"])]
+
+    def _rpc_credit_quota(self, p_user_id, p_max_hours=3):
+        role = self.roles.get(p_user_id, "student")
+        if role != "student":
+            return [{"o_role": role, "o_account_kind": None, "o_account_id": None, "o_free": 0, "o_reserved": 0,
+                     "o_spent": 0, "o_member_limit": None, "o_member_used": None, "o_next_hours": 0}]
+        acct, free, limit, used, left = self._startable(p_user_id)
+        nxt = self._next_hours(free, left, p_max_hours)
+        return [{"o_role": role, "o_account_kind": acct[0], "o_account_id": acct[1], "o_free": free,
+                 "o_reserved": self.reserved.get(acct, 0), "o_spent": self.spent.get(acct, 0),
+                 "o_member_limit": limit, "o_member_used": used, "o_next_hours": max(nxt, 0)}]
+
+    def _rpc_record_training_refusal(self, p_user_id, p_request_kind, p_code, p_model_type):
+        if p_request_kind not in ("start", "continue") or p_code not in ("role", "policy", "no_hours",
+                                                                            "member_limit"):
+            raise PgError("23514")
+        mt = (p_model_type or "").strip().lower()
+        self.refusals.append({"user_id": p_user_id, "role": self.roles.get(p_user_id, "student"),
+                              "request_kind": p_request_kind, "code": p_code,
+                              "model_type": mt if re.fullmatch(r"[a-z0-9_]{1,32}", mt) else None})
+        return None
+
+    def _rpc_credit_history(self, p_scope, p_id, p_before=None, p_limit=100):
+        """§4.11 over ``self.ledger`` (rows shaped like credit_history's answer)."""
+        def about(r):
+            if p_scope == "all":
+                return True
+            if p_scope == "student":
+                return (("student", p_id) in ((r.get("from_kind"), r.get("from_id")), (r.get("to_kind"), r.get("to_id")))
+                        or r.get("member_id") == p_id)
+            return (p_scope, p_id) in ((r.get("from_kind"), r.get("from_id")), (r.get("to_kind"), r.get("to_id")))
+        lim = max(1, min(200, p_limit or 100))
+        rows = [r for r in sorted(self.ledger, key=lambda r: -r["id"]) if about(r)
+                and (p_before is None or r["id"] < p_before)]
+        return copy.deepcopy(rows[:lim])
+
+    def _rpc_credit_reconcile(self):
+        return [{"o_unsettled": 0, "o_orphans": 0, "o_drift": 0, "o_stale_open": 0}]
 
 
 # ---------------------------------------------------------------------------
@@ -668,6 +899,10 @@ class FakeR2:
         self.copies: list = []           # (src, dst) of each copy_object
         self.puts: list = []             # (key, path) of each put_file_presigned
         self.copy_unsupported = False    # raise R2CopyUnsupported on every copy_object
+        # keys R2 holds a stored SHA-256 for (a PUT through presign_put signs it, OQ-1 / G0b V1):
+        # head_meta returns the sha256 of the CURRENT bytes for them (R2 enforces it at upload),
+        # None for every other object (a direct write, a CopyObject copy), as measured by G0
+        self.checksummed: set = set()
 
     def _maybe_fail(self, op):
         n = self.fail.get(op, 0)
@@ -675,11 +910,23 @@ class FakeR2:
             self.fail[op] = n - 1
             raise RuntimeError(f"r2 {op} failed")
 
-    def presign_put(self, key, size, md5_b64):
+    def presign_put(self, key, size, sha256_hex):
+        from app.services import r2_client
+
         self._maybe_fail("presign")
-        self.presigned.append(("put", key, size, md5_b64))
-        return (f"https://r2.test/{key}?X-Amz-SignedHeaders=content-length%3Bcontent-md5%3Bcontent-type%3Bhost",
-                {"Content-Type": "application/octet-stream", "Content-Length": str(int(size)), "Content-MD5": md5_b64})
+        self.presigned.append(("put", key, size, sha256_hex))
+        return (f"https://r2.test/{key}?X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost%3Bx-amz-checksum-sha256",
+                {"Content-Type": "application/octet-stream", "Content-Length": str(int(size)),
+                 "x-amz-checksum-sha256": r2_client.sha256_b64(sha256_hex)})
+
+    def head_meta(self, key):
+        from app.services import r2_client
+
+        self._maybe_fail("head")
+        if key not in self.objects:
+            raise r2_client.R2Missing(key)
+        data = self.objects[key]
+        return len(data), (hashlib.sha256(data).hexdigest() if key in self.checksummed else None)
 
     def presign_get(self, key):
         self.presigned.append(("get", key))
@@ -740,11 +987,13 @@ class FakeR2:
         if src_key not in self.objects:
             raise r2_client.R2Missing(src_key)
         self.objects[dst_key] = self.objects[src_key]
+        self.checksummed.discard(dst_key)  # G0 (e): a CopyObject copy carries no SHA-256
 
     def put_file_presigned(self, key, path):
         self._maybe_fail("put")
         with open(path, "rb") as fh:
             self.objects[key] = fh.read()
+        self.checksummed.add(key)
         self.puts.append((key, path))
 
     @contextmanager
@@ -752,8 +1001,8 @@ class FakeR2:
         from app.services import r2_client
 
         with ExitStack() as st:
-            for name in ("presign_put", "presign_get", "head_size", "exists", "get_bytes", "stream_to_file",
-                         "stream_sha256", "delete_keys", "copy_object", "put_file_presigned"):
+            for name in ("presign_put", "presign_get", "head_size", "head_meta", "exists", "get_bytes",
+                         "stream_to_file", "stream_sha256", "delete_keys", "copy_object", "put_file_presigned"):
                 st.enter_context(patch.object(r2_client, name, getattr(self, name)))
             yield self
 
@@ -761,7 +1010,9 @@ class FakeR2:
         from app.services import r2_client
 
         for rel, data in files.items():
-            self.objects[r2_client.ckpt_key(tid, attempt, step, rel)] = data
+            key = r2_client.ckpt_key(tid, attempt, step, rel)
+            self.objects[key] = data
+            self.checksummed.add(key)  # uploaded through a signed PUT (OQ-1)
 
 
 # ---------------------------------------------------------------------------

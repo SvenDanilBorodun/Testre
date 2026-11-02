@@ -6,24 +6,26 @@ leaves the row in status='cancel_requested' rather than pretending the
 cancel succeeded. This loop retries the Modal cancel every
 SWEEP_INTERVAL_S until either:
 
-  * Modal cancel succeeds → flip status to 'canceled' (credit auto-frees
-    because get_remaining_credits counts only failed/canceled as freed).
-  * 5 attempts have been made → flip status to 'failed' so the credit
-    IS released. The GPU container most likely already ran to its
-    timeout_hours cap or self-terminated; a stuck row is worse than
-    a one-credit loss.
+  * Modal cancel succeeds → flip status to 'canceled'.
+  * 5 attempts have been made → flip status to 'failed'. The GPU container
+    most likely already ran to its timeout_hours cap or self-terminated; a
+    stuck row is worse than a lost stop.
+
+Either terminal status settles the row: a `ledger` row's terminal status is
+settled by the 052 trigger (charged its started hours up to the first stop
+request, the rest released); a `derived` (pre-052) row's credit frees as
+before.
 
 Single-tenant by design: Cloud API runs uvicorn --workers 1, so spawning
 this loop once at startup is correct. Scale-out would require either
 Redis-backed locking or a Postgres advisory lock so only one worker
 sweeps at a time.
 
-Does NOT modify credit accounting directly. The credit pool is derived
-from `trainings.status NOT IN ('failed', 'canceled')` by the
-get_remaining_credits and the workgroup credit RPCs. Flipping a row's
-status from cancel_requested → canceled (or failed) is sufficient to
-free the slot — start_training_safe / get_remaining_credits /
-adjust_workgroup_credits are untouched.
+Does NOT modify hour accounting directly: a `ledger` row's terminal status is
+settled by the 052 trigger (charged, the rest released); a `derived` row's
+credit frees as before (pre-052 credits are DERIVED from
+`trainings.status NOT IN ('failed', 'canceled')`). Flipping a row's status from
+cancel_requested → canceled (or failed) is the whole job.
 """
 
 from __future__ import annotations
@@ -40,10 +42,11 @@ logger = logging.getLogger(__name__)
 # hammer Modal's cancel API. Override via env for ops.
 DEFAULT_SWEEP_INTERVAL_S = 30
 
-# After this many failed Modal cancel attempts, give up and flip the row
-# to 'failed' so the credit is released. The GPU container has almost
-# certainly exited by now (either by hitting its own timeout_hours or
-# because Modal eventually reaped it).
+# After this many failed cancel attempts, give up and flip the row to
+# 'failed': a `ledger` row's terminal status is settled by the 052 trigger
+# (charged, the rest released); a `derived` row's credit frees as before. The
+# GPU container has almost certainly exited by now (either by hitting its own
+# timeout_hours or because Modal eventually reaped it).
 MAX_CANCEL_ATTEMPTS = 5
 
 # Process at most this many cancel_requested rows per tick. Stops one
@@ -55,7 +58,8 @@ BATCH_LIMIT = 20
 
 # The student-facing give-up text of a LEGACY row (a managed row gets S21,
 # training_texts_de, which names no provider: FR-22). Shared with
-# routes/training.py's synchronous give-up so the student reads one sentence.
+# services/stop_actions.py's synchronous give-up so the student reads one sentence.
+# Reached only by `derived` (pre-052) rows, whose credit really is freed, so it stays.
 LEGACY_CANCEL_GIVEUP_DE = (
     "Abbruch konnte nicht an Cloud-Worker zugestellt werden "
     f"(Modal-Cancel nach {MAX_CANCEL_ATTEMPTS} Versuchen "

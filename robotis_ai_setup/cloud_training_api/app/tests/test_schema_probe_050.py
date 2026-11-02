@@ -6,7 +6,9 @@ the Railway deploy with a named cause instead. PostgREST resolves an RPC on
 (name, argument-name set), so the two new RPCs name EXACTLY 050's parameters,
 and their values hit training id 0 / a dummy user, which never exist, so each
 answers P0049 / P0002 and writes nothing (proven through PostgREST on a local
-stack, §16 P5). The 19 / 18 / 46 totals are pinned in ``test_schema_probe_040.py``.
+stack, §16 P5). The 23 / 23 / 56 totals are pinned in ``test_schema_probe_040.py``. Migration
+052 widened start_continuation_safe (p_max_hours) and finish_training (p_charge_waiver); both
+probes name 052's shape, which keeps 050's parameters as a subset.
 """
 
 from __future__ import annotations
@@ -21,6 +23,8 @@ from app.tests.test_schema_probe_040 import _probe_tuples
 HERE = os.path.dirname(os.path.abspath(__file__))
 MIGRATION = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HERE))), "supabase", "migrations",
                          "20261021120000_050_training_continuation.sql")
+MIGRATION_052 = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HERE))), "supabase", "migrations",
+                             "20261028120000_052_credit_ledger.sql")
 _DUMMY = "00000000-0000-0000-0000-000000000000"
 NEW_RPCS = ("cap_training_attempt", "start_continuation_safe")
 
@@ -64,15 +68,24 @@ class TestSchemaProbeKnows050(unittest.TestCase):
                        "training_id, step, manifest, state, kept_at, expires_at, refused_reason, bad_attempts"),
                       self.columns)
 
-    def test_the_two_new_rpcs_name_exactly_the_migrations_parameters(self):
+    def test_the_two_new_rpcs_name_exactly_the_latest_parameters(self):
+        with open(MIGRATION_052, encoding="utf-8") as fh:
+            sql052 = fh.read()
+        latest = {"cap_training_attempt": self.sql, "start_continuation_safe": sql052}
         for name in NEW_RPCS:
             with self.subTest(rpc=name):
                 self.assertIn(name, self.rpcs)
-                self.assertEqual(sorted(self.rpcs[name]), sorted(_params(self.sql, name)))
+                self.assertEqual(sorted(self.rpcs[name]), sorted(_params(latest[name], name)))
+                self.assertLessEqual(set(_params(self.sql, name)), set(self.rpcs[name]), "050's still resolve")
+        # cap_training_attempt kept its signature in 052
+        self.assertEqual(sorted(_params(sql052, "cap_training_attempt")), sorted(_params(self.sql, "cap_training_attempt")))
 
-    def test_finish_training_is_probed_with_all_eight_arguments(self):
-        self.assertEqual(sorted(self.rpcs["finish_training"]), sorted(_params(self.sql, "finish_training")))
-        self.assertEqual(len(self.rpcs["finish_training"]), 8)
+    def test_finish_training_is_probed_with_all_nine_arguments(self):
+        with open(MIGRATION_052, encoding="utf-8") as fh:
+            sql052 = fh.read()
+        self.assertEqual(sorted(self.rpcs["finish_training"]), sorted(_params(sql052, "finish_training")))
+        self.assertEqual(len(self.rpcs["finish_training"]), 9)
+        self.assertLessEqual(set(_params(self.sql, "finish_training")), set(self.rpcs["finish_training"]))
 
     def test_the_probe_values_write_nothing(self):
         self.assertEqual(self.rpcs["cap_training_attempt"]["p_training_id"], 0)

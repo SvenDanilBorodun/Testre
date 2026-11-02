@@ -45,6 +45,9 @@ vi.mock('react-hot-toast', () => {
 
 let deleteResponse;
 let deleteCalls;
+let hoursCalls;
+let hoursResponse;
+let historyCalls;
 vi.mock('../../../services/teacherApi', () => ({
   __esModule: true,
   deleteStudent: (...a) => {
@@ -54,20 +57,31 @@ vi.mock('../../../services/teacherApi', () => ({
   },
   patchStudent: () => Promise.resolve({}),
   resetStudentPassword: () => Promise.resolve({}),
-  adjustStudentCredits: () => Promise.resolve({}),
+  // Training hours (credit system v2): a delta with a request_id, never an amount.
+  changeStudentHours: (...a) => {
+    hoursCalls.push(a);
+    if (hoursResponse instanceof Error) return Promise.reject(hoursResponse);
+    return Promise.resolve(hoursResponse);
+  },
+  getStudentCreditHistory: (...a) => {
+    historyCalls.push(a);
+    return Promise.resolve({ entries: [], refusals: [] });
+  },
 }));
 
 vi.mock('../../../services/meApi', () => ({
   __esModule: true,
-  getMe: () => Promise.resolve({ credits_pool: 0 }),
+  getMe: () => Promise.resolve({ pool_available: 7 }),
 }));
 
-const student = {
+let student = {};
+const BASE_STUDENT = {
   id: 'stu1',
   full_name: 'Anna Müller',
   username: 'anna',
-  credits_used: 0,
-  credits_limit: 10,
+  hours_free: 3,
+  hours_reserved: 2,
+  hours_spent: 4,
 };
 
 function renderRow() {
@@ -108,6 +122,10 @@ beforeEach(() => {
   toastCalls.error.length = 0;
   deleteCalls = [];
   deleteResponse = { ok: true, hf_erasure_complete: true };
+  hoursCalls = [];
+  historyCalls = [];
+  hoursResponse = { new_amount: 4, pool_available: 6, hours_free: 4, hours_reserved: 2, hours_spent: 4 };
+  student = { ...BASE_STUDENT };
   vi.spyOn(window, 'confirm').mockReturnValue(true);
 });
 
@@ -256,5 +274,94 @@ describe('deleting a student reports what actually happened', () => {
     expect(deleteCalls).toEqual([]);
     expect(toastCalls.success).toEqual([]);
     expect(toastCalls.error).toEqual([]);
+  });
+});
+
+// ── training hours (credit system v2, spec §10.4) ──────────────────────────
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+describe('the student row\'s training hours', () => {
+  it('shows the free, reserved and spent hours as „Std." chips', () => {
+    renderRow();
+    expect(screen.getByText('3 Std. frei')).toBeInTheDocument();
+    expect(screen.getByText('2 Std. reserviert')).toBeInTheDocument();
+    expect(screen.getByText('4 Std. verbraucht')).toBeInTheDocument();
+  });
+
+  it('hides the reserved chip at 0 and disables „1 Std. zurückholen" without free hours', () => {
+    student = { ...BASE_STUDENT, hours_free: 0, hours_reserved: 0 };
+    renderRow();
+    expect(screen.queryByText(/Std\. reserviert/)).toBeNull();
+    expect(screen.getByRole('button', { name: '1 Std. zurückholen' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '1 Std. zuweisen' })).toBeEnabled();
+  });
+
+  it('„1 Std. zuweisen" sends a delta of +1 with a fresh request_id, never an amount', async () => {
+    renderRow();
+    await userEvent.click(screen.getByRole('button', { name: '1 Std. zuweisen' }));
+    await waitFor(() => expect(hoursCalls.length).toBe(1));
+    const [token, sid, body] = hoursCalls[0];
+    expect(token).toBe('jwt');
+    expect(sid).toBe('stu1');
+    expect(Object.keys(body).sort()).toEqual(['delta', 'request_id']);
+    expect(body.delta).toBe(1);
+    expect(body.request_id).toMatch(UUID);
+    await waitFor(() => expect(toastCalls.success.map(([m]) => m)).toContain('Freie Stunden: 4'));
+  });
+
+  it('„1 Std. zurückholen" sends -1; each change has its own request_id', async () => {
+    renderRow();
+    await userEvent.click(screen.getByRole('button', { name: '1 Std. zurückholen' }));
+    await waitFor(() => expect(hoursCalls.length).toBe(1));
+    await userEvent.click(screen.getByRole('button', { name: '1 Std. zuweisen' }));
+    await waitFor(() => expect(hoursCalls.length).toBe(2));
+    expect(hoursCalls[0][2].delta).toBe(-1);
+    expect(hoursCalls[1][2].delta).toBe(1);
+    expect(hoursCalls[0][2].request_id).not.toBe(hoursCalls[1][2].request_id);
+  });
+
+  it('the popover: „Stunden anpassen", the reclaim limit, the quick keys and the footnote', async () => {
+    renderRow();
+    await userEvent.click(screen.getByTitle('Beliebigen Betrag anpassen'));
+    expect(screen.getByText('Stunden anpassen')).toBeInTheDocument();
+    expect(screen.getByTitle('Max. 3 zurückholbar')).toBeInTheDocument();
+    expect(screen.getByTitle('+5 Std. sofort zuweisen')).toBeInTheDocument();
+    expect(screen.getByText('Zurückholen geht nur mit freien Stunden; reservierte und verbrauchte Stunden bleiben.'))
+      .toBeInTheDocument();
+    await userEvent.click(screen.getByTitle('+10 Std. sofort zuweisen'));
+    await waitFor(() => expect(hoursCalls.length).toBe(1));
+    expect(hoursCalls[0][2].delta).toBe(10);
+  });
+
+  it('no free hours: the popover says there is nothing to reclaim', async () => {
+    student = { ...BASE_STUDENT, hours_free: 0 };
+    renderRow();
+    await userEvent.click(screen.getByTitle('Beliebigen Betrag anpassen'));
+    expect(screen.getByTitle('Keine freien Stunden zum Zurückholen')).toBeInTheDocument();
+  });
+
+  it('a grouped student: „Stunden werden über die Gruppe verwaltet", no hour keys', () => {
+    student = { ...BASE_STUDENT, workgroup_id: 'g1', workgroup_name: 'Rot' };
+    renderRow();
+    expect(screen.getByText('Stunden werden über die Gruppe verwaltet')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '1 Std. zuweisen' })).toBeNull();
+  });
+
+  it('„Stundenverlauf" opens the student\'s hour history', async () => {
+    renderRow();
+    await userEvent.click(screen.getByRole('button', { name: 'Stundenverlauf' }));
+    expect(await screen.findByRole('dialog', { name: 'Stundenverlauf · Anna Müller' })).toBeInTheDocument();
+    expect(historyCalls[0][1]).toBe('stu1');
+    expect(await screen.findAllByText('Noch keine Einträge.')).not.toHaveLength(0);
+    expect(screen.getByText('Abgelehnte Starts')).toBeInTheDocument();
+  });
+
+  it('a failed change shows the API\'s German detail', async () => {
+    hoursResponse = new Error('Im Lehrer-Pool sind nicht genug freie Stunden.');
+    renderRow();
+    await userEvent.click(screen.getByRole('button', { name: '1 Std. zuweisen' }));
+    await waitFor(() => expect(toastCalls.error.map(([m]) => m))
+      .toContain('Im Lehrer-Pool sind nicht genug freie Stunden.'));
   });
 });

@@ -18,12 +18,12 @@
 //  * `null` renders „—", never 0. A failed fetch and an empty portfolio are
 //    different facts, and only one of them is about the student.
 //
-//  * When the student is in a workgroup, the trainings and the credits are the
-//    GROUP'S, and the card says so. `/trainings/list` returns the group's rows
-//    and TrainingJob carries no owner id, so this cannot be narrowed on the
-//    client; `get_remaining_credits` deliberately returns the shared pool. Both
-//    numbers are correct — presenting them unlabelled as personal would be the
-//    lie. Datasets and programs ARE filtered to the student (both rows carry an
+//  * When the student is in a workgroup, the trainings and the training hours
+//    are the GROUP'S, and the card says so. `/trainings/list` returns the
+//    group's rows and TrainingJob carries no owner id, so this cannot be
+//    narrowed on the client; the quota deliberately answers the group account's
+//    hours. Both numbers are correct — presenting them unlabelled as personal
+//    would be the lie. Datasets and programs ARE filtered to the student (both rows carry an
 //    owner), so those stay strictly theirs either way.
 
 import React from 'react';
@@ -32,6 +32,7 @@ import { useSelector } from 'react-redux';
 import { Card } from '../EbUI';
 import { Led, Readout } from '../sucher';
 import { relativeDe } from '../../hooks/useStudentWork';
+import { hoursDe } from '../../utils/hoursDe';
 
 /** One counter tile: a big dark readout, its caption and the line under it. */
 function WorkStat({ label, value, tone = 'ink', trend }) {
@@ -55,14 +56,12 @@ export default function WorkCard({ work, loading }) {
 
   const {
     datasetCount, episodeCount, modelCount, workflowCount,
-    creditsRemaining, creditsTotal, runningTrainings, lastDataset, lastWorkflow,
+    hoursFree, hoursReserved, runningTrainings, lastDataset, lastWorkflow,
   } = work;
 
-  const creditsTone = creditsRemaining === 0 ? 'danger'
-    : (typeof creditsRemaining === 'number' && creditsRemaining > 0 ? 'success' : undefined);
-
-  // The credits readout takes the old Stat tone: success → ok, danger → rec.
-  const creditsReadTone = creditsTone === 'danger' ? 'rec' : creditsTone === 'success' ? 'ok' : 'ink';
+  // The hours readout: none free → rec, some → ok, unknown → ink.
+  const hoursReadTone = hoursFree === 0 ? 'rec'
+    : (typeof hoursFree === 'number' && hoursFree > 0 ? 'ok' : 'ink');
 
   return (
     <Card
@@ -70,7 +69,7 @@ export default function WorkCard({ work, loading }) {
       titleStyle="serif"
       className="su-work h-full"
       subtitle={inGroup
-        ? `Training und Credits teilst du mit der Gruppe ${workgroupName || ''}`.trim()
+        ? `Training und Stunden teilst du mit der Gruppe ${workgroupName || ''}`.trim()
         : undefined}
       right={runningTrainings > 0
         ? (
@@ -93,10 +92,10 @@ export default function WorkCard({ work, loading }) {
         />
         <WorkStat label="Programme" value={loading ? '…' : fmt(workflowCount)} trend="Roboter Studio" />
         <WorkStat
-          label={inGroup ? 'Credits der Gruppe' : 'Credits'}
-          value={loading ? '…' : fmt(creditsRemaining)}
-          tone={creditsReadTone}
-          trend={typeof creditsTotal === 'number' ? `von ${creditsTotal} übrig` : 'übrig'}
+          label={inGroup ? 'Stunden der Gruppe' : 'Trainingsstunden'}
+          value={loading ? '…' : fmt(hoursFree)}
+          tone={hoursReadTone}
+          trend={typeof hoursReserved === 'number' && hoursReserved > 0 ? `${hoursDe(hoursReserved)} reserviert` : 'frei'}
         />
       </div>
 

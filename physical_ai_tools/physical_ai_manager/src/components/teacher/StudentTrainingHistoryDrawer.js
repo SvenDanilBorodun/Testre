@@ -1,14 +1,92 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import { useSelector } from 'react-redux';
 import {
+  getStudentStopPreview,
   listStudentTrainings,
   listStudentInferenceRuns,
   listTrainingCheckpoints,
+  stopStudentTraining,
 } from '../../services/teacherApi';
-import { Avatar, Pill } from '../EbUI';
+import { Avatar, Btn, Pill } from '../EbUI';
 import Icon from '../icons/Icon';
+import Modal from './Modal';
+import { hourLines, hoursDe, lostTimeLine, numberDe } from '../../utils/hoursDe';
+
+// „Training stoppen" (decision 13, spec §10.4): the teacher's stop of a running
+// managed training, confirmed against the same stop preview the student sees.
+export const STOP_DE = {
+  button: 'Training stoppen',
+  title: 'Training stoppen?',
+  publish: (step, c, r) =>
+    `Der GPU-Server wird gestoppt und der letzte Zwischenstand (Schritt ${numberDe(step)}) als Modell veröffentlicht. Berechnet: ${hoursDe(c)} von ${hoursDe(r)}.`,
+  noCheckpoint: (c, r) =>
+    `Der GPU-Server wird gestoppt. Es gibt noch keinen Zwischenstand, also wird kein Modell veröffentlicht. Berechnet: ${hoursDe(c)} von ${hoursDe(r)}.`,
+  notTrained: 'Das Training hat noch nicht begonnen. Es wird nichts berechnet.',
+  previewFailed:
+    'Der Stand konnte nicht abgefragt werden. Wenn das Training schon auf einer GPU läuft, wird die angefangene Trainingszeit berechnet.',
+  loading: 'Stand wird abgefragt …',
+  confirm: 'Ja, stoppen',
+  back: 'Zurück',
+  done: 'Training gestoppt.',
+};
+
+/** The teacher's preview sentence (spec §10.4); null preview = the request failed. */
+export function stopPreviewSentence(p) {
+  if (!p || typeof p !== 'object' || typeof p.trained !== 'boolean') return STOP_DE.previewFailed;
+  if (!p.trained) return STOP_DE.notTrained;
+  if (p.outcome === 'publish') return STOP_DE.publish(p.checkpoint_step, p.charged_hours_now, p.reserved_hours);
+  return STOP_DE.noCheckpoint(p.charged_hours_now, p.reserved_hours);
+}
+
+/** Only a managed training that is still waiting or running can be stopped. */
+export const isStoppable = (t) => t?.managed === true && (t.status === 'queued' || t.status === 'running');
+
+function StopTrainingDialog({ token, studentId, training, onClose, onStopped }) {
+  const [preview, setPreview] = useState('loading');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    getStudentStopPreview(token, studentId, training.id)
+      .then((p) => { if (alive) setPreview(p && typeof p === 'object' ? p : null); })
+      .catch(() => { if (alive) setPreview(null); });
+    return () => { alive = false; };
+  }, [token, studentId, training.id]);
+
+  const confirm = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await stopStudentTraining(token, studentId, training.id);
+      toast.success(STOP_DE.done);
+      onStopped?.();
+      onClose();
+    } catch (err) {
+      toast.error(err.message || 'Fehler');
+      setBusy(false);
+    }
+  };
+
+  const loading = preview === 'loading';
+  return (
+    <Modal
+      title={STOP_DE.title}
+      onClose={() => { if (!busy) onClose(); }}
+      footer={(
+        <>
+          <Btn variant="ghost" onClick={onClose} disabled={busy}>{STOP_DE.back}</Btn>
+          <Btn variant="danger" onClick={confirm} disabled={busy || loading}>{STOP_DE.confirm}</Btn>
+        </>
+      )}
+    >
+      <p role="status" className="text-sm text-[var(--ink-2)] leading-relaxed">
+        {loading ? STOP_DE.loading : stopPreviewSentence(preview)}
+      </p>
+    </Modal>
+  );
+}
 
 const STATUS_TONE = {
   queued: 'neutral',
@@ -55,19 +133,25 @@ export default function StudentTrainingHistoryDrawer({ student, onClose }) {
   };
 
   const [inferenceRuns, setInferenceRuns] = useState([]);
+  const [stopTarget, setStopTarget] = useState(null);
 
-  useEffect(() => {
+  const loadTrainings = useCallback(() => {
     if (!token || !student) return;
     setLoading(true);
     listStudentTrainings(token, student.id)
       .then((t) => setTrainings(t))
       .catch((err) => toast.error(err.message || 'Fehler beim Laden'))
       .finally(() => setLoading(false));
+  }, [token, student]);
+
+  useEffect(() => {
+    if (!token || !student) return;
+    loadTrainings();
     // Jetson inference run records (PR-5b) — best-effort side load.
     listStudentInferenceRuns(token, student.id)
       .then((runs) => setInferenceRuns(runs))
       .catch(() => setInferenceRuns([]));
-  }, [token, student]);
+  }, [token, student, loadTrainings]);
 
   if (!student) return null;
 
@@ -145,6 +229,22 @@ export default function StudentTrainingHistoryDrawer({ student, onClose }) {
                     {t.current_loss != null ? t.current_loss.toFixed(4) : '—'}
                   </div>
                 </div>
+                {(hourLines(t, { withStopper: false }).length > 0 || lostTimeLine(t)) && (
+                  <div className="mt-2 text-[11px] text-[var(--ink-2)] space-y-0.5" data-testid={`hours-${t.id}`}>
+                    {hourLines(t, { withStopper: false }).map((line) => <div key={line}>{line}</div>)}
+                    {lostTimeLine(t) && <div>{lostTimeLine(t)}</div>}
+                  </div>
+                )}
+                {isStoppable(t) && (
+                  <Btn
+                    variant="secondary"
+                    size="sm"
+                    className="mt-2"
+                    onClick={() => setStopTarget(t)}
+                  >
+                    <Icon name="stop" /> {STOP_DE.button}
+                  </Btn>
+                )}
                 {t.error_message && (
                   <div
                     className={clsx(
@@ -242,6 +342,17 @@ export default function StudentTrainingHistoryDrawer({ student, onClose }) {
             </div>
           )}
         </div>
+        {/* Inside the aside, whose click handler keeps a click in the dialog
+            (a portal, but a React child) from closing the drawer. */}
+        {stopTarget && (
+          <StopTrainingDialog
+            token={token}
+            studentId={student.id}
+            training={stopTarget}
+            onClose={() => setStopTarget(null)}
+            onStopped={loadTrainings}
+          />
+        )}
       </aside>
     </div>
   );

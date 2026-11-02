@@ -26,6 +26,8 @@ uint16 coverage_cells
 float64 lens_fit_rms_px
 float64 lens_heldout_rms_px
 float64 lens_heldout_max_px
+float64 lens_fx_px       # the accepted lens solve's focal length fx (px); 0 before one
+float64 lens_fy_px       # the accepted lens solve's focal length fy (px); 0 before one
 float64 board_reproj_px
 float64 registration_rms_mm
 float64 registration_max_mm

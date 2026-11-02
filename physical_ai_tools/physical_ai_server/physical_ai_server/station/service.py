@@ -825,6 +825,13 @@ class StationService:
             resp.lens_fit_rms_px = float(com.intrinsics['fit_rms'])
             resp.lens_heldout_rms_px = float(com.intrinsics['held_rms'])
             resp.lens_heldout_max_px = float(com.intrinsics['held_max'])
+            # fx / fy of the accepted solve (bench gate B7 reads them off the
+            # wizard). Guarded: interfaces generated from an older .srv lack
+            # the two slots, and an AttributeError would fail every status.
+            K = com.intrinsics['K']
+            if hasattr(resp, 'lens_fx_px') and hasattr(resp, 'lens_fy_px'):
+                resp.lens_fx_px = float(K[0, 0])
+                resp.lens_fy_px = float(K[1, 1])
         if com.board:
             resp.board_reproj_px = float(com.board['reproj'])
         if com.world:

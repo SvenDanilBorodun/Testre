@@ -122,6 +122,48 @@ describe('StationCommissionWizard', () => {
     expect(screen.getByTestId('lens-counts')).toHaveTextContent(COMMISSION_DE.lensCounts(12, 3, 9));
   });
 
+  it('the lens result line shows the solve\'s measured focal length (bench gate B7)', async () => {
+    mockStation.status = {
+      commission_id: 'c-1', step: 'board_solve', job_id: 5, job_state: 'done',
+      lens_fit_rms_px: 0.42, lens_heldout_rms_px: 0.51, lens_heldout_max_px: 1.2,
+      lens_fx_px: 1102.4, lens_fy_px: 1098.6,
+    };
+    render(<StationCommissionWizard onClose={() => {}} />);
+    await flush();
+    expect(screen.getByTestId('lens-result')).toHaveTextContent(
+      'Fehler 0,42 px (Kontrolle 0,51 px, höchstens 1,20 px), Brennweite fx 1102 px, fy 1099 px',
+    );
+  });
+
+  it('an accepted lens solve moves on to the board step with fx and fy on screen', async () => {
+    mockStation.status = { commission_id: 'c-1', step: 'lens', job_id: 5, job_state: 'done' };
+    const solved = {
+      lens_fit_rms_px: 0.4, lens_heldout_rms_px: 0.5, lens_heldout_max_px: 1.1, lens_fx_px: 1188, lens_fy_px: 1185,
+    };
+    mockStation.answers.lens_solve = () => {
+      // The server's status carries the same numbers from now on.
+      mockStation.status = { ...mockStation.status, step: 'board_solve', ...solved };
+      return { accepted: true, success: true, result: 'OK', message: 'Linse kalibriert.', ...solved };
+    };
+    render(<StationCommissionWizard onClose={() => {}} />);
+    await flush();
+    await act(async () => { screen.getByRole('button', { name: COMMISSION_DE.lensSolve }).click(); });
+    expect(screen.getByTestId('lens-result')).toHaveTextContent('Brennweite fx 1188 px, fy 1185 px');
+  });
+
+  it('a refused lens solve shows the server\'s sentence with the measured focal length', async () => {
+    const REFUSED = 'Die Linsenkalibrierung ist nicht gut genug (Brennweite fx 1312 px, fy 1310 px, '
+      + 'erlaubt 935–1265 px) – bitte neu erfassen.';
+    mockStation.status = { commission_id: 'c-1', step: 'lens', job_id: 5, job_state: 'done' };
+    mockStation.answers.lens_solve = { accepted: true, success: false, result: 'FAILED', message: REFUSED };
+    render(<StationCommissionWizard onClose={() => {}} />);
+    await flush();
+    await act(async () => { screen.getByRole('button', { name: COMMISSION_DE.lensSolve }).click(); });
+    expect(screen.getByTestId('commission-message')).toHaveTextContent(REFUSED);
+    expect(screen.getByText(COMMISSION_DE.lensIntro)).toBeInTheDocument();
+    expect(screen.queryByTestId('lens-result')).toBe(null);
+  });
+
   it('resumes a running commission at its step, with the next dot', async () => {
     mockStation.status = { commission_id: 'c-1', step: 'touch_capture', next_dot_id: 3, job_id: 7, job_state: 'done' };
     render(<StationCommissionWizard onClose={() => {}} />);
@@ -175,6 +217,15 @@ describe('StationCommissionWizard', () => {
     expect(screen.getByTestId('next-mark')).toHaveTextContent(COMMISSION_DE.markNext('M3', true));
     await act(async () => { screen.getByRole('button', { name: COMMISSION_DE.markCapture }).click(); });
     expect(calls('mark_capture')[0][1]).toEqual({ commission_id: 'c-1', mark_id: 'M3', cube_turn: 1 });
+  });
+});
+
+describe('COMMISSION_DE.lensResult', () => {
+  it('names fx and fy in whole pixels, and leaves them out when the server sent none', () => {
+    expect(COMMISSION_DE.lensResult(0.4, 0.5, 1.1, 1100.4, 1099.5))
+      .toBe('Fehler 0,40 px (Kontrolle 0,50 px, höchstens 1,10 px), Brennweite fx 1100 px, fy 1100 px');
+    expect(COMMISSION_DE.lensResult(0.4, 0.5, 1.1)).toBe('Fehler 0,40 px (Kontrolle 0,50 px, höchstens 1,10 px)');
+    expect(COMMISSION_DE.lensResult(0.4, 0.5, 1.1, 0, 0)).toBe('Fehler 0,40 px (Kontrolle 0,50 px, höchstens 1,10 px)');
   });
 });
 

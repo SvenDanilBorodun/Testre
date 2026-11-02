@@ -253,8 +253,10 @@ export default function StationCommissionWizard({ onClose }) {
             {step === 'board' && (
               <div className="flex flex-col gap-2">
                 {Number(st.lens_fit_rms_px) > 0 && (
-                  <p className="text-xs text-[var(--ink-3)]">
-                    {COMMISSION_DE.lensResult(st.lens_fit_rms_px, st.lens_heldout_rms_px, st.lens_heldout_max_px)}
+                  <p className="text-xs text-[var(--ink-3)]" data-testid="lens-result">
+                    {COMMISSION_DE.lensResult(
+                      st.lens_fit_rms_px, st.lens_heldout_rms_px, st.lens_heldout_max_px, st.lens_fx_px, st.lens_fy_px,
+                    )}
                   </p>
                 )}
                 <p className="text-sm text-[var(--ink-2)]">{COMMISSION_DE.boardIntro}</p>
@@ -383,7 +385,7 @@ export default function StationCommissionWizard({ onClose }) {
 // a capture shows its new counts before the next poll.
 const NUMBER_FIELDS = [
   'lens_views_fit', 'lens_views_heldout', 'coverage_cells', 'lens_fit_rms_px', 'lens_heldout_rms_px',
-  'lens_heldout_max_px', 'board_reproj_px', 'registration_rms_mm', 'registration_max_mm',
+  'lens_heldout_max_px', 'lens_fx_px', 'lens_fy_px', 'board_reproj_px', 'registration_rms_mm', 'registration_max_mm',
   'registration_shift_mm', 'registration_rot_deg', 'world_rms_mm', 'world_max_mm', 'world_points',
 ];
 

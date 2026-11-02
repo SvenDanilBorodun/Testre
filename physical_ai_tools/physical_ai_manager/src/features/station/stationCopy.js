@@ -252,8 +252,13 @@ export const COMMISSION_DE = Object.freeze({
   lensSolve: 'Linse berechnen',
   lensCounts: (fit, held, cells) => `${fit} Bilder für die Berechnung, ${held} zur Kontrolle, ${cells} von 16 `
     + 'Bildfeldern abgedeckt',
-  lensResult: (fit, held, max) => `Fehler ${numberDe(fit, 2)} px (Kontrolle ${numberDe(held, 2)} px, höchstens `
-    + `${numberDe(max, 2)} px)`,
+  // fx / fy of the accepted solve (bench gate B7 reads the real unit's focal
+  // length here); left out when the server sends none (an older image).
+  lensResult: (fit, held, max, fx, fy) => `Fehler ${numberDe(fit, 2)} px (Kontrolle ${numberDe(held, 2)} px, höchstens `
+    + `${numberDe(max, 2)} px)`
+    + (Number(fx) > 0 && Number(fy) > 0
+      ? `, Brennweite fx ${numberDe(fx, 0)} px, fy ${numberDe(fy, 0)} px`
+      : ''),
   boardIntro: 'Räume die Matte ganz frei. Dann wird die Kamera auf die gedruckte Tafel ausgerichtet.',
   boardSolve: 'Matte ausrichten',
   boardResult: (px) => `Ausgerichtet (Abweichung ${numberDe(px, 2)} px)`,

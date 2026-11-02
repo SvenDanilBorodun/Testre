@@ -177,6 +177,11 @@ LENS_NOT_ENOUGH_DE = (
     'Es fehlen noch Ansichten: mindestens 25, über das ganze Bild verteilt, '
     'verschieden groß und schräg.')
 LENS_REJECTED_DE = 'Die Linsenkalibrierung ist nicht gut genug ({why}) – bitte neu erfassen.'
+# The focal-length refusal names the measured value and the allowed band (bench
+# gate B7 reads the real unit's fx / fy from it); filled into LENS_REJECTED_DE's
+# {why}. Whole pixels: the band is ±15 % of f₀, so a sub-pixel digit says nothing.
+LENS_FOCAL_OUT_OF_BAND_DE = (
+    'Brennweite fx {fx:.0f} px, fy {fy:.0f} px, erlaubt {lo:.0f}–{hi:.0f} px')
 LENS_OK_DE = 'Linse kalibriert.'
 LENS_MISSING_DE = 'Bitte zuerst die Linse kalibrieren.'
 

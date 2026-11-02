@@ -432,6 +432,56 @@ def test_commission_end_to_end_then_camera_and_robot_check_verify(tmp_path):
     assert status.job_state == 'done'
 
 
+def _begun(tmp_path):
+    svc, node = _svc(tmp_path)
+    sid = _activate(svc, node)
+    own = dict(session_id=sid, client_id='A')
+    svc.commission_command(_req(command='begin', layout_id=F.TEST_LAYOUT_ID, **own), _Resp())
+    _run_jobs(svc)
+    return svc, own
+
+
+def test_the_commission_status_carries_the_accepted_lens_fx_and_fy(tmp_path):
+    """Bench gate B7: the wizard's lens result line shows fx / fy."""
+    svc, own = _begun(tmp_path)
+    st = svc.commission_command(_req(command='status', **own), _Resp())
+    assert not st.lens_fx_px and not st.lens_fy_px   # nothing before a solve
+    K, dist = F.ftheta_intrinsics()
+    K = K.copy()
+    K[0, 0], K[1, 1] = 1101.5, 1098.25
+    svc.commission.intrinsics = {'K': K, 'dist': dist, 'fit_rms': 0.4, 'held_rms': 0.5,
+                                 'held_max': 1.0}
+    st = svc.commission_command(_req(command='status', **own), _Resp())
+    assert (st.lens_fx_px, st.lens_fy_px) == (1101.5, 1098.25)
+    assert isinstance(st.lens_fx_px, float)
+
+
+def test_a_response_without_the_fx_fy_slots_still_answers_status(tmp_path):
+    """Interfaces generated from an older .srv lack the two slots: the status
+    answers everything else instead of failing with an AttributeError."""
+    svc, own = _begun(tmp_path)
+    K, dist = F.ftheta_intrinsics()
+    svc.commission.intrinsics = {'K': K, 'dist': dist, 'fit_rms': 0.4, 'held_rms': 0.5,
+                                 'held_max': 1.0}
+
+    class _OldResp(_Resp):
+        _MISSING = ('lens_fx_px', 'lens_fy_px')
+
+        def __getattr__(self, name):
+            if name in self._MISSING:
+                raise AttributeError(name)
+            return None
+
+        def __setattr__(self, name, value):
+            if name in self._MISSING:
+                raise AttributeError(name)
+            super().__setattr__(name, value)
+
+    st = svc.commission_command(_req(command='status', **own), _OldResp())
+    assert st.result == 'OK' and st.lens_fit_rms_px == 0.4
+    assert 'lens_fx_px' not in vars(st)
+
+
 def test_a_run_jog_or_replay_during_a_resolve_is_refused_by_on_calibration(tmp_path):
     svc, node = _svc(tmp_path, configured=True)
     _activate(svc, node)

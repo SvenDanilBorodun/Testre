@@ -296,7 +296,18 @@ def test_seeded_lens_fit_passes_acceptance_on_synthetic_views(model, seed):
 def test_an_unseeded_wrong_minimum_fails_the_fx_bound():
     K = np.array([[1500.0, 0, 960], [0, 1500.0, 540], [0, 0, 1]])
     ok, why = CM.accept_intrinsics(K, np.zeros(8), 0.8, np.array([0.5]), [])
-    assert not ok and why == 'Brennweite'
+    # The refusal names the measured values and the band (bench gate B7).
+    assert not ok and why == 'Brennweite fx 1500 px, fy 1500 px, erlaubt 935–1265 px'
+
+
+def test_the_focal_refusal_names_fy_too_and_follows_a_re_centred_f0():
+    K = np.array([[1100.0, 0, 960], [0, 1312.4, 540], [0, 0, 1]])
+    ok, why = CM.accept_intrinsics(K, np.zeros(8), 0.8, np.array([0.5]), [])
+    assert not ok and why == 'Brennweite fx 1100 px, fy 1312 px, erlaubt 935–1265 px'
+    # The band is the gate's own (±F_BAND around the f0 passed in), never a copy.
+    K = np.array([[900.0, 0, 960], [0, 900.0, 540], [0, 0, 1]])
+    ok, why = CM.accept_intrinsics(K, np.zeros(8), 0.8, np.array([0.5]), [], f0=1200.0)
+    assert not ok and why == 'Brennweite fx 900 px, fy 900 px, erlaubt 1020–1380 px'
 
 
 # ── the station YAML (§6.5) ───────────────────────────────────────────────────
@@ -444,7 +455,8 @@ def test_a_real_unseeded_fit_lands_in_a_wrong_minimum_the_fx_bound_rejects_and_s
     # Measured on OpenCV 4.10 (the image) and 4.13: fx ≈ 1650. An unseeded fit
     # outside the f₀ band is always rejected by the fx bound, whatever the build.
     if not 935.0 <= K[0, 0] <= 1265.0:
-        assert not ok and why == 'Brennweite'
+        assert not ok and why.startswith('Brennweite fx '), why
+        assert why.endswith(', erlaubt 935–1265 px'), why
     rms, K, dist = CM.calibrate(board, fit)
     errs = CM.heldout_errors(board, held, K, dist)
     assert CM.accept_intrinsics(K, dist, rms, errs, fit) == (True, '')

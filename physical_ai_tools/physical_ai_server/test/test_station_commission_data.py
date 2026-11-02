@@ -69,6 +69,22 @@ def test_a_lens_solve_that_replaces_the_intrinsics_drops_board_marks_and_world(
     assert (ok, code, msg) == (False, 'REFUSED', T.BOARD_MISSING_DE)
 
 
+def test_a_lens_solve_refused_for_its_focal_length_names_the_value_and_the_band(
+        tmp_path, monkeypatch):
+    """Bench gate B7 reads the real unit's fx / fy off this refusal."""
+    com = _commissioned(tmp_path)
+    K2 = np.array([[1312.3, 0, 961], [0, 1309.6, 541], [0, 0, 1]])
+    monkeypatch.setattr(CM, 'diversity', lambda views: (True, ''))
+    monkeypatch.setattr(CM, 'calibrate', lambda board, fit, f0=CM.F0_PX: (
+        0.4, K2, np.zeros((1, 8))))
+    monkeypatch.setattr(CM, 'heldout_errors', lambda *a: np.array([0.5, 0.6]))
+    ok, msg = com.lens_solve()
+    assert not ok
+    assert msg == ('Die Linsenkalibrierung ist nicht gut genug (Brennweite fx 1312 px, '
+                   'fy 1310 px, erlaubt 935–1265 px) – bitte neu erfassen.')
+    assert com.intrinsics is None
+
+
 def test_a_lens_solve_refused_for_too_few_views_keeps_everything(tmp_path):
     com = _commissioned(tmp_path)
     com.views = com.views[:3]

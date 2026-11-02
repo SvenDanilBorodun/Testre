@@ -278,9 +278,11 @@ def accept_intrinsics(K, dist, fit_rms, held, views, f0=F0_PX):
     if not np.all(np.isfinite(K)):
         return False, 'K'
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
-    if not ((1 - F_BAND) * f0 <= fx <= (1 + F_BAND) * f0
-            and (1 - F_BAND) * f0 <= fy <= (1 + F_BAND) * f0):
-        return False, 'Brennweite'
+    lo, hi = (1 - F_BAND) * f0, (1 + F_BAND) * f0
+    if not (lo <= fx <= hi and lo <= fy <= hi):
+        # The measured values and the band, so the bench can read the real unit's
+        # fx / fy off the refusal (gate B7); the band itself is unchanged.
+        return False, T.LENS_FOCAL_OUT_OF_BAND_DE.format(fx=fx, fy=fy, lo=lo, hi=hi)
     if abs(fx / fy - 1.0) > FXFY_TOL:
         return False, 'Seitenverhältnis'
     if abs(cx - W / 2.0) > C_TOL_PX or abs(cy - H / 2.0) > C_TOL_PX:

@@ -133,6 +133,22 @@ class Codes(unittest.TestCase):
         missing = sorted(c for c in codes if not re.search(rf"['\"`]{c}['\"`]", text))
         self.assertEqual(missing, [], 'codes the React station copy does not know')
 
+    def test_every_commission_metric_reaches_the_wizard(self):
+        """Every ``float64`` of the commission answer (the lens, board, world and
+        registration results, the lens fx / fy bench gate B7 reads) is merged
+        into the wizard's view, so a result line never misses a number the
+        server sends."""
+        response = self.commission.split('---', 1)[1]
+        floats = set(re.findall(r'^\s*float64\s+(\w+)', response, re.M))
+        self.assertIn('lens_fx_px', floats)
+        self.assertIn('lens_fy_px', floats)
+        wizard = _require(REACT_SRC / 'components' / 'Station' / 'StationCommissionWizard.jsx')
+        m = re.search(r'const NUMBER_FIELDS = \[(.*?)\];', wizard, re.S)
+        self.assertIsNotNone(m, 'NUMBER_FIELDS not found in the wizard')
+        fields = set(re.findall(r"'(\w+)'", m.group(1)))
+        self.assertEqual(sorted(floats - fields), [],
+                         'commission metrics the wizard never shows')
+
     def test_every_server_code_is_one_the_server_answers(self):
         service = _require(STATION / 'service.py') + _require(STATION / 'state.py')
         for code in self.t.SESSION_REASON_CODES:

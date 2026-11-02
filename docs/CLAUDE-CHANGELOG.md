@@ -10,18 +10,17 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 **Why.** At v2.36.0 a training credit was not a record: `start_training_safe` / `get_remaining_credits` counted
 `trainings WHERE status NOT IN ('failed','canceled')`, so every path that ended a row `failed` or `canceled` was a
-refund, whoever caused it and however much GPU time had run (`docs/plans/2026-10-28-credit-system/design.md` §1,
-verified in code). Seven holes: „Abbrechen" after 3 h 29 min gave the credit back while the public 10 000-step mirror
-kept usable weights (H1); „Konto löschen" was the same as a mass cancel (H2); every failure refunded, self-caused ones
+refund, whoever caused it and however much GPU time had run (verified in code). Seven
+holes: „Abbrechen" after 3 h 29 min gave the credit back while the public 10 000-step mirror kept usable weights (H1); „Konto löschen" was the same as a mass cancel (H2); every failure refunded, self-caused ones
 after GPU time included (H3); the policy choice was an environment setting, so a student calling the API directly
 could start a 10 h VLA on an A100 for one credit unless Railway set `ALLOWED_POLICIES=act` (H4); deleting a student
 or an empty workgroup gave its CONSUMED credits back to the teacher's pool, so delete + recreate was unlimited credit —
 the recycling hole (H5); the pool could be spent twice because any role could start (H6); and the start and the quota
-counted different rows after a group change (H7). The spec (`spec.md` beside the design, gitignored) was written by
-one architect and reviewed three times by fresh reviewers (review 1: B1, M1–M5; review 2: M1, a host faking a model's
+counted different rows after a group change (H7). The spec (a gitignored throwaway, deleted after the release) was
+written by one architect and reviewed three times by fresh reviewers (review 1: B1, M1–M5; review 2: M1, a host faking a model's
 SHA-256 to bill the student an S7; review 3: minors only), every fold decided by the owner.
 
-**Owner decisions** (spec §21, design.md's answer rounds). The unit: 1 hour = 1 started hour of counted GPU training
+**Owner decisions** (the spec's decision list and the design's answer rounds). The unit: 1 hour = 1 started hour of counted GPU training
 time; a start reserves min(3, free, member hours left), the training's limit is its reserved hours, the charge at the
 end is ceil(counted seconds / 3600), 0 possible, the rest released (rounds 1–2: 1B, 13A, 14A, 15A; D10); a reset at
 the release (11C: every balance 0, the admin re-grants, teachers hand out anew); never expiring (10A); students only,
@@ -64,7 +63,7 @@ integration head before the fix round: cloud API 1183 (also on python:3.11-slim)
 `test_gui_theme` without `_tkinter`), pi 594, jetson 30, modal_inference 117, vitest 319 files / 5467 (+2 expected
 fail), eslint 0, both vite builds. After the fix round: cloud API 1195; after fix round 2: 1215.
 
-**Verification and its fixes** (`verification.md` beside the spec; two fresh zero-trust verifiers on their own local
+**Verification and its fixes** (two fresh zero-trust verifiers on their own local
 Supabase stacks; the owner decided every finding). V1-M1 (major): `_finish` judged a fresh start by
 `resume_from_step` alone, which only `/start` writes, so two distinct hosts that skipped `/start` got the S19 waiver
 and the WHOLE training was charged 0, an earlier attempt's honestly trained hours included — fixed in the API AND

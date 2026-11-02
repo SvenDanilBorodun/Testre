@@ -97,6 +97,18 @@ describe('LeaderToggle with a station session held', () => {
     expect(screen.queryByRole('button', { name: 'Leader verbinden' })).toBe(null);
   });
 
+  it('lets the long station label wrap instead of being cut off; the plain label stays one line', async () => {
+    const { unmount } = render(<LeaderToggle isActive />);
+    const btn = await screen.findByRole('button', { name: STATION_DE.leaveAndLeaderOn });
+    expect(btn.className).toContain('whitespace-normal');
+    expect(btn.className).not.toContain('whitespace-nowrap');
+    unmount();
+    mockStation.box.snap = { held: false, phase: 'idle', workflowActive: false };
+    render(<LeaderToggle isActive />);
+    const plain = await screen.findByRole('button', { name: 'Leader verbinden' });
+    expect(plain.className).toContain('whitespace-nowrap');
+  });
+
   it('leaves the station first, then switches the leader on', async () => {
     render(<LeaderToggle isActive />);
     await openAndConfirm();

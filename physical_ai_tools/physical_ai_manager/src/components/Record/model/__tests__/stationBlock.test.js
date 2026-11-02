@@ -49,6 +49,25 @@ describe('the station block kind', () => {
     expect(p.stationLeave).toBe(true);
   });
 
+  it('outranks the stalled leader on omx_full, which a session always has (D7, §9.2)', () => {
+    // During a session the leader is necessarily off, so its source reads
+    // stalled; the banner must still show the station block and its button.
+    const m = deriveRecordView({
+      heartbeat: 'connected', status: READY_STATUS, form: FORM, station: { leaveDisabled: false },
+      verdicts: LEADER_STALLED, bridge: FOLLOWER_ONLY_BRIDGE, stationRig: true,
+    });
+    expect(m.startBlock.kind).toBe('station');
+    const list = deriveProblems({
+      view: m.view, heartbeat: 'connected', startBlock: m.startBlock,
+      verdicts: LEADER_STALLED, bridge: FOLLOWER_ONLY_BRIDGE, stationRig: true,
+    });
+    expect(list[0].textDe).toBe(RECORD_COPY.problem.station);
+    expect(list[0].stationLeave).toBe(true);
+    // Listed once, and the leader's own sentence still follows it.
+    expect(list.filter((p) => p.stationLeave)).toHaveLength(1);
+    expect(list[1].textDe).toBe(RECORD_COPY.problem.leaderOffStation);
+  });
+
   it('offers the button disabled while a real program runs', () => {
     expect(stationProblem({ leaveDisabled: true }).stationLeaveDisabled).toBe(true);
     expect(RECORD_COPY.problem.stationLeave).toBe('Station verlassen');

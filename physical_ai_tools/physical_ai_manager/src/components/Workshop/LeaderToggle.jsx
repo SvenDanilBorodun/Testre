@@ -140,6 +140,11 @@ const modalStyle = { ...boxStyle, textAlign: 'left' };
 const TOGGLE_BUTTON_CLASS = 'st-key text-xs px-3 py-1.5 rounded-md border border-[var(--line)] bg-white '
   + 'text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] disabled:opacity-50 disabled:cursor-not-allowed '
   + 'whitespace-nowrap';
+// The camera station's „Station verlassen und Leader einschalten" is long: where
+// its place is narrow (the Inferenz cloud panel) it wraps onto a second line
+// instead of being cut off.
+const TOGGLE_BUTTON_WRAP_CLASS = TOGGLE_BUTTON_CLASS.replace(
+  'whitespace-nowrap', 'whitespace-normal text-left leading-tight min-w-0');
 
 // `lockedReason` (string | null): while set — Vormachen is open and owns the
 // arm — the three toggle buttons are disabled and carry it as their title; the
@@ -403,7 +408,9 @@ export default function LeaderToggle({ isActive, lockedReason = null }) {
 
   return (
     // Compact, to sit in the studio header beside the simulator toggle.
-    <div className="leader-toggle flex items-center gap-2">
+    // With a station session held the long station label may take a line of
+    // its own below the status where the row is narrow (the cloud panel).
+    <div className={`leader-toggle flex items-center gap-2${stationHeld ? ' flex-wrap' : ''}`}>
       {!followerOnly ? (
         <button
           type="button"
@@ -424,7 +431,7 @@ export default function LeaderToggle({ isActive, lockedReason = null }) {
           </span>
           <button
             type="button"
-            className={TOGGLE_BUTTON_CLASS}
+            className={stationHeld ? TOGGLE_BUTTON_WRAP_CLASS : TOGGLE_BUTTON_CLASS}
             disabled={busy || taskBusy || !!lockedReason || (stationHeld && stationWorkflowActive)}
             onClick={() => setShowReconnect(true)}
             title={lockedReason || (taskBusy

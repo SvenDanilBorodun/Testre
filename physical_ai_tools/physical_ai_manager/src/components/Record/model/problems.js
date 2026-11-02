@@ -132,10 +132,13 @@ export function sourcesWith(verdicts, verdict) {
  *   2. a transient command failure / validation message (the page keeps it 8 s)
  *   3. the link lost while running
  *   4. disk low / critical
+ *   4b. the camera station holding the robot, where Start is offered: it
+ *       outranks a stalled source, because on omx_full the leader is
+ *       necessarily off during a session (D7) and only „Station verlassen"
+ *       brings it back (station spec §9.2, D13)
  *   5. stalled sources
- *   5b. any other reason Start is refused (the camera station holding the
- *       robot, the student's token) — where Start is offered; disk and source
- *       blocks are rows 4 and 5 already
+ *   5b. any other reason Start is refused (the student's token) — where Start
+ *       is offered; disk, station and source blocks are rows 4, 4b and 5
  *   5c. the non-blocking Hugging-Face-Token hint (S2), where Start is offered
  *   6. a record [WARNUNG] notice, ≤ 12 s old
  *   7. slow sources
@@ -178,12 +181,15 @@ export function deriveProblems({
   }
   const diskP = diskProblem(disk, { running });
   if (diskP) out.push(diskP);
+  if (view === 'READY' && startBlock?.kind === 'station' && startBlock.problem) {
+    out.push(startBlock.problem);
+  }
   for (const s of sourcesWith(verdicts, 'stalled')) {
     out.push(stalledSourceProblem(s, { bridge, activation, stationRig }));
   }
-  // Start is off for a reason the rows above do not name (V2-R2-2): say it —
-  // the camera station's claim among them (station spec §9.2).
-  if (view === 'READY' && startBlock?.problem && startBlock.kind !== 'disk' && startBlock.kind !== 'source') {
+  // Start is off for a reason the rows above do not name (V2-R2-2): say it.
+  if (view === 'READY' && startBlock?.problem && startBlock.kind !== 'disk'
+      && startBlock.kind !== 'source' && startBlock.kind !== 'station') {
     out.push(startBlock.problem);
   }
   // Start is NOT off for this one: it only says why the Benutzer-ID list is empty.

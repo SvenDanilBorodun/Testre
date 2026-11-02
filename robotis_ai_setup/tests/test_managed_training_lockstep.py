@@ -112,7 +112,7 @@ def lerobot_step_id(step, total_steps):
 
 
 # §3.7, verbatim (templates keep their {placeholders}); S4–S8, S18, S21, S23, S27 replaced and
-# S30–S40 added by the training-hour ledger (052, credit spec §8.1, verbatim): no sentence
+# S30–S40 added by the training-hour ledger (052, verbatim): no sentence
 # claims a refund any more, and an hour count is always hours_de's noun phrase.
 SENTENCES = {
     "S1": "GPU-Server ausgefallen – das Training wird ab Schritt {step} auf einem anderen Server fortgesetzt.",
@@ -178,7 +178,8 @@ SENTENCES = {
            "anderen Server neu.",
 }
 # S16 is the one sentence that still names a refund: only the legacy worker writes it, and no
-# 052 row reaches that worker (credit spec §8.1).
+# 052 row reaches that worker (every 052 start is a managed ACT row; `legacy` dispatch refuses
+# new starts).
 REFUND_SENTENCES = frozenset({"S16"})
 # The two sentences with neither an umlaut nor a word of german_detail_lint's GERMAN_WORDS. The lint
 # itself classifies such a string as neither language and accepts it (ENGLISH is judged only on
@@ -1048,7 +1049,7 @@ class TheSentencesAreTheContract(unittest.TestCase):
             self.assertLessEqual(len(widest), limit, f"{name} would be cut on the models card")
 
     def test_no_sentence_claims_a_refund_any_more(self):
-        """052: a training's hours are settled, never refunded (credit spec §8.1); only the
+        """052: a training's hours are settled, never refunded; only the
         legacy worker's S16 keeps its old wording."""
         texts = _texts(self)
         for name in SENTENCES:
@@ -1137,7 +1138,7 @@ class TheLiveColumnsAreGranted(unittest.TestCase):
         for col in ("capped_step", "continuable_until", "continued_from"):
             self.assertIn(col, g050, f"050 grants {col}")
             self.assertIn(col, live, f"LIVE_COLUMNS selects {col}")
-        # 052's four ledger columns (credit spec §12.2) are granted by name and read live.
+        # 052's four ledger columns are granted by name and read live.
         for col in ("reserved_hours", "charged_hours", "stop_requested_by_role", "lost_seconds"):
             self.assertIn(col, g052, f"052 grants {col}")
             self.assertIn(col, live, f"LIVE_COLUMNS selects {col}")

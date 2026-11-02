@@ -76,7 +76,10 @@ PT_PER_INCH = 72.0
 
 # Feature drawing (mm). The layout fixes positions and outer sizes; these are
 # the line widths of the artwork.
-OUTLINE_W = 0.5          # robot / tower footprint, world-check marks
+OUTLINE_W = 0.5          # robot outline, tower footprint, world-check marks
+HOLE_RING_W = 0.25       # robot mounting hole: a thin ring of the hole's diameter
+HOLE_CROSS_ARM = 1.0     # ... with a centre cross of ± this
+HOLE_CROSS_W = 0.2
 DOT_RING_W = 0.5         # touch-dot ring (outer diameter from the layout)
 DOT_CROSS_W = 0.25       # the dot's centre cross (overall size from the layout)
 MARK_CROSS_ARM = 3.0     # world-check mark centre cross: ± this
@@ -145,6 +148,8 @@ class MatPage:
 #   ('rect', u0, v0, u1, v1)                 filled black
 #   ('line', u0, v0, u1, v1, w)              stroke (the dashed zone outline)
 #   ('ring', uc, vc, r_out, w)               annulus, outer radius r_out
+#   ('outline', [(u, v), …], w)              closed polygon outline: a band of
+#                                            width w just OUTSIDE the polygon
 #   ('text', u, v, text, cap, anchor)        text; anchor 'l' | 'c'; v = baseline
 #   ('bitmap', u0, v0, u1, v1, cells)        a black/white cell image (0 = black)
 
@@ -302,10 +307,26 @@ def build_mat(layout, layout_module):
     def add(fid, kind, box, prims, **extra):
         features.append({'id': fid, 'kind': kind, 'box': tuple(float(v) for v in box), 'prims': prims, **extra})
 
-    # Robot and tower footprints (outlines; the bases sit on them).
-    fr = layout['robot']['footprint_mm']
-    rbox = (fr['x_range_mm'][0], fr['x_range_mm'][1], fr['y_range_mm'][0], fr['y_range_mm'][1])
-    add('robot', 'footprint', rbox, _frame(*page.box_uv(rbox), OUTLINE_W))
+    # The robot: its base plate's real contact outline (layout ``outline_mm``,
+    # the base mesh's bottom face) drawn as a band just outside it, so the
+    # plate's edge is the band's inner edge and the line stays visible around
+    # a placed robot, plus its mounting holes, each a thin ring of the hole's
+    # diameter with a small centre cross. Nothing else is printed inside the
+    # outline; the feature box (separation rule) is the band's outer extent.
+    rob = layout['robot']
+    outline = [(float(x), float(y)) for x, y in rob['outline_mm']]
+    holes = [((float(x), float(y)), float(d))
+             for (x, y), d in zip(rob['mount_holes_mm'], rob['mount_hole_diameters_mm'], strict=True)]
+    rprims = [('outline', [page.uv(x, y) for x, y in outline], OUTLINE_W)]
+    for (hx, hy), d in holes:
+        u, v = page.uv(hx, hy)
+        rprims += [('ring', u, v, d / 2, HOLE_RING_W)] + _cross(u, v, HOLE_CROSS_ARM, HOLE_CROSS_W)
+    xs = [p[0] for p in outline]
+    ys = [p[1] for p in outline]
+    rbox = (min(xs) - OUTLINE_W, max(xs) + OUTLINE_W, min(ys) - OUTLINE_W, max(ys) + OUTLINE_W)
+    add('robot', 'footprint', rbox, rprims, outline=outline, holes=holes)
+
+    # The tower footprint (an outline; the base sits on it).
     ft = layout['tower']['footprint_mm']
     tbox = (ft['x_range_mm'][0], ft['x_range_mm'][1], ft['y_range_mm'][0], ft['y_range_mm'][1])
     mu, mv = page.uv(*layout['tower']['mast_centre_mm'])
@@ -589,6 +610,24 @@ def _px(mm, s):
     return int(round(mm * s))
 
 
+def _draw_outline(img, pts, w, s):
+    """A band of width ``w`` mm just outside the closed polygon ``pts`` (page
+    mm): a line of width 2w centred on the polygon (round joins), then the
+    polygon's inside cleared, in a local patch so no other ink is touched."""
+    band = max(1, _px(2 * w, s))
+    pix = [(u * s - 0.5, v * s - 0.5) for u, v in pts]   # cv2 draws at pixel centres
+    pad = band + 4
+    c0 = max(0, int(math.floor(min(x for x, _ in pix))) - pad)
+    r0 = max(0, int(math.floor(min(y for _, y in pix))) - pad)
+    c1 = min(img.shape[1], int(math.ceil(max(x for x, _ in pix))) + pad + 1)
+    r1 = min(img.shape[0], int(math.ceil(max(y for _, y in pix))) + pad + 1)
+    local = np.full((r1 - r0, c1 - c0), 255, np.uint8)
+    fixed = np.array([[int(round((x - c0) * 16)), int(round((y - r0) * 16))] for x, y in pix], np.int32)
+    cv2.polylines(local, [fixed], True, 0, band, cv2.LINE_8, 4)
+    cv2.fillPoly(local, [fixed], 255, cv2.LINE_8, 4)
+    img[r0:r1, c0:c1] = np.minimum(img[r0:r1, c0:c1], local)
+
+
 def render_raster(width_mm, height_mm, prims, dpi=DPI):
     """A white 1-bit-valued uint8 raster (0 black, 255 white) of the primitives."""
     s = px_per_mm(dpi)
@@ -606,6 +645,9 @@ def render_raster(width_mm, height_mm, prims, dpi=DPI):
             thick = max(1, _px(w, s))
             r_mid = r_out * s - thick / 2.0
             cv2.circle(img, (_px(uc, s), _px(vc, s)), int(round(r_mid)), 0, thick, cv2.LINE_8)
+        elif kind == 'outline':
+            _, pts, w = p
+            _draw_outline(img, pts, w, s)
         elif kind == 'text':
             _, u, v, text, cap, anchor = p
             draw_text(img, text, u * s, v * s, cap * s, anchor)
@@ -686,6 +728,17 @@ def render_svg(width_mm, height_mm, prims, title):
             _, uc, vc, r_out, w = p
             out.append(f'<circle cx="{_fmt(uc)}" cy="{_fmt(vc)}" r="{_fmt(r_out - w / 2)}" fill="none" '
                        f'stroke="#000" stroke-width="{_fmt(w)}"/>')
+        elif kind == 'outline':
+            # A 2w line centred on the polygon, clipped to the outside: the
+            # raster's band of width w just outside the outline.
+            _, pts, w = p
+            clip_id = f'outside{len(out)}'
+            ring = ' '.join(f'{_fmt(u)},{_fmt(v)}' for u, v in pts)
+            path = 'M' + ' L'.join(f'{_fmt(u)} {_fmt(v)}' for u, v in pts) + ' Z'
+            out.append(f'<clipPath id="{clip_id}"><path clip-rule="evenodd" '
+                       f'd="M0 0 H{_fmt(width_mm)} V{_fmt(height_mm)} H0 Z {path}"/></clipPath>')
+            out.append(f'<polygon points="{ring}" fill="none" stroke="#000" stroke-width="{_fmt(2 * w)}" '
+                       f'stroke-linejoin="round" clip-path="url(#{clip_id})"/>')
         elif kind == 'text':
             _, u, v, text, cap, anchor = p
             out.append(f'<text x="{_fmt(u)}" y="{_fmt(v)}" font-family="Helvetica, Arial, sans-serif" '

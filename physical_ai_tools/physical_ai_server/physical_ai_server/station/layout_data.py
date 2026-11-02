@@ -47,10 +47,39 @@ LAYOUTS = {
             "material": "rigid-pvc-matte"
         },
         "robot": {
+            # The bounding box of outline_mm. The work zone and B1/B2 derive
+            # from it (``_in_nominal_zone``), never from the outline.
             "footprint_mm": {
                 "x_range_mm": [-60, 60],
                 "y_range_mm": [-75, 75]
             },
+            # What touches the mat: the bottom (z = 0) faces of the URDF base
+            # mesh physical_ai_tools/physical_ai_manager/public/omx-urdf/meshes/
+            # follower_01_base.stl (link0 = this frame, mm), CCW, straight CAD
+            # edges. A U-shaped plate: the front cut-out toward +x, chamfered
+            # corners and the rear cable channel (roofed 6 mm above the mat).
+            # test/test_station_robot_outline.py holds it to the STL.
+            "outline_mm": [
+                [-52.0, -75.0], [52.0, -75.0], [60.0, -67.0], [60.0, -45.5],
+                [52.0, -37.5], [23.0, -37.5], [15.0, -29.5], [15.0, 29.5],
+                [23.0, 37.5], [52.0, 37.5], [60.0, 45.5], [60.0, 67.0],
+                [52.0, 75.0], [-52.0, 75.0], [-60.0, 67.0], [-60.0, 15.0],
+                [-50.0, 5.0], [-30.35, 5.0], [-29.35, 6.0], [-29.35, 7.0],
+                [-30.35, 8.0], [-30.85, 8.0], [-30.85, 20.25], [-19.85, 20.25],
+                [-19.85, 8.0], [-20.35, 8.0], [-21.35, 7.0], [-21.35, -7.0],
+                [-20.35, -8.0], [-19.85, -8.0], [-19.85, -20.25], [-30.85, -20.25],
+                [-30.85, -8.0], [-30.35, -8.0], [-29.35, -7.0], [-29.35, -6.0],
+                [-30.35, -5.0], [-50.0, -5.0], [-60.0, -15.0], [-60.0, -67.0]
+            ],
+            # The ten mounting holes in that face (the STL's octagons are these
+            # circles): Ø6.5 at x = -50, 0, 50 (counterbore Ø13 from z = 7),
+            # Ø5.5 at x = ±25 (counterbore Ø10 from z = 8).
+            "mount_holes_mm": [
+                [-50.0, -62.5], [-50.0, 62.5], [-25.0, -62.5], [-25.0, 62.5],
+                [0.0, -62.5], [0.0, 62.5], [25.0, -62.5], [25.0, 62.5],
+                [50.0, -62.5], [50.0, 62.5]
+            ],
+            "mount_hole_diameters_mm": [6.5, 6.5, 5.5, 5.5, 6.5, 6.5, 5.5, 5.5, 6.5, 6.5],
             "measured": False
         },
         "tower": {

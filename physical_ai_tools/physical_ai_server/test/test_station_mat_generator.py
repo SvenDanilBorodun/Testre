@@ -27,6 +27,10 @@ directory. Then, from the FILES it wrote (never from its in-memory state):
 * all 24 board corners are detected, each within ±0.2 mm of nominal, and the
   portable lens board's detector finds none on the mat;
 * every touch dot and world-check mark is printed within ±0.2 mm of nominal;
+* the robot is its base plate's contact outline (layout ``outline_mm``), a
+  0.5 mm band hugging it from outside within 0.1 mm, and its ten mounting holes
+  (centre and diameter within ±0.2 mm); nothing else is printed inside the
+  outline (``test_station_robot_outline.py`` holds the outline to the STL);
 * the hash printed in the margin is ``layout_data.layout_sha256`` of the
   layout, read from layout_data.py by file path, and the layout JSON written
   beside it is ``layout_data.canonical_json``;
@@ -303,6 +307,81 @@ def test_the_dot_ring_has_the_layout_s_diameter(out, mat_small):
     dark = np.where(line < 128)[0]
     width_mm = (dark[-1] - dark[0] + 1) / s
     assert width_mm == pytest.approx(dot['ring_diameter_mm'], abs=0.5)
+
+
+# ── the robot ───────────────────────────────────────────────────────────────
+
+def _robot_window(out, mat_png, pad_mm=3.0):
+    """The full-resolution window around the robot outline (pad_mm beyond its
+    box), and the layout polygon filled in that window's pixels (1 = inside)."""
+    page = out['page']
+    s = _s()
+    poly = [(float(x), float(y)) for x, y in out['layout']['robot']['outline_mm']]
+    xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+    u0, v0 = page.uv(max(xs) + pad_mm, max(ys) + pad_mm)
+    u1, v1 = page.uv(min(xs) - pad_mm, min(ys) - pad_mm)
+    c0, r0 = int(math.floor(u0 * s)), int(math.floor(v0 * s))
+    c1, r1 = int(math.ceil(u1 * s)), int(math.ceil(v1 * s))
+    win = mat_png[r0:r1, c0:c1]
+    fixed = np.array([[int(round((u * s - 0.5 - c0) * 16)), int(round((v * s - 0.5 - r0) * 16))]
+                      for u, v in (page.uv(x, y) for x, y in poly)], np.int32)
+    inside = np.zeros(win.shape, np.uint8)
+    cv2.fillPoly(inside, [fixed], 1, cv2.LINE_8, 4)
+    return win, inside, (c0, r0)
+
+
+def test_the_robot_outline_is_printed_where_the_layout_says(gen, out, mat_png):
+    """A band of OUTLINE_W just outside the layout polygon: every pixel 0.1 mm
+    to OUTLINE_W − 0.1 mm outside the outline is ink, nothing farther out (up
+    to 3 mm) is, and no band ink lies more than 0.1 mm inside it."""
+    s = _s()
+    win, inside, _origin = _robot_window(out, mat_png)
+    ink = win < 128
+    out_dist = cv2.distanceTransform((1 - inside).astype(np.uint8), cv2.DIST_L2, cv2.DIST_MASK_PRECISE) / s
+    in_dist = cv2.distanceTransform(inside, cv2.DIST_L2, cv2.DIST_MASK_PRECISE) / s
+    w = gen.OUTLINE_W
+    band = (out_dist >= 0.1) & (out_dist <= w - 0.1)
+    assert band.sum() > 0 and ink[band].all(), 'the outline band has a gap'
+    far = out_dist >= w + 0.1
+    assert not ink[far].any(), 'ink outside the robot outline beyond its band'
+    # The band stops at the outline: no ink 0.1–1 mm inside it (the holes are
+    # farther in).
+    rim = (in_dist >= 0.1) & (in_dist <= 1.0)
+    assert not ink[rim].any(), 'the outline band reaches inside the outline'
+
+
+def test_every_mount_hole_is_printed_within_tolerance(out, mat_png):
+    rob = out['layout']['robot']
+    assert len(rob['mount_holes_mm']) == len(rob['mount_hole_diameters_mm']) == 10
+    for (cx, cy), d in zip(rob['mount_holes_mm'], rob['mount_hole_diameters_mm']):
+        r = d / 2
+        x, y = _outline_centre(out, mat_png, cx, cy, r + 1.0)
+        assert math.hypot(x - cx, y - cy) <= _TOL_MM, ((cx, cy), 'ring', (x, y))
+        x, y = _ink_centre(out, mat_png, cx, cy, 1.5)  # the centre cross, inside the ring
+        assert math.hypot(x - cx, y - cy) <= _TOL_MM, ((cx, cy), 'cross', (x, y))
+        win, _o = _window(out, mat_png, cx, cy, r + 1.0)
+        dark = win < 128
+        cols = np.where(dark.any(axis=0))[0]
+        rows = np.where(dark.any(axis=1))[0]
+        assert (cols[-1] - cols[0] + 1) / _s() == pytest.approx(d, abs=_TOL_MM), ((cx, cy), 'width')
+        assert (rows[-1] - rows[0] + 1) / _s() == pytest.approx(d, abs=_TOL_MM), ((cx, cy), 'height')
+
+
+def test_nothing_but_the_mount_holes_is_printed_inside_the_robot_outline(out, mat_png):
+    s = _s()
+    win, inside, origin = _robot_window(out, mat_png)
+    in_dist = cv2.distanceTransform(inside, cv2.DIST_L2, cv2.DIST_MASK_PRECISE) / s
+    rows, cols = np.nonzero((win < 128) & (in_dist > 0.1))
+    assert len(rows) > 0, 'the mounting holes are printed'
+    page = out['page']
+    x = page.x1 - (origin[1] + rows + 0.5) / s
+    y = page.y1 - (origin[0] + cols + 0.5) / s
+    rob = out['layout']['robot']
+    near_a_hole = np.zeros(len(rows), bool)
+    for (hx, hy), d in zip(rob['mount_holes_mm'], rob['mount_hole_diameters_mm']):
+        near_a_hole |= np.hypot(x - hx, y - hy) <= d / 2 + 0.1
+    stray = np.flatnonzero(~near_a_hole)
+    assert len(stray) == 0, [(float(x[i]), float(y[i])) for i in stray[:5]]
 
 
 # ── B1 / B2, labels, separation ─────────────────────────────────────────────

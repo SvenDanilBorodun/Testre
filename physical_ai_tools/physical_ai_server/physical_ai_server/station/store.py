@@ -265,9 +265,11 @@ def validate(raw, layouts=None):
         if not isinstance(v, np.ndarray) or not _finite(v):
             return bad
         fields[key] = np.asarray(v, dtype=np.float64)
-    if int(fields['schema']) != SCHEMA:
+    # Exact integers: a schema 6.5 or a width 1920.7 is not schema 6 / 1920 px.
+    if fields['schema'] != float(SCHEMA):
         return bad
-    if (int(fields['image_width']), int(fields['image_height'])) != T.STATION_IMAGE_SIZE:
+    if (fields['image_width'], fields['image_height']) != tuple(
+            float(v) for v in T.STATION_IMAGE_SIZE):
         return bad
     for key in ('T_cam_mat', 'T_cam_mat_commissioned', 'T_cam_base'):
         if not _rigid_ok(fields[key]):
@@ -345,15 +347,30 @@ def load(path=None, layouts=None):
 
 
 def write_station(fields, base=None, layouts=None):
-    """Commit and re-solve write: (1) copy the current VALID station.yaml to
-    station.prev.yaml, (2) write the new file; each temp + fsync + os.replace,
-    then the directory fsync. A crash leaves the old or the new complete file."""
+    """Commit and re-solve write (§6.5). The new content is written to a temp file
+    (+ fsync) and must pass the full load validation BEFORE anything is replaced:
+    an invalid one changes neither file. Then (1) the current VALID station.yaml
+    is copied to station.prev.yaml, (2) the temp file replaces station.yaml;
+    each temp + fsync + os.replace, then the directory fsync. A crash leaves the
+    old or the new complete file. Returns (True, '') or (False, German reason)."""
     current = yaml_path(base)
-    if current.exists():
-        cal, _ = load(current, layouts)
-        if cal is not None:
-            _copy_atomic(current, prev_path(base))
-    write_atomic(current, fields)
+    current.parent.mkdir(parents=True, exist_ok=True)
+    tmp = current.with_name(f'.{current.stem}.new-{os.getpid()}.yaml')
+    try:
+        _write_fs(tmp, fields)
+        _fsync_file(tmp)
+        if load(tmp, layouts)[0] is None:
+            return False, T.WRITE_FAILED_DE
+        if current.exists():
+            cal, _ = load(current, layouts)
+            if cal is not None:
+                _copy_atomic(current, prev_path(base))
+        os.replace(tmp, current)
+        _fsync_dir(current.parent)
+        return True, ''
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def restore_previous(base=None, layouts=None):

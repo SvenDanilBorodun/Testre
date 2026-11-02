@@ -352,7 +352,9 @@ class StationService:
             return False, T.WRITE_FAILED_DE, None
         try:
             fields = com.yaml_fields(solution, self.profile_id)
-            store.write_station(fields, self.base, self.layouts)
+            written, reason = store.write_station(fields, self.base, self.layouts)
+            if not written:
+                return False, reason or T.WRITE_FAILED_DE, None
             cal, reason = store.load(store.yaml_path(self.base), self.layouts)
             if cal is None:
                 return False, reason or T.WRITE_FAILED_DE, None
@@ -435,10 +437,12 @@ class StationService:
             return False, T.RESOLVE_REFUSED_DE, {'check': res}
         fields = CM.resolve_fields(f, T_new)
         try:
-            store.write_station(fields, self.base, self.layouts)
+            written, reason = store.write_station(fields, self.base, self.layouts)
         except Exception as e:  # noqa: BLE001
             self._log('error', f'station re-solve write failed: {e!r}')
             return False, T.WRITE_FAILED_DE, None
+        if not written:
+            return False, reason or T.WRITE_FAILED_DE, None
         new_cal, reason = store.load(store.yaml_path(self.base), self.layouts)
         if new_cal is None:
             return False, reason, None
@@ -711,7 +715,9 @@ class StationService:
             if cmd == 'resolve_camera':
                 ans = self.worker.request_claim(CW.RESOLVE, self.machine.session_id,
                                                 self._arm_idle_refusal())
-                resp.result = 'QUEUED' if ans.result == 'QUEUED' else 'FAILED'
+                # §8.2: FAILED is the re-lock's; an arm that is not idle (a mode
+                # holds it, a station job pending) is BUSY with that sentence.
+                resp.result = 'QUEUED' if ans.result == 'QUEUED' else 'BUSY'
                 resp.job_id = ans.job_id
                 resp.job_state = 'queued' if ans.job_id else 'none'
                 resp.message = T.RESOLVE_QUEUED_DE if ans.job_id else ans.message
@@ -892,6 +898,11 @@ class StationService:
                 self._wake.set()
                 return self._answer(resp, ans)
             if cmd == 'restore_previous':
+                # §6.5: an ACTIVE session's owner only (an ENTERING one would
+                # only end stale on the worker).
+                if self.machine.state != 'ACTIVE':
+                    resp.result, resp.message = 'REFUSED', T.CHECK_NOT_ACTIVE_DE
+                    return resp
                 if rec is not None:
                     resp.result, resp.message = 'REFUSED', T.JOB_PENDING_DE
                     return resp

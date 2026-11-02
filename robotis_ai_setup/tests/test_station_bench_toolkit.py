@@ -227,6 +227,69 @@ class Checks(unittest.TestCase):
         self.assertEqual(t.summary()['camera']['s1_static_verdict'], 'FAIL')
         self.assertIn('camera: 51 checks', t.line())
 
+    def test_s1_robot_verdict_is_all_ok_and_the_half_count_only_a_report(self):
+        # Spec §12.3: „30 static robot checks, all OK"; the half-threshold rule
+        # is the camera's. A robot OK at dxy 3.0 mm (OK <= 4.0, half 2.0) passes
+        # S1 and is merely not counted at half the thresholds.
+        t = B.CheckTally()
+        robot_ok = {'result': 'OK', 'dot_id': 1, 'dot_dxy_mm': 3.0, 'dot_dz_mm': 2.5}
+        for _ in range(B.S1_ROBOT_CHECKS):
+            t.add('robot', robot_ok)
+        s = t.summary()['robot']
+        self.assertEqual(s['s1_static_verdict'], 'PASS')
+        self.assertEqual(s['ok_at_half_thresholds'], 0)
+        self.assertIn('not a gate', s['ok_at_half_thresholds_note'])
+        t.add('robot', dict(robot_ok, result='ROBOT_MOVED'))
+        self.assertEqual(t.summary()['robot']['s1_static_verdict'], 'FAIL')
+        # The camera keeps both halves of its criterion.
+        c = B.CheckTally()
+        for _ in range(B.S1_CAMERA_CHECKS):
+            c.add('camera', dict(self.CAM_OK, max_mm=3.5))       # OK, not at half
+        self.assertEqual(c.summary()['camera']['s1_static_verdict'], 'FAIL')
+
+    def test_the_camera_half_thresholds_are_pinned(self):
+        self.assertEqual((B.CAMERA_OK_RMS_MM / 2, B.CAMERA_OK_MAX_MM / 2,
+                          B.CAMERA_OK_CENTROID_MM / 2, B.CAMERA_OK_ROTATION_DEG / 2),
+                         (1.5, 3.0, 1.5, 0.25))
+        at = dict(self.CAM_OK, rms_mm=1.5, max_mm=3.0, centroid_mm=1.5, rotation_deg=0.25)
+        self.assertTrue(B.half_threshold_ok('camera', at))
+        for key, over in (('rms_mm', 1.5001), ('max_mm', 3.0001), ('centroid_mm', 1.5001),
+                          ('rotation_deg', 0.2501)):
+            self.assertFalse(B.half_threshold_ok('camera', dict(at, **{key: over})), key)
+
+    def test_a_re_solve_result_is_its_own_kind(self):
+        # station/service.py::_finish_work_locked stores the re-solve's own
+        # camera_check dict as OK / RESOLVE_REFUSED; camera_check adds no ref_ids
+        # (only _camera_check does) and no dot_id.
+        resolve_ok = {'result': 'OK', 'generation': 3, 'rms_mm': 0.8, 'max_mm': 1.4,
+                      'centroid_mm': 0.5, 'rotation_deg': 0.1, 'dot_id': 0,
+                      'dot_dxy_mm': 0.0, 'dot_dz_mm': 0.0, 'ref_ids': [],
+                      'ref_residual_mm': [0.7, 0.8, 0.9, 0.8]}
+        self.assertEqual(B.check_kind(resolve_ok), 'resolve')
+        self.assertEqual(B.check_kind({'result': 'RESOLVE_REFUSED', 'dot_id': 0,
+                                       'ref_ids': []}), 'resolve')
+        self.assertIsNone(B.half_threshold_ok('resolve', resolve_ok))
+        self.assertEqual(B.check_kind(self.CAM_OK), 'camera')
+        t = B.CheckTally()
+        t.add('resolve', resolve_ok)
+        t.add('resolve', dict(resolve_ok, result='RESOLVE_REFUSED'))
+        self.assertEqual(t.summary()['resolve']['by_result'], {'OK': 1, 'RESOLVE_REFUSED': 1})
+        self.assertEqual(t.total('camera'), 0)
+        self.assertIn('resolve: 2', t.line())
+
+    def test_the_resolve_shape_is_the_servers(self):
+        svc = (PAS / 'station' / 'service.py').read_text(encoding='utf-8')
+        finish = svc.split('def _finish_work_locked', 1)[1].split('\n    def ', 1)[0]
+        self.assertIn("'OK' if ok else 'RESOLVE_REFUSED'", finish)
+        steps = svc.split('def _resolve_steps', 1)[1].split('\n    def ', 1)[0]
+        self.assertIn('C.camera_check(', steps)
+        self.assertNotIn("res['ref_ids']", steps)               # no ref_ids on a re-solve
+        cam = svc.split('def _camera_check', 1)[1].split('\n    def ', 1)[0]
+        self.assertIn("res['ref_ids'] = list(f['ref_ids'])", cam)   # every camera check has them
+        srv = (REPO / 'physical_ai_tools' / 'physical_ai_interfaces' / 'srv'
+               / 'StationCheck.srv').read_text(encoding='utf-8')
+        self.assertIn('RESOLVE_REFUSED', srv)
+
     def test_the_fingerprint_tells_two_checks_apart(self):
         a = B.check_fingerprint(self.CAM_OK)
         self.assertEqual(a, B.check_fingerprint(dict(self.CAM_OK)))
@@ -253,6 +316,20 @@ class Checks(unittest.TestCase):
         self.assertIsNone(e.update(80.0, 'ACTIVE', 3, False))     # a new session
         self.assertEqual(e.update(100.0, 'ACTIVE', 3, True), 20.0)
         self.assertEqual(e.durations, [60.0, 20.0])
+
+    def test_entry_timer_ignores_a_session_running_when_logging_started(self):
+        e = B.EntryTimer()
+        self.assertIsNone(e.update(0.0, 'ACTIVE', 7, False))     # already running
+        self.assertIsNone(e.update(30.0, 'ACTIVE', 7, True))     # not an entry we saw
+        self.assertIsNone(e.update(40.0, 'IDLE', 7, False))
+        self.assertIsNone(e.update(50.0, 'ENTERING', 8, False))  # entered after the start
+        self.assertEqual(e.update(65.0, 'ACTIVE', 8, True), 15.0)
+        self.assertEqual(e.durations, [15.0])
+        # A first poll in ENTERING is the same: that entry began before we looked.
+        f = B.EntryTimer()
+        self.assertIsNone(f.update(0.0, 'ENTERING', 2, False))
+        self.assertIsNone(f.update(5.0, 'ACTIVE', 2, True))
+        self.assertEqual(f.durations, [])
 
 
 class MirroredContracts(unittest.TestCase):
@@ -376,12 +453,25 @@ class Tools(unittest.TestCase):
         self.assertIsNone(r.check(dict(Checks.CAM_OK)))          # the same stored check
         self.assertEqual(r.check(dict(Checks.CAM_OK, rms_mm=1.3)), 'camera')
         self.assertEqual(r.tally.total('camera'), 2)
-        changed, dur = r.session(0.0, {'state': 'ENTERING', 'generation': 5, 'verified': False})
+        resolved = dict(Checks.CAM_OK, ref_ids=[], rms_mm=0.9)
+        self.assertEqual(r.check(resolved), 'resolve')           # never 'unknown'
+        self.assertEqual(r.check(dict(resolved, result='RESOLVE_REFUSED')), 'resolve')
+        self.assertEqual(r.tally.total('camera'), 2)             # not a camera check
+        self.assertEqual(r.tally.total('resolve'), 2)
+        # The owner's last re-solve job: a change is logged once.
+        self.assertFalse(r.job({'job_id': 0, 'job_state': 'none', 'message': ''}))
+        self.assertTrue(r.job({'job_id': 4, 'job_state': 'running', 'message': ''}))
+        self.assertFalse(r.job({'job_id': 4, 'job_state': 'running', 'message': ''}))
+        self.assertTrue(r.job({'job_id': 4, 'job_state': 'failed', 'message': 'x'}))
+        # Logging starts while no session runs; the entry is seen from its start.
+        changed, dur = r.session(0.0, {'state': 'IDLE', 'generation': 4, 'verified': False})
+        self.assertTrue(changed)
+        changed, dur = r.session(1.0, {'state': 'ENTERING', 'generation': 5, 'verified': False})
         self.assertTrue(changed)
         self.assertIsNone(dur)
-        changed, dur = r.session(1.0, {'state': 'ENTERING', 'generation': 5, 'verified': False})
+        changed, dur = r.session(2.0, {'state': 'ENTERING', 'generation': 5, 'verified': False})
         self.assertFalse(changed)
-        changed, dur = r.session(40.0, {'state': 'ACTIVE', 'generation': 5, 'verified': True})
+        changed, dur = r.session(41.0, {'state': 'ACTIVE', 'generation': 5, 'verified': True})
         self.assertEqual((changed, dur), (True, 40.0))
 
     def test_pick_tally(self):

@@ -209,20 +209,29 @@ py container_run.py check_log --out C:\bench\s1 -- --interval 0.5
 
 It polls `/station/check` and `/station/session` with `{command: status}` (the same
 read-only calls as `ros2 service call … "{command: status}"`, through an rclpy client so the
-answer needs no text parsing) and appends every NEW check result with its kind, result,
-rms / max / centroid / rotation, dot id / dxy / dz and per-reference residuals, plus every
-session change. The console shows a running tally against S1's half-threshold criterion.
+answer needs no text parsing) and appends every NEW check result with its kind (`camera`,
+`robot` or `resolve`), result, rms / max / centroid / rotation, dot id / dxy / dz and
+per-reference residuals, every session change, and every change of the owner's last re-solve
+job (`…_jobs.csv`: `job_id`, `job_state`, message). The console shows a running S1 tally.
 
 * **S1:** 50 static camera checks („Kamera prüfen") all `OK` with every metric at most half
   its threshold (rms ≤ 1.5 mm, max ≤ 3.0 mm, centroid ≤ 1.5 mm, rotation ≤ 0.25°), and 30
-  static robot checks („Roboter prüfen", then „Prüfen") all `OK` (the half-threshold
-  column, dxy ≤ 2.0 mm and dz ≤ 1.5 mm, is reported as well).
+  static robot checks („Roboter prüfen", then „Prüfen") all `OK`. For the robot the
+  half-threshold count (dxy ≤ 2.0 mm and dz ≤ 1.5 mm) is reported, never a gate (spec
+  §12.3 says „all OK" for the robot).
 * **S2:** after a deliberate ≈ 1° camera rotation, 10/10 `MOVED`; after a 5 mm base shift,
   10/10 `ROBOT_MOVED` (count them in the `result` column).
-* **S3:** a re-solve („Kamera neu ausrichten (Lehrkraft)") after a 1–2° bump passes (its
-  result shows as the next camera check) and picks still succeed; after > 3° it is refused
-  („Kamera zu stark verstellt – vollständige Einrichtung nötig.", which is not a stored
-  check: watch the page).
+* **S3:** a re-solve („Kamera neu ausrichten (Lehrkraft)") stores its OWN result
+  (`service.py::_finish_work_locked`) as a row of kind `resolve`: `OK` when it passes,
+  `RESOLVE_REFUSED` when the new pose's own check is not `OK` or the pose moved beyond the
+  re-solve bounds (more than 3° or 25 mm from commissioning). The row carries that check's
+  rms / max / centroid / rotation (all 0 when the check found no refs) and no ref ids and
+  no dot. After a 1–2° bump expect `resolve` `OK`, then picks still succeed (and the next
+  „Kamera prüfen" is an ordinary `camera` row); after > 3° expect `resolve`
+  `RESOLVE_REFUSED` (the page says „Kamera zu stark verstellt – vollständige Einrichtung
+  nötig."). A re-solve that fails before its check (too few board frames, the board solve,
+  the write) stores no result: it shows only in the jobs CSV (`job_state` `failed`, the
+  German message) and on the page.
 * **S5:** a page reload in ACTIVE keeps the session's `generation` and `robot_ok`, and a new
   camera check follows by itself; the session CSV shows both.
 * **Limits:** the server keeps ONE last check per session generation with no counter: a
@@ -244,7 +253,8 @@ py pick_tally.py stopwatch --out C:\bench\entry --gate entry
   der Roboter darf sich bewegen". **Pass/fail (spec):** typical ≤ 2 min, p50 / p95 reported.
   `check_log.py` also measures it automatically from the first poll that sees a new session
   generation to the first `verified` (`entry_to_verified_s`); that leaves out the click and
-  the page's own start.
+  the page's own start. A session already running when `check_log` starts is not timed
+  (start the log first, then „Station starten").
 
 ## Unit tests
 

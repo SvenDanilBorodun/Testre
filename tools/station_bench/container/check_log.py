@@ -26,7 +26,13 @@ answer needs no text parsing — and appends:
 * every NEW check result to ``check_log_<stamp>_checks.csv`` (time, kind,
   result, rms / max / centroid / rotation, dot id / dxy / dz, generation, the
   per-reference residuals, the half-threshold verdict), with a running tally
-  against S1's „every metric ≤ half its threshold";
+  against S1 (camera: all OK, every metric ≤ half its threshold; robot: all
+  OK). A re-solve's stored result is its own kind, ``resolve`` (``OK`` /
+  ``RESOLVE_REFUSED``, no ref ids, no dot);
+* every change of the owner's last re-solve job (``job_id`` / ``job_state``
+  / ``message``) to ``…_jobs.csv``: a re-solve that fails before its own
+  check (too few frames, the board solve, the write) stores no check result
+  and shows only there;
 * every session change to ``…_session.csv`` (state, generation, camera check
   epoch, camera_ok, robot_ok, verified, …) — the S5 evidence (a reload keeps
   the generation and ``robot_ok``; the camera re-checks) and the timing of
@@ -54,14 +60,16 @@ import bench_common as B  # noqa: E402
 CHECK_FIELDS = ['t_iso', 'recv_ns', 'kind', 'result', 'success', 'generation', 'rms_mm',
                 'max_mm', 'centroid_mm', 'rotation_deg', 'dot_id', 'dot_dxy_mm', 'dot_dz_mm',
                 'ref_ids', 'ref_residual_mm', 'half_threshold_ok', 'camera_ok', 'robot_ok',
-                'verified', 'message']
+                'verified', 'job_id', 'job_state', 'message']
+JOB_FIELDS = ['t_iso', 'recv_ns', 'job_id', 'job_state', 'generation', 'result', 'message']
 SESSION_FIELDS = ['t_iso', 'recv_ns', 'state', 'generation', 'camera_check_epoch',
                   'station_configured', 'source_ok', 'camera_ok', 'robot_ok', 'verified',
                   'workflow_active', 'layout_id', 'calibration_digest', 'entry_to_verified_s']
 # The StationCheck response fields read here (physical_ai_interfaces/srv/StationCheck.srv).
 CHECK_RESPONSE_FIELDS = ('result', 'success', 'generation', 'rms_mm', 'max_mm', 'centroid_mm',
                          'rotation_deg', 'dot_id', 'dot_dxy_mm', 'dot_dz_mm', 'ref_ids',
-                         'ref_residual_mm', 'camera_ok', 'robot_ok', 'verified', 'message')
+                         'ref_residual_mm', 'camera_ok', 'robot_ok', 'verified', 'job_id',
+                         'job_state', 'message')
 SESSION_RESPONSE_FIELDS = ('state', 'generation', 'camera_check_epoch', 'station_configured',
                            'source_ok', 'camera_ok', 'robot_ok', 'verified', 'workflow_active',
                            'layout_id', 'calibration_digest')
@@ -83,6 +91,7 @@ class Recorder:
     def __init__(self):
         self.last_fp = None
         self.last_session = None
+        self.last_job = None
         self.tally = B.CheckTally()
         self.entry = B.EntryTimer()
         self.checks = []
@@ -99,6 +108,15 @@ class Recorder:
         self.tally.add(kind, d)
         self.checks.append((kind, d))
         return kind or 'unknown'
+
+    def job(self, d):
+        """True when the owner's last job (id, state, message) changed; job 0
+        (no job of this session's owner) is never logged."""
+        key = (int(d.get('job_id') or 0), d.get('job_state') or '', d.get('message') or '')
+        if key[0] == 0 or key == self.last_job:
+            return False
+        self.last_job = key
+        return True
 
     def session(self, t_s, d):
         """Returns (changed, entry_to_verified_s or None)."""
@@ -134,6 +152,7 @@ def main(argv=None):
     clog = B.CsvLog(B.out_path(args.out, 'check_log', run_stamp, '_checks.csv'), CHECK_FIELDS)
     slog = B.CsvLog(B.out_path(args.out, 'check_log', run_stamp, '_session.csv'),
                     SESSION_FIELDS)
+    jlog = B.CsvLog(B.out_path(args.out, 'check_log', run_stamp, '_jobs.csv'), JOB_FIELDS)
     rec = Recorder()
     # Our own SIGINT handler (set above) ends the loop and writes the summary;
     # rclpy's would shut the context down under the running loop instead.
@@ -178,6 +197,10 @@ def main(argv=None):
                       flush=True)
         if c is not None:
             cd = to_dict(c, CHECK_RESPONSE_FIELDS)
+            if rec.job(cd):
+                jlog.write(dict(cd, t_iso=B.iso_now(), recv_ns=now_ns))
+                print(f"re-solve job {cd['job_id']}: {cd['job_state']}"
+                      + (f" — {cd['message']}" if cd['message'] else ''), flush=True)
             kind = rec.check(cd)
             if kind is not None:
                 clog.write(dict(cd, t_iso=B.iso_now(), recv_ns=now_ns, kind=kind,
@@ -185,6 +208,10 @@ def main(argv=None):
                 if kind == 'robot':
                     what = (f"dot {cd['dot_id']} dxy {cd['dot_dxy_mm']:.2f} dz "
                             f"{cd['dot_dz_mm']:.2f} mm")
+                elif kind == 'resolve':
+                    what = (f"re-solve, its check rms {cd['rms_mm']:.2f} max "
+                            f"{cd['max_mm']:.2f} centroid {cd['centroid_mm']:.2f} mm rot "
+                            f"{cd['rotation_deg']:.3f}° (all 0 when its check found no refs)")
                 else:
                     what = (f"rms {cd['rms_mm']:.2f} max {cd['max_mm']:.2f} centroid "
                             f"{cd['centroid_mm']:.2f} mm rot {cd['rotation_deg']:.3f}°")
@@ -195,10 +222,12 @@ def main(argv=None):
     rclpy.shutdown()
     clog.close()
     slog.close()
+    jlog.close()
     durs = rec.entry.durations
     summary = {
-        'gates': 'S1 (static checks at half the thresholds), S2/S3 (MOVED / ROBOT_MOVED / '
-                 're-solve outcomes), S5 (session continuity), entry plus both checks',
+        'gates': 'S1 (camera: all OK at half the thresholds; robot: all OK), S2 (MOVED / '
+                 'ROBOT_MOVED), S3 (re-solve: kind resolve, OK / RESOLVE_REFUSED, and the '
+                 'jobs CSV), S5 (session continuity), entry plus both checks',
         'label': args.label, 'checks': rec.tally.summary(),
         'entry_to_verified_s': B.summarize(durs),
         'entry_typical_le_120_s': B.verdict(B.percentile(durs, 50), B.ENTRY_TYPICAL_S,
@@ -210,6 +239,10 @@ def main(argv=None):
                             'robot_dxy_dz_mm': [B.ROBOT_OK_DXY_MM / 2, B.ROBOT_OK_DZ_MM / 2]},
         'notes': ['One stored check per generation, no counter: a check replaced before the '
                   'next poll is missed; identical consecutive values count once.',
+                  'A re-solve stores its own check as OK / RESOLVE_REFUSED (kind resolve); one '
+                  'that fails before that check (too few frames, the board solve, the write) '
+                  'stores nothing and shows only in the jobs CSV (job_state failed).',
+                  'entry_to_verified times only sessions entered after logging started.',
                   'entry_to_verified is measured from the first poll that sees a new session '
                   'generation (ENTERING/ACTIVE) to the first poll with verified=true; '
                   'resolution = the poll interval. The click before „Station starten" is '

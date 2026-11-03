@@ -201,3 +201,34 @@ describe('deriveHealth — defaults', () => {
     expect(row(h, 'connection').state).toBe(BAD);
   });
 });
+
+describe('deriveHealth — a camera station (station spec §9.2)', () => {
+  // A station never runs the manual three steps, so „Kalibrierung 0 von 3"
+  // would stand forever; the row reads CalibrationStatus's station fields.
+  it('reads „Kamerastation eingerichtet" on a configured station', () => {
+    const h = deriveHealth({
+      ...healthy,
+      calibration: { intrinsic: false, handeye: false, table: false, stationRig: true, stationConfigured: true },
+    });
+    expect(row(h, 'calibration')).toMatchObject({ state: OK, value: 'Kamerastation eingerichtet' });
+    expect(h.verdict).toBe(READY);
+  });
+
+  it('reads „Kamerastation nicht eingerichtet" (a warning) on a fresh station', () => {
+    const h = deriveHealth({
+      ...healthy,
+      calibration: { intrinsic: false, handeye: false, table: false, stationRig: true, stationConfigured: false },
+    });
+    expect(row(h, 'calibration')).toMatchObject({ state: WARN, value: 'Kamerastation nicht eingerichtet' });
+    expect(h.verdict).toBe(LIMITED);
+  });
+
+  it('keeps unknown unknown, and a manual rig its three steps', () => {
+    expect(row(deriveHealth({ ...healthy, calibration: null }), 'calibration').state).toBe(UNKNOWN);
+    const manual = deriveHealth({
+      ...healthy,
+      calibration: { intrinsic: true, handeye: false, table: false, stationRig: false, stationConfigured: false },
+    });
+    expect(row(manual, 'calibration')).toMatchObject({ state: WARN, value: '1 von 3' });
+  });
+});

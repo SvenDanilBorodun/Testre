@@ -499,14 +499,19 @@ def _load_method(name, ns):
 class TheWindowCloseHookStopsTheCloudRunFirst(unittest.TestCase):
 
     def test_two_separate_try_blocks_cloud_stop_first(self):
+        # Three since the camera station: its Studio-stream backstop sits
+        # between the cloud stop (still FIRST) and the token clear (which may
+        # sleep for minutes), each in its own try.
         stmts = _body(_method(_gui_tree(), "_on_student_window_closed"))
-        self.assertEqual(len(stmts), 2, [ast.unparse(s)[:60] for s in stmts])
-        first, second = stmts
+        self.assertEqual(len(stmts), 3, [ast.unparse(s)[:60] for s in stmts])
+        first, middle, second = stmts
         self.assertIsInstance(first, ast.Try)
+        self.assertIsInstance(middle, ast.Try)
         self.assertIsInstance(second, ast.Try)
         self.assertIn("docker_manager.stop_cloud_inference_after_window_close(", ast.unparse(first.body[0]))
+        self.assertEqual("self._station_stream_off()", ast.unparse(middle.body[0]))
         self.assertIn("docker_manager.clear_robot_hf_token_after_window_close(", ast.unparse(second.body[0]))
-        for block in (first, second):
+        for block in (first, middle, second):
             self.assertEqual(len(block.handlers), 1)
             self.assertEqual(ast.unparse(block.handlers[0].type), "Exception")
 

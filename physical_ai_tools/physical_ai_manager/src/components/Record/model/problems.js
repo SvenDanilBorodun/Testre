@@ -38,13 +38,17 @@ export function diskProblem(disk, { running = false } = {}) {
   return { kind: 'bad', textDe: P.diskLow(disk.free, disk.startFloor) };
 }
 
-/** The sentence for one stalled source (the leader's has three causes). */
-export function stalledSourceProblem(source, { bridge = null, activation = null } = {}) {
+/**
+ * The sentence for one stalled source (the leader's has three causes). On a
+ * camera station (`stationRig`) the switched-off leader comes back only by
+ * leaving the station (station spec §9.2), and the sentence says where.
+ */
+export function stalledSourceProblem(source, { bridge = null, activation = null, stationRig = false } = {}) {
   if (!source) return null;
   if (source.kind === 'camera') return { kind: 'bad', textDe: P.cameraStalled(source.name) };
   if (source.kind === 'follower') return { kind: 'bad', textDe: P.followerStalled };
   if (bridge && bridge.available === true && bridge.followerOnly === true) {
-    return { kind: 'bad', textDe: P.leaderOff };
+    return { kind: 'bad', textDe: stationRig ? P.leaderOffStation : P.leaderOff };
   }
   if (activation && activation.state && activation.state !== 'active') {
     return { kind: 'bad', textDe: P.leaderNotActivated, linkToHome: true };
@@ -92,6 +96,23 @@ export function hfTokenHintProblem(reason) {
   return { kind: 'warn', textDe: P.hfTokenHint[reason], linkToHome: true };
 }
 
+/**
+ * The camera station holds the robot (station spec §9.2, D13): the server
+ * refuses a recording start while the claim is held, so the page says so and
+ * offers „Station verlassen" — disabled while a real program runs (the
+ * server's `workflow_active`, §9.1 step 4).
+ * @param {{leaveDisabled?: boolean}} station
+ */
+export function stationProblem(station) {
+  if (!station) return null;
+  return {
+    kind: 'bad',
+    textDe: P.station,
+    stationLeave: true,
+    stationLeaveDisabled: Boolean(station.leaveDisabled),
+  };
+}
+
 /** The sentence for one slow source. */
 export function slowSourceProblem(source, fps) {
   if (!source) return null;
@@ -111,9 +132,13 @@ export function sourcesWith(verdicts, verdict) {
  *   2. a transient command failure / validation message (the page keeps it 8 s)
  *   3. the link lost while running
  *   4. disk low / critical
+ *   4b. the camera station holding the robot, where Start is offered: it
+ *       outranks a stalled source, because on omx_full the leader is
+ *       necessarily off during a session (D7) and only „Station verlassen"
+ *       brings it back (station spec §9.2, D13)
  *   5. stalled sources
- *   5b. any other reason Start is refused (the same dataset still uploading) —
- *       where Start is offered; disk and source blocks are rows 4 and 5 already
+ *   5b. any other reason Start is refused (the student's token) — where Start
+ *       is offered; disk, station and source blocks are rows 4, 4b and 5
  *   5c. the non-blocking Hugging-Face-Token hint (S2), where Start is offered
  *   6. a record [WARNUNG] notice, ≤ 12 s old
  *   7. slow sources
@@ -134,6 +159,7 @@ export function deriveProblems({
   fps = 0,
   startBlock = null,
   hfTokenHint = null,
+  stationRig = false,
   nowWallMs = Date.now(),
 } = {}) {
   const out = [];
@@ -155,11 +181,15 @@ export function deriveProblems({
   }
   const diskP = diskProblem(disk, { running });
   if (diskP) out.push(diskP);
+  if (view === 'READY' && startBlock?.kind === 'station' && startBlock.problem) {
+    out.push(startBlock.problem);
+  }
   for (const s of sourcesWith(verdicts, 'stalled')) {
-    out.push(stalledSourceProblem(s, { bridge, activation }));
+    out.push(stalledSourceProblem(s, { bridge, activation, stationRig }));
   }
   // Start is off for a reason the rows above do not name (V2-R2-2): say it.
-  if (view === 'READY' && startBlock?.problem && startBlock.kind !== 'disk' && startBlock.kind !== 'source') {
+  if (view === 'READY' && startBlock?.problem && startBlock.kind !== 'disk'
+      && startBlock.kind !== 'source' && startBlock.kind !== 'station') {
     out.push(startBlock.problem);
   }
   // Start is NOT off for this one: it only says why the Benutzer-ID list is empty.

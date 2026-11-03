@@ -18,6 +18,13 @@
 // ask" into "we asked and the answer was none", which on this page is a claim
 // about the student's rig that nobody checked.
 
+import { STATION_DE } from '../features/station/stationCopy';
+
+// The camera station's calibration line (station spec §9.2), from the one
+// station copy module.
+export const STATION_CONFIGURED_DE = STATION_DE.homeConfigured;
+export const STATION_NOT_CONFIGURED_DE = STATION_DE.homeNotConfigured;
+
 export const OK = 'ok';
 export const WARN = 'warn';
 export const BAD = 'bad';
@@ -67,7 +74,13 @@ export function isHardError(text) {
  * @param {?number} i.expectedCameras  how many this profile uses, or null
  * @param {?object} i.calibration      {intrinsic, handeye, table} booleans, or
  *                                     null when /calibration/status has not
- *                                     answered — NOT an object of falses.
+ *                                     answered — NOT an object of falses. On a
+ *                                     camera station it also carries
+ *                                     {stationRig: true, stationConfigured}
+ *                                     (CalibrationStatus.srv's additive
+ *                                     station fields, station spec §8.4): a
+ *                                     station never has the manual three
+ *                                     steps, so the row reads the station.
  * @param {boolean} i.showCalibration  false hides the row entirely (a profile
  *                                     without Roboter Studio never calibrates)
  * @param {string}  i.errorText        taskStatus.error, verbatim
@@ -140,7 +153,12 @@ export function deriveHealth({
   if (showCalibration) {
     let calState = UNKNOWN;
     let calValue = '—';
-    if (connected && calibration) {
+    if (connected && calibration && calibration.stationRig) {
+      // Station spec §9.2: „Kamerastation eingerichtet" / „nicht eingerichtet";
+      // the session state is the Roboter-Studio page's business.
+      calState = calibration.stationConfigured ? OK : WARN;
+      calValue = calibration.stationConfigured ? STATION_CONFIGURED_DE : STATION_NOT_CONFIGURED_DE;
+    } else if (connected && calibration) {
       const done = [calibration.intrinsic, calibration.handeye, calibration.table]
         .filter(Boolean).length;
       if (done === 3) {

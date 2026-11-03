@@ -275,7 +275,8 @@ _KIND_POINT_DE = ('„{p}“ muss ein Punkt aus drei Zahlen x, y, z in Metern se
 _KIND_TARGET_DE = ('„{p}“ muss ein Punkt aus drei Zahlen x, y, z in Metern oder der '
                    'Name eines gemerkten Ziels sein.')
 _KIND_ZIEL_DE = '„{p}“ muss ein Greifziel sein — das Ergebnis von find.'
-_KIND_TAGIDS_DE = '„{p}“ muss eine Liste mit 1 bis 16 Marker-IDs (0 bis 586) sein.'
+_KIND_TAGIDS_DE = ('„{p}“ muss eine Liste mit 1 bis 16 Marker-IDs sein (0 bis 99 oder '
+                   '200 bis 586; 100 bis 199 sind für die Kamerastation reserviert).')
 _KIND_OBJ_DE = ('„{p}“ muss ein Objekt-Name aus Buchstaben ohne Umlaute (a–z), Ziffern '
                 'und _ sein (höchstens 24 Zeichen).')
 # F18: an object named by its LABEL („Würfel") — the type it means (a German
@@ -292,6 +293,11 @@ _EMPTY_DE = '„{p}“ darf nicht leer sein.'
 _CHOICE_DE = '„{p}“ muss eines davon sein: {choices}.'
 
 _TAG_ID_MAX = 586          # tag36h11's id space
+# D14 (owner, 2026-11-01): AprilTag IDs 100–199 are reserved for the OMX camera
+# station's reference tags on EVERY robot, station or not, so a program behaves
+# the same everywhere and a student's own object never matches a station marker.
+STATION_TAG_ID_MIN = 100
+STATION_TAG_ID_MAX = 199
 _TAG_IDS_MAX = 16
 _POINT_ABS_MAX_M = 1.0
 _TARGET_NAME_RE = re.compile(robot_api.DESTINATION_NAME_RE)
@@ -633,7 +639,8 @@ def validate_value(p: ApiParam, v: Any, *, label: str | None = None) -> str | No
     if kind == 'tagids':
         if (not isinstance(v, list) or not 1 <= len(v) <= _TAG_IDS_MAX
                 or any(isinstance(t, bool) or not isinstance(t, int)
-                       or not 0 <= t <= _TAG_ID_MAX for t in v)):
+                       or not 0 <= t <= _TAG_ID_MAX
+                       or STATION_TAG_ID_MIN <= t <= STATION_TAG_ID_MAX for t in v)):
             return _KIND_TAGIDS_DE.format(p=name)
         return None
     if kind == 'obj':
@@ -1211,6 +1218,12 @@ class RunSession:
         grasp depth over the object height) is the German refusal verbatim."""
         from physical_ai_server.workflow import object_catalog as _oc
         name, label, tag_ids, hoehe_m, greiftiefe_m, close, anfahr = args
+        # D14: the station range is refused here too (defence in depth behind
+        # validate_value), on every rig.
+        if any(STATION_TAG_ID_MIN <= int(t) <= STATION_TAG_ID_MAX for t in tag_ids):
+            label = robot_api.java_camel('tag_ids') if self.language == 'java' else 'tag_ids'
+            return _err(rid, 'robot', _VALUE_FRAME.format(
+                method='Greifobjekt', reason=_KIND_TAGIDS_DE.format(p=label)))
         entry: dict[str, Any] = {
             'label_de': label,
             'tag_ids': [int(t) for t in tag_ids],

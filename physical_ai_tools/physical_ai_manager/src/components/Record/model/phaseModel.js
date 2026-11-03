@@ -20,7 +20,9 @@
 import TaskPhase from '../../../constants/taskPhases';
 import { isFinishTracking } from '../../../features/tasks/recordSession';
 import RECORD_COPY from './recordCopy';
-import { diskProblem, hfTokenProblem, sourcesWith, stalledSourceProblem } from './problems';
+import {
+  diskProblem, hfTokenProblem, sourcesWith, stalledSourceProblem, stationProblem,
+} from './problems';
 
 export const VIEW = Object.freeze({
   OFFLINE: 'OFFLINE',
@@ -237,10 +239,15 @@ function dotsFor(view, { episode, session }) {
 }
 
 /**
- * Why Start is refused, first match (Q5): the disk, a stalled source (camera →
- * follower → leader), or the student's own Hugging-Face token (not stored, not
- * usable, or not on the robot yet). Validation is not a block — it runs on the
- * click.
+ * Why Start is refused, first match (Q5): the camera station holding the robot
+ * (station spec §9.2, D13: the server refuses every recording start while this
+ * tab's station claim is held), the disk, a stalled source (camera → follower
+ * → leader), or the student's own Hugging-Face token (not stored, not usable,
+ * or not on the robot yet). Validation is not a block — it runs on the click.
+ *
+ * `station` is the controller's block (features/station/gating::
+ * stationStartBlock), `{leaveDisabled}` or null; `stationRig` words the
+ * switched-off leader for a station.
  *
  * The SAME dataset still uploading is no block (Daten 2.0, R-8, owner decision
  * V2-3): the robot waits for that upload by itself before it checks Hugging
@@ -252,15 +259,20 @@ function dotsFor(view, { episode, session }) {
  * UNKNOWN NEVER BLOCKS: an account state that has not answered, a robot that
  * has not said it takes a personal token (older image, Jetson) and a store
  * without the feature all arrive as null.
- * @returns {null | {kind: 'disk'|'source'|'hftoken', reason?, problem}}
+ * @returns {null | {kind: 'station'|'disk'|'source'|'hftoken', reason?, problem}}
  */
 export function deriveStartBlock({
   disk = null, verdicts = null, bridge = null, activation = null, hfToken = null,
+  station = null, stationRig = false,
 } = {}) {
+  const stationP = stationProblem(station);
+  if (stationP) return { kind: 'station', problem: stationP };
   const diskP = diskProblem(disk, { running: false });
   if (diskP) return { kind: 'disk', problem: diskP };
   const stalled = sourcesWith(verdicts, 'stalled')[0];
-  if (stalled) return { kind: 'source', problem: stalledSourceProblem(stalled, { bridge, activation }) };
+  if (stalled) {
+    return { kind: 'source', problem: stalledSourceProblem(stalled, { bridge, activation, stationRig }) };
+  }
   const hfProblem = hfToken ? hfTokenProblem(hfToken) : null;
   if (hfProblem) return { kind: 'hftoken', reason: hfToken, problem: hfProblem };
   return null;
@@ -283,6 +295,8 @@ export function deriveStartBlock({
  * @param input.activation  useRobotActivation status | null
  * @param input.hfToken     null | 'none' | 'unusable' | 'transfer' | 'busy' | 'failed' | 'taken_over'
  * @param input.waitingForUpload  the robot still uploads the dataset being started (R-8)
+ * @param input.station     the camera station's block ({leaveDisabled}) | null
+ * @param input.stationRig  this robot is a camera station
  */
 export function deriveRecordView({
   heartbeat = 'disconnected',
@@ -300,6 +314,8 @@ export function deriveRecordView({
   activation = null,
   hfToken = null,
   waitingForUpload = false,
+  station = null,
+  stationRig = false,
 } = {}) {
   const view = deriveView({ heartbeat, status, collision, session });
   const running = !!status.running;
@@ -322,7 +338,7 @@ export function deriveRecordView({
 
   const connected = heartbeat === 'connected';
   const startBlock = deriveStartBlock({
-    disk, verdicts, bridge, activation, hfToken,
+    disk, verdicts, bridge, activation, hfToken, station, stationRig,
   });
   const segments = segmentsFor(view, { status, plan, episode, session });
   const idleText = view === VIEW.FINISHING ? C.track.allDone : C.track.idle;

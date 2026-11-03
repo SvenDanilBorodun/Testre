@@ -1,0 +1,41 @@
+# OMX camera station (plan v6.13 §8.3): commissioning (/station/commission).
+# Every command except status requires the owner's client_id and the current
+# session_id. A command that creates a job answers QUEUED at once; its outcome is
+# read from status (job_id / job_state / job_message). No request carries a path.
+string command        # begin | lens_capture | lens_solve | board_solve | touch_begin | touch_capture | touch_solve | mark_capture | mark_solve | commit | cancel | restore_previous | status
+string session_id
+string client_id
+string layout_id      # begin: a released layout from layout_data.py
+string commission_id  # minted by the CLAIM job that begin queues (read from status); required by every later command except status/restore_previous
+uint8 dot_id          # touch_capture: 1..4, in order
+string mark_id        # mark_capture: M1..M8 | B1 | B2
+uint8 cube_turn       # mark_capture: 0 (0°) | 1 (90°)
+---
+bool accepted
+bool success
+string step
+string result         # OK | QUEUED (a job was created, §6) | NO_FRAME | NOT_OWNER | REFUSED (a precondition of §6 not met; the German message says which) | FAILED (a gate or a torque switch failed; the message says which) | INVALID (malformed request: unknown command, wrong commission_id, out-of-order dot or mark)
+uint32 job_id         # the job this answer created, or (status) the owner's last job of this session, kept after the commission ends (§6 State)
+string job_state      # status: none | queued | running | retry_wait | done | failed | stale
+string job_message    # status: the German outcome of that job
+string message        # German
+string commission_id
+uint16 lens_views_fit
+uint16 lens_views_heldout
+uint16 coverage_cells
+float64 lens_fit_rms_px
+float64 lens_heldout_rms_px
+float64 lens_heldout_max_px
+float64 lens_fx_px       # the accepted lens solve's focal length fx (px); 0 before one
+float64 lens_fy_px       # the accepted lens solve's focal length fy (px); 0 before one
+float64 board_reproj_px
+float64 registration_rms_mm
+float64 registration_max_mm
+float64 registration_shift_mm
+float64 registration_rot_deg
+float64 world_rms_mm
+float64 world_max_mm
+uint16 world_points
+uint8 next_dot_id     # status: the next touch_capture's dot (0 when none)
+string next_mark_id   # status: the next mark_capture's mark ('' when none)
+uint8 next_cube_turn  # status: the next mark_capture's cube turn

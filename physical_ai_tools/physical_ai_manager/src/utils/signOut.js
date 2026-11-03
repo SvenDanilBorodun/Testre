@@ -80,6 +80,7 @@ import { supabase } from '../lib/supabaseClient';
 import { signedOut } from '../features/session/sessionActions';
 import { resetJetsonOnLogout } from '../features/jetson/sessionReset';
 import { endCloudInferenceOnLogout } from '../features/cloudInference/controller';
+import { endStationSessionOnLogout } from '../features/station/controller';
 import { CLEAR_BOUND_MS, clearRobotHfToken } from '../features/hfToken/robotChannel';
 import { forgetVormachenCopy } from '../components/Workshop/code/vormachenClipboard';
 import { clearStudentScopedStorage, clearSupabaseSessionKeys } from './sessionScope';
@@ -132,6 +133,11 @@ export const signOutStudent = ({ reload = true } = {}) => async (dispatch, getSt
   // still-valid JWT (a keepalive POST …/end) and reset the module-level
   // controller synchronously, so the next student finds no session of ours.
   endCloudInferenceOnLogout(accessToken);
+  // The camera station (station spec §9.1 step 4): if this tab holds the
+  // session, its `leave` is started and the GUI's `off` chained on the answer,
+  // neither awaited; in every case the per-tab client id is re-minted, so a
+  // lost `leave` can never let the next student resume this one's session.
+  endStationSessionOnLogout();
   // Started now, awaited after the revoke (see „THE ROBOT'S TOKEN SLOT").
   const hfClear = startRobotTokenClear(jetsonClaimed);
   dispatch(signedOut());
@@ -252,10 +258,16 @@ export function logoutBlockReason({
   taskRunning,
   workflowRunning,
   calibrationCapturing,
+  stationWorkflowActive = false,
 }) {
   if (!robotLinkLive) return null;
   if (taskRunning) return 'task';
-  if (workflowRunning) return 'workflow';
+  // `stationWorkflowActive`: on a camera station the server's own
+  // `workflow_active` (station spec §9.1 step 4), which the app-wide station
+  // controller keeps on EVERY page — `workflowRunning` is fed only while the
+  // Roboter-Studio page is open, so it alone would let a student sign out
+  // from Start while a program still runs.
+  if (workflowRunning || stationWorkflowActive) return 'workflow';
   if (calibrationCapturing) return 'calibration';
   return null;
 }

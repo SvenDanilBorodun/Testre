@@ -214,6 +214,16 @@ export const IGNORED_STORAGE_KEYS = Object.freeze({
     + 'one so the two can never both answer on mount; the hook deletes it as '
     + 'soon as the open document is not code, so a student who moved on to '
     + 'blocks is never pulled back into an old Python program.',
+  edubotics_station_client_id:
+    'sessionStorage, owned by features/station/clientId. A per-TAB id of the '
+    + 'camera station session (station spec §9.1 step 0, owner decision D10): '
+    + 'a UUID with no student data in it, which a reload must KEEP so the '
+    + 'reloaded tab resumes its own session instead of waiting for it to '
+    + 'expire. It cannot go in STUDENT_SCOPED_KEYS (that loop is localStorage '
+    + 'only, the same reason as edubotics.jetson.reconnect), and it needs no '
+    + 'scrub there: utils/signOut::signOutStudent re-mints it through '
+    + 'features/station/controller::endStationSessionOnLogout, so the next '
+    + 'student can never resume the previous one’s session.',
   edubotics_workshop_autosave_session:
     'sessionStorage, owned by components/Workshop/useAutosave::'
     + 'autosaveSessionScope. It is the ANONYMOUS half of the identity that '

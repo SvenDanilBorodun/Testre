@@ -287,7 +287,14 @@ function RecordPage({ isActive = true }) {
               {showFinish ? <FinishCard {...c.finish} onAction={onFinishAction} /> : null}
             </RecordStage>
             <div className="rec-footer" data-testid="rec-footer">
-              <ProblemBanner problem={c.problem} homeLabel={copy.problem.homeLabel} onGoHome={c.goToHome} />
+              <ProblemBanner
+                problem={c.problem}
+                homeLabel={copy.problem.homeLabel}
+                onGoHome={c.goToHome}
+                stationLeaveLabel={copy.problem.stationLeave}
+                stationLeaveBlocked={copy.problem.stationLeaveBlocked}
+                onStationLeave={c.leaveStation}
+              />
               <ActionBar
                 ariaLabel={copy.actionbar.aria}
                 pill={model.pill}

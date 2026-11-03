@@ -1068,6 +1068,9 @@ class TheScanAsksFirstWhenThereIsASessionToLose(unittest.TestCase):
             _clear_arm_repair=lambda: None,
             _stop_camera_bridge=lambda: None,
             _stop_rs_control_server=lambda: None,
+            # The camera station's Studio stream goes off first in `_do_scan`
+            # (plan §3.3). Test-double completion, not a weakening.
+            _station_stream_off=lambda: None,
             _update_start_button=lambda: None,
             _show_arm_repair=lambda *a: None,
             running=False,

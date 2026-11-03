@@ -103,6 +103,8 @@ class RolesComeFromTheProfile(unittest.TestCase):
             _selected_robot_profile=lambda: profile,
             _stop_camera_previews=lambda: None,
             _start_camera_previews=previews.append,
+            # Camera station: a scene-role change may clear its flag.
+            _station_check_scene_role=lambda: None,
         )
         method(owner)
         return owner, labels, previews
@@ -308,6 +310,7 @@ class ARobotTypeSwitchReDerivesTheCameraRole(unittest.TestCase):
             _selected_robot_profile=lambda: profile["id"],
             _stop_camera_previews=lambda: None,
             _start_camera_previews=lambda _c: None,
+            _station_check_scene_role=lambda: None,
         )
         on_cameras_changed(owner)
         self.assertEqual(cams[0].role, "gripper")

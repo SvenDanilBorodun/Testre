@@ -226,6 +226,7 @@ class ARaisingScanDoesNotStrandTheButton(unittest.TestCase):
             _log=rec.logs.append,
             _clear_arm_repair=lambda: None,
             _stop_camera_bridge=lambda: None,
+            _station_stream_off=lambda: None,
             _stop_rs_control_server=lambda: None,
             _update_start_button=lambda: None,
             _show_arm_repair=lambda *a, **k: None,

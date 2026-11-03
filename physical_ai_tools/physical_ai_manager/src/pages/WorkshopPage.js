@@ -15,6 +15,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import toast, { useToasterStore } from 'react-hot-toast';
 import * as Blockly from 'blockly/core';
 import CalibrationWizard from '../components/Workshop/CalibrationWizard';
+import StationPanel from '../components/Station/StationPanel';
 import { HomeGlideProvider } from '../components/Workshop/HomeGlidePrompt';
 import LeaderToggle from '../components/Workshop/LeaderToggle';
 import BlocklyWorkspace from '../components/Workshop/BlocklyWorkspace';
@@ -103,6 +104,9 @@ import { useRosTopicSubscription } from '../hooks/useRosTopicSubscription';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import useRsBridgeStatus from '../hooks/useRsBridgeStatus';
 import useSimPreview from '../hooks/useSimPreview';
+import { useStationValue, useStationWorkshop } from '../features/station/useStation';
+import { STATION_CAMERA, isStationRig } from '../features/station/stationContract';
+import { STATION_DE } from '../features/station/stationCopy';
 import {
   SIM_ENTRY_BLOCK_TITLES_DE,
   SIM_ENTRY_SETTLE_MS,
@@ -134,6 +138,10 @@ const UrdfTwin = lazy(() => import('../components/UrdfTwin'));
 // async chunk pulled in by CodeView → pythonCodeGen) stays out of the entry
 // bundle; mounts only while the „Code"-panel is open.
 const CodeView = lazy(() => import('../components/Workshop/CodeView'));
+
+// „Station einrichten (Lehrkraft)" (station spec §6, §9.2): an overlay opened
+// from the station card or strip, LAZY so a manual rig never loads it.
+const StationCommissionWizard = lazy(() => import('../components/Station/StationCommissionWizard'));
 
 // On-screen toast stack cap. Roboter Studio was the ONE student page without
 // it: the other five (ControlPanel, TrainingPage, EditDatasetPage, RecordPage,
@@ -584,7 +592,9 @@ function WorkshopPage({ isActive }) {
   // student opened is still being fetched (review round 4, mc10 — Start would
   // run the OLD program's files and Ziele under the NEW program's id), and
   // while a version restore is on its way (nb2). Previews read the same two.
-  const startBlockedReason = hydrating
+  // (On a camera station a real run also needs the verified session; that half
+  // is added below, beside the other station gates.)
+  const startBlockedReasonDoc = hydrating
     ? DE.DOCUMENT_LOADING
     : (versionRestoring ? DE.VERSION_RESTORE_IN_FLIGHT : null);
   // Batch 2b: rosbridge liveness gates the real-arm jog panel and Vormachen (the same
@@ -601,6 +611,10 @@ function WorkshopPage({ isActive }) {
   // (lifted here) so Vormachen refuses to open over a limp arm — one shared truth,
   // so no surface shows a stale „freigeschaltet" state after JogPanel closes it.
   const [jogHandGuideOn, setJogHandGuideOn] = useState(false);
+  // The camera station's robot check frees the arm through the same
+  // hand-guide (station spec §7.2): the same gates hold while it does.
+  const [stationHandGuideOn, setStationHandGuideOn] = useState(false);
+  const armFreed = jogHandGuideOn || stationHandGuideOn;
   // The Roboter-Studio bridge (:8769): Vormachen reads `leaderOn` (leader vs
   // hand mode, and a leader switched on mid-session) and `followerOnly` (the
   // leader gone in leader mode). Polled only while the page is shown.
@@ -613,7 +627,7 @@ function WorkshopPage({ isActive }) {
     runState,
     paused,
     simMode,
-    jogHandGuideOn,
+    jogHandGuideOn: armFreed,
     previewActive,
   });
   const subscriptions = useRosTopicSubscription();
@@ -764,7 +778,7 @@ function WorkshopPage({ isActive }) {
   // One ladder for the header sim toggle AND a preview's sim entry
   // (utils/simPreview.js::simEntryBlockReason).
   const simEntryReason = simEntryBlockReason({
-    simRunActive, realRunActive, simMode, activeTutorialId, teachOpen, jogHandGuideOn,
+    simRunActive, realRunActive, simMode, activeTutorialId, teachOpen, jogHandGuideOn: armFreed,
   });
   const simEntryReasonRef = useRef(simEntryReason);
   simEntryReasonRef.current = simEntryReason;
@@ -809,6 +823,33 @@ function WorkshopPage({ isActive }) {
     hasHandeyeScene &&
     hasTableTouch;
 
+  // The camera station (station spec §9.2). On a station rig the manual
+  // calibration's `calibrated` is never read: the manual YAMLs stay untouched
+  // there (§5.4), so it would stay false and the editor would never open.
+  // `stationConfigured` is null until the robot has answered once.
+  const stationRig = isStationRig(caps);
+  const stationConfigured = useStationValue((st) => st.stationConfigured);
+  const stationVerified = useStationValue((st) => Boolean(st.held && st.verified));
+  const stationSourceOk = useStationValue((st) => Boolean(st.held && st.sourceOk));
+  // Opening Roboter Studio is the visit that enters the station session by
+  // itself (§9.1 step 1); the leader state decides whether it may (D7).
+  useStationWorkshop({
+    isActive,
+    leaderOn: Boolean(rsBridge.leaderOn),
+    leaderProbed: rsBridge.probed !== false,
+  });
+  const [stationCommissionOpen, setStationCommissionOpen] = useState(false);
+  // What the manual rig calls „calibrated": the editor, the catalog fetch and
+  // the autosaves unlock with it (§9.2).
+  const editorUnlocked = stationRig ? stationConfigured === true : calibrated;
+  // A REAL run on a station needs this session verified (§9.2, D4); continue
+  // and step are gated by the server, which answers in German. A simulator run
+  // needs nothing.
+  const stationStartReason = stationRig && !simMode && !stationVerified
+    ? (stationConfigured === true ? STATION_DE.notVerified : STATION_DE.notConfigured)
+    : null;
+  const startBlockedReason = startBlockedReasonDoc || stationStartReason;
+
   // The editor unlocks only when calibrated AND not mid-recalibration AND not
   // holding for the optional accuracy-verify step. The `recalibrating` override
   // (set by „Kalibrierung neu starten") keeps the wizard open even though the
@@ -820,7 +861,10 @@ function WorkshopPage({ isActive }) {
   // editor on a fresh page load (workshopSlice).
   // Phase-3: the simulator needs no calibration (real interpreter + real IK on a
   // VIRTUAL arm — plan §WS-D), so simMode opens the editor regardless.
-  const showEditor = simMode || (calibrated && !recalibrating && !pendingVerify);
+  // Station rig: `simMode || station_configured` (§9.2).
+  const showEditor = simMode || (stationRig
+    ? stationConfigured === true
+    : (calibrated && !recalibrating && !pendingVerify));
 
   // Re-subscribe to /workflow/status whenever this page is active OR
   // the rosbridge connection state flips back to connected. The v1
@@ -1066,7 +1110,7 @@ function WorkshopPage({ isActive }) {
       // Refuse a driven move while the arm is hand-guided (limp — the student's
       // hand is on it in JogPanel „Arm freischalten"). Re-torquing + driving it
       // would fight the student's hand while JogPanel still shows „freigeschaltet".
-      if (jogHandGuideOn) {
+      if (armFreed) {
         toast.error(
           'Der Arm ist freigeschaltet — bitte zuerst festsetzen, '
           + 'bevor du ihn zu einem Punkt fährst.',
@@ -1102,7 +1146,7 @@ function WorkshopPage({ isActive }) {
       }
     });
     return () => setDriveToHandler(null);
-  }, [jogArm, simMode, runState, teachOpen, heartbeatStatus, jogHandGuideOn]);
+  }, [jogArm, simMode, runState, teachOpen, heartbeatStatus, armFreed]);
 
   // Fetch the named-object catalog for the Blockly dropdowns once the editor is
   // available (calibrated). Re-fetch if the student calibrates in-session. The
@@ -1111,7 +1155,7 @@ function WorkshopPage({ isActive }) {
   // Phase-3: also fetch the catalog in simMode (even uncalibrated) so the
   // simulator object palette is populated; an empty/failed fetch seeds a default.
   useEffect(() => {
-    if (!isActive || !(calibrated || simMode)) return undefined;
+    if (!isActive || !(editorUnlocked || simMode)) return undefined;
     let cancelled = false;
     getObjectCatalog()
       .then((r) => {
@@ -1144,7 +1188,7 @@ function WorkshopPage({ isActive }) {
     return () => {
       cancelled = true;
     };
-  }, [isActive, calibrated, simMode, getObjectCatalog]);
+  }, [isActive, editorUnlocked, simMode, getObjectCatalog]);
 
   // TemplatePicker calls onPicked(workflowObject) — the full row, not
   // just the id. We extract the id and store it in Redux; the editor's
@@ -1331,7 +1375,7 @@ function WorkshopPage({ isActive }) {
   // The local crash recovery only; the toolbar shows the CLOUD save (saveMark).
   useAutosave({
     workspace,
-    enabled: isActive && (calibrated || simMode),
+    enabled: isActive && (editorUnlocked || simMode),
     scopeKey: userId,
     onRestore: handleAutosaveRestore,
   });
@@ -1362,7 +1406,7 @@ function WorkshopPage({ isActive }) {
     files: codeFiles,
     // The draft carries the document's Ziele beside its files (041).
     destinations: isCodeWorkflow ? storeEntries : null,
-    enabled: isActive && (calibrated || simMode),
+    enabled: isActive && (editorUnlocked || simMode),
     scopeKey: userId,
     onRestore: handleCodeAutosaveRestore,
   });
@@ -1684,7 +1728,7 @@ function WorkshopPage({ isActive }) {
       documentLoading: hydrating,
       versionRestoring,
       teachOpen,
-      jogHandGuideOn,
+      jogHandGuideOn: armFreed,
       simMode,
       activeTutorialId,
       ...previewGate,
@@ -1728,7 +1772,9 @@ function WorkshopPage({ isActive }) {
         // is drawn disabled until the control bridge has answered once.
         previewPending,
         previewVariables: true,
-        pinCamera: !!calibrated && !simMode,
+        // A camera pin on a station needs the session verified: click-to-Ziel
+        // is D4-gated there (§9.2).
+        pinCamera: (stationRig ? stationVerified : !!calibrated) && !simMode,
         pinSim: true,
         // Whether a 3D view is on screen right now (the simulator's, or the
         // dock's „3D-Ansicht" panel). While it is not, a Ziel/Position offers
@@ -1744,7 +1790,7 @@ function WorkshopPage({ isActive }) {
       variableValues: variableValues || {},
       restrictedBlocks: Array.isArray(restrictedBlocks) ? restrictedBlocks : null,
     });
-  }, [sammlungProvider, simMode, calibrated, previewPending, robotType, trajectoryList,
+  }, [sammlungProvider, simMode, calibrated, stationRig, stationVerified, previewPending, robotType, trajectoryList,
     lastPreviewResult, variableValues, restrictedBlocks, dockCollapsed, dockOpen]);
   useEffect(() => {
     sammlungProvider.setActionHandler((action) => {
@@ -1901,8 +1947,9 @@ function WorkshopPage({ isActive }) {
               bigger camera instead of a small strip with empty space below. */}
           <div className="flex-1 min-h-0">
             <CameraFeedOverlay
-              camera="scene"
-              clickable={true}
+              camera={stationRig ? STATION_CAMERA : 'scene'}
+              clickable={!stationRig || stationVerified}
+              sourceOk={stationSourceOk}
               fill
               resolveMarkLabel={resolveMarkLabel}
               onMark={handleMarkDestination}
@@ -2152,12 +2199,24 @@ function WorkshopPage({ isActive }) {
         runState={runState}
         paused={paused}
         simMode={simMode}
-        jogHandGuideOn={jogHandGuideOn}
+        jogHandGuideOn={armFreed}
         previewActive={previewActive}
         rsBridge={rsBridge}
         saveWorkflowNow={saveWorkflowNow}
         refetchTrajectories={refetchTrajectories}
       />
+      {/* The station strip (§9.2): directly under the header, above the
+          editor row, a stable keyed sibling OUTSIDE <main>, so it appearing or
+          changing never remounts the editor. */}
+      {stationRig && showEditor && (
+        <StationPanel
+          key="station-strip"
+          compact
+          onOpenCommission={() => setStationCommissionOpen(true)}
+          armBusy={jogHandGuideOn}
+          onHandGuideChange={setStationHandGuideOn}
+        />
+      )}
       <main className="flex-1 overflow-hidden flex flex-col min-h-0">
         {showEditor ? (
           <>
@@ -2212,7 +2271,7 @@ function WorkshopPage({ isActive }) {
                       />
                       {/* There is no camera to recalibrate in the simulator
                           (R0-8). */}
-                      {!simMode && recalibrateButton}
+                      {!simMode && !stationRig && recalibrateButton}
                     </>
                   }
                 />
@@ -2435,10 +2494,24 @@ function WorkshopPage({ isActive }) {
               </>
             )}
           </>
+        ) : stationRig ? (
+          // The full station card where the manual wizard would be (§9.2).
+          <div className="flex-1 overflow-auto">
+            <StationPanel
+              onOpenCommission={() => setStationCommissionOpen(true)}
+              armBusy={jogHandGuideOn}
+              onHandGuideChange={setStationHandGuideOn}
+            />
+          </div>
         ) : (
           <CalibrationWizard />
         )}
       </main>
+      {stationRig && stationCommissionOpen && (
+        <Suspense fallback={null}>
+          <StationCommissionWizard onClose={() => setStationCommissionOpen(false)} />
+        </Suspense>
+      )}
     </div>
     </HomeGlideProvider>
   );

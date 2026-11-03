@@ -255,6 +255,35 @@ CAMERA_HEIGHT = int(os.environ.get("EDUBOTICS_CAMERA_HEIGHT", "480"))
 CAMERA_FRAMERATE = float(os.environ.get("EDUBOTICS_CAMERA_FRAMERATE", "30.0"))
 CAMERA_JPEG_QUALITY = int(os.environ.get("EDUBOTICS_CAMERA_JPEG_QUALITY", "80"))
 
+# --- OMX camera station (Windows native MSMF only) ---
+# The option „Kamerastation (OMX)" is OFFERED only in a release whose
+# physical_ai_server/station/layout_data.py holds a `released` layout: on a
+# rig without one, enabling the station would refuse every real motion
+# (nothing can be commissioned against a `draft` layout). The first release
+# ships OMX-STATION-A as `draft`, so this stays False there; bench gate C1 runs
+# a dev build with the measured, released layout. A cross-package test holds
+# this literal equal to that condition.
+STATION_OPTION_OFFERED = False
+# How the station camera is opened natively (win_camera.open_station_capture).
+# Chosen on the bench (gates B1/B5), never at run time:
+#   "fourcc_only"     (a) the MJPG fourcc only, exactly like today's MSMF path,
+#                         for a camera whose MSMF default mode is already
+#                         1920x1080 at >= 29 fps; sets no fps;
+#   "fourcc_size_fps" (b) the MJPG fourcc plus CAP_PROP_FRAME_WIDTH/HEIGHT
+#                         1920x1080 and CAP_PROP_FPS 30.
+STATION_OPEN_METHOD = "fourcc_only"
+STATION_OPEN_METHODS = ("fourcc_only", "fourcc_size_fps")
+# The station camera's native mode (InnoMaker U20CAM-1080P, MJPEG). Every
+# frame must be exactly this size; nothing is ever stretched to it.
+STATION_NATIVE_WIDTH = 1920
+STATION_NATIVE_HEIGHT = 1080
+# Enrollment probe: the camera on the scene role must deliver this many frames
+# of exactly the native size, at no less than this rate, before the station can
+# be enabled. A 720P camera cannot pass, which also tells the station camera
+# from the 720P gripper camera.
+STATION_PROBE_FRAMES = 60
+STATION_PROBE_MIN_FPS = 29.0
+
 
 def cameras_use_native_bridge() -> bool:
     """Whether cameras are captured natively on Windows (vs usb_cam-over-usbipd).

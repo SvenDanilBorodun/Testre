@@ -62,6 +62,8 @@ import { studentAuthGateDecision } from './utils/authGate';
 import { usePiMode } from './utils/piMode';
 import Icon from './components/icons/Icon';
 import { releasePointerFocus } from './components/Record/ActionBar';
+import { useStationHost, useStationValue } from './features/station/useStation';
+import { stationBlocksLogout } from './features/station/gating';
 
 function StudentApp() {
   const dispatch = useDispatch();
@@ -160,6 +162,23 @@ function StudentApp() {
   const calibrationCapturing = useSelector(selectCalibrationHasUnsolvedCaptures);
 
   const isFirstLoad = useRef(true);
+
+  // The camera station session (station spec §9.1, D13): ONE module-level
+  // controller, started here so it survives every tab switch. It is active
+  // only on a station rig (capabilities.station_protocol === 6), not in Pi
+  // mode and not while a classroom Jetson is claimed; it asks the robot for a
+  // session to resume as soon as the local rosbridge connects. Off in
+  // cloud-only mode (no robot).
+  useStationHost({
+    capabilities: caps,
+    piMode,
+    piModeResolved,
+    jetsonConnected,
+    enabled: !cloudOnly,
+  });
+  // A real program in this tab's station session refuses „Abmelden" from any
+  // page (§9.1 step 4), not only while Roboter Studio is open.
+  const stationWorkflowActive = useStationValue(stationBlocksLogout);
 
   const rosSubscriptionControls = useRosTopicSubscription();
   if (!cloudOnly) {
@@ -470,6 +489,7 @@ function StudentApp() {
     // The wizard is the only thing that captures frames and it lives on this
     // page alone; see the selector for why the count is stale everywhere else.
     calibrationCapturing: page === PageType.WORKSHOP && calibrationCapturing,
+    stationWorkflowActive,
   });
   const logoutBlocked = blockReason !== null;
   const logoutTitle = logoutBlocked

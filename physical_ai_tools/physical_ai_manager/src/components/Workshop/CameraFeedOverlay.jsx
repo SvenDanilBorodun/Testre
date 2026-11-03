@@ -20,10 +20,14 @@ import { usePiMode, videoStreamBase } from '../../utils/piMode';
 import { destinationNameErrorDe } from './blocks/destinations';
 import { DE } from './blocks/messages_de';
 import { sanitizeDestinationNameInput } from './sammlung/destinationStore';
+import { STATION_CAMERA, STATION_TOPIC } from '../../features/station/stationContract';
 
 const CAMERA_TOPICS = {
   scene: '/scene/image_raw/compressed',
   gripper: '/gripper/image_raw/compressed',
+  // The camera station's native 1920×1080 Studio stream (station spec §4,
+  // §9.2 Preview); click-to-Ziel sends `camera: 'station_scene'` (§5.4).
+  [STATION_CAMERA]: STATION_TOPIC,
 };
 
 // Audit F24: a frozen MJPEG keeps the TCP socket open with
@@ -55,6 +59,11 @@ function CameraFeedOverlay({
   // answers `{ok, error?}` and keeps the field open until it is `ok`.
   resolveMarkLabel,
   onRenameMark,
+  // The station preview's liveness (station spec §9.2): the station
+  // controller's `source_ok`, IN PLACE of the rosbridge probe below — a
+  // throttled subscription to a 1080p topic would push ~700 KB of base64 per
+  // second through the shared websocket. Read only for the station camera.
+  sourceOk = true,
   ...rest
 }) {
   // Hooks first, no conditional returns above them — react-hooks/rules
@@ -138,8 +147,11 @@ function CameraFeedOverlay({
   // Audit F24: ROS-side liveness ping. Subscribe to the same compressed
   // image topic at 1 Hz throttle so a frozen MJPEG doesn't fool us. If
   // no message arrives for FROZEN_THRESHOLD_MS, flip the badge.
+  const isStationCamera = camera === STATION_CAMERA;
   useEffect(() => {
     if (cloudOnly) return undefined;
+    // The station preview never subscribes over rosbridge: see `sourceOk`.
+    if (isStationCamera) return undefined;
     const topic = CAMERA_TOPICS[camera];
     if (!topic) return undefined;
     const ros = rosConnectionManager?.ros;
@@ -169,7 +181,13 @@ function CameraFeedOverlay({
         /* roslib throws if already torn down */
       }
     };
-  }, [camera, cloudOnly]);
+  }, [camera, cloudOnly, isStationCamera]);
+
+  // The station preview's frozen badge follows the controller's `source_ok`.
+  useEffect(() => {
+    if (!isStationCamera) return;
+    setIsFrozen(!sourceOk);
+  }, [isStationCamera, sourceOk]);
 
   // Audit F25: when a sustained freeze is detected, force a re-mount
   // of the <img> so the next reconnect grabs a fresh naturalSize.

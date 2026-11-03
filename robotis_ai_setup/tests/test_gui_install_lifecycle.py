@@ -1379,6 +1379,7 @@ class ScanRefusalAndSetupContextTest(unittest.TestCase):
                 follower_status_var=types.SimpleNamespace(set=lambda *a: None),
                 _set_status=rec.statuses.append, _log=rec.logs.append,
                 _clear_arm_repair=lambda: None, _stop_camera_bridge=lambda: None,
+                _station_stream_off=lambda: None,
                 _stop_rs_control_server=lambda: None, _update_start_button=lambda: None,
                 _show_arm_repair=lambda *a, **k: None, running=False,
                 _reboot_required_pending=lambda: False).items():

@@ -58,6 +58,15 @@ MANAGED_KEYS = frozenset({
     # EDUBOTICS_FOLLOWER_ONLY is derived from it. The server reads it at boot to
     # resolve its ArmProfile (capabilities + kinematics seam).
     "EDUBOTICS_ROBOT_TYPE",
+    # EDUBOTICS_STATION_ENABLED is the OMX camera-station flag (1 = this rig is
+    # a station). MANAGED and re-emitted ONLY from generate_*'s
+    # `station_enabled` argument, so the GUI passes it at EVERY generation —
+    # the environment start AND the Roboter-Studio leader toggle's forward and
+    # rollback regenerates; a caller that omitted it would recreate
+    # open_manipulator with the flag at 0 while physical_ai_server keeps 1.
+    # Read by camera_ingest_node.py and the server at container start, and
+    # read back by the GUI at its own start. The Pi generator never emits it.
+    "EDUBOTICS_STATION_ENABLED",
     # CAMERA_DEVICE_N / CAMERA_NAME_N are handled by prefix-match below
     # because the count varies with how many cameras are connected.
 })
@@ -67,6 +76,28 @@ _MANAGED_PREFIXES = ("CAMERA_DEVICE_", "CAMERA_NAME_")
 # once so _read_unmanaged_lines can skip it on re-read (otherwise a fresh copy
 # compounds on every regenerate) and the two emitters stay in sync.
 _PRESERVE_MARKER = "# Operator overrides preserved across regeneration."
+
+
+STATION_ENABLED_KEY = "EDUBOTICS_STATION_ENABLED"
+
+
+def station_flag_on(value: "str | None") -> bool:
+    """The ONE parsing rule for EDUBOTICS_STATION_ENABLED.
+
+    Shared, value for value, by its three readers — this GUI's .env read-back,
+    camera_ingest_node.py and the server: every whitespace character removed
+    (``tr -d '[:space:]'`` semantics, i.e. space, tab, newline, vertical tab,
+    form feed, carriage return), then exactly ``1`` is on and anything else —
+    absent, empty, ``true``, ``01`` — is off. Quotes are already gone here
+    (``read_env_var`` unquotes; compose strips them for the containers).
+    """
+    if value is None:
+        return False
+    return "".join(ch for ch in value if ch not in " \t\n\v\f\r") == "1"
+
+
+def _station_line(station_enabled: bool) -> str:
+    return f"{STATION_ENABLED_KEY}={1 if station_enabled else 0}"
 
 
 def _is_managed_key(key: str) -> bool:
@@ -508,7 +539,8 @@ def _phone_camera_names_line() -> str:
 def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
                       phone_camera: bool = False,
                       robot_type: str = DEFAULT_ROBOT_PROFILE,
-                      follower_only: bool | None = None) -> str:
+                      follower_only: bool | None = None,
+                      station_enabled: bool = False) -> str:
     """Write .env file with hardware paths.
 
     Args:
@@ -540,6 +572,10 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
             follower-only profile is CONTRADICTORY (the profile has no leader
             to re-arm) and raises a German ValueError instead of silently
             emitting a both-arms .env.
+        station_enabled: The OMX camera-station flag, emitted as the managed
+            ``EDUBOTICS_STATION_ENABLED=1`` (True) or ``=0`` (False). Pass the
+            GUI's flag at EVERY call: the line is re-emitted only from this
+            argument, so a forgotten argument writes 0.
 
     Returns:
         The content written to the file.
@@ -644,6 +680,8 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
     # GUI-hardset robot type — the server resolves its ArmProfile from this at
     # boot. MANAGED so the selector is authoritative; a full restart changes it.
     lines.append(f"EDUBOTICS_ROBOT_TYPE={robot_type}")
+    # OMX camera-station flag — from the caller, never from the old file.
+    lines.append(_station_line(station_enabled))
     # Default camera source. Yields to an operator override already present in
     # the preserved (unmanaged) lines, so EDUBOTICS_CAMERA_SOURCE=usb_cam in a
     # hand-edited .env survives regeneration (one-variable rollback).
@@ -668,7 +706,8 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
 
 def generate_cloud_only_env(output_path: str = ENV_FILE,
                             phone_camera: bool = False,
-                            robot_type: str = DEFAULT_ROBOT_PROFILE) -> str:
+                            robot_type: str = DEFAULT_ROBOT_PROFILE,
+                            station_enabled: bool = False) -> str:
     """Write a minimal .env for cloud-only mode (no robot hardware).
 
     Docker Compose still reads .env when starting any service, so we provide
@@ -684,6 +723,10 @@ def generate_cloud_only_env(output_path: str = ENV_FILE,
     ``robot_type`` is emitted for MANAGED-key symmetry (so a stale hand-pinned
     EDUBOTICS_ROBOT_TYPE is superseded here too, R3) even though cloud-only
     never starts physical_ai_server.
+
+    ``station_enabled`` is emitted for the same reason: cloud-only starts
+    nothing that reads it, but the GUI reads the flag back from this file at
+    its next start, so a cloud-only session must not erase it.
     """
     domain_id = _resolve_ros_domain_id()
     preserved = _read_unmanaged_lines(output_path)
@@ -700,6 +743,7 @@ def generate_cloud_only_env(output_path: str = ENV_FILE,
         f"REGISTRY_FALLBACK={REGISTRY_FALLBACK}",
         f"IMAGE_TAG={IMAGE_TAG}",
         f"EDUBOTICS_ROBOT_TYPE={robot_type}",
+        _station_line(station_enabled),
     ]
     from .constants import cameras_use_native_bridge
     if cameras_use_native_bridge() and not _has_camera_source(preserved):

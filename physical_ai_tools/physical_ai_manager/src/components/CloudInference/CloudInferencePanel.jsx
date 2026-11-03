@@ -21,6 +21,9 @@ import LeaderToggle from '../Workshop/LeaderToggle';
 import Icon from '../icons/Icon';
 import { Key } from '../sucher';
 import useRsBridgeStatus from '../../hooks/useRsBridgeStatus';
+import { useStationValue } from '../../features/station/useStation';
+import { stationClaimHeld } from '../../features/station/gating';
+import { STATION_DE } from '../../features/station/stationCopy';
 import useSupabaseTrainings from '../../hooks/useSupabaseTrainings';
 import useCloudInferenceSession from '../../hooks/useCloudInferenceSession';
 import { getInferenceUsage } from '../../services/cloudInferenceApi';
@@ -75,6 +78,10 @@ export default function CloudInferencePanel({ isActive = true, cloud, cloudState
   const imageTopicList = useSelector((s) => s.ros.imageTopicList);
   const { jobs, loading } = useSupabaseTrainings();
   const bridge = useRsBridgeStatus({ enabled: isActive });
+  // The camera station holds the robot (station spec §9.2, D13): the server
+  // refuses an inference start meanwhile, so Start is off and says why (the
+  // page above shows the sentence with „Station verlassen").
+  const stationHeld = useStationValue(stationClaimHeld);
 
   const [selectedId, setSelectedId] = useState(null);
   const [usage, setUsage] = useState(null);
@@ -144,7 +151,8 @@ export default function CloudInferencePanel({ isActive = true, cloud, cloudState
     || missing.length > 0
     || Boolean(taskRunning)
     || !START_PHASES.has(session.phase)
-    || refused;
+    || refused
+    || stationHeld;
 
   const onStart = () => {
     if (startDisabled) return;
@@ -154,7 +162,8 @@ export default function CloudInferencePanel({ isActive = true, cloud, cloudState
   const onStopOrphan = () => controller.stopOrphan({ getAccessToken, liveSessionId: usage?.live_session_id || null });
 
   let hint = null;
-  if (!cloudEnabled && cloud?.reason) hint = cloudCopy.disabled[cloud.reason];
+  if (stationHeld) hint = STATION_DE.busyElsewhere;
+  else if (!cloudEnabled && cloud?.reason) hint = cloudCopy.disabled[cloud.reason];
   else if (taskRunning && !orphanRun && !busy) hint = cloudCopy.panel.runningElsewhere;
   else if (!selectedJob && START_PHASES.has(session.phase)) hint = cloudCopy.panel.chooseModel;
 

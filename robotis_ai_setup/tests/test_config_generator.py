@@ -909,8 +909,9 @@ class TestLegacyHfTokenPurge(unittest.TestCase):
                      "HF_TOKEN_ANY_MACHINE_ENV"):
             self.assertFalse(hasattr(self.cg, name), name)
         self.assertEqual(self.cg._LEGACY_HF_KEYS, ("HF_TOKEN", "HF_TOKEN_MACHINE"))
-        # MANAGED_KEYS stays the 9 keys the compose interface is built on.
-        self.assertEqual(len(self.cg.MANAGED_KEYS), 9)
+        # MANAGED_KEYS is the 10 keys the compose interface is built on (the
+        # tenth, EDUBOTICS_STATION_ENABLED, is the OMX camera-station flag).
+        self.assertEqual(len(self.cg.MANAGED_KEYS), 10)
         for key in self.cg._LEGACY_HF_KEYS:
             self.assertNotIn(key, self.cg.MANAGED_KEYS)
 
@@ -1108,6 +1109,122 @@ class TestSingleSceneCamera(unittest.TestCase):
             self.assertIsNone(read_env_var("CAMERA_NAME_2", tmp_path))
         finally:
             os.unlink(tmp_path)
+
+
+class TestStationFlag(unittest.TestCase):
+    """EDUBOTICS_STATION_ENABLED, the OMX camera-station flag (plan §3.1):
+    MANAGED, emitted by BOTH generators from their argument only, never
+    carried over from the old file, and parsed by ONE rule."""
+
+    def setUp(self):
+        self._prev_src = os.environ.get("EDUBOTICS_CAMERA_SOURCE")
+        os.environ["EDUBOTICS_CAMERA_SOURCE"] = "usb_cam"
+
+    def tearDown(self):
+        if self._prev_src is None:
+            os.environ.pop("EDUBOTICS_CAMERA_SOURCE", None)
+        else:
+            os.environ["EDUBOTICS_CAMERA_SOURCE"] = self._prev_src
+
+    def _config(self):
+        return HardwareConfig(
+            leader=ArmDevice(busid="1-3", serial_path="/dev/serial/by-id/l",
+                             role="leader", description="OpenRB-150"),
+            follower=ArmDevice(busid="1-4", serial_path="/dev/serial/by-id/f",
+                               role="follower", description="OpenRB-150"))
+
+    def _tmp(self, content=None):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".env",
+                                         delete=False) as f:
+            if content:
+                f.write(content)
+            return f.name
+
+    def test_the_key_is_managed_and_the_count_is_ten(self):
+        from gui.app import config_generator as cg
+        self.assertIn("EDUBOTICS_STATION_ENABLED", cg.MANAGED_KEYS)
+        self.assertEqual(cg.STATION_ENABLED_KEY, "EDUBOTICS_STATION_ENABLED")
+        self.assertEqual(len(cg.MANAGED_KEYS), 10)
+
+    def test_true_and_false_are_emitted_exactly_once(self):
+        for flag, line in ((True, "EDUBOTICS_STATION_ENABLED=1"),
+                           (False, "EDUBOTICS_STATION_ENABLED=0")):
+            p = self._tmp()
+            try:
+                content = generate_env_file(self._config(), output_path=p,
+                                            station_enabled=flag)
+                self.assertIn(line, content.splitlines())
+                self.assertEqual(content.count("EDUBOTICS_STATION_ENABLED="), 1)
+            finally:
+                os.unlink(p)
+
+    def test_a_caller_that_omits_it_writes_zero(self):
+        p = self._tmp()
+        try:
+            content = generate_env_file(self._config(), output_path=p)
+            self.assertIn("EDUBOTICS_STATION_ENABLED=0", content.splitlines())
+        finally:
+            os.unlink(p)
+
+    def test_a_stale_value_is_superseded_not_preserved(self):
+        p = self._tmp('EDUBOTICS_STATION_ENABLED="1"\nMY_OVERRIDE=x\n')
+        try:
+            content = generate_env_file(self._config(), output_path=p,
+                                        station_enabled=False)
+            self.assertIn("EDUBOTICS_STATION_ENABLED=0", content.splitlines())
+            self.assertEqual(content.count("EDUBOTICS_STATION_ENABLED="), 1)
+            self.assertIn("MY_OVERRIDE=x", content)
+        finally:
+            os.unlink(p)
+
+    def test_the_runtime_leader_toggle_keeps_it(self):
+        p = self._tmp()
+        try:
+            generate_env_file(self._config(), output_path=p, station_enabled=True)
+            content = generate_env_file(self._config(), output_path=p,
+                                        follower_only=True, station_enabled=True)
+            self.assertIn("EDUBOTICS_STATION_ENABLED=1", content.splitlines())
+        finally:
+            os.unlink(p)
+
+    def test_cloud_only_emits_it_too(self):
+        for flag, line in ((True, "EDUBOTICS_STATION_ENABLED=1"),
+                           (False, "EDUBOTICS_STATION_ENABLED=0")):
+            p = self._tmp()
+            try:
+                content = generate_cloud_only_env(output_path=p,
+                                                  station_enabled=flag)
+                self.assertIn(line, content.splitlines())
+            finally:
+                os.unlink(p)
+
+    def test_read_back_round_trip_including_the_quoted_upsert(self):
+        from gui.app import config_generator as cg
+        p = self._tmp()
+        try:
+            generate_env_file(self._config(), output_path=p, station_enabled=True)
+            self.assertTrue(cg.station_flag_on(
+                read_env_var("EDUBOTICS_STATION_ENABLED", p)))
+            upsert_env_var("EDUBOTICS_STATION_ENABLED", "0", p)
+            self.assertFalse(cg.station_flag_on(
+                read_env_var("EDUBOTICS_STATION_ENABLED", p)))
+            upsert_env_var("EDUBOTICS_STATION_ENABLED", "1", p)   # writes "1"
+            self.assertTrue(cg.station_flag_on(
+                read_env_var("EDUBOTICS_STATION_ENABLED", p)))
+        finally:
+            os.unlink(p)
+
+    def test_the_parser(self):
+        from gui.app import config_generator as cg
+        on = ("1", " 1", "1 ", "\t1\n", "\v1\f\r")
+        off = (None, "", " ", "0", "true", "yes", "01", "11", "1 1", "on",
+               "\u00a01")
+        for v in on:
+            with self.subTest(value=v):
+                self.assertTrue(cg.station_flag_on(v))
+        for v in off:
+            with self.subTest(value=v):
+                self.assertFalse(cg.station_flag_on(v))
 
 
 class TestConfigGeneratorRobotType(unittest.TestCase):

@@ -41,6 +41,7 @@ const signOutMock = vi.fn(() => Promise.resolve({ error: null }));
 const resetJetsonMock = vi.fn();
 const clearRobotHfTokenMock = vi.fn(() => Promise.resolve(true));
 const endCloudMock = vi.fn();
+const endStationMock = vi.fn();
 
 vi.mock('../../lib/supabaseClient', () => ({
   __esModule: true,
@@ -63,6 +64,15 @@ vi.mock('../../features/jetson/sessionReset', () => ({
 vi.mock('../../features/cloudInference/controller', () => ({
   __esModule: true,
   endCloudInferenceOnLogout: endCloudMock,
+}));
+
+// The camera station: its leave is a rosbridge call and its stream `off` a
+// localhost POST, not reducers — mocked so the order assertion can observe the
+// step. The controller's own contract (leave started, `off` chained, the client
+// id re-minted) is tested in features/station/__tests__/controller.test.js.
+vi.mock('../../features/station/controller', () => ({
+  __esModule: true,
+  endStationSessionOnLogout: endStationMock,
 }));
 
 vi.mock('../../features/hfToken/robotChannel', () => ({
@@ -122,6 +132,7 @@ beforeEach(() => {
   resetJetsonMock.mockClear();
   resetJetsonMock.mockImplementation(() => {});
   endCloudMock.mockReset();
+  endStationMock.mockReset();
   clearRobotHfTokenMock.mockReset();
   clearRobotHfTokenMock.mockImplementation(() => Promise.resolve(true));
   localStorage.clear();
@@ -540,6 +551,14 @@ describe('logoutBlockReason', () => {
     expect(logoutBlockReason({ ...live, workflowRunning: true })).toBe('workflow');
   });
 
+  it('blocks a program in this tab\'s camera station session, from any page (§9.1 step 4)', () => {
+    // The station controller keeps the server's `workflow_active` on every
+    // page; `workflowRunning` is fed only while Roboter Studio is open.
+    expect(logoutBlockReason({ ...live, stationWorkflowActive: true })).toBe('workflow');
+    expect(logoutBlockReason({ ...live, robotLinkLive: false, stationWorkflowActive: true })).toBeNull();
+    expect(logoutBlockReason({ ...live, stationWorkflowActive: false })).toBeNull();
+  });
+
   it('blocks a calibration with captured frames', () => {
     expect(logoutBlockReason({ ...live, calibrationCapturing: true })).toBe('calibration');
   });
@@ -624,6 +643,36 @@ describe('signOutStudent — ordering and failure modes', () => {
     expect(endCloudMock).toHaveBeenCalledTimes(1);
     expect(endCloudMock).toHaveBeenCalledWith('jwt-abc');
     expect(order).toEqual(['jetson', 'cloud', 'hfClear', 'signOut']);
+  });
+
+  it('ends this tab\'s camera station session right after the cloud step, before the broadcast', async () => {
+    // Station spec §9.1 step 4: `endStationSessionOnLogout()` right after
+    // `endCloudInferenceOnLogout`, synchronous (its leave and the GUI `off` are
+    // started, never awaited), before `session/signedOut`.
+    const order = [];
+    resetJetsonMock.mockImplementation(() => order.push('jetson'));
+    endCloudMock.mockImplementation(() => order.push('cloud'));
+    endStationMock.mockImplementation(() => order.push('station'));
+    clearRobotHfTokenMock.mockImplementation(() => {
+      order.push('hfClear');
+      return Promise.resolve(true);
+    });
+    signOutMock.mockImplementation(() => {
+      order.push('signOut');
+      return Promise.resolve({ error: null });
+    });
+
+    const { store, signOutStudent, auth } = await freshStore();
+    store.dispatch(auth.setSession({ access_token: 'jwt-abc' }));
+    const unsub = store.subscribe(() => {
+      if (!store.getState().auth.isAuthenticated && !order.includes('broadcast')) order.push('broadcast');
+    });
+    await store.dispatch(signOutStudent({ reload: false }));
+    unsub();
+
+    expect(endStationMock).toHaveBeenCalledTimes(1);
+    expect(endStationMock).toHaveBeenCalledWith();
+    expect(order).toEqual(['jetson', 'cloud', 'station', 'hfClear', 'broadcast', 'signOut']);
   });
 
   it('reloads by default and not when asked not to', async () => {

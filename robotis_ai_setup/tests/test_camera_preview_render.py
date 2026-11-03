@@ -280,6 +280,7 @@ class TestPreviewRoleAssignment(unittest.TestCase):
             _preview_role_vars=[_FakeVar("Greifer"), _FakeVar("Szene")],
             hardware=types.SimpleNamespace(cameras=[]),
             _log=lambda *a, **k: None,
+            _station_check_scene_role=lambda: None,
         )
         return fn, owner, cams
 

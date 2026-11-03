@@ -401,7 +401,20 @@ class CalibrationManager:
         get_frame: Callable[[str], np.ndarray | None] | None = None,
         get_gripper_pose: Callable[[], tuple[np.ndarray, np.ndarray] | None] | None = None,
         get_approach_axis: Callable[[], tuple[float, float, float] | None] | None = None,
+        root: Path | None = None,
+        board_to_base: np.ndarray | None = None,
     ) -> None:
+        # OMX camera station (plan v6.13 §6.5): an optional INSTANCE root. None
+        # keeps the module-global CALIB_DIR, so the manual path is unchanged; the
+        # station commissioning passes its staging directory. CALIB_DIR itself is
+        # never mutated.
+        self._root = Path(root) if root is not None else CALIB_DIR
+        # And an optional board pose (4x4 board→base): the station's board solve
+        # uses the released layout's pose, never _board_to_base_transform's
+        # board-placement globals (BOARD_ORIGIN_X_M, BOARD_ORIGIN_Y_M,
+        # BOARD_TABLE_Z_M, BOARD_YAW_DEG). None keeps the manual behaviour.
+        self._board_to_base = (None if board_to_base is None
+                               else np.asarray(board_to_base, dtype=np.float64).reshape(4, 4))
         self._get_frame = get_frame
         self._get_gripper_pose = get_gripper_pose
         # Optional, and its absence resolves to the OMX axis — so a bare
@@ -416,7 +429,7 @@ class CalibrationManager:
         self._handeye_buffers: dict[str, HandEyeCaptureBuffer] = {}
         self._table_touch: TableTouchBuffer | None = None
         self._intrinsics: dict[str, dict] = {}
-        CALIB_DIR.mkdir(parents=True, exist_ok=True)
+        self._root.mkdir(parents=True, exist_ok=True)
         self._load_persisted_intrinsics()
         # #1 (2026-06-19): per-rig intrinsic calibration is MANDATORY — the
         # factory-default seeding was REMOVED. A guessed focal length scales
@@ -431,10 +444,10 @@ class CalibrationManager:
     # Persistence helpers
     # ------------------------------------------------------------------
     def _intrinsic_path(self, camera: str) -> Path:
-        return CALIB_DIR / f'{camera}_intrinsics.yaml'
+        return self._root / f'{camera}_intrinsics.yaml'
 
     def _handeye_path(self, camera: str) -> Path:
-        return CALIB_DIR / f'{camera}_handeye.yaml'
+        return self._root / f'{camera}_handeye.yaml'
 
     def _load_persisted_intrinsics(self) -> None:
         for camera in ('gripper', 'scene'):
@@ -998,6 +1011,18 @@ class CalibrationManager:
             f'Intrinsische Kalibrierung gespeichert (RMS {ret:.2f} px).'
         )
 
+    def board_pose(self) -> np.ndarray:
+        """The board→base transform this instance solves against: the one
+        passed at construction (the station's released layout), else the manual
+        rig's board-placement globals (BOARD_ORIGIN_X_M … BOARD_YAW_DEG)."""
+        if self._board_to_base is not None:
+            return self._board_to_base.copy()
+        return self._board_to_base_transform()
+
+    @property
+    def root(self) -> Path:
+        return self._root
+
     @staticmethod
     def _board_to_base_transform() -> np.ndarray:
         """T_board_to_base — the known placement of the ChArUco board on the
@@ -1153,7 +1178,7 @@ class CalibrationManager:
                 'das Bild erneut erfassen.'
             )
 
-        T_board_to_base = self._board_to_base_transform()
+        T_board_to_base = self.board_pose()
         T_cam_to_base = T_board_to_base @ T_cam_to_board
 
         # Sanity guard: the camera must be ABOVE the table (looking down at

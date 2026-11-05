@@ -1,0 +1,27 @@
+EduBotics — Proprietary Licence
+
+Copyright (c) 2025-2026 Sven Danil Borodun (EduBotics)
+Unsuhrstrasse 10, 45325 Essen, Germany — svendanilborodun@gmail.com
+All rights reserved.
+
+The source code, documentation and other material in this repository that
+were written by or for EduBotics are proprietary and confidential. No licence
+to use, copy, modify, merge, publish, distribute, sublicense or sell them, or
+to create derivative works from them, is granted, except as follows:
+
+1. The software EduBotics distributes in binary form (the Windows installer
+   and application, the Docker images, the web interface and the Orange Pi
+   agent) is licensed to its users under the EduBotics End-User Licence
+   Agreement in robotis_ai_setup/installer/assets/license.txt.
+
+2. Third-party and upstream works keep their own licences and are not
+   covered by this notice. In particular, open_manipulator/ and
+   physical_ai_tools/ are derived from software of ROBOTIS Co., Ltd. licensed
+   under the Apache License, Version 2.0 (see the LICENSE file in each of
+   those directories and NOTICE). The original ROBOTIS files remain under the
+   Apache License 2.0; EduBotics' modifications to them and the files
+   EduBotics added are licensed as stated in point 1, as section 4 of the
+   Apache License 2.0 permits.
+
+THE PROPRIETARY MATERIAL IS PROVIDED UNDER THE TERMS OF THE END-USER LICENCE
+AGREEMENT ONLY; NOTHING IN THIS FILE GRANTS ANY RIGHT BEYOND IT.

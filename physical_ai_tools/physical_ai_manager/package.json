@@ -7,7 +7,7 @@
     "EduBotics",
     "Kiwoong Park <pkw@robotis.com>"
   ],
-  "license": "Apache-2.0",
+  "license": "SEE LICENSE IN ../../LICENSE",
   "private": true,
   "dependencies": {
     "@blockly/block-plus-minus": "^9.0.10",
@@ -50,7 +50,7 @@
   },
   "scripts": {
     "start": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/write-third-party-licenses.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "start:debug": "REACT_APP_DEBUG=true vite"

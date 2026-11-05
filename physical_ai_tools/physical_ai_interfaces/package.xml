@@ -9,6 +9,9 @@
 
   <maintainer email="pyo@robotis.com">Pyo</maintainer>
   <license>Apache-2.0</license>
+  <!-- Mixed: the ROBOTIS files are Apache-2.0, EduBotics' files and
+       modifications are proprietary (repository-root LICENSE, NOTICE). -->
+  <license>LicenseRef-EduBotics-Proprietary</license>
   <author email="kdy@robotis.com">Dongyun Kim</author>
   <author email="pkw@robotis.com">Kiwoong Park</author>
   <author email="kimsw@robotis.com">Seongwoo Kim</author>

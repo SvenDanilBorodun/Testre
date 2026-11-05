@@ -47,7 +47,12 @@ jobs:
     timeout-minutes: 15
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      # A DUMMY, never the real service-role key: importing app.main never
+      # opens a Supabase connection (get_supabase() is lazy and the startup
+      # hook that runs _validate_required_schema does not fire on an import),
+      # so the real key bought nothing here while it sat in the environment of
+      # an unhashed `pip install` (security review 2026-10-25, P0-2).
+      SUPABASE_SERVICE_ROLE_KEY: ci-probe-not-a-key
       MODAL_TOKEN_ID: ci-probe
       MODAL_TOKEN_SECRET: ci-probe
       # A required secret since 2026-10-04 (owner decision S2). The probe never
@@ -73,10 +78,12 @@ jobs:
       - name: Import + probe
         working-directory: robotis_ai_setup/cloud_training_api
         run: |
-          # Importing app.main triggers the three startup validators
-          # (line 67 _validate_required_secrets, line 114 _warn_optional,
-          # line 319 _validate_required_schema). The schema probe hits
-          # the live DB read-only via the service-role key.
+          # Importing app.main runs the import-time validators
+          # (_validate_required_secrets, _validate_hf_token_key,
+          # _validate_managed_training). It does NOT run
+          # _validate_required_schema: that is scheduled by the startup hook,
+          # which an import never fires. Schema drift is caught later, by the
+          # new pod failing its own /health gate (CLAUDE.md Rule §6).
           python -c "from app import main; print('schema probe passed')"
 
   deploy:
@@ -84,19 +91,33 @@ jobs:
     needs: [schema-probe]
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    # RAILWAY_TOKEN is set on the steps that call `railway`, never on the job:
+    # nothing that downloads or installs code runs with the token in scope.
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
-      - name: Install Railway CLI via npm
-        # GH runners come with Node.js + npm pre-installed. npm install
-        # of @railway/cli is more stable in CI than the curl install
-        # script (which uses sudo -v and assumes interactive auth).
+      - name: Install Railway CLI (pinned release binary, SHA-256 checked)
+        # One fixed release asset, verified by hash, installed with no token
+        # in scope. The npm wrapper it replaces fetched the binary in a
+        # postinstall script through floating dependencies while the token sat
+        # in the job env (security review 2026-10-25, P0-2). Bump the version
+        # and the hash together; tests/test_ci_supply_chain_pins.py holds all
+        # four copies of this step equal.
+        env:
+          RAILWAY_CLI_VERSION: "5.71.0"
+          RAILWAY_CLI_SHA256: "2e682fd2ddf8d6fdf9e46d9d99d99646ff0022a6abb0c2bca93011348a269fb9"
         run: |
-          npm install -g @railway/cli
-          railway --version
+          set -euo pipefail
+          dir="${RUNNER_TEMP}/railway-cli"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 -o "$dir/railway.tgz" \
+            "https://github.com/railwayapp/cli/releases/download/v${RAILWAY_CLI_VERSION}/railway-v${RAILWAY_CLI_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          echo "${RAILWAY_CLI_SHA256}  $dir/railway.tgz" | sha256sum -c -
+          tar -xzf "$dir/railway.tgz" -C "$dir" railway
+          chmod +x "$dir/railway"
+          echo "$dir" >> "$GITHUB_PATH"
+          "$dir/railway" --version
       - name: Stage VERSION file into build context
         # The Dockerfile COPYs ./VERSION into the image so main.py's drift
         # check (GUI_VERSION env vs in-tree VERSION) works in production.
@@ -110,6 +131,7 @@ jobs:
       - name: Stamp BUILD_COMMIT as service variable
         env:
           GITHUB_SHA_FULL: ${{ github.sha }}
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           # Set BUILD_COMMIT as a Railway service variable BEFORE `railway up`
           # so health.py::_resolve_commit() returns the actual SHA (not 'dev'
@@ -126,6 +148,8 @@ jobs:
               echo "  stamped BUILD_COMMIT=${GITHUB_SHA_FULL}"
       - name: Deploy
         working-directory: robotis_ai_setup/cloud_training_api
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           # railway up --ci has a known bug: it exits non-zero on "Failed to
           # stream build logs" even when the deploy itself proceeds fine on

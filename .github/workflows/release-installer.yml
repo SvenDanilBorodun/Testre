@@ -178,7 +178,11 @@ jobs:
           # we eventually bump) and can produce subtly different WinForms
           # interop behavior on 3.11.
           python -m pip install --pre -r requirements.txt
-          python -m pip install pyinstaller
+          # Pinned to what built v2.37.0 (release run 41416948649). An
+          # unpinned PyInstaller in a job that writes the installer every
+          # school PC runs elevated is a supply-chain hole (security review
+          # 2026-10-25, P0-9; hash-locking requirements.txt is still open).
+          python -m pip install pyinstaller==6.22.3 pyinstaller-hooks-contrib==2026.9
 
       - name: Build GUI with PyInstaller
         shell: pwsh
@@ -188,6 +192,14 @@ jobs:
           if (-not (Test-Path "dist/EduBotics/EduBotics.exe")) {
             throw "PyInstaller did not produce dist/EduBotics/EduBotics.exe"
           }
+          # The licence notices of every Python package in the environment
+          # PyInstaller bundled from (the same interpreter), plus Python's own
+          # LICENSE.txt. The .iss copies dist/EduBotics/* to {app}\gui, so this
+          # ships as {app}\gui\THIRD_PARTY_PYTHON.txt (THIRD_PARTY_NOTICES.txt
+          # section 1.1 points there). The script exits non-zero on an empty
+          # environment.
+          python ../../.github/scripts/third_party_python_notices.py --out dist/EduBotics/THIRD_PARTY_PYTHON.txt
+          if ($LASTEXITCODE -ne 0) { throw "third_party_python_notices.py failed ($LASTEXITCODE)" }
 
       - name: Install Inno Setup
         shell: pwsh
@@ -226,6 +238,37 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+      - name: Check the public release channel (tag pushes only)
+        # The assets go to vars.RELEASES_REPO (owner/repo of a PUBLIC repository
+        # that holds only the binaries) once it is set, else to this repository.
+        # A private repository's release assets answer 404 to anonymous clients,
+        # and every GUI and Pi downloads its update anonymously, so the
+        # downloads must leave this repository before it goes private
+        # (docs/deploy/PRIVATE-REPOSITORY.md). The channel needs a token that
+        # can write there: secrets.RELEASES_REPO_TOKEN, a fine-grained PAT with
+        # Contents read/write on that repository only. A variable without the
+        # token fails here, before the upload, instead of in softprops.
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          RELEASES_REPO: ${{ vars.RELEASES_REPO }}
+          RELEASES_REPO_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASES_REPO}" ]; then
+            echo "Release channel: this repository (vars.RELEASES_REPO is not set)."
+            exit 0
+          fi
+          if ! printf '%s' "${RELEASES_REPO}" | grep -Eq '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$'; then
+            echo "::error::vars.RELEASES_REPO='${RELEASES_REPO}' is not of the form owner/repo."
+            exit 1
+          fi
+          if [ -z "${RELEASES_REPO_TOKEN}" ]; then
+            echo "::error::vars.RELEASES_REPO is set but secrets.RELEASES_REPO_TOKEN is empty: create a fine-grained PAT with Contents read/write on ${RELEASES_REPO} only and store it as RELEASES_REPO_TOKEN."
+            exit 1
+          fi
+          echo "Release channel: ${RELEASES_REPO}"
+
       - name: Attach installer to GitHub Release (tag pushes only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
@@ -239,7 +282,11 @@ jobs:
           # token explicitly via `with:` bypasses the discovery path and
           # uses the secret value directly. v2.3.7 hit this; this line is
           # the fix. See the v2.3.7 release-installer failure log.
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # The public release channel (see the step above). With
+          # vars.RELEASES_REPO unset this is exactly the old behaviour: this
+          # repository with the explicit GITHUB_TOKEN.
+          repository: ${{ vars.RELEASES_REPO || github.repository }}
+          token: ${{ vars.RELEASES_REPO && secrets.RELEASES_REPO_TOKEN || secrets.GITHUB_TOKEN }}
           # Don't auto-generate notes — operator writes them in the dashboard.
           # Don't mark as latest until the operator has bumped Railway env vars
           # (see CLAUDE.md §14): bumping GUI_VERSION before this release is

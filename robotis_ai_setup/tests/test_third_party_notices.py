@@ -128,6 +128,7 @@ class WebNoticeGenerator(unittest.TestCase):
                 "node_modules/@scope/lib": {"version": "1.0.0", "license": "Apache-2.0"},
                 "node_modules/@scope/lib/node_modules/nested": {"version": "0.1.0", "license": "ISC"},
                 "node_modules/vitest": {"version": "3.0.0", "dev": True, "license": "MIT"},
+                "node_modules/tailwindcss": {"version": "3.4.17", "dev": True, "license": "MIT"},
                 "node_modules/missing-optional": {"version": "1.0.0", "optional": True},
             },
         }
@@ -137,6 +138,7 @@ class WebNoticeGenerator(unittest.TestCase):
             ("node_modules/@scope/lib", "LICENSE.md", "Apache scope text"),
             ("node_modules/@scope/lib/node_modules/nested", "LICENCE", "ISC nested text"),
             ("node_modules/vitest", "LICENSE", "DEV ONLY TEXT"),
+            ("node_modules/tailwindcss", "LICENSE", "TAILWIND BUNDLED TEXT"),
         ):
             d = self.tmp / key
             d.mkdir(parents=True)
@@ -154,7 +156,7 @@ class WebNoticeGenerator(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         text = out.read_text(encoding="utf-8")
         for needle in ("react 19.0.0", "MIT react text", "@scope/lib 1.0.0", "Apache-2.0", "Apache scope text",
-                       "nested 0.1.0", "ISC nested text"):
+                       "nested 0.1.0", "ISC nested text", "tailwindcss 3.4.17", "TAILWIND BUNDLED TEXT"):
             self.assertIn(needle, text)
         self.assertNotIn("DEV ONLY TEXT", text)
         self.assertNotIn("vitest", text)
@@ -202,6 +204,18 @@ class InstallerLicencePayload(unittest.TestCase):
         self.assertIn('Source: "assets\\THIRD_PARTY_NOTICES.txt"; DestDir: "{app}"', self.iss)
         self.assertIn('Source: "assets\\licenses\\*"; DestDir: "{app}\\licenses"', self.iss)
         self.assertIn('MessagesFile: "compiler:Languages\\German.isl"', self.iss)
+
+    def test_the_installer_names_its_copyright_holder(self):
+        self.assertIn("AppCopyright=© 2025–2026 Sven Danil Borodun (EduBotics)", self.iss)
+
+    def test_the_pi_tarball_carries_the_licence(self):
+        import yaml
+        job = yaml.safe_load((REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8"))["jobs"]["pi-agent-tarball"]
+        run = next(s for s in job["steps"] if s.get("name") == "Build edubotics-pi-agent.tar.gz")["run"]
+        self.assertIn("cp robotis_ai_setup/installer/assets/license.txt robotis_ai_setup/pi_agent/LICENSE.txt", run)
+        self.assertIn("cp robotis_ai_setup/installer/assets/THIRD_PARTY_NOTICES.txt robotis_ai_setup/pi_agent/THIRD_PARTY_NOTICES.txt", run)
+        self.assertIn("rm -f robotis_ai_setup/pi_agent/LICENSE.txt robotis_ai_setup/pi_agent/THIRD_PARTY_NOTICES.txt", run)
+        self.assertIn("for lic in LICENSE.txt THIRD_PARTY_NOTICES.txt; do", run)
 
     def test_the_installer_build_writes_the_python_notices_into_the_dist_folder(self):
         text = (REPO / ".github" / "workflows" / "release-installer.yml").read_text(encoding="utf-8")

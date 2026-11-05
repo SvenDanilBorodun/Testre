@@ -44,6 +44,16 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 **Release preflight:** checks the channel before W1 (private repository without channel, missing or expired token, non-public channel).
 
+**The verifier's round (one independent agent, MERGE AFTER FIXES).**
+- **Modification lines:** 31 of the 48 were on ROBOTIS files byte-identical to upstream. `git log --follow` had mis-followed tiny identical `__init__.py` files and missed the absorb commit. They were removed, as were 3 on restored files whose only change had been the rebrand. Every one of the 34 is byte-identical to `b0b601fa` again.
+- **`StudentApp.js`:** split out of `App.js` on 2026-04-16, it had been made proprietary. It now carries the ROBOTIS header.
+- **Shortened ROBOTIS headers:** nine had lost Apache sentences or `Author:` lines. Each got its full upstream header back, keeping EduBotics' own notes below it.
+- **Preflight:** it now proves the token can WRITE, by creating and deleting a draft release; checked once against the real API.
+- **Web licence list:** includes tailwindcss, vite and rolldown, whose code ends up in the bundle.
+- **Pi tarball:** carries `LICENSE.txt` and `THIRD_PARTY_NOTICES.txt`; the step was run whole under bash in a copy.
+- **Installer:** gets `AppCopyright`.
+- **Download repository:** rulesets, Actions off; v2.36.0 mirrored for rollback.
+
 **Still open:** the owner's channel move, plan choice and flip; the EULA's legal review; hash-locked installer requirements and signing; the rootfs's missing `copyright` files (`docs/KNOWN-ISSUES.md`); the rest of the 2026-10-25 security review.
 
 ### v2.37.0, 2026-11-01 (build) — the training-hour ledger (migration 052)

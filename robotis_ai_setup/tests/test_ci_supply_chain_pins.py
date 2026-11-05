@@ -202,6 +202,9 @@ class ReleaseChannel(unittest.TestCase):
         # the token is proven live against the channel, which must be public
         self.assertIn("https://api.github.com/repos/${RELEASES_REPO}", run)
         self.assertIn('if [ "$private" != "false" ]; then', run)
+        # and that it can WRITE there: a draft release created and deleted
+        self.assertIn('"draft\\":true', run)
+        self.assertIn('if [ "$code" != "201" ]; then', run)
         self.assertGreaterEqual(run.count("exit 1"), 5)
         # W1 (and so every deploy) waits for the preflight
         self.assertIn("version-preflight", jobs["supabase"]["needs"])
@@ -212,12 +215,15 @@ class ReleaseChannelScripts(unittest.TestCase):
     """The channel checks, executed under bash with a stand-in curl."""
 
     FAKE_CURL = r"""#!/usr/bin/env bash
-out=""
+out=""; method=GET
 while [ $# -gt 0 ]; do
-  case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac
+  case "$1" in -o) out="$2"; shift 2 ;; -X) method="$2"; shift 2 ;; *) shift ;; esac
 done
-[ -n "$out" ] && printf '{"private": %s}' "${FAKE_PRIVATE:-false}" > "$out"
-printf '%s' "${FAKE_CODE:-200}"
+case "$method" in
+  POST)   [ -n "$out" ] && printf '{"id": 4242}' > "$out"; printf '%s' "${FAKE_POST_CODE:-201}" ;;
+  DELETE) printf '%s' "${FAKE_DELETE_CODE:-204}" ;;
+  *)      [ -n "$out" ] && printf '{"private": %s}' "${FAKE_PRIVATE:-false}" > "$out"; printf '%s' "${FAKE_CODE:-200}" ;;
+esac
 """
 
     def setUp(self):
@@ -228,7 +234,8 @@ printf '%s' "${FAKE_CODE:-200}"
         curl.chmod(0o755)
 
     def _run(self, script, **env):
-        full = {"PATH": f"{self.tmp}:{os.environ.get('PATH', '')}", "RELEASES_REPO": "", "RELEASES_REPO_TOKEN": ""}
+        full = {"PATH": f"{self.tmp}:{os.environ.get('PATH', '')}", "RELEASES_REPO": "", "RELEASES_REPO_TOKEN": "",
+                "GITHUB_RUN_ID": "123"}
         full.update(env)
         r = subprocess.run(["bash", "-c", script], env=full, capture_output=True, text=True, timeout=30)
         return r.returncode, r.stdout + r.stderr
@@ -247,7 +254,9 @@ printf '%s' "${FAKE_CODE:-200}"
             ("channel without token", bad, dict(REPO_PRIVATE="true", RELEASES_REPO="o/r")),
             ("expired token", bad, dict(REPO_PRIVATE="true", RELEASES_REPO="o/r", RELEASES_REPO_TOKEN=TOKEN, FAKE_CODE="401")),
             ("private channel", bad, dict(REPO_PRIVATE="true", RELEASES_REPO="o/r", RELEASES_REPO_TOKEN=TOKEN, FAKE_PRIVATE="true")),
-            ("public channel, valid token", ok, dict(REPO_PRIVATE="true", RELEASES_REPO="o/r", RELEASES_REPO_TOKEN=TOKEN)),
+            ("read-only token", bad, dict(REPO_PRIVATE="true", RELEASES_REPO="o/r", RELEASES_REPO_TOKEN=TOKEN, FAKE_POST_CODE="403")),
+            ("public channel, token can write", ok, dict(REPO_PRIVATE="true", RELEASES_REPO="o/r", RELEASES_REPO_TOKEN=TOKEN)),
+            ("probe draft not deleted: warn, go on", ok, dict(REPO_PRIVATE="true", RELEASES_REPO="o/r", RELEASES_REPO_TOKEN=TOKEN, FAKE_DELETE_CODE="500")),
         ]
         for label, want, env in cases:
             with self.subTest(case=label):

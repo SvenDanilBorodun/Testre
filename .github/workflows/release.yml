@@ -232,7 +232,7 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${RELEASES_REPO}")" || code="000"
           if [ "$code" != "200" ]; then
-            echo "::error::GitHub answered HTTP ${code} for ${RELEASES_REPO} with RELEASES_REPO_TOKEN: the token is expired, revoked or lacks access to that repository, or the repository does not exist."
+            echo "::error::GitHub answered HTTP ${code} for ${RELEASES_REPO} with RELEASES_REPO_TOKEN: the token is expired or revoked, or the repository does not exist or is not visible to it."
             exit 1
           fi
           private="$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1])).get("private")).lower())' "$body")"
@@ -240,7 +240,30 @@ jobs:
             echo "::error::${RELEASES_REPO} is not public (private=${private}). Anonymous clients cannot download from it."
             exit 1
           fi
-          echo "Release channel: ${RELEASES_REPO} (public, token valid)."
+          # Reading the public repository proves nothing about WRITING to it (any
+          # valid token can read a public repository), and a token that cannot
+          # write would fail only at W5, after W1–W4 shipped. So prove write
+          # access: create a draft release (never visible to the public) and
+          # delete it. No --retry on the POST: a retried POST could leave two.
+          probe="$(mktemp)"
+          code="$(curl -sS --max-time 20 -o "$probe" -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${RELEASES_REPO_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -d "{\"tag_name\":\"preflight-${GITHUB_RUN_ID}\",\"name\":\"preflight ${GITHUB_RUN_ID}\",\"draft\":true}" \
+            "https://api.github.com/repos/${RELEASES_REPO}/releases")" || code="000"
+          if [ "$code" != "201" ]; then
+            echo "::error::RELEASES_REPO_TOKEN cannot create a release in ${RELEASES_REPO} (HTTP ${code}): it needs Contents read and write on that repository."
+            exit 1
+          fi
+          rid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$probe")"
+          code="$(curl -sS --retry 3 --retry-connrefused --max-time 20 -o /dev/null -w '%{http_code}' -X DELETE \
+            -H "Authorization: Bearer ${RELEASES_REPO_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${RELEASES_REPO}/releases/${rid}")" || code="000"
+          if [ "$code" != "204" ]; then
+            echo "::warning::The preflight's draft release ${rid} in ${RELEASES_REPO} could not be deleted (HTTP ${code}); it is invisible to the public, delete it by hand."
+          fi
+          echo "Release channel: ${RELEASES_REPO} (public, token can write)."
 
   # ── W1: Supabase ──────────────────────────────────────────────────
   supabase:
@@ -431,6 +454,11 @@ jobs:
           # its baked-in literal fallback). Copied into the package tree just
           # before tar and removed after, so the checkout tree stays clean.
           cp VERSION robotis_ai_setup/pi_agent/VERSION
+          # The tarball is publicly downloadable plain Python source, so the
+          # licence travels with it: the EULA and the third-party notices,
+          # copied in like VERSION and removed again after tar.
+          cp robotis_ai_setup/installer/assets/license.txt robotis_ai_setup/pi_agent/LICENSE.txt
+          cp robotis_ai_setup/installer/assets/THIRD_PARTY_NOTICES.txt robotis_ai_setup/pi_agent/THIRD_PARTY_NOTICES.txt
 
           # IMAGE_TAG pin — the Pi's half of what the Windows installer has done
           # since release-installer.yml started baking docker/versions.env into
@@ -481,6 +509,7 @@ jobs:
             -czf edubotics-pi-agent.tar.gz \
             -C robotis_ai_setup pi_agent
           rm -f robotis_ai_setup/pi_agent/VERSION
+          rm -f robotis_ai_setup/pi_agent/LICENSE.txt robotis_ai_setup/pi_agent/THIRD_PARTY_NOTICES.txt
           # Remove ONLY the file this step generated. `rm -rf .../pi_agent/docker`
           # was correct while the directory was a pure build artifact; it is not
           # any more — `pi_agent/docker/docker-compose.opi.yml` is a TRACKED,
@@ -516,6 +545,14 @@ jobs:
             exit 1
           fi
           echo "OK: packaged pi_agent/VERSION = $PKG_VERSION"
+          for lic in LICENSE.txt THIRD_PARTY_NOTICES.txt; do
+            if ! tar -xzOf edubotics-pi-agent.tar.gz "pi_agent/${lic}" \
+                 | cmp -s - "robotis_ai_setup/installer/assets/$([ "$lic" = LICENSE.txt ] && echo license.txt || echo "$lic")"; then
+              echo "::error::edubotics-pi-agent.tar.gz is missing pi_agent/${lic}, or it differs from the installer's copy"
+              exit 1
+            fi
+          done
+          echo "OK: packaged pi_agent/LICENSE.txt and pi_agent/THIRD_PARTY_NOTICES.txt"
           # IMAGE_TAG gate (mirrors the pi_agent/VERSION gate above): the baked
           # versions.env must be present AND pin this exact release. If the bake
           # above ever regresses, the failure is SILENT on the rig — the agent

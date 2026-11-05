@@ -29,10 +29,17 @@ Curated 2026-07-03; Orange-Pi entries appended 2026-08-02; the rest not re-curat
     - §§ 7–8 (warranty and liability for a free versus a paid licence);
     - § 2.2 (the school clause);
     - the form of the GPL/LGPL source offer.
+  - **No privacy policy exists yet, although the EULA's § 4.1 refers to one** („Datenschutzerklärung von EduBotics"). A launch requirement for German schools: minors' data, and training hosts outside the EU.
+    - The public teacher web carries no Impressum (DDG § 5).
+    - Web, teacher and Orange-Pi users never see the installer's EULA, and no terms exist for them.
+    - The download repository's README carries the contact and Impressum.
+  - **Third-party apps keep reading the code after the switch.** CodeRabbit reviews this repository's pull requests. Before the flip, review every installed GitHub App and OAuth grant and its data retention. The CLI token cannot list app installations; check Settings → Applications.
+  - **Older installers.** v2.37.0 and v2.36.0 (the rollback target) are mirrored, hash-verified, into the public download repository. Anything older is reachable only from this repository and stops being downloadable anonymously at the flip.
   - **What was published before keeps the Apache-2.0 grant.**
     - Until 2026-11-05, 749 EduBotics files carried an Apache-2.0 header: the public repository, the public fork `SWFDtf/Testre` (history to 2026-06-19), and every image and installer up to v2.37.0.
     - Those grants are irrevocable for those copies; the new headers bind only what is distributed from now on.
-    - The 46 rebranded ROBOTIS files (commit `f74ef852`, 2026-03-28) shipped without the ROBOTIS copyright in every release before the fix.
+    - The 46 rebranded ROBOTIS files (commit `f74ef852`, 2026-03-28) shipped without the ROBOTIS copyright in every release before the fix. So did `StudentApp.js`, split out of `App.js` in 2026-04.
+    - Nine more ROBOTIS files shipped with a shortened Apache notice or without their `Author:` lines: `App.js`, `App.css`, `RecordPage.js`, `InferencePage.js`, `EpisodeStatus.js`, `FullTaskStatus.js`, `lerobot_dataset_wrapper.py`, `training_manager.py`, `training/__init__.py`.
   - **Web packages without a licence file of their own.** 13 production packages ship none; the generated `/third-party-licenses.txt` names their declared licence (the `@supabase/*` family, `blockly`, `urdf-loader`, …). `pngparse` 2.0.1 declares none at all. **Trigger:** a licence audit; then add their texts by hand.
   - **The images carry no EduBotics licence notice inside them:** no `org.opencontainers.image.licenses` label, no NOTICE file in the image.
   - **Supply chain, P0-9's remainder.**

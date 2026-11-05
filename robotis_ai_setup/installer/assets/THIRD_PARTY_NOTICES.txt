@@ -8,7 +8,8 @@ Herausgeber / Distributor:
   E-Mail: svendanilborodun@gmail.com
 
 EduBotics selbst steht unter dem EduBotics-Endnutzer-Lizenzvertrag
-(LICENSE.txt in diesem Ordner). Die Software enthält und installiert
+(im Installationsordner LICENSE.txt, im Download-Repository LICENSE).
+Die Software enthält und installiert
 Bestandteile Dritter. Für sie gelten ausschließlich ihre eigenen Lizenzen;
 der EduBotics-Lizenzvertrag schränkt die Rechte, die Ihnen diese Lizenzen
 gewähren, nicht ein.
@@ -114,7 +115,8 @@ gewähren, nicht ein.
 English summary
 
 EduBotics is licensed under the EduBotics End-User Licence Agreement
-(LICENSE.txt). Third-party components keep their own licences: the
+(LICENSE.txt in the installation folder, LICENSE in the download
+repository). Third-party components keep their own licences: the
 Python packages of the Windows application are listed with their licence
 texts in gui\THIRD_PARTY_PYTHON.txt, the web interface's packages at
 /third-party-licenses.txt, and the full texts of the Apache, GPL and LGPL

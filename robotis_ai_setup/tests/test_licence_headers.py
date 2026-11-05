@@ -15,8 +15,9 @@ Rules, over every source file under the shipped roots:
 2. A "Modifications copyright … (EduBotics)" line sits directly under a ROBOTIS
    copyright line, in a header that keeps the Apache-2.0 text.
 3. A proprietary header names the holder in full and points at LICENSE, and is
-   never mixed with a ROBOTIS copyright.
-4. Every font the web app ships has its licence beside it.
+   never mixed with a ROBOTIS copyright or an upstream `Author:` line.
+4. A ROBOTIS header keeps the whole Apache-2.0 notice.
+5. Every font the web app ships has its licence beside it.
 """
 
 from __future__ import annotations
@@ -84,7 +85,10 @@ class LicenceHeaders(unittest.TestCase):
                     with self.subTest(file=rel):
                         self.assertTrue(i > 0 and ROBOTIS_COPYRIGHT.search(head[i - 1]), "ROBOTIS copyright directly above")
                         self.assertIn(APACHE, "".join(head), "the Apache-2.0 text stays")
-        self.assertGreaterEqual(count, 94, "the 46 restored and 48 modified ROBOTIS files")
+        # 2026-11-05: 61 = the ROBOTIS files EduBotics changed (by content against the
+        # absorbed b0b601fa tree) plus StudentApp.js, split out of App.js. A ROBOTIS
+        # file that is byte-identical to upstream carries NO modification line.
+        self.assertGreaterEqual(count, 61)
 
     def test_proprietary_headers_are_complete_and_never_mixed(self):
         count = 0
@@ -99,7 +103,27 @@ class LicenceHeaders(unittest.TestCase):
             elif EDU_COPYRIGHT.search(text) and MODIFICATIONS not in text:
                 with self.subTest(file=rel):
                     self.fail("an EduBotics copyright without the proprietary header or a modification line")
-        self.assertGreaterEqual(count, 703)
+        self.assertGreaterEqual(count, 705)
+
+    def test_a_proprietary_header_never_sits_beside_an_upstream_author(self):
+        """An `Author:` line comes from ROBOTIS code (EduBotics files carry none):
+        such a file is derived and keeps the ROBOTIS copyright and Apache text."""
+        for rel, head in self.heads.items():
+            text = "".join(head)
+            if PROPRIETARY_FIRST.search(text):
+                with self.subTest(file=rel):
+                    self.assertIsNone(re.search(r"^\s*(?:#|//|\*)\s*Author:", text, re.M))
+
+    def test_a_robotis_header_keeps_the_whole_apache_notice(self):
+        count = 0
+        for rel, head in self.heads.items():
+            text = "".join(head)
+            if ROBOTIS_COPYRIGHT.search(text):
+                count += 1
+                with self.subTest(file=rel):
+                    self.assertIn(APACHE, text)
+                    self.assertIn("limitations under the License.", text)
+        self.assertGreaterEqual(count, 120)
 
 
 class FontLicences(unittest.TestCase):

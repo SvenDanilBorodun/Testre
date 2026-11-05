@@ -19,6 +19,10 @@ const root = process.argv[2] || join(here, '..');
 const outFile = process.argv[3] || join(root, 'build', 'third-party-licenses.txt');
 
 const LICENSE_FILE = /^(licen[cs]e|copying|notice)([._-].*)?$/i;
+// Build tools whose own code ends up in the bundle although they are
+// devDependencies: Tailwind's generated CSS (its preflight), Vite's runtime
+// helpers (the modulepreload polyfill) and Rolldown's module runtime.
+const BUNDLED_BUILD_TOOLS = new Set(['node_modules/tailwindcss', 'node_modules/vite', 'node_modules/rolldown']);
 const RULE = '='.repeat(78);
 
 function declaredLicense(entry, pkg) {
@@ -46,7 +50,7 @@ const packages = lock.packages || {};
 const entries = [];
 let missing = 0;
 for (const [key, entry] of Object.entries(packages)) {
-  if (!key.startsWith('node_modules/') || entry.dev) continue;
+  if (!key.startsWith('node_modules/') || (entry.dev && !BUNDLED_BUILD_TOOLS.has(key))) continue;
   const dir = join(root, key);
   if (!existsSync(join(dir, 'package.json'))) {
     missing += 1; // an optional platform package that was not installed here
@@ -72,7 +76,8 @@ const lines = [
   'EduBotics – Open-Source-Bestandteile der Web-Oberfläche',
   'Open-source components of the EduBotics web interface',
   '',
-  `${entries.length} Pakete / packages (Produktionsabhängigkeiten laut package-lock.json).`,
+  `${entries.length} Pakete / packages (Produktionsabhängigkeiten laut package-lock.json,`,
+  'dazu die Build-Werkzeuge, deren Code in die Oberfläche einfließt: tailwindcss, vite, rolldown).',
   'Schriftarten: siehe /fonts/OFL-*.txt (SIL Open Font License 1.1).',
   '',
 ];

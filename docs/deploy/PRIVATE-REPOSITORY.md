@@ -30,6 +30,7 @@ W6 then sets Railway's `GUI_RELEASE_REPO` and `GUI_DOWNLOAD_URL` to the public r
 - this repository is private and `RELEASES_REPO` is unset (fails closed on an unknown visibility);
 - the variable is set without the token;
 - the token is rejected by the GitHub API (expired, revoked, no access);
+- the token cannot write there (the preflight creates and deletes a draft release, invisible to the public);
 - the channel repository is not public.
 
 The fine-grained token expires: **renew it before its expiry date**, or the next tag stops in the preflight.
@@ -57,7 +58,8 @@ The fine-grained token expires: **renew it before its expiry date**, or the next
    - set `GUI_DOWNLOAD_URL` without it, so exactly one redeploy happens;
    - then check that `curl -s …/version` shows the new URLs with the **same** hashes.
 5. **Set the repository variable** `RELEASES_REPO` to the public repository. From now on every release uploads there.
-6. **Prove it:**
+6. **Mirror the previous release too** (`--latest=false`), so the documented rollback (install the older `.exe` and pin) stays downloadable after the flip. v2.36.0 is mirrored.
+7. **Prove it:**
    - one Windows PC and one Pi check for updates (same version → no update; the forced-update path works);
    - the next tagged release runs W5 → W5b → W6 through the new channel.
 

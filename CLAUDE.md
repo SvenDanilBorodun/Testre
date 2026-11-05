@@ -43,7 +43,9 @@ Never treat as source: `robotis_ai_setup/gui/dist/` and `installer/output/` (bui
 
   All of them ship to `{app}`.
 - **A new EduBotics file's header** reads `Copyright <year> Sven Danil Borodun (EduBotics). All rights reserved.` followed by `Proprietary and confidential. Licensed under the EduBotics End-User Licence Agreement; see LICENSE at the repository root.`
-- **A ROBOTIS file** keeps its ROBOTIS copyright and its Apache text. Once EduBotics changes it, it gains `Modifications copyright 2026 Sven Danil Borodun (EduBotics)` directly under that line (Apache-2.0 §4(b)/(c)).
+- **A ROBOTIS file** keeps its ROBOTIS copyright, its whole Apache notice and its `Author:` lines. Once EduBotics changes its CONTENT relative to the absorbed upstream (`b0b601fa`), it gains `Modifications copyright 2026 Sven Danil Borodun (EduBotics)` directly under the copyright line (Apache-2.0 §4(b)/(c)).
+  - A file byte-identical to upstream carries no such line: judge by a content diff, never by `git log --follow`, which mis-follows tiny identical files.
+  - A file split out of a ROBOTIS file is a ROBOTIS file: `StudentApp.js` came out of `App.js`.
 - **Never** put an Apache header on EduBotics code, and never replace a ROBOTIS copyright line. A 2026-03-28 rebrand did exactly that to 46 files (`tests/test_licence_headers.py`).
 - **The manifests:** `physical_ai_server`'s and `physical_ai_interfaces`' `package.xml` declare both licences; the web app's `package.json` reads `SEE LICENSE IN ../../LICENSE`.
 - **The shipped licence lists are GENERATED, never written by hand:**
@@ -201,6 +203,7 @@ Eight workflows in `.github/workflows/`:
 - a PRIVATE repository without `vars.RELEASES_REPO`, failing closed on an unknown visibility (`github.event.repository.private`);
 - a channel without its token;
 - a token the GitHub API rejects (a fine-grained PAT expires);
+- a token that cannot write there, proven by creating and deleting a draft release, which the public never sees;
 - a channel repository that is not public.
 
 Moving the channel needs no client update. The runbook is `docs/deploy/PRIVATE-REPOSITORY.md`.
@@ -211,7 +214,7 @@ Moving the channel needs no client update. The runbook is `docs/deploy/PRIVATE-R
 
 **`version-preflight` runs first on tag pushes** and hard-fails when the tag ≠ the `VERSION` file (W6 advertises the TAG while the tarball/installer bake the FILE; a mismatch puts every Pi and Windows GUI into an infinite forced-update loop) and when any of the three fallback literals differs from it.
 
-**The Pi tarball.** `release.yml::pi-agent-tarball` attaches `edubotics-pi-agent.tar.gz` (top-level `pi_agent/`) with three baked, gated files: the repo `VERSION` as `pi_agent/VERSION`, a generated `pi_agent/docker/versions.env` pinning `IMAGE_TAG=<VERSION>`, and the tracked `docker-compose.opi.yml` twin, which must `cmp` equal to `robotis_ai_setup/docker/docker-compose.opi.yml`. The post-`tar` cleanup deletes only the GENERATED `versions.env`; `rm -rf …/pi_agent/docker` would take the tracked twin. W6 publishes `PI_AGENT_SHA256` before the `GUI_VERSION` flip, emptied on hash failure AND when any of the four `-opi:<VERSION>` images (the runner included) is anonymously pullable on NEITHER registry; **an empty hash ⇒ the Pi advertises no self-update**. `pi-agent-tarball` is an ordering-only `needs` of W6, which gates only on `installer` success. The reverse direction (a failed installer skips both Pi jobs after `-opi` images published) is an owner call (`docs/KNOWN-ISSUES.md`).
+**The Pi tarball.** `release.yml::pi-agent-tarball` attaches `edubotics-pi-agent.tar.gz` (top-level `pi_agent/`) with three baked, gated files: the repo `VERSION` as `pi_agent/VERSION`, a generated `pi_agent/docker/versions.env` pinning `IMAGE_TAG=<VERSION>`, and the tracked `docker-compose.opi.yml` twin, which must `cmp` equal to `robotis_ai_setup/docker/docker-compose.opi.yml`. It also carries the licence: the installer's EULA as `pi_agent/LICENSE.txt` and `pi_agent/THIRD_PARTY_NOTICES.txt`, copied in before `tar`, removed after, and `cmp`-checked against the installer's copies. The tarball is publicly downloadable plain source; the agent's tar validation refuses only unsafe paths and types, so extra regular files are safe. The post-`tar` cleanup deletes only the GENERATED `versions.env` and the copied licence files; `rm -rf …/pi_agent/docker` would take the tracked twin. W6 publishes `PI_AGENT_SHA256` before the `GUI_VERSION` flip, emptied on hash failure AND when any of the four `-opi:<VERSION>` images (the runner included) is anonymously pullable on NEITHER registry; **an empty hash ⇒ the Pi advertises no self-update**. `pi-agent-tarball` is an ordering-only `needs` of W6, which gates only on `installer` success. The reverse direction (a failed installer skips both Pi jobs after `-opi` images published) is an owner call (`docs/KNOWN-ISSUES.md`).
 
 **The Modal app (`edubotics-training`) deploys MANUALLY** (the image builds in Modal's infrastructure and the CI loop is too slow to debug remotely). The owner keeps `edubotics-training` stopped; the emergency rung stays in the code and OFF (`MANAGED_MODAL_RUNG=0`); before flipping it, `modal deploy modal_app.py` at the running release (a Modal attempt is accounted like a RunPod one). Run it BEFORE pushing a tag if the release touches Modal:
 

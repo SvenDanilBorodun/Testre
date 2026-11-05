@@ -6,6 +6,46 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### 2026-11-05 — preparing the private repository and the CI supply chain
+
+**Why.** The owner wants the repository private and EduBotics shipped publicly.
+
+**Measured live that day:**
+- `/version` pointed every GUI and Pi at this repository's release assets, which answer 404 anonymously once the repository is private, so every update would have stopped silently.
+- The API served `/docs`, `/redoc` and `/openapi.json` (89 paths, 8 admin) to anyone.
+- Four jobs ran `npm install -g @railway/cli` (unpinned, postinstall with floating dependencies) while `RAILWAY_TOKEN` sat in the job env.
+- `schema-probe` held the real service-role key during an unhashed `pip install`, although an import never opens a connection.
+- `supabase/setup-cli version: latest` had moved to the major 3.0.0 hours after the last production apply, which used 2.122.0.
+- PyInstaller was unpinned; 6.22.3 built v2.37.0.
+
+**What changed:**
+- A release channel (`vars.RELEASES_REPO` + `secrets.RELEASES_REPO_TOKEN`; unset = old behaviour).
+- The Railway CLI as one pinned, SHA-256-checked binary step, with the token only on the steps that run `railway`.
+- A dummy probe key; Supabase CLI and PyInstaller pins.
+- Docs off unless `EDUBOTICS_API_DOCS=1`.
+- `tests/test_ci_supply_chain_pins.py` (mutation-checked: six deliberate regressions each fail it) and `app/tests/test_api_docs_off.py`.
+- Runbook: `docs/deploy/PRIVATE-REPOSITORY.md`.
+
+**The licence (owner: proprietary EULA; licensor Sven Danil Borodun, Essen).**
+- **Before:** the installer said Apache-2.0 (and still named Docker Desktop). 749 EduBotics files carried an Apache-2.0 header, 74 of them in the robot server package that ships as source in the public images. The rebrand commit `f74ef852` (2026-03-28) had replaced „Copyright 2025 ROBOTIS CO., LTD." with „Copyright 2025 EduBotics" in 46 files derived from ROBOTIS's web app, which Apache-2.0 §4(c) forbids.
+- **Licence files:** a German EULA, root `LICENSE`/`NOTICE`, `THIRD_PARTY_NOTICES.txt` with the GPL/LGPL written source offer, and the SPDX 3.29.0 texts of Apache-2.0, GPL-2.0/3.0 and LGPL-2.1/3.0.
+- **Headers:**
+  - 703 EduBotics headers became proprietary, with the year of each file's first commit, all 2026;
+  - the 46 derived files got the ROBOTIS line back, plus a modification line;
+  - 48 more ROBOTIS files we changed got the modification line.
+
+  The edit was proven header-only: all 800 diffs touch comment lines within the first 32 lines.
+- **Generators:** two licence-list generators (Python GUI, npm build).
+- **Installer:** a German wizard (`German.isl`).
+- **Manifests:** `package.json`/`package.xml` declare the real licences.
+- **Font:** the unused `PretendardVariable.woff2` (no licence file) was removed.
+
+**Bug caught on the way.** The first header pass split files with `str.splitlines()`, which also breaks at `\x85` / ` ` inside string literals. The robot-server suite failed collection on `handlers/output.py`; the pass was reverted and redone splitting on `\n` only.
+
+**Release preflight:** checks the channel before W1 (private repository without channel, missing or expired token, non-public channel).
+
+**Still open:** the owner's channel move, plan choice and flip; the EULA's legal review; hash-locked installer requirements and signing; the rootfs's missing `copyright` files (`docs/KNOWN-ISSUES.md`); the rest of the 2026-10-25 security review.
+
 ### v2.37.0, 2026-11-01 (build) — the training-hour ledger (migration 052)
 
 **Why.** At v2.36.0 a training credit was not a record: `start_training_safe` / `get_remaining_credits` counted

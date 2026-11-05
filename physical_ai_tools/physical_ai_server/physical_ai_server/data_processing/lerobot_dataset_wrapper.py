@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 #
 # Copyright 2025 ROBOTIS CO., LTD.
+# Modifications copyright 2026 Sven Danil Borodun (EduBotics)
 # Modified 2026-05 for EduBotics v2.5.0 — streaming_encoding replaces the
 # v2.4 JPEG-in-RAM hack. Most of the prior wrapper became upstream-native.
 #

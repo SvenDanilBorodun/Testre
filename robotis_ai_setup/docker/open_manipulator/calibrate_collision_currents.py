@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-# Copyright 2026 EduBotics
+# Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
+#
+# Proprietary and confidential. Licensed under the EduBotics End-User
+# Licence Agreement; see LICENSE at the repository root.
 #
 # Operator helper: measure the OMX follower's no-contact per-joint motor-effort envelope and
 # print ready-to-paste EDUBOTICS_COLLISION_EFFORT_J* values for the teleop force/collision

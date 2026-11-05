@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 #
 # Copyright 2025 ROBOTIS CO., LTD.
+# Modifications copyright 2026 Sven Danil Borodun (EduBotics)
 # Modified 2026-05 for EduBotics v2.5.0 — on-device training removed; Modal Cloud handles training.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

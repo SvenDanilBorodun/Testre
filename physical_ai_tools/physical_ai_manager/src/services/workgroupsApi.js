@@ -32,10 +32,31 @@ export const removeWorkgroupMember = (token, workgroupId, studentId) =>
     token
   );
 
-export const adjustWorkgroupCredits = (token, workgroupId, delta) =>
+// Training hours of a group (credit system v2, spec §8.3): a delta with the
+// client's `request_id`, exactly like a student's.
+export const changeWorkgroupHours = (token, workgroupId, { delta, request_id }) =>
   apiRequest(`/teacher/workgroups/${workgroupId}/credits`, 'POST', token, {
     delta,
+    request_id,
   });
+
+// One per-member hour limit for the whole group (D5): 1…1000, or null for none.
+export const setMemberLimit = (token, workgroupId, hours) =>
+  apiRequest(`/teacher/workgroups/${workgroupId}/member-limit`, 'PUT', token, {
+    hours,
+  });
+
+export const getWorkgroupCreditHistory = (token, workgroupId, { before, limit } = {}) => {
+  const params = new URLSearchParams();
+  if (before !== null && before !== undefined) params.set('before', String(before));
+  if (limit) params.set('limit', String(limit));
+  const qs = params.toString();
+  return apiRequest(
+    `/teacher/workgroups/${workgroupId}/credit-history${qs ? `?${qs}` : ''}`,
+    'GET',
+    token
+  );
+};
 
 // Last 100 trainings spawned by any (current or former) member of the
 // group, latest first. Includes started_by_* attribution so the panel

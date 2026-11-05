@@ -23,6 +23,15 @@ or a managed row is non-terminal, §3.8 / FR-3; off with
   current attempt of an active row is deleted (§4.3, SR-8);
 * the HF write check and the RunPod boot probe (every 10 min until good).
 
+The training-hour ledger (migration 052) settles every ``ledger`` row inside its
+terminal transaction by trigger; nothing here settles anything. What this module
+owns of it is the per-row time limit (``limit_of``: the row's reserved hours ×
+3600, a pre-052 ``derived`` row ``PRE_LEDGER_CAP_S``) and its clock
+(``limit_used``: ``train_seconds_used + lost_seconds``, owner D1), the give-up
+publishes of S4/S18 (owner Q-A), the checkpoint-overdue rule (owner R3-3), the
+distinct-host rule of the host claims (owner Q-C) and the report-only
+``reconcile_tick`` (``credit_reconcile``, §4.12).
+
 Blocking I/O never runs on the event loop: supabase-py in ``asyncio.to_thread``
 (two batched reads per round, FR-21), RunPod through one ``httpx.AsyncClient``
 (``runpod_client``), Modal through ``modal_client``'s threads, publishing and
@@ -60,22 +69,28 @@ MIRROR_EVERY = 10000
 # this long after expiry (any child created before expiry has capped or failed by
 # then), and the bucket's keep/ rule (9 days) is the floor.
 KEEP_S = 7 * 86400
-# The two cap end_reasons live ONLY here; every other site reads the names (review m2).
+# The publish end_reasons live ONLY here; every other site reads the names (review m2).
+# A cap-like end writes the kept copy and leaves the row continuable (owner E36, D6, Q-A, R3-1).
 END_CAPPED = "capped"
 END_WALL_CAPPED = "wall_capped"
-CAP_END_REASONS = (END_CAPPED, END_WALL_CAPPED)
+END_STOPPED = "stopped"                  # Abbrechen / a teacher's stop after a GPU trained (052, D6)
+END_ATTEMPTS_OUT = "attempts_out"        # 4 attempts used, a ready checkpoint exists (Q-A)
+END_NO_GPU = "no_gpu"                    # 30 min without a GPU, a ready checkpoint exists (Q-A)
+END_CONTENT_REFUSED = "content_refused"  # a confirmed S7 with an earlier ready checkpoint (R3-1)
+CAP_END_REASONS = (END_CAPPED, END_WALL_CAPPED, END_STOPPED, END_ATTEMPTS_OUT, END_NO_GPU, END_CONTENT_REFUSED)
 PUBLISH_END_REASONS = ("succeeded",) + CAP_END_REASONS
-# An ACT start under TRAINING_DISPATCH=legacy ignores the client's num_workers and
-# save_freq too (owner E3: the form no longer shows them for ACT, yet still sends
-# whatever the browser stored): today's fresh-form defaults
-# (physical_ai_manager trainingSlice.js::defaultTrainingInfo, numWorkers / saveFreq;
-# app/tests/test_managed_start.py reads that file and holds the two equal).
-LEGACY_ACT_NUM_WORKERS = 2
-LEGACY_ACT_SAVE_FREQ = 10000
+# cap_attempt's bound -> the end_reason cap_training_attempt writes (§9.7)
+BOUND_END_REASON = {"cap": END_CAPPED, "wall": END_WALL_CAPPED, "attempts_out": END_ATTEMPTS_OUT,
+                    "no_gpu": END_NO_GPU, "content_refused": END_CONTENT_REFUSED}
 ACT_BATCH = 8
 MAX_ATTEMPTS = 4
 COMMUNITY_LOSS_LIMIT = 2
-MANAGED_ACT_CAP_S = 12600  # 3.5 h of training time per credit (owner E32; still a setting)
+# 052 (decision 6): the CEILING of a reservation — 1, 2 or 3 hours; the limit itself is per
+# row (limit_of). Only these three values boot.
+MANAGED_ACT_CAP_S = 10800
+ALLOWED_CAPS_S = (3600, 7200, 10800)
+# A pre-052 (credit_scheme 'derived') row keeps the old global 3.5 h limit (§9.2, §9.4).
+PRE_LEDGER_CAP_S = 12600
 WALL_CAP_S = 43200
 HEARTBEAT_INTERVAL_S = 15
 HEARTBEAT_LOST_S = 300
@@ -120,8 +135,10 @@ START_TIMEOUT_GRACE_S = 300        # the dispatcher's own cap margin (§4.2 step
 JANITOR_WINDOW_S = 7 * 86400       # terminal rows the janitor revisits (R2 lifecycle is the backstop)
 # train_managed's Modal timeout is fixed at 7 h in code (§4.9, TR-8 n11).
 MODAL_TIMEOUT_S = 7 * 3600
-MANAGED_CAP_CEILING_S = MODAL_TIMEOUT_S - FINAL_UPLOAD_WAIT_S - 600  # 23 520 s: with the Modal rung
-MANAGED_CAP_CEILING_RUNPOD_S = WALL_CAP_S  # without the Modal rung a cap past the wall clock could never bind
+MANAGED_CAP_CEILING_S = MODAL_TIMEOUT_S - FINAL_UPLOAD_WAIT_S - 600  # 23 520 s: above every allowed cap
+# R3-3: an attempt whose step runs more than 2 × save_freq past its last ready checkpoint
+# for this long is lost; the grace covers one presigned PUT's validity plus an upload's tail.
+CKPT_OVERDUE_GRACE_S = PUT_TTL_S + 300
 
 HF_ORG = "EduBotics-Solutions"
 TRAINER_IMAGE_PREFIX = "ghcr.io/svendanilborodun/edubotics-trainer"
@@ -165,7 +182,8 @@ TRAINING_COLUMNS = (
     "id, user_id, status, managed, current_attempt, train_seconds_used, status_note, step_advanced_at, "
     "dataset_fps, unplaced_since, requested_at, last_progress_at, total_steps, training_params, "
     "model_name, dataset_name, terminated_at, log_url, cancel_attempts, current_step, "
-    "capped_step, continuable_until, continued_from"
+    "capped_step, continuable_until, continued_from, "
+    "credit_scheme, reserved_hours, lost_seconds, lost_reasons, stop_requested_at, stop_requested_by_role"
 )
 KEPT_COLUMNS = "training_id, step, manifest, state, kept_at, expires_at, refused_reason, bad_attempts"
 ATTEMPT_COLUMNS = (
@@ -175,7 +193,7 @@ ATTEMPT_COLUMNS = (
 )
 CHECKPOINT_COLUMNS = (
     "training_id, attempt_no, step, state, manifest, created_at, ready_at, mirrored_at, mirror_tries, "
-    "refused_reason, refused_by, crash_attempts, mirror_claimed_at, mirror_owner"
+    "refused_reason, refused_by, crash_attempts, mirror_claimed_at, mirror_owner, config_complaints"
 )
 
 
@@ -198,8 +216,7 @@ class Settings:
     runpod_api_key: str = ""
     trainer_image: str = ""
     ladder: tuple = ()
-    modal_rung: bool = False     # MANAGED_MODAL_RUNG=1 was asked for (owner E29)
-    cap_clamped_from: int | None = None  # the configured cap when E43 clamped it
+    modal_rung: bool = False     # MANAGED_MODAL_RUNG=1 was asked for (owner E29; off, Q-E)
     pod_prefix: str = "edubotics-train"
     max_runpod_pods: int = 30
     start_deadline_s: int = 1200
@@ -278,11 +295,6 @@ def parse_ladder(raw, *, modal_rung: bool = False) -> tuple:
     return tuple(out)
 
 
-def cap_ceiling(ladder) -> int:
-    """The largest MANAGED_ACT_CAP_S this ladder can honour."""
-    return MANAGED_CAP_CEILING_S if any(r["rung"] == RUNG_MODAL for r in ladder) else MANAGED_CAP_CEILING_RUNPOD_S
-
-
 def _int_env(env, name, default, lo=1, hi=None):
     raw = env.get(name)
     if raw is None or raw == "":
@@ -326,12 +338,8 @@ def load_settings(env=None) -> Settings:
     elif mirror_every % save_freq != 0:
         raise SettingsError("TRAINING_MIRROR_EVERY must be a positive multiple of TRAINING_SAVE_FREQ")
     cap_s = _int_env(env, "MANAGED_ACT_CAP_S", MANAGED_ACT_CAP_S)
-    cap_clamped_from = None
-    if any(r["rung"] == RUNG_MODAL for r in ladder):
-        if cap_s > MANAGED_CAP_CEILING_S:          # E43: an emergency switch never blocks the boot
-            cap_clamped_from, cap_s = cap_s, MANAGED_CAP_CEILING_S
-    elif cap_s > MANAGED_CAP_CEILING_RUNPOD_S:     # not the emergency path: a malformed value
-        raise SettingsError("MANAGED_ACT_CAP_S exceeds the 12 h wall cap")
+    if cap_s not in ALLOWED_CAPS_S:  # 052: the ceiling of a 1–3 hour reservation, with or without Modal
+        raise SettingsError("MANAGED_ACT_CAP_S must be 3600, 7200 or 10800")
     prefix = (env.get("RUNPOD_POD_PREFIX") or "edubotics-train").strip()
     if not POD_PREFIX_RE.fullmatch(prefix):
         raise SettingsError("RUNPOD_POD_PREFIX must match ^[a-z0-9-]{3,40}$")
@@ -358,7 +366,6 @@ def load_settings(env=None) -> Settings:
         trainer_image=image,
         ladder=ladder,
         modal_rung=modal_rung,
-        cap_clamped_from=cap_clamped_from,
         pod_prefix=prefix,
         max_runpod_pods=_int_env(env, "MAX_RUNPOD_PODS", 30),
         start_deadline_s=_int_env(env, "TRAINING_START_DEADLINE_S", 1200),
@@ -395,10 +402,8 @@ def validate_boot(env=None) -> Settings:
         )
     if settings.modal_rung:
         logger.warning("MANAGED_MODAL_RUNG=1: the managed ladder ends in Modal train_managed (an emergency setting; "
-                       "unset it when RunPod is usable again)")
-    if settings.cap_clamped_from is not None:
-        logger.warning("MANAGED_ACT_CAP_S is above the Modal ceiling while MANAGED_MODAL_RUNG=1: clamped to "
-                       "MANAGED_CAP_CEILING_S (23520 s, owner E43)")
+                       "edubotics-training must be deployed at the running release; unset it when RunPod is "
+                       "usable again)")
     if settings.missing:
         if settings.managed:
             raise RuntimeError(
@@ -495,6 +500,40 @@ def mirror_every_of(row) -> int:
     return int(v) if isinstance(v, int) and v > 0 else MIRROR_EVERY
 
 
+def limit_of(row) -> int:
+    """The row's time limit (§9.2, decision 6): its reservation × 3600; a pre-052 row 12 600 s."""
+    hours = row.get("reserved_hours") if isinstance(row, dict) else None
+    if isinstance(hours, int) and not isinstance(hours, bool) and hours > 0:
+        return 3600 * int(hours)
+    return PRE_LEDGER_CAP_S
+
+
+def limit_used(row) -> int:
+    """The limit clock [D1]: counted training seconds plus the unsaved part of lost attempts
+    (``lost_seconds`` is 0 on a derived row, so an old row keeps the old clock). The charge
+    reads ``train_seconds_used`` alone."""
+    return int(row.get("train_seconds_used") or 0) + int(row.get("lost_seconds") or 0)
+
+
+def is_ledger(row) -> bool:
+    return (row or {}).get("credit_scheme") == "ledger"
+
+
+def distinct_hosts(a, b) -> bool:
+    """Owner Q-C (review 2 m3): two attempts ran on provably different hosts exactly when
+    their backend differs, or both GPU types are known and differ, or both data centres are
+    known and differ. An unknown field means „maybe the same host"; RunPod's REST v2 pod
+    record carries no machine id. Two Modal attempts are never distinct."""
+    a, b = a or {}, b or {}
+    if a.get("backend") != b.get("backend"):
+        return True
+    ga, gb = a.get("gpu_type"), b.get("gpu_type")
+    if ga and gb and ga != gb:
+        return True
+    da, db = a.get("data_center"), b.get("data_center")
+    return bool(da and db and da != db)
+
+
 def attempt_seconds(attempt, now: float) -> int:
     """now − first_heartbeat_at of the attempt (0 when unset)."""
     first = ts((attempt or {}).get("first_heartbeat_at"))
@@ -557,6 +596,7 @@ class _State:
     delete_retry: dict = field(default_factory=dict)       # pod id -> rounds still listed
     modal_cancel_retry: set = field(default_factory=set)
     budget_bound: dict = field(default_factory=dict)       # (tid, attempt) -> 'wall' | 'cap'
+    overdue_first: dict = field(default_factory=dict)      # (tid, attempt) -> (first_seen, ref_then), R3-3
     janitor_done: set = field(default_factory=set)
     loops_started: bool = False
 
@@ -602,10 +642,10 @@ def record_budget_bound(training_id: int, attempt: int, bound: str) -> None:
 
 
 def budget_for(row, attempt, now: float, settings: Settings | None = None) -> tuple[int, str]:
-    """``(budget_s, bound)`` of §3.2 `start` (FR-18): the smaller of the training-time
-    cap left (minus the current attempt's own time) and the 12 h wall cap left."""
-    s = settings or SETTINGS
-    cap_left = s.cap_s - int(row.get("train_seconds_used") or 0) - attempt_seconds(attempt, now)
+    """``(budget_s, bound)`` of §3.2 `start` (FR-18): the smaller of the row's limit left
+    (its limit clock and the current attempt's own time subtracted, §9.2) and the 12 h wall
+    cap left."""
+    cap_left = limit_of(row) - limit_used(row) - attempt_seconds(attempt, now)
     requested = ts(row.get("requested_at")) or now
     wall_left = WALL_CAP_S - int(now - requested)
     if wall_left < cap_left:
@@ -793,7 +833,7 @@ async def requeue_attempt(row, attempt, reason: str, now: float, checkpoints=Non
     try:
         await arpc("requeue_training", {
             "p_training_id": tid, "p_attempt": int(attempt["attempt_no"]), "p_reason": reason,
-            "p_note": T.loss_note(resume), "p_resume_step": resume,
+            "p_note": T.loss_note(resume, reason), "p_resume_step": resume,
             "p_train_seconds": attempt_seconds(attempt, now),
         })
     except RpcConflict:
@@ -832,12 +872,15 @@ async def end_attempt_succeeded(row, attempt, now: float) -> bool:
     return True
 
 
-async def fail_training(row, attempt_no: int, message: str) -> bool:
+async def fail_training(row, attempt_no: int, message: str, *, charge_waiver: str | None = None) -> bool:
+    """finish_training(failed). ``charge_waiver='lerobot_error'`` only for a confirmed S19
+    (owner OQ-2): the 052 settlement then charges 0."""
+    args = {"p_training_id": int(row["id"]), "p_attempt": int(attempt_no), "p_status": "failed",
+            "p_message": message, "p_log_url": None}
+    if charge_waiver is not None:
+        args["p_charge_waiver"] = charge_waiver
     try:
-        await arpc("finish_training", {
-            "p_training_id": int(row["id"]), "p_attempt": int(attempt_no), "p_status": "failed",
-            "p_message": message, "p_log_url": None,
-        })
+        await arpc("finish_training", args)
     except RpcConflict:
         return False
     logger.info("training %s failed (attempt %s)", row["id"], attempt_no)
@@ -855,22 +898,39 @@ async def on_loss(row, attempt, reason: str, now: float, checkpoints, *, skip_co
     await terminate_attempt(attempt)
 
 
+def _no_checkpoint_message(row, bound: str) -> str:
+    """The failure sentence of a cap-like end that has nothing to publish (§9.7)."""
+    if bound == "cap":
+        return T.s5(limit_of(row))
+    if bound == "wall":
+        return T.S6
+    if bound == "attempts_out":
+        return T.attempts_out_message(row.get("lost_reasons"))
+    if bound == "no_gpu":
+        return T.S18
+    return T.S7                                              # content_refused (R3-1)
+
+
 async def cap_attempt(row, attempt, now: float, checkpoints, *, bound: str) -> str:
-    """A cap (bound 'cap': training time; bound 'wall': the 12 h wall, owner E44) with a
-    ready checkpoint publishes; without one it fails the row (S5 / S6). Returns
-    'published' | 'failed' | 'conflict'. ``checkpoints`` = the row's ready checkpoints."""
+    """A cap-like end publishes the newest ready checkpoint (kept copy, continuable): bound
+    'cap' (the row's limit), 'wall' (the 12 h wall, owner E44), 'attempts_out' / 'no_gpu'
+    (S4 / S18 with a checkpoint, owner Q-A), 'content_refused' (a confirmed S7 with an
+    earlier checkpoint, owner R3-1). Without one the row fails (S5 / S6 / S4 or S37 / S18 /
+    S7). Returns 'published' | 'failed' | 'conflict'. ``checkpoints`` = the row's ready
+    checkpoints."""
     total = total_steps_of(row)
     if final_ready(checkpoints, total) is not None:          # the ready-final rule, as today
         return "published" if await end_attempt_succeeded(row, attempt, now) else "conflict"
     ck = newest_ready_checkpoint(checkpoints, total)
     n = int(attempt["attempt_no"])
     if ck is None:                                           # no checkpoint, no publish
-        msg = T.s5(SETTINGS.cap_s) if bound == "cap" else T.S6
+        msg = _no_checkpoint_message(row, bound)
         return "failed" if await fail_training(row, n, msg) else "conflict"
+    note = T.S22 if bound in ("cap", "wall") else T.S34
     try:
         await arpc("cap_training_attempt", {
             "p_training_id": int(row["id"]), "p_attempt": n, "p_step": int(ck["step"]),
-            "p_reason": END_CAPPED if bound == "cap" else END_WALL_CAPPED, "p_note": T.S22,
+            "p_reason": BOUND_END_REASON[bound], "p_note": note,
             "p_train_seconds": 0 if attempt.get("state") in ("lost", "ended") else attempt_seconds(attempt, now)})
     except RpcConflict:
         logger.info("cap of training %s attempt %s lost a race", row["id"], n)
@@ -1224,19 +1284,28 @@ async def _try_modal(row, attempt_no: int, token: str, s: Settings) -> str:
     return "placed"
 
 
+async def _give_up(row, attempt, n: int, now: float, checkpoints, *, bound: str) -> None:
+    """S4 / S18 publish like a cap when a ready checkpoint exists (owner Q-A, lifting E47)."""
+    if n > 0 and attempt is not None:
+        await cap_attempt(row, attempt, now, checkpoints, bound=bound)
+    else:
+        await fail_training(row, n, _no_checkpoint_message(row, bound))
+
+
 async def _budget_finish(row, attempt, now: float, s: Settings, checkpoints) -> bool:
-    """§4.2 step 2. True when the row was finished, capped or lost a race. S4 first and
-    S18 last stay fail + refund even with a ready checkpoint (owner E47); the training-time
-    cap and the 12 h wall between them publish the newest ready checkpoint (owner E33/E44)."""
+    """§4.2 step 2. True when the row was finished, capped or lost a race. 4 attempts used
+    (S4/S37) first and 30 min without a GPU (S18) last publish the newest ready checkpoint
+    like a cap (owner Q-A), as do the row's limit (§9.2: ``limit_used`` against
+    ``limit_of``) and the 12 h wall between them (owner E33/E44)."""
     n = int(row.get("current_attempt") or 0)
     if n >= MAX_ATTEMPTS:
-        await fail_training(row, n, T.S4)
+        await _give_up(row, attempt, n, now, checkpoints, bound="attempts_out")
         return True
-    if int(row.get("train_seconds_used") or 0) >= s.cap_s - START_TIMEOUT_GRACE_S:
+    if limit_used(row) >= limit_of(row) - START_TIMEOUT_GRACE_S:
         if n > 0 and attempt is not None:
             await cap_attempt(row, attempt, now, checkpoints, bound="cap")
         else:
-            await fail_training(row, n, T.s5(s.cap_s))
+            await fail_training(row, n, T.s5(limit_of(row)))
         return True
     if now - (ts(row.get("requested_at")) or now) >= WALL_CAP_S - START_TIMEOUT_GRACE_S:
         if n > 0 and attempt is not None:
@@ -1246,7 +1315,7 @@ async def _budget_finish(row, attempt, now: float, s: Settings, checkpoints) -> 
         return True
     unplaced = ts(row.get("unplaced_since"))
     if unplaced is not None and now - unplaced >= PLACEMENT_GIVEUP_S:
-        await fail_training(row, n, T.S18)
+        await _give_up(row, attempt, n, now, checkpoints, bound="no_gpu")
         return True
     return False
 
@@ -1383,9 +1452,9 @@ async def _check_attempt(row, attempt, now: float, pods_by_id, pods_ok: bool, ch
     # Caps (with WATCHDOG_GRACE_S, TR-2): training time (cap) or the 12 h wall (owner
     # E44); either one publishes the newest ready checkpoint (else S5 / S6).
     if state in ("starting", "running"):
-        used = int(row.get("train_seconds_used") or 0) + attempt_seconds(attempt, now)
+        used = limit_used(row) + attempt_seconds(attempt, now)
         bound = None
-        if used > s.cap_s + WATCHDOG_GRACE_S:
+        if used > limit_of(row) + WATCHDOG_GRACE_S:
             bound = "cap"
         elif now - (ts(row.get("requested_at")) or now) > WALL_CAP_S + WATCHDOG_GRACE_S:
             bound = "wall"
@@ -1443,6 +1512,43 @@ async def _check_attempt(row, attempt, now: float, pods_by_id, pods_ok: bool, ch
         advanced = ts(row.get("step_advanced_at")) or (ts(attempt.get("first_heartbeat_at")) or now)
         if now - max(advanced, t_fail) > STALL_S:
             await on_loss(row, attempt, "stalled", now, checkpoints)
+            return
+        if is_ledger(row) and await _checkpoint_overdue(row, attempt, now, checkpoints):
+            return
+
+
+def overdue_ref(attempt, checkpoints) -> int:
+    """R3-3: the step the attempt's progress is measured from — its resume step or the
+    highest step of ITS OWN ready checkpoints (an `uploading` one never counts)."""
+    n = int(attempt["attempt_no"])
+    own = [int(c.get("step") or 0) for c in checkpoints
+           if c.get("state") == "ready" and int(c.get("attempt_no") or 0) == n]
+    return max([int(attempt.get("resume_from_step") or 0)] + own)
+
+
+async def _checkpoint_overdue(row, attempt, now: float, checkpoints) -> bool:
+    """§9.10 (owner R3-3), the sweep only, in memory: the clock starts the first round the
+    reported step is more than 2 × the row's save_freq past ``overdue_ref``; only a new ready
+    checkpoint of this attempt raising the ref clears it (a lowered step does not); after
+    CKPT_OVERDUE_GRACE_S the attempt is lost as ``checkpoint_overdue`` (free; a host fault,
+    so the Community data centre is skipped). True when it was lost."""
+    key = (int(row["id"]), int(attempt["attempt_no"]))
+    ref = overdue_ref(attempt, checkpoints)
+    entry = STATE.overdue_first.get(key)
+    if entry is not None and ref > entry[1]:
+        STATE.overdue_first.pop(key, None)
+        entry = None
+    if entry is None:
+        if int(row.get("current_step") or 0) > ref + 2 * save_freq_of(row):
+            STATE.overdue_first[key] = (now, ref)
+        return False
+    if now - entry[0] < CKPT_OVERDUE_GRACE_S:
+        return False
+    STATE.overdue_first.pop(key, None)
+    logger.warning("training %s attempt %s: no checkpoint beyond step %s for %d s, lost (checkpoint_overdue)",
+                   key[0], key[1], ref, int(now - entry[0]))
+    await on_loss(row, attempt, T.CHECKPOINT_OVERDUE, now, checkpoints, skip_community_dc=True)
+    return True
 
 
 async def sweep_tick(settings: Settings | None = None) -> dict:
@@ -1697,14 +1803,19 @@ async def reaper_tick(settings: Settings | None = None) -> dict:
         logger.warning("reaper: pod list failed: %s", type(exc).__name__)
         return out
 
-    max_age = s.cap_s + s.start_deadline_s + REAPER_GRACE_S
+    # §9.4: a pod's maximum age is its ROW's limit (a pre-052 row keeps 12 600 s), so a
+    # lower global cap never kills an older training; the window covers the largest.
+    def max_age_of(row) -> int:
+        return limit_of(row) + s.start_deadline_s + REAPER_GRACE_S
+
+    window_age = max(PRE_LEDGER_CAP_S, s.cap_s) + s.start_deadline_s + REAPER_GRACE_S
 
     def _db():
         # (b) by DB id (V1-7): only attempts young enough to still own a live pod
         # (a pod is created while its attempt is placing, and one older than
         # max_age is deleted anyway), read page by page, so PostgREST's max_rows
         # can never hide a row.
-        since = _iso(now - (max_age + PLACING_STALE_S + REAPER_GRACE_S))
+        since = _iso(now - (window_age + PLACING_STALE_S + REAPER_GRACE_S))
         refs = []
         for _ in range(REAPER_MAX_PAGES):
             page = (
@@ -1719,7 +1830,7 @@ async def reaper_tick(settings: Settings | None = None) -> dict:
         else:
             raise RuntimeError("reaper: attempt list did not end")
         active = (
-            _sb().table("trainings").select("id, status, current_attempt")
+            _sb().table("trainings").select("id, status, current_attempt, reserved_hours")
             .eq("managed", True).in_("status", ["queued", "running"]).execute()
         ).data or []
         ids = [r["id"] for r in active]
@@ -1758,7 +1869,7 @@ async def reaper_tick(settings: Settings | None = None) -> dict:
             cur = attempt_by_key.get((a["training_id"], a["attempt_no"]))
             if (row and int(row.get("current_attempt") or 0) == a["attempt_no"] and cur
                     and cur.get("state") in ("starting", "running") and cur.get("cloud_ref") == pod_id
-                    and age < max_age):
+                    and age < max_age_of(row)):
                 keep = True
         if not keep and m:
             tid, att = int(m.group(1)), int(m.group(2))
@@ -1994,6 +2105,25 @@ def start_loops() -> bool:
     _keep(asyncio.create_task(_forever("reaper", reaper_tick, REAPER_INTERVAL_S, initial_delay=20)))
     logger.info("managed training loops started (boot %s, dispatch=%s)", BOOT_ID[:8], SETTINGS.dispatch)
     return True
+
+
+# ---------------------------------------------------------------------------
+# credit_reconcile (§4.12, §9.5): report-only, its own periodic task (review 3 m7)
+# ---------------------------------------------------------------------------
+
+
+async def reconcile_tick() -> dict | None:
+    """Call the report-only ``credit_reconcile()`` and log ONE ERROR naming the four
+    counts when any is above 0. Writes nothing (two instances cannot race on it); a
+    human settles by hand. Started by main.py independent of TRAINING_DISPATCH."""
+    data = await asyncio.to_thread(rpc, "credit_reconcile", {})
+    row = (data or [{}])[0] if isinstance(data, list) else (data or {})
+    counts = {k: int(row.get(k) or 0) for k in ("o_unsettled", "o_orphans", "o_drift", "o_stale_open")}
+    if any(counts.values()):
+        logger.error("credit ledger reconcile: unsettled=%d orphans=%d drift=%d stale_open=%d "
+                     "(report only; settle by hand)", counts["o_unsettled"], counts["o_orphans"],
+                     counts["o_drift"], counts["o_stale_open"])
+    return counts
 
 
 def _has_nonterminal_managed() -> bool:

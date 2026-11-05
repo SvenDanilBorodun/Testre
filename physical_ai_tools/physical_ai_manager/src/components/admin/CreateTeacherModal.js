@@ -109,7 +109,7 @@ export default function CreateTeacherModal({ onClose, onSubmit }) {
         </label>
         <label className="block">
           <span className="text-xs font-medium text-[var(--ink-2)] mb-1.5 block">
-            Start-Credits (Pool)
+            Start-Stunden (Pool)
           </span>
           <input
             type="number"
@@ -120,7 +120,7 @@ export default function CreateTeacherModal({ onClose, onSubmit }) {
             max={10000}
           />
           <p className="text-[11px] text-[var(--ink-3)] mt-1.5 leading-snug">
-            Credits die der Lehrer an Schüler verteilen kann.
+            Stunden, die die Lehrkraft an Schülerinnen und Schüler verteilt. 1 Stunde = 1 Stunde GPU-Trainingszeit.
           </p>
         </label>
       </form>

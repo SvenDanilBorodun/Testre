@@ -1,14 +1,28 @@
+"""Teacher routes (``/teacher``): classrooms, students, their training hours and trainings.
+
+Training hours (migration 052, spec §8.3) are an append-only ledger: every summary
+is read from ``credit_accounts`` / ``credit_teacher_summary``, every change goes
+through a SECURITY DEFINER function (``credit_assign`` / ``credit_reclaim``), which
+judges ownership itself (P0066 → the German 404), and every change carries the
+client's ``request_id`` (a replay answers the same, a reuse for another change is
+P0071 → 409). No route here reads or writes ``users.training_credits`` (a dead
+column since 052). The history and account helpers here are shared by
+``routes/workgroups.py``, ``routes/admin.py`` and ``routes/me.py``.
+"""
+
 import logging
 import os
 import re
 import time
+import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from huggingface_hub import HfApi
 from huggingface_hub.utils import RepositoryNotFoundError
 from pydantic import BaseModel, Field
 
 from app.auth import get_current_teacher, get_user_profile
+from app.services import credit_texts_de as credit_texts
 from app.services.supabase_client import get_supabase
 from app.services.usernames import synthetic_email, validate_username
 from app.validators.workflow import validate_blockly_json
@@ -48,10 +62,6 @@ class PasswordReset(BaseModel):
     new_password: str = Field(..., min_length=6, max_length=128)
 
 
-class CreditsDelta(BaseModel):
-    delta: int = Field(..., ge=-1000, le=1000)
-
-
 class ClassroomSummary(BaseModel):
     id: str
     name: str
@@ -63,13 +73,18 @@ class StudentSummary(BaseModel):
     id: str
     username: str | None
     full_name: str | None
+    # 052: the legacy fields are derived from the hour account (free + reserved +
+    # spent, reserved + spent, free); the hour fields are what the dashboard shows.
     training_credits: int
     trainings_used: int
     remaining: int
+    hours_free: int = 0
+    hours_reserved: int = 0
+    hours_spent: int = 0
     classroom_id: str | None
     # When the student is in a workgroup, surface the group so the
-    # teacher dashboard can route credit edits to the group endpoint
-    # instead of poking adjust_student_credits (which would now reject).
+    # teacher dashboard can route hour edits to the group endpoint
+    # (credit_assign refuses a grouped student, P0023).
     workgroup_id: str | None = None
     workgroup_name: str | None = None
 
@@ -89,6 +104,12 @@ class TrainingSummary(BaseModel):
     # 028: full worker stdout in the private HF model repo (terminal
     # transitions only) — the teacher's failure-forensics artifact.
     log_url: str | None = None
+    # 052 (review m8): „Reserviert/Berechnet", the lost time, „Training stoppen".
+    managed: bool = False
+    reserved_hours: int | None = None
+    charged_hours: int | None = None
+    stop_requested_by_role: str | None = None
+    lost_seconds: int | None = 0
 
 
 class ClassroomDetail(BaseModel):
@@ -101,6 +122,9 @@ class ClassroomDetail(BaseModel):
 class CreditsResponse(BaseModel):
     new_amount: int
     pool_available: int
+    hours_free: int = 0
+    hours_reserved: int = 0
+    hours_spent: int = 0
 
 
 class WorkflowTemplateCreate(BaseModel):
@@ -140,7 +164,7 @@ def _assert_student_owned(teacher_id: str, student_id: str) -> dict:
     supabase = get_supabase()
     result = (
         supabase.table("users")
-        .select("id, username, full_name, training_credits, classroom_id, role")
+        .select("id, username, full_name, classroom_id, workgroup_id, role")
         .eq("id", student_id)
         .eq("role", "student")
         .execute()
@@ -154,59 +178,214 @@ def _assert_student_owned(teacher_id: str, student_id: str) -> dict:
     return student
 
 
-def _student_usage(student_id: str) -> int:
-    """Single-student active-training count. Used by callers that touch
-    one student at a time (create, patch). For list views, prefer
-    ``_batch_student_usage`` to avoid N+1.
-    """
-    supabase = get_supabase()
-    result = (
-        supabase.table("trainings")
-        .select("id", count="exact")
-        .eq("user_id", student_id)
-        .not_.in_("status", ["failed", "canceled"])
-        .execute()
-    )
-    return int(result.count or 0)
+# ---------- Training hours (052, spec §8.3) ----------
+
+ACCOUNT_COLUMNS = "kind, owner_id, parent_teacher_id, free, reserved, spent, member_hour_limit, closed_at"
 
 
-def _batch_student_usage(student_ids: list[str]) -> dict[str, int]:
-    """One round-trip to count active trainings for many students.
-
-    Replaces N separate ``count="exact"`` queries when rendering a
-    classroom roster — the dashboard's dominant cost.
-    """
-    if not student_ids:
+def credit_accounts(kind: str, owner_ids) -> dict:
+    """``credit_accounts`` rows of one kind for many owners, in one select (service-role
+    SELECT; an owner without an account is simply absent: no hours yet)."""
+    ids = [str(i) for i in owner_ids if i]
+    if not ids:
         return {}
-    supabase = get_supabase()
     rows = (
-        supabase.table("trainings")
-        .select("user_id")
-        .in_("user_id", student_ids)
-        .not_.in_("status", ["failed", "canceled"])
-        .execute()
+        get_supabase().table("credit_accounts").select(ACCOUNT_COLUMNS)
+        .eq("kind", kind).in_("owner_id", ids).execute()
     ).data or []
-    usage: dict[str, int] = {}
-    for r in rows:
-        uid = r.get("user_id")
-        if uid:
-            usage[uid] = usage.get(uid, 0) + 1
-    return usage
+    return {str(r["owner_id"]): r for r in rows}
+
+
+def hours_fields(acct: dict | None) -> dict:
+    """The hour fields of a summary and the legacy keys derived from them (§8.3)."""
+    acct = acct or {}
+    free, reserved, spent = int(acct.get("free") or 0), int(acct.get("reserved") or 0), int(acct.get("spent") or 0)
+    return {"hours_free": free, "hours_reserved": reserved, "hours_spent": spent,
+            "training_credits": free + reserved + spent, "trainings_used": reserved + spent, "remaining": free}
+
+
+def teacher_summary(teacher_id: str, sb=None) -> dict:
+    """``credit_teacher_summary`` (§4.13) as a dict (zeros for an empty answer). ``sb``: the
+    caller's client (routes/me.py passes its own)."""
+    data = (sb or get_supabase()).rpc("credit_teacher_summary", {"p_teacher_id": str(teacher_id)}).execute().data
+    rows = data if isinstance(data, list) else ([data] if data else [])
+    row = rows[0] if rows else {}
+    keys = ("o_free", "o_assigned_free", "o_assigned_reserved", "o_spent", "o_compensated",
+            "o_student_count", "o_group_count", "o_group_hours")
+    return {k[2:]: int(row.get(k) or 0) for k in keys}
+
+
+def pool_fields(summary: dict) -> dict:
+    """The teacher's pool readout with its pre-052 meaning (§8.6): available = free,
+    allocated = what sits in child accounts (free + reserved), total = both."""
+    allocated = summary["assigned_free"] + summary["assigned_reserved"]
+    return {"pool_total": summary["free"] + allocated, "allocated_total": allocated,
+            "pool_available": summary["free"], "student_count": summary["student_count"],
+            "group_count": summary["group_count"], "group_credits_total": summary["group_hours"],
+            "hours_spent": summary["spent"], "compensated": summary["compensated"]}
+
+
+def _pg_code(exc) -> str | None:
+    from app.services.training_dispatch import pg_code
+
+    return pg_code(exc)
+
+
+def parse_request_id(value) -> str | None:
+    """A client ``request_id`` (UUID) or None; anything else is a 400."""
+    if value is None:
+        return None
+    try:
+        return str(uuid.UUID(str(value)))
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=400, detail=credit_texts.CREDIT_CHANGE_FAILED_DE) from None
+
+
+def parse_delta(body, max_abs: int, range_detail: str) -> tuple[int, str | None]:
+    """``{delta: int, request_id?: uuid}``, validated by hand (a pydantic 422 is English)."""
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail=credit_texts.CREDIT_CHANGE_FAILED_DE)
+    delta = body.get("delta")
+    if type(delta) is not int:
+        raise HTTPException(status_code=400, detail=range_detail)
+    if delta == 0:
+        raise HTTPException(status_code=400, detail=credit_texts.DELTA_ZERO_DE)
+    if abs(delta) > max_abs:
+        raise HTTPException(status_code=400, detail=range_detail)
+    return delta, parse_request_id(body.get("request_id"))
+
+
+def change_hours(teacher_id: str, kind: str, target_id: str, delta: int, request_id: str | None,
+                 not_found_detail: str) -> dict:
+    """``credit_assign`` (delta > 0) or ``credit_reclaim(−delta)``, then the target account,
+    as the credits response (§8.3)."""
+    fn = "credit_assign" if delta > 0 else "credit_reclaim"
+    args = {"p_teacher_id": str(teacher_id), "p_target_kind": kind, "p_target_id": str(target_id),
+            "p_hours": abs(int(delta)), "p_request_id": request_id}
+    sb = get_supabase()
+    try:
+        call = sb.rpc("credit_assign", args) if delta > 0 else sb.rpc("credit_reclaim", args)
+        data = call.execute().data
+    except Exception as exc:
+        code = _pg_code(exc)
+        if code == "P0065":
+            raise HTTPException(status_code=409, detail=credit_texts.POOL_TOO_SMALL_DE)
+        if code == "P0064":
+            raise HTTPException(status_code=409, detail=credit_texts.RECLAIM_TOO_MUCH_DE)
+        if code == "P0023":
+            raise HTTPException(status_code=409, detail=credit_texts.GROUPED_STUDENT_DE)
+        if code == "P0071":
+            raise HTTPException(status_code=409, detail=credit_texts.REQUEST_REUSED_DE)
+        if code in ("P0066", "P0002"):
+            raise HTTPException(status_code=404, detail=not_found_detail)
+        logger.error("%s for %s %s failed: %s", fn, kind, target_id, type(exc).__name__)
+        raise HTTPException(status_code=500, detail=credit_texts.CREDIT_CHANGE_FAILED_DE)
+    row = (data or [{}])[0] if isinstance(data, list) else (data or {})
+    acct = credit_accounts(kind, [target_id]).get(str(target_id))
+    fields = hours_fields(acct)
+    return {"new_amount": int(row.get("o_target_free") if row.get("o_target_free") is not None
+                              else fields["hours_free"]),
+            "pool_available": int(row.get("o_teacher_free") or 0),
+            "hours_free": fields["hours_free"], "hours_reserved": fields["hours_reserved"],
+            "hours_spent": fields["hours_spent"]}
+
+
+def _account_side(row: dict) -> tuple[str | None, str | None]:
+    """The account a ledger row is ABOUT: its child side (student/group) when it has one,
+    else its teacher side (a grant/revoke of the pool)."""
+    for side in ("from", "to"):
+        if row.get(f"{side}_kind") in ("student", "group"):
+            return row[f"{side}_kind"], row.get(f"{side}_id")
+    for side in ("from", "to"):
+        if row.get(f"{side}_kind"):
+            return row[f"{side}_kind"], row.get(f"{side}_id")
+    return None, None
+
+
+def history_entry(row: dict, model_names: dict, *, admin: bool = False) -> dict:
+    """One ``credit_history`` row as the history entry of §8.3. A teacher's entry never
+    carries another user's id; an admin's carries the ids a compensation needs (§8.5)."""
+    meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+    kind = row.get("kind")
+    account_kind, account_id = _account_side(row)
+    tid = row.get("training_id")
+    entry = {
+        "id": row.get("id"), "at": row.get("at"), "kind": kind, "hours": row.get("hours"),
+        "account": account_kind, "training_id": tid,
+        "model_name": model_names.get(tid) if tid is not None else None,
+        "actor": row.get("actor_role"),
+        "reason": row.get("reason"),
+        "reason_erased": row.get("reason_id") is not None and row.get("reason") is None,
+        "stopped_by": None, "status": None, "lost_seconds": None, "losses": None, "waiver": None,
+        "limit_old": None, "limit_new": None,
+    }
+    if kind == "charge":
+        entry.update(stopped_by=meta.get("stopped_by"), status=meta.get("status"),
+                     lost_seconds=meta.get("lost_seconds"),
+                     losses=meta.get("losses") if isinstance(meta.get("losses"), list) else None,
+                     waiver=meta.get("waiver"))
+    elif kind == "limit_change":
+        entry.update(limit_old=meta.get("old"), limit_new=meta.get("new"))
+    if admin:
+        entry.update(account_kind=account_kind, account_id=account_id, member_id=row.get("member_id"),
+                     reason_id=row.get("reason_id"), actor_role=row.get("actor_role"))
+    return entry
+
+
+def parse_history_page(before, limit) -> tuple[int | None, int]:
+    """``?before=&limit=``: a ledger id and 1…200 (the database clamps too)."""
+    def _int(v, default):
+        if v is None or v == "":
+            return default
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=credit_texts.HISTORY_FAILED_DE) from None
+
+    b = _int(before, None)
+    lim = max(1, min(200, _int(limit, 100)))
+    return b, lim
+
+
+def history_payload(scope: str, owner_id: str, before, limit, *, admin: bool = False,
+                    refusals_user: str | None = None) -> dict:
+    """``{entries, refusals}`` (§8.3; refusals only for a student's history). Any read
+    failure is the 500 HISTORY_FAILED_DE."""
+    b, lim = parse_history_page(before, limit)
+    supabase = get_supabase()
+    try:
+        rows = supabase.rpc("credit_history", {
+            "p_scope": scope, "p_id": owner_id, "p_before": b, "p_limit": lim,
+        }).execute().data or []
+        tids = sorted({r["training_id"] for r in rows if r.get("training_id") is not None})
+        names = {}
+        if tids:
+            trows = supabase.table("trainings").select("id, model_name").in_("id", tids).execute().data or []
+            names = {t["id"]: t.get("model_name") for t in trows}
+        refusals = []
+        if refusals_user is not None:
+            refusals = (
+                supabase.table("training_start_refusals").select("at, request_kind, code, model_type")
+                .eq("user_id", str(refusals_user)).order("id", desc=True).limit(50).execute()
+            ).data or []
+    except Exception as exc:  # noqa: BLE001
+        logger.error("credit history (%s) failed: %s", scope, type(exc).__name__)
+        raise HTTPException(status_code=500, detail=credit_texts.HISTORY_FAILED_DE)
+    return {"entries": [history_entry(r, names, admin=admin) for r in rows],
+            "refusals": [{k: r.get(k) for k in ("at", "request_kind", "code", "model_type")} for r in refusals]}
 
 
 def _student_summary(
     row: dict,
     *,
-    usage: int | None = None,
+    account: dict | None = None,
     group_name_lookup: dict | None = None,
 ) -> StudentSummary:
-    """Build a StudentSummary.
-
-    Pass ``usage`` from a batched lookup when rendering many students;
-    otherwise this function falls back to a per-student count query.
-    """
-    credits = int(row.get("training_credits") or 0)
-    used = usage if usage is not None else _student_usage(row["id"])
+    """Build a StudentSummary from the users row and the student's hour account (pass the
+    batched ``account``; a single-student caller reads it here). A grouped student's
+    hours live in the group's account, so a grouped student reads 0 here."""
+    if account is None:
+        account = credit_accounts("student", [row["id"]]).get(str(row["id"]))
     workgroup_id = row.get("workgroup_id")
     workgroup_name = None
     if workgroup_id and group_name_lookup is not None:
@@ -229,9 +408,7 @@ def _student_summary(
         id=row["id"],
         username=row.get("username"),
         full_name=row.get("full_name"),
-        training_credits=credits,
-        trainings_used=used,
-        remaining=credits - used,
+        **hours_fields(account),
         classroom_id=row.get("classroom_id"),
         workgroup_id=workgroup_id,
         workgroup_name=workgroup_name,
@@ -309,7 +486,7 @@ async def get_classroom(classroom_id: str, teacher=Depends(get_current_teacher))
     supabase = get_supabase()
     students_raw = (
         supabase.table("users")
-        .select("id, username, full_name, training_credits, classroom_id, workgroup_id")
+        .select("id, username, full_name, classroom_id, workgroup_id")
         .eq("classroom_id", classroom_id)
         .eq("role", "student")
         .order("full_name", desc=False)
@@ -326,10 +503,8 @@ async def get_classroom(classroom_id: str, teacher=Depends(get_current_teacher))
             .execute()
         ).data or []
         group_lookup = {g["id"]: g["name"] for g in groups_raw}
-    # Single roundtrip for active-training counts instead of one count
-    # per student. With 30 students this drops the endpoint from 31+
-    # serial Supabase calls to 3 — the biggest dashboard speedup.
-    usage_lookup = _batch_student_usage([s["id"] for s in students_raw])
+    # One select for every student's hour account (052) instead of one per student.
+    accounts = credit_accounts("student", [s["id"] for s in students_raw])
     return ClassroomDetail(
         id=c["id"],
         name=c["name"],
@@ -337,7 +512,7 @@ async def get_classroom(classroom_id: str, teacher=Depends(get_current_teacher))
         students=[
             _student_summary(
                 s,
-                usage=usage_lookup.get(s["id"], 0),
+                account=accounts.get(str(s["id"])) or {},
                 group_name_lookup=group_lookup,
             )
             for s in students_raw
@@ -552,32 +727,30 @@ async def create_student(
             raise HTTPException(status_code=409, detail="Klassenzimmer voll (30 Schüler)")
         raise HTTPException(status_code=500, detail="Schüler-Profil konnte nicht gesetzt werden")
 
-    # Allocate initial credits via the RPC (enforces teacher-pool limits).
+    # The start hours (052): an assign from the teacher's pool, after the creation.
     if req.initial_credits > 0:
         try:
             supabase.rpc(
-                "adjust_student_credits",
+                "credit_assign",
                 {
                     "p_teacher_id": teacher["id"],
-                    "p_student_id": student_id,
-                    "p_delta": req.initial_credits,
+                    "p_target_kind": "student",
+                    "p_target_id": student_id,
+                    "p_hours": req.initial_credits,
+                    "p_request_id": None,
                 },
             ).execute()
         except Exception as e:
-            msg = str(e)
-            if "P0014" in msg:
-                # Pool exhausted — student is still created with 0 credits.
-                logger.warning("Insufficient pool when creating %s: %s", username, e)
-                raise HTTPException(
-                    status_code=409,
-                    detail="Schüler erstellt, aber Lehrer-Pool reicht nicht für die Startguthaben",
-                )
-            logger.error("Initial credit allocation failed: %s", e)
-            # Student still exists with 0 credits — return instead of failing.
+            if _pg_code(e) == "P0065":
+                # Pool too small — the student is still created, with 0 hours.
+                logger.warning("Insufficient pool when creating %s", username)
+                raise HTTPException(status_code=409, detail=credit_texts.STUDENT_CREATED_POOL_SHORT_DE)
+            logger.error("Initial hour assignment failed: %s", type(e).__name__)
+            # Student still exists with 0 hours — return instead of failing.
 
     row = (
         supabase.table("users")
-        .select("id, username, full_name, training_credits, classroom_id, workgroup_id")
+        .select("id, username, full_name, classroom_id, workgroup_id")
         .eq("id", student_id)
         .single()
         .execute()
@@ -615,7 +788,7 @@ async def patch_student(
 
     row = (
         supabase.table("users")
-        .select("id, username, full_name, training_credits, classroom_id, workgroup_id")
+        .select("id, username, full_name, classroom_id, workgroup_id")
         .eq("id", student_id)
         .single()
         .execute()
@@ -989,47 +1162,62 @@ async def reset_student_password(
 @router.post("/students/{student_id}/credits", response_model=CreditsResponse)
 async def adjust_credits(
     student_id: str,
-    req: CreditsDelta,
+    body: dict | None = Body(default=None),
     teacher=Depends(get_current_teacher),
 ):
+    """Assign (delta > 0) or reclaim (delta < 0) a student's hours (§8.3). Only free
+    hours can be reclaimed (P0064); a grouped student is managed through the group."""
     _assert_student_owned(teacher["id"], student_id)
-    if req.delta == 0:
-        raise HTTPException(status_code=400, detail="Delta darf nicht 0 sein")
-    supabase = get_supabase()
-    try:
-        result = supabase.rpc(
-            "adjust_student_credits",
-            {
-                "p_teacher_id": teacher["id"],
-                "p_student_id": student_id,
-                "p_delta": req.delta,
-            },
-        ).execute()
-    except Exception as e:
-        msg = str(e)
-        if "P0011" in msg:
-            raise HTTPException(status_code=403, detail="Schüler gehört nicht zu diesem Lehrer")
-        if "P0012" in msg:
-            raise HTTPException(
-                status_code=409,
-                detail="Neuer Betrag waere kleiner als bereits verbrauchte Credits",
-            )
-        if "P0013" in msg:
-            raise HTTPException(status_code=409, detail="Credits dürfen nicht negativ werden")
-        if "P0014" in msg:
-            raise HTTPException(status_code=409, detail="Lehrer hat nicht genug Credits im Pool")
-        if "P0023" in msg:
-            raise HTTPException(
-                status_code=409,
-                detail="Schüler ist in einer Arbeitsgruppe — bitte Credits über die Gruppe anpassen",
-            )
-        logger.error("adjust_student_credits failed: %s", e)
-        raise HTTPException(status_code=500, detail="Credit-Anpassung fehlgeschlagen")
-    row = (result.data or [{}])[0]
-    return CreditsResponse(
-        new_amount=int(row.get("new_amount", 0)),
-        pool_available=int(row.get("pool_available", 0)),
-    )
+    delta, request_id = parse_delta(body, 1000, credit_texts.TEACHER_DELTA_RANGE_DE)
+    return CreditsResponse(**change_hours(teacher["id"], "student", student_id, delta, request_id,
+                                          credit_texts.STUDENT_NOT_FOUND_DE))
+
+
+@router.get("/students/{student_id}/credit-history")
+async def student_credit_history(
+    student_id: str,
+    before: int | None = Query(default=None),
+    limit: int | None = Query(default=None),
+    teacher=Depends(get_current_teacher),
+):
+    """The student's hour history (scope ``student``: its own account and every row about
+    it as a group member) plus its newest 50 refused starts (§8.3)."""
+    _assert_student_owned(teacher["id"], student_id)
+    return history_payload("student", student_id, before, limit, refusals_user=student_id)
+
+
+@router.get("/credit-history")
+async def own_credit_history(
+    before: int | None = Query(default=None),
+    limit: int | None = Query(default=None),
+    teacher=Depends(get_current_teacher),
+):
+    """The teacher's own pool history (scope ``teacher``)."""
+    return history_payload("teacher", teacher["id"], before, limit)
+
+
+@router.post("/students/{student_id}/trainings/{training_id}/stop")
+async def stop_student_training(student_id: str, training_id: int, teacher=Depends(get_current_teacher)):
+    """„Training stoppen" (decision 13): the student's own „Abbrechen" path (§8.4) with
+    the teacher's role. A training of another student is the same German 404 (P0002)."""
+    from app.services import stop_actions
+    from app.services import training_texts_de as texts
+
+    _assert_student_owned(teacher["id"], student_id)
+    return await stop_actions.stop(training_id, owner=student_id, actor=teacher["id"], role="teacher",
+                                   note=texts.S32)
+
+
+@router.get("/students/{student_id}/trainings/{training_id}/stop-preview")
+async def student_training_stop_preview(student_id: str, training_id: int,
+                                        teacher=Depends(get_current_teacher)):
+    """The student preview's body for the teacher (same assert)."""
+    import asyncio
+
+    from app.routes.training import read_stop_preview
+
+    _assert_student_owned(teacher["id"], student_id)
+    return await asyncio.to_thread(read_stop_preview, training_id, student_id)
 
 
 @router.get("/students/{student_id}/trainings", response_model=list[TrainingSummary])
@@ -1045,7 +1233,7 @@ async def list_student_trainings(
             "id, status, dataset_name, model_name, model_type, "
             "current_step, total_steps, current_loss, "
             "requested_at, terminated_at, error_message, log_url, "
-            "workgroup_id"
+            "workgroup_id, managed, reserved_hours, charged_hours, stop_requested_by_role, lost_seconds"
         )
         .eq("user_id", student_id)
         .order("requested_at", desc=True)

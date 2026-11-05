@@ -84,6 +84,11 @@ class _Rpc:
         if self.sb.fail_rpc is not None:
             raise self.sb.fail_rpc
         p = self.params
+        if self.fn == "credit_quota":  # 052: PATCH /me's profile reads a student's quota
+            return SimpleNamespace(data=[{"o_role": "student", "o_account_kind": "student",
+                                          "o_account_id": p["p_user_id"], "o_free": 0, "o_reserved": 0,
+                                          "o_spent": 0, "o_member_limit": None, "o_member_used": None,
+                                          "o_next_hours": 0}])
         # Migration 045: a non-NULL p_expected_fp makes the write conditional,
         # atomically, on the row still holding exactly that fingerprint.
         expected = p.get("p_expected_fp")

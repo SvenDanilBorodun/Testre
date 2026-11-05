@@ -12,7 +12,10 @@ process's ``BOOT_ID``, renewed every ``PUBLISH_RENEW_S``):
   sha256 against the manifest (R4) → 3. validate (§3.5 JSON rules,
   ``act_config_summary``, config.json == train_config.policy, processor steps,
   state files; a refusal fails the row with S7 at once) → 4. our one own file,
-  ``edubotics_model_meta.json`` (the legacy worker's byte format), and, for a CAPPED/WALL_CAPPED publish, copy the checkpoint's 11 files to ``keep/`` and record the kept row (owner E36, ``_keep_checkpoint``) before any HF call → 5.
+  ``edubotics_model_meta.json`` (the legacy worker's byte format), and, for a cap-like publish
+  (``D.CAP_END_REASONS``: capped, wall_capped, and since 052 stopped, attempts_out, no_gpu,
+  content_refused), copy the checkpoint's 11 files to ``keep/`` and record the kept row
+  (owner E36, D6, Q-A, R3-1, ``_keep_checkpoint``) before any HF call → 5.
   ``create_repo(exist_ok)`` + ONE ``create_commit`` (8 root files, the 7 files
   under ``checkpoints/<step_id>/pretrained_model/``, the training log) → 6.
   read back every path (LFS sha256 + size; non-LFS git blob sha1) → 7.
@@ -457,12 +460,12 @@ def publish_sync(tid: int, attempt_no: int) -> str:
             expected[repo_path] = (hashlib.sha256(data).hexdigest(), len(data), git_blob_sha1(data))
         api, CommitOperationAdd = _hf()
         repo = row["model_name"]
+        end_reason = attempt.get("end_reason")
         if not capped:
             commit_message = f"EduBotics: trained model (training {int(tid)})"
-        elif attempt.get("end_reason") == D.END_WALL_CAPPED:
-            commit_message = f"EduBotics: model at step {step} of {total} (training {int(tid)}, 12 h limit)"
         else:
-            commit_message = f"EduBotics: model at step {step} of {total} (training {int(tid)}, time cap)"
+            why = _COMMIT_WHY.get(end_reason, "time cap")
+            commit_message = f"EduBotics: model at step {step} of {total} (training {int(tid)}, {why})"
         lease.check()
         try:
             api.create_repo(repo_id=repo, repo_type="model", exist_ok=True)
@@ -482,8 +485,7 @@ def publish_sync(tid: int, attempt_no: int) -> str:
         finish_args = {"p_training_id": int(tid), "p_attempt": int(attempt_no), "p_status": "succeeded",
                        "p_message": None, "p_log_url": log_url_for(repo) if log_path is not None else None}
         if capped:
-            note = (T.s29(step, total) if attempt.get("end_reason") == D.END_WALL_CAPPED
-                    else T.s23(D.SETTINGS.cap_s, step, total))
+            note = publish_note(row, end_reason, step, total)
             finish_args.update({"p_note": note, "p_final_step": step, "p_continuable_until": expires_at})
         try:
             D.rpc("finish_training", finish_args)
@@ -509,6 +511,34 @@ def publish_sync(tid: int, attempt_no: int) -> str:
     finally:
         lease.stop()
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# The commit message's reason per cap-like end (§9.3).
+_COMMIT_WHY = {
+    D.END_CAPPED: "time cap",
+    D.END_WALL_CAPPED: "12 h limit",
+    D.END_STOPPED: "stopped",
+    D.END_ATTEMPTS_OUT: "4 attempts",
+    D.END_NO_GPU: "no GPU",
+    D.END_CONTENT_REFUSED: "later checkpoint refused",
+}
+
+
+def publish_note(row, end_reason: str, step: int, total: int) -> str:
+    """The status_note a cap-like publish leaves on the succeeded row (§9.3): S33 when a
+    teacher stopped it, else S31; S35 / S36 / S38 for the give-up and content publishes;
+    S29 for the wall; S23 with the row's own limit for the cap."""
+    if end_reason == D.END_STOPPED:
+        return T.s33(step, total) if row.get("stop_requested_by_role") == "teacher" else T.s31(step, total)
+    if end_reason == D.END_ATTEMPTS_OUT:
+        return T.s35(step, total)
+    if end_reason == D.END_NO_GPU:
+        return T.s36(step, total)
+    if end_reason == D.END_CONTENT_REFUSED:
+        return T.s38(step, total)
+    if end_reason == D.END_WALL_CAPPED:
+        return T.s29(step, total)
+    return T.s23(D.limit_of(row), step, total)
 
 
 def janitor_row(tid: int) -> None:
@@ -561,6 +591,10 @@ async def recover_publish(row, attempt, now: float) -> str:
 # ---------------------------------------------------------------------------
 
 
+# A checkpoint is mirrored only while its training is active or succeeded.
+MIRROR_ROW_STATUSES = ("queued", "running", "succeeded")
+
+
 def mirror_sync(tid: int, attempt_no: int, step: int) -> str:
     lease = _Lease(_mirror_claim(tid, attempt_no, step))
     if not lease.acquire():
@@ -572,6 +606,11 @@ def mirror_sync(tid: int, attempt_no: int, step: int) -> str:
         ckpts = [c for c in D.read_checkpoints([tid], ["ready"])
                  if c["attempt_no"] == int(attempt_no) and c["step"] == int(step)]
         if not row or not ckpts or ckpts[0].get("mirrored_at"):
+            return "gone"
+        if row.get("status") not in MIRROR_ROW_STATUSES:
+            # 052 fix round 2: a failed, canceled or stopping training publishes nothing
+            # (claim_checkpoint_mirror refuses it in SQL too)
+            logger.info("training %s: mirror of step %s skipped, the row is %s", tid, step, row.get("status"))
             return "gone"
         ckpt = ckpts[0]
         try:

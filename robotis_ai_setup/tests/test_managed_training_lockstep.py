@@ -63,6 +63,7 @@ MIGRATIONS = SETUP / "supabase" / "migrations"
 MIGRATION_047 = MIGRATIONS / "20261020120000_047_hide_worker_token.sql"
 MIGRATION_049 = MIGRATIONS / "20261020130000_049_managed_training.sql"
 MIGRATION_050 = MIGRATIONS / "20261021120000_050_training_continuation.sql"
+MIGRATION_052 = MIGRATIONS / "20261028120000_052_credit_ledger.sql"
 LIVE_JS = (REPO_ROOT / "physical_ai_tools" / "physical_ai_manager" / "src" / "hooks"
            / "useSupabaseTrainings.js")
 MY_MODELS_JS = (REPO_ROOT / "physical_ai_tools" / "physical_ai_manager" / "src" / "components"
@@ -71,7 +72,7 @@ GERMAN_LINT_PY = REPO_ROOT / ".github" / "scripts" / "german_detail_lint.py"
 
 OWNERS = {
     ARTIFACT_VALIDATION_PY: "WP-A", TEXTS_PY: "WP-A", MIGRATION_047: "WP-A", MIGRATION_049: "WP-A",
-    MIGRATION_050: "v2.33.0 WP-B",
+    MIGRATION_050: "v2.33.0 WP-B", MIGRATION_052: "credit ledger implementer A",
     HANDLER_PY: "WP-B", CHUNK_ENGINE_PY: "WP-C", CLOUD_PROTOCOL_PY: "Cloud-Inferenz",
     LIVE_JS: "WP-C", MY_MODELS_JS: "WP-C", GERMAN_LINT_PY: "CI",
 }
@@ -110,21 +111,24 @@ def lerobot_step_id(step, total_steps):
     return f"{step:0{max(6, len(str(total_steps)))}d}"
 
 
-# §3.7, verbatim (templates keep their {placeholders}).
+# §3.7, verbatim (templates keep their {placeholders}); S4–S8, S18, S21, S23, S27 replaced and
+# S30–S40 added by the training-hour ledger (052, verbatim): no sentence
+# claims a refund any more, and an hour count is always hours_de's noun phrase.
 SENTENCES = {
     "S1": "GPU-Server ausgefallen – das Training wird ab Schritt {step} auf einem anderen Server fortgesetzt.",
     "S2": "GPU-Server ausgefallen – das Training startet auf einem anderen Server neu.",
     "S3": "Training fertig – das Modell wird geprüft und veröffentlicht …",
-    "S4": "Das Training konnte auch nach 4 Versuchen auf GPU-Servern nicht abgeschlossen werden und wurde "
-          "abgebrochen. Das Trainingsguthaben wurde erstattet – bitte starte das Training neu.",
-    "S5": "Das Training hat das Limit von {hours} Stunden Trainingszeit erreicht und wurde abgebrochen. "
-          "Das Trainingsguthaben wurde erstattet.",
-    "S6": "Das Training wurde nicht innerhalb von 12 Stunden fertig und wurde abgebrochen. "
-          "Das Trainingsguthaben wurde erstattet.",
-    "S7": "Das Modell hat die Sicherheitsprüfung nicht bestanden und wurde nicht veröffentlicht. "
-          "Das Trainingsguthaben wurde erstattet – bitte starte das Training neu.",
-    "S8": "Das Modell konnte nicht auf Hugging Face veröffentlicht werden. Das Trainingsguthaben wurde "
-          "erstattet – bitte starte das Training neu.",
+    "S4": "Das Training ist auf 4 GPU-Servern immer wieder abgebrochen, bevor ein Zwischenstand gespeichert war. "
+          "Wahrscheinlich liegt es am Datensatz – prüfe ihn im Tab Daten, bevor du neu startest. Berechnet wird "
+          "nur gespeicherte Trainingszeit.",
+    "S5": "Das Limit von {hours} Trainingszeit war erreicht, bevor ein Zwischenstand gespeichert wurde – das "
+          "Training wurde ohne Modell beendet. Berechnet wird nur gezählte Trainingszeit.",
+    "S6": "Das Training wurde nicht innerhalb von 12 Stunden fertig und hatte noch keinen Zwischenstand – es "
+          "wurde ohne Modell beendet. Berechnet wird nur gezählte Trainingszeit.",
+    "S7": "Das Modell hat die Sicherheitsprüfung nicht bestanden und wurde nicht veröffentlicht. Die bisherige "
+          "Trainingszeit wird berechnet.",
+    "S8": "Das Modell konnte nicht auf Hugging Face veröffentlicht werden. Die Trainingszeit wird berechnet – "
+          "bitte wende dich an deine Lehrkraft.",
     "S9": "Das Training ist fertig und wird gerade veröffentlicht – Abbrechen ist nicht mehr möglich.",
     "S10": "Der Trainings-Worker ist für dieses Training nicht mehr berechtigt.",
     "S11": "Die Dateiliste des Checkpoints ist ungültig.",
@@ -136,25 +140,47 @@ SENTENCES = {
            "gestartet – das Trainingsguthaben wurde erstattet.",
     "S17": "Das Modell enthält nicht erlaubte Verarbeitungsschritte und wird aus Sicherheitsgründen nicht "
            "geladen.",
-    "S18": "Zurzeit ist keine Cloud-GPU verfügbar. Das Trainingsguthaben wurde erstattet – bitte starte das "
-           "Training später neu.",
+    "S18": "Zurzeit ist keine Cloud-GPU verfügbar und es gibt noch keinen Zwischenstand – das Training wurde "
+           "beendet. Berechnet wird nur gespeicherte Trainingszeit, die übrigen reservierten Stunden sind wieder "
+           "frei.",
     "S19": "Das Training ist auf dem GPU-Server abgebrochen. Details stehen im Trainingsprotokoll.",
     "S20": "Dieser Datensatz kann nicht mit ACT trainiert werden: Kameras, Gelenkdaten oder Aktionen passen "
            "nicht zu dem, was der Roboter senden kann.",
-    "S21": "Der Abbruch konnte nicht an den GPU-Server übermittelt werden. Das Trainingsguthaben wurde "
-           "erstattet – bitte starte das Training neu.",
+    "S21": "Der Abbruch konnte nicht an den GPU-Server übermittelt werden; das Training wurde beendet. Berechnet "
+           "wird die Trainingszeit bis zum Abbruch.",
     "S22": "Zeitlimit erreicht – der letzte Zwischenstand wird geprüft und veröffentlicht …",
-    "S23": "Nach {hours} Stunden bei Schritt {step} von {total} gestoppt – du kannst das Training fortsetzen.",
+    "S23": "Nach {hours} bei Schritt {step} von {total} gestoppt – du kannst das Training fortsetzen.",
     "S24": "Der gespeicherte Zwischenstand ist abgelaufen oder nicht mehr nutzbar – das Training kann nicht "
            "mehr fortgesetzt werden. Bitte starte ein neues Training.",
     "S25": "Dieses Training wird bereits fortgesetzt.",
     "S26": "Dieses Training kann zurzeit nicht fortgesetzt werden.",
-    "S27": "Der gespeicherte Zwischenstand ist nicht mehr nutzbar. Das Trainingsguthaben wurde erstattet – "
-           "bitte starte das Training neu.",
+    "S27": "Der gespeicherte Zwischenstand ist nicht mehr nutzbar – die Fortsetzung wurde beendet. Berechnet "
+           "wird nur ihre tatsächliche Trainingszeit.",
     "S28": "Fortsetzung ab Schritt {step} – ein GPU-Server wird dafür gesucht …",
     "S29": "Das Zeitlimit von 12 Stunden seit dem Start wurde bei Schritt {step} von {total} erreicht – "
            "du kannst das Training fortsetzen.",
+    "S30": "Training gestoppt – der letzte Zwischenstand wird geprüft und veröffentlicht …",
+    "S31": "Bei Schritt {step} von {total} gestoppt – du kannst das Training fortsetzen.",
+    "S32": "Von deiner Lehrkraft gestoppt – der letzte Zwischenstand wird geprüft und veröffentlicht …",
+    "S33": "Von deiner Lehrkraft bei Schritt {step} von {total} gestoppt – du kannst das Training fortsetzen.",
+    "S34": "Das Training kann nicht weiterlaufen – der letzte Zwischenstand wird geprüft und veröffentlicht …",
+    "S35": "Nach 4 Versuchen auf GPU-Servern wurde das Training bei Schritt {step} von {total} beendet – du "
+           "kannst es fortsetzen.",
+    "S36": "Zurzeit ist keine Cloud-GPU frei – das Training wurde bei Schritt {step} von {total} beendet. Du "
+           "kannst es später fortsetzen.",
+    "S37": "Das Training konnte auch nach 4 Versuchen nicht abgeschlossen werden, weil die GPU-Server "
+           "ausgefallen sind. Berechnet wird nur gespeicherte Trainingszeit – bitte starte das Training neu.",
+    "S38": "Ein späterer Zwischenstand hat die Sicherheitsprüfung nicht bestanden – veröffentlicht wurde der "
+           "letzte gültige bei Schritt {step} von {total}. Du kannst das Training fortsetzen.",
+    "S39": "Der GPU-Server hat zu lange keinen Zwischenstand gespeichert – das Training wird ab Schritt {step} "
+           "auf einem anderen Server fortgesetzt.",
+    "S40": "Der GPU-Server hat zu lange keinen Zwischenstand gespeichert – das Training startet auf einem "
+           "anderen Server neu.",
 }
+# S16 is the one sentence that still names a refund: only the legacy worker writes it, and no
+# 052 row reaches that worker (every 052 start is a managed ACT row; `legacy` dispatch refuses
+# new starts).
+REFUND_SENTENCES = frozenset({"S16"})
 # The two sentences with neither an umlaut nor a word of german_detail_lint's GERMAN_WORDS. The lint
 # itself classifies such a string as neither language and accepts it (ENGLISH is judged only on
 # strings that do not classify as German); they are pinned verbatim above. The marker rule below
@@ -986,7 +1012,7 @@ class TheSentencesAreTheContract(unittest.TestCase):
     def test_every_sentence_is_the_spec_text(self):
         texts = _texts(self)
         numbered = {n for n in texts if re.fullmatch(r"S\d+", n)}
-        self.assertEqual(numbered, set(SENTENCES), "training_texts_de defines exactly S1 … S29")
+        self.assertEqual(numbered, set(SENTENCES), "training_texts_de defines exactly S1 … S40")
         for name, want in SENTENCES.items():
             self.assertEqual(texts[name], want, name)
 
@@ -1017,10 +1043,20 @@ class TheSentencesAreTheContract(unittest.TestCase):
         self.assertEqual(len(found), 1, "MyModels.js defines ERROR_MESSAGE_MAX_CHARS once, as a literal")
         limit = int(found[0])
         for name, text in SENTENCES.items():
-            widest = (text.replace("{step}", "500.000").replace("{hours}", "999,5")
+            widest = (text.replace("{step}", "500.000").replace("{hours}", "999,5 Stunden")
                       .replace("{total}", "500.000"))
             self.assertNotIn("{", widest, name)
             self.assertLessEqual(len(widest), limit, f"{name} would be cut on the models card")
+
+    def test_no_sentence_claims_a_refund_any_more(self):
+        """052: a training's hours are settled, never refunded; only the
+        legacy worker's S16 keeps its old wording."""
+        texts = _texts(self)
+        for name in SENTENCES:
+            text = texts[name] if name in texts else SENTENCES[name]
+            claims = "erstattet" in text or "Trainingsguthaben" in text
+            self.assertEqual(claims, name in REFUND_SENTENCES, name)
+            self.assertNotIn("1 Stunden", text.replace("{hours}", "1 Stunde"), name)
 
     def test_the_rule_holds_for_the_contract_texts_themselves(self):
         gdl = _german_lint()
@@ -1093,18 +1129,22 @@ class TheLiveColumnsAreGranted(unittest.TestCase):
     def test_every_live_column_is_granted_and_the_token_never(self):
         live = self._live_columns()
         self.assertNotIn("*", "".join(live))
-        g047, g049, g050 = (self._granted(MIGRATION_047), self._granted(MIGRATION_049),
-                            self._granted(MIGRATION_050))
-        granted = g047 | g049 | g050
+        g047, g049, g050, g052 = (self._granted(MIGRATION_047), self._granted(MIGRATION_049),
+                                  self._granted(MIGRATION_050), self._granted(MIGRATION_052))
+        granted = g047 | g049 | g050 | g052
         self.assertTrue(g047, "047 grants no column list on trainings")
         self.assertIn("status_note", g049, "049 grants status_note")
         # 050's three continuation columns (owner E32–E37) are granted by name.
         for col in ("capped_step", "continuable_until", "continued_from"):
             self.assertIn(col, g050, f"050 grants {col}")
             self.assertIn(col, live, f"LIVE_COLUMNS selects {col}")
+        # 052's four ledger columns are granted by name and read live.
+        for col in ("reserved_hours", "charged_hours", "stop_requested_by_role", "lost_seconds"):
+            self.assertIn(col, g052, f"052 grants {col}")
+            self.assertIn(col, live, f"LIVE_COLUMNS selects {col}")
         self.assertNotIn("worker_token", granted)
         self.assertEqual([c for c in live if c not in granted], [],
-                         "a column the live read selects is granted by none of 047/049/050 (42501 for students)")
+                         "a column the live read selects is granted by none of 047/049/050/052 (42501 for students)")
 
 
 class TheMatchersHaveTeeth(unittest.TestCase):

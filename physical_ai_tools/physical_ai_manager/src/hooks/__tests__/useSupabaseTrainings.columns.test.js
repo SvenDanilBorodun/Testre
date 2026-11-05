@@ -52,6 +52,8 @@ const EXPECTED = [
   'last_progress_at', 'workgroup_id', 'status_note',
   // 050: the three continuation columns (owner E32–E37), granted by name.
   'capped_step', 'continuable_until', 'continued_from',
+  // 052: the training hours (credit system v2), granted by name.
+  'reserved_hours', 'charged_hours', 'stop_requested_by_role', 'lost_seconds',
 ];
 
 describe('useSupabaseTrainings LIVE_COLUMNS', () => {

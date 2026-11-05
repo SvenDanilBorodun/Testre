@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import toast from 'react-hot-toast';
 import Modal from './Modal';
 import { Btn } from '../EbUI';
+import { numberDe } from '../../utils/hoursDe';
 
 const inputClass =
   'w-full h-10 px-3 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-sm text-[var(--ink)] placeholder:text-[var(--ink-4)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-wash)] transition';
@@ -114,7 +115,7 @@ export default function CreateStudentModal({ onClose, onSubmit, poolAvailable })
         </label>
         <label className="block">
           <span className="text-xs font-medium text-[var(--ink-2)] mb-1.5 block">
-            Start-Credits
+            Start-Stunden
           </span>
           <input
             type="number"
@@ -126,7 +127,7 @@ export default function CreateStudentModal({ onClose, onSubmit, poolAvailable })
           />
           {poolAvailable !== null && poolAvailable !== undefined && (
             <p className="text-[11px] text-[var(--ink-3)] mt-1.5 leading-snug">
-              Verfügbar im Pool: <span className="font-mono">{poolAvailable}</span>
+              {`Frei im Lehrer-Pool: ${numberDe(poolAvailable)} Std.`}
             </p>
           )}
         </label>

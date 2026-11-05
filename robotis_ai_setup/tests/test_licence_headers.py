@@ -126,6 +126,44 @@ class LicenceHeaders(unittest.TestCase):
         self.assertGreaterEqual(count, 120)
 
 
+UPSTREAM = "b0b601fa"  # the commit that absorbed open_manipulator/ and physical_ai_tools/
+
+
+def _upstream(rel: str):
+    """The file's bytes at the absorb commit, or None (no history, or no such path)."""
+    import subprocess
+    r = subprocess.run(["git", "-C", str(REPO), "show", f"{UPSTREAM}:{rel}"], capture_output=True)
+    return r.stdout if r.returncode == 0 else None
+
+
+def _history_available() -> bool:
+    import subprocess
+    return subprocess.run(["git", "-C", str(REPO), "cat-file", "-e", f"{UPSTREAM}^{{commit}}"],
+                          capture_output=True).returncode == 0
+
+
+@unittest.skipUnless(_history_available(), f"needs git history with {UPSTREAM} (CI's shallow checkout has none)")
+class ModificationLinesAreTrue(unittest.TestCase):
+    """A modification line means EduBotics changed the file's CONTENT: with the
+    line taken out, the file must differ from its absorbed upstream version."""
+
+    def test_no_modification_line_on_an_unchanged_upstream_file(self):
+        checked = 0
+        for path in _sources():
+            raw = path.read_bytes()
+            if MODIFICATIONS.encode() not in raw:
+                continue
+            rel = path.relative_to(REPO).as_posix()
+            old = _upstream(rel)
+            if old is None:  # a file split out of, or copied from, an upstream file elsewhere
+                continue
+            checked += 1
+            without = b"\n".join(l for l in raw.split(b"\n") if MODIFICATIONS.encode() not in l)
+            with self.subTest(file=rel):
+                self.assertNotEqual(without, old, "byte-identical to upstream: no modification line")
+        self.assertGreater(checked, 50)
+
+
 class FontLicences(unittest.TestCase):
     def test_every_shipped_font_has_its_licence(self):
         fonts = REPO / "physical_ai_tools" / "physical_ai_manager" / "public" / "fonts"

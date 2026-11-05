@@ -6,6 +6,16 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### 2026-11-05 — V1 Servo-Station: brought up to v2.37.0, its migration renumbered 052 → 053
+
+**Why.** The station branch was cut on v2.36.0 and named its migration `20261026120000_052_servo_calibration_records`.
+v2.37.0 then shipped `20261028120000_052_credit_ledger` to production. Two migrations labelled 052, the station's with
+the OLDER timestamp, would have made `supabase db push --include-all` apply the station's migration out of order
+beside a different 052. **What changed.** `origin/main` (f964555e) merged into the branch (conflicts in docs and
+`.gitleaksignore` only; no code overlap); the migration, its rollback, its assertions and its text test renamed to 053
+with timestamp `20261105120000`, so it sorts after the credit ledger, and every station reference renamed with them
+(the station's German „Migration 053 fehlt" included). The dated entries below still say 052: that is history.
+
 ### v2.37.0, 2026-11-01 (build) — the training-hour ledger (migration 052)
 
 **Why.** At v2.36.0 a training credit was not a record: `start_training_safe` / `get_remaining_credits` counted

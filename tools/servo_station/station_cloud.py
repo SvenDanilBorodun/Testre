@@ -2,7 +2,7 @@
 
 The bench PC never holds a service-role key. The station signs in as an ADMIN
 account over Supabase Auth's password grant (``<username>@edubotics.local``,
-the cloud API's synthetic-email scheme) and calls migration 052's
+the cloud API's synthetic-email scheme) and calls migration 053's
 ``submit_servo_calibration_record`` RPC with that JWT; the RPC refuses every
 non-admin with 42501. The access and refresh tokens live in this object's
 memory only; the password is used for the one sign-in request and kept

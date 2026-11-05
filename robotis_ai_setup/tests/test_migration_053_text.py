@@ -1,15 +1,15 @@
-"""Migration 052 (servo_calibration_records + the admin-gated upload RPC) and its
+"""Migration 053 (servo_calibration_records + the admin-gated upload RPC) and its
 rollback, read as text.
 
 The behaviour is proven by hand on a local stack by
-``supabase/tests/052_servo_calibration_records_assertions.sql`` (12 PASS); what is
+``supabase/tests/053_servo_calibration_records_assertions.sql`` (12 PASS); what is
 pinned here, deps-free and in CI, is the shape a careless edit would break (Rule
 §4): the table's CHECKs, RLS on with no policy and every request-role privilege
 revoked, the RPC SECURITY DEFINER with a pinned search_path whose FIRST statement
 is the admin gate (42501), EXECUTE for authenticated + service_role only, the
 closing self-check, the serial pattern equal to the servo spec's and the
 station's, the rollback refusing while rows exist and dropping in dependency
-order — and that the cloud API never learned about the table (owner R4-2: 052 is
+order — and that the cloud API never learned about the table (owner R4-2: 053 is
 not in the boot schema probe).
 """
 
@@ -24,10 +24,10 @@ import unittest
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 _SUPABASE = _ROOT / 'supabase'
 _MIG = _SUPABASE / 'migrations'
-M051 = _MIG / '20261025120000_051_trajectory_robot_profile_v1.sql'
-M052 = _MIG / '20261026120000_052_servo_calibration_records.sql'
-R052 = _SUPABASE / 'rollback' / '20261026120000_052_servo_calibration_records_rollback.sql'
-A052 = _SUPABASE / 'tests' / '052_servo_calibration_records_assertions.sql'
+M052_CREDIT = _MIG / '20261028120000_052_credit_ledger.sql'  # main's 052; the station's migration was renumbered after it
+M053 = _MIG / '20261105120000_053_servo_calibration_records.sql'
+R053 = _SUPABASE / 'rollback' / '20261105120000_053_servo_calibration_records_rollback.sql'
+A053 = _SUPABASE / 'tests' / '053_servo_calibration_records_assertions.sql'
 _API = _ROOT / 'cloud_training_api'
 
 sys.path.insert(0, str(_ROOT / 'docker' / 'open_manipulator'))
@@ -55,23 +55,24 @@ def _function_body(code: str) -> str:
 
 class FilesAndOrder(unittest.TestCase):
     def test_every_file_exists(self):
-        for p in (M052, R052, A052):
+        for p in (M053, R053, A053):
             self.assertTrue(p.is_file(), p)
 
-    def test_052_sorts_after_051(self):
-        self.assertGreater(M052.name, M051.name)
-        later = [p.name for p in _MIG.glob('*.sql') if p.name > M052.name]
+    def test_053_sorts_after_the_credit_ledger_052(self):
+        self.assertTrue(M052_CREDIT.is_file(), M052_CREDIT)
+        self.assertGreater(M053.name, M052_CREDIT.name)
+        later = [p.name for p in _MIG.glob('*.sql') if p.name > M053.name]
         self.assertEqual(later, [])
 
     def test_the_migration_is_one_transaction(self):
-        code = _code(_read(M052))
+        code = _code(_read(M053))
         self.assertEqual(code.count('BEGIN;'), 1)
         self.assertTrue(code.rstrip().endswith('COMMIT;'))
 
 
-class Table052(unittest.TestCase):
+class Table053(unittest.TestCase):
     def setUp(self):
-        self.code = _code(_read(M052))
+        self.code = _code(_read(M053))
 
     def test_the_serial_check_is_the_spec_pattern(self):
         self.assertEqual(fss.SERVO_SERIAL_PATTERN, r'^V1S-[0-9]{6}$')
@@ -113,9 +114,9 @@ class Table052(unittest.TestCase):
         self.assertIn('BEFORE UPDATE ON public.servo_calibration_records', self.code)
 
 
-class Function052(unittest.TestCase):
+class Function053(unittest.TestCase):
     def setUp(self):
-        self.code = _code(_read(M052))
+        self.code = _code(_read(M053))
         self.body = _function_body(self.code)
 
     def test_security_definer_with_a_pinned_search_path(self):
@@ -174,9 +175,9 @@ class Function052(unittest.TestCase):
         self.assertIn(f"NOT has_function_privilege('authenticated', '{_FN_SIG}', 'EXECUTE')", tail)
 
 
-class Rollback052(unittest.TestCase):
+class Rollback053(unittest.TestCase):
     def setUp(self):
-        self.raw = _read(R052)
+        self.raw = _read(R053)
         self.code = _code(self.raw)
 
     def test_the_header_says_the_api_does_not_use_it(self):
@@ -201,8 +202,8 @@ class Rollback052(unittest.TestCase):
 
 
 class TheApiDoesNotKnowTheTable(unittest.TestCase):
-    """Owner R4-2: the cloud API never reads the table, so 052 stays out of its
-    boot schema probe (the counts stay 19/18/46, test_schema_probe_040.py)."""
+    """Owner R4-2: the cloud API never reads the table, so 053 stays out of its
+    boot schema probe (the counts stay 23/23/56, test_schema_probe_040.py)."""
 
     def test_no_api_file_names_it(self):
         hits = []

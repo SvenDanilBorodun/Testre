@@ -2,7 +2,7 @@
 
 The local record file is the COMMIT POINT of a calibration (spec §5A L): a
 servo without ``records/<serial>.json`` is not calibrated, whatever its EEPROM
-says; the cloud copy (migration 052) is only a copy. So every JSON file is
+says; the cloud copy (migration 053) is only a copy. So every JSON file is
 written atomically (temp file in the same directory → flush → fsync →
 ``os.replace``), a re-calibration moves the previous record to ``history/``
 before its first write to the servo and nothing is ever deleted, and the CSV

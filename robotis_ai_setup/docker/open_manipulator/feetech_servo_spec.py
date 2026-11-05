@@ -47,7 +47,7 @@ JOINT_LABEL_DE = ('Gelenk 1 – Basis', 'Gelenk 2 – Schulter', 'Gelenk 3 – E
                   'Gelenk 4 – Handgelenk', 'Gelenk 5 – Drehung', 'Greifer')
 COLOUR_DE = ('weiß', 'gelb', 'orange', 'grün', 'blau', 'rot')
 COLOUR_HEX = ('#FFFFFF', '#FFD400', '#FF8C00', '#2EAD4B', '#1E6FD9', '#D7263D')
-SERVO_SERIAL_PATTERN = r'^V1S-[0-9]{6}$'                                  # migration 052's CHECK repeats it
+SERVO_SERIAL_PATTERN = r'^V1S-[0-9]{6}$'                                  # migration 053's CHECK repeats it
 CAP_LABEL_PATTERN = r'^KAPPE-(J15|GR)-[A-X0-9]{1,4}$'                       # no Y/Z: a US-configured scanner on a German layout swaps them
 TICK_DIRECTION_CCW = 1
 TICK_DIRECTION_CW = -1

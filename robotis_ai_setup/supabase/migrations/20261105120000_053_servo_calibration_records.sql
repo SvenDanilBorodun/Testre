@@ -1,11 +1,11 @@
--- 052 — servo_calibration_records: one row per calibrated V1 servo, uploaded by
+-- 053 — servo_calibration_records: one row per calibrated V1 servo, uploaded by
 -- the vendor's Servo-Station (tools/servo_station/, build spec S9).
 --
 -- The station's LOCAL record file is the commit point (records/<serial>.json on
 -- the bench PC); this table is the server copy, so a servo returned by a school
 -- can be looked up by the serial on its label. Nothing deployed reads it: the
 -- cloud API never touches the table or the RPC (the station talks to PostgREST
--- directly), so 052 is deliberately NOT in the API's boot schema probe (owner
+-- directly), so 053 is deliberately NOT in the API's boot schema probe (owner
 -- R4-2; CLAUDE.md leaves objects with no API-visible shape unprobed, like
 -- 043/044/046/047).
 --
@@ -28,9 +28,9 @@
 -- newer), so two concurrent FIRST uploads of one serial serialise on the
 -- primary key and the newer one wins whatever the order.
 --
--- Rollback: rollback/20261026120000_052_servo_calibration_records_rollback.sql
+-- Rollback: rollback/20261105120000_053_servo_calibration_records_rollback.sql
 -- (refuses while rows exist; stop uploading from the Servo-Station first).
--- Hand-run assertions: supabase/tests/052_servo_calibration_records_assertions.sql.
+-- Hand-run assertions: supabase/tests/053_servo_calibration_records_assertions.sql.
 -- Idempotent — re-runnable.
 
 BEGIN;
@@ -65,7 +65,7 @@ REVOKE ALL ON TABLE public.servo_calibration_records FROM PUBLIC, anon, authenti
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.servo_calibration_records TO service_role;
 
 COMMENT ON TABLE public.servo_calibration_records IS
-    'One row per calibrated V1 servo, uploaded by the vendor Servo-Station through submit_servo_calibration_record (052). Service-role only: RLS on, no policies, no anon/authenticated grants. Not in Realtime. The station''s local record file is the commit point.';
+    'One row per calibrated V1 servo, uploaded by the vendor Servo-Station through submit_servo_calibration_record (053). Service-role only: RLS on, no policies, no anon/authenticated grants. Not in Realtime. The station''s local record file is the commit point.';
 
 -- updated_at maintenance (the 036 idiom).
 CREATE OR REPLACE FUNCTION public.servo_calibration_records_touch()
@@ -165,7 +165,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.submit_servo_calibration_record(jsonb) IS
-    'SECURITY DEFINER, admin only (42501 otherwise): upsert one Servo-Station calibration record, unless a newer one is stored (052).';
+    'SECURITY DEFINER, admin only (42501 otherwise): upsert one Servo-Station calibration record, unless a newer one is stored (053).';
 
 REVOKE ALL ON FUNCTION public.submit_servo_calibration_record(jsonb) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.submit_servo_calibration_record(jsonb) TO authenticated, service_role;
@@ -202,15 +202,15 @@ BEGIN
   FOREACH v_role IN ARRAY ARRAY['anon', 'authenticated'] LOOP
     FOREACH v_priv IN ARRAY ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'] LOOP
       IF has_table_privilege(v_role, 'public.servo_calibration_records', v_priv) THEN
-        RAISE EXCEPTION '052: % still holds % on servo_calibration_records', v_role, v_priv;
+        RAISE EXCEPTION '053: % still holds % on servo_calibration_records', v_role, v_priv;
       END IF;
     END LOOP;
   END LOOP;
   IF has_function_privilege('anon', 'public.submit_servo_calibration_record(jsonb)', 'EXECUTE') THEN
-    RAISE EXCEPTION '052: anon can execute submit_servo_calibration_record';
+    RAISE EXCEPTION '053: anon can execute submit_servo_calibration_record';
   END IF;
   IF NOT has_function_privilege('authenticated', 'public.submit_servo_calibration_record(jsonb)', 'EXECUTE') THEN
-    RAISE EXCEPTION '052: authenticated cannot execute submit_servo_calibration_record';
+    RAISE EXCEPTION '053: authenticated cannot execute submit_servo_calibration_record';
   END IF;
 END $$;
 

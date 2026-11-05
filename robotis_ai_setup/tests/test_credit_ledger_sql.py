@@ -214,7 +214,9 @@ class FilesAndOrder(unittest.TestCase):
 
     def test_052_sorts_after_051(self):
         self.assertGreater(M052.name, M051.name)
-        self.assertEqual(sorted(p.name for p in _MIG.glob("*.sql"))[-1], M052.name)
+        # 052 comes right after 051; a later migration (053, the Servo-Station's) may follow it.
+        names = sorted(p.name for p in _MIG.glob("*.sql"))
+        self.assertEqual(names.index(M052.name), names.index(M051.name) + 1)
 
     def test_one_transaction_each(self):
         for p in (M052, R052):

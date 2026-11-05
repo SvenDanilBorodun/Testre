@@ -1,9 +1,9 @@
--- Rollback for 052 — drop servo_calibration_records and its upload RPC.
+-- Rollback for 053 — drop servo_calibration_records and its upload RPC.
 --
 -- The cloud API does not use this table (not in its boot probe), so there is no
 -- API step: stop uploading from the Servo-Station first, its local records stay
 -- the commit point (records/<serial>.json on the bench PC); a station that
--- uploads afterwards is told „Migration 052 fehlt" and keeps its records queued.
+-- uploads afterwards is told „Migration 053 fehlt" and keeps its records queued.
 --
 -- NOT SAFE TO RUN BLIND: rows are calibration evidence. This script REFUSES
 -- while the table holds any row — export them first (as service_role:

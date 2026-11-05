@@ -199,7 +199,7 @@ Stichproben.
 
 Jeder Datensatz wird nach dem Speichern hochgeladen, wenn ein Admin angemeldet ist; sonst wartet er
 („… Datensätze warten auf das Hochladen") bis „Jetzt hochladen". Die Datenbank-Funktion
-(`submit_servo_calibration_record`, Migration 052) nimmt nur Admin-Anmeldungen an und überschreibt nie einen
+(`submit_servo_calibration_record`, Migration 053) nimmt nur Admin-Anmeldungen an und überschreibt nie einen
 neueren Datensatz. Ein abgelehnter Datensatz wird nicht wieder gesendet und erscheint als „abgelehnt".
 **Maßgeblich ist immer die Datei auf dem Prüf-PC**, die Cloud hält eine Kopie. Nach einer abgebrochenen
 Neu-Kalibrierung zeigt die Cloud noch die frühere Kalibrierung, bis der nächste erfolgreiche Datensatz dieses

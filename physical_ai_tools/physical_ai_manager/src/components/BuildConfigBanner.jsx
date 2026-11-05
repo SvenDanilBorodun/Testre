@@ -1,6 +1,7 @@
-// Copyright 2025 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License").
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 //
 // Renders a high-contrast banner at the top of the app whenever the Docker
 // build was missing one of the React build args (REACT_APP_SUPABASE_URL,

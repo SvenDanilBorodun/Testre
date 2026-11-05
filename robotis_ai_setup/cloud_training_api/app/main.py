@@ -38,7 +38,22 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="EduBotics Cloud Training API")
+
+def _api_docs_kwargs() -> dict:
+    """FastAPI keyword arguments for the interactive docs and the schema.
+
+    Off unless ``EDUBOTICS_API_DOCS=1``: FastAPI's defaults served /docs,
+    /redoc and /openapi.json to anyone on the internet, listing every route,
+    the admin and worker ones included. A developer turns them back on locally
+    with the variable (``.env`` works, load_dotenv ran above); production
+    never sets it.
+    """
+    if os.environ.get("EDUBOTICS_API_DOCS", "").strip() == "1":
+        return {}
+    return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+
+
+app = FastAPI(title="EduBotics Cloud Training API", **_api_docs_kwargs())
 
 
 def _validate_required_secrets() -> None:

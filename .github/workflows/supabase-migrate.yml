@@ -84,7 +84,12 @@ jobs:
           persist-credentials: false
       - uses: supabase/setup-cli@52a446718e4edd1a9f1e2631186019c87e329f60  # v2.1.0
         with:
-          version: latest
+          # Pinned, never `latest`: these jobs hold the access token and the
+          # database password. 2.122.0 is the CLI the last production apply
+          # used (run 41416915519, 2026-11-02); `latest` had moved to the major
+          # 3.0.0 hours later. Bump all four copies together
+          # (tests/test_ci_supply_chain_pins.py).
+          version: 2.122.0
       - name: List migrations to be applied
         working-directory: robotis_ai_setup/supabase
         run: |
@@ -130,7 +135,7 @@ jobs:
           persist-credentials: false
       - uses: supabase/setup-cli@52a446718e4edd1a9f1e2631186019c87e329f60  # v2.1.0
         with:
-          version: latest
+          version: 2.122.0  # pinned: see the first setup-cli step
       - name: Link to the production project (creates branches under it)
         working-directory: robotis_ai_setup/supabase
         run: supabase link --project-ref ${{ secrets.SUPABASE_PROJECT_REF }} --password ""
@@ -226,7 +231,7 @@ jobs:
           persist-credentials: false
       - uses: supabase/setup-cli@52a446718e4edd1a9f1e2631186019c87e329f60  # v2.1.0
         with:
-          version: latest
+          version: 2.122.0  # pinned: see the first setup-cli step
       - name: Link
         working-directory: robotis_ai_setup/supabase
         run: supabase link --project-ref ${{ secrets.SUPABASE_PROJECT_REF }} --password ""
@@ -254,7 +259,7 @@ jobs:
           persist-credentials: false
       - uses: supabase/setup-cli@52a446718e4edd1a9f1e2631186019c87e329f60  # v2.1.0
         with:
-          version: latest
+          version: 2.122.0  # pinned: see the first setup-cli step
       - name: Link to production
         # `link` writes .supabase/temp/project-ref locally. Pass --password ""
         # to skip the interactive DB-password prompt — the actual db push

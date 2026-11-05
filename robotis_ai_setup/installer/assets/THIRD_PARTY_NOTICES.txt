@@ -1,0 +1,129 @@
+EduBotics – Hinweise zu Bestandteilen Dritter und Angebot zum Quellcode
+Third-party notices and written offer for source code
+Stand: 5. November 2026
+
+Herausgeber / Distributor:
+  Sven Danil Borodun (EduBotics)
+  Unsuhrstrasse 10, 45325 Essen, Deutschland
+  E-Mail: svendanilborodun@gmail.com
+
+EduBotics selbst steht unter dem EduBotics-Endnutzer-Lizenzvertrag
+(im Installationsordner LICENSE.txt, im Download-Repository LICENSE).
+Die Software enthält und installiert
+Bestandteile Dritter. Für sie gelten ausschließlich ihre eigenen Lizenzen;
+der EduBotics-Lizenzvertrag schränkt die Rechte, die Ihnen diese Lizenzen
+gewähren, nicht ein.
+
+
+1. Bestandteile in diesem Installationsprogramm
+
+1.1 Windows-Anwendung (Ordner gui\)
+    Gebaut mit PyInstaller. Enthält die Python-Laufzeitumgebung
+    (Python Software Foundation License; deren Windows-Fassung bringt
+    u. a. OpenSSL, Tcl/Tk, libffi, SQLite, zlib, bzip2 und xz mit) und
+    Python-Pakete wie pywebview, pythonnet, opencv-python (mit FFmpeg,
+    LGPL) und NumPy. Die vollständige Liste mit Versionen und den
+    Lizenztexten jedes Pakets steht in gui\THIRD_PARTY_PYTHON.txt. Der
+    PyInstaller-Bootloader steht unter der GNU General Public License,
+    Version 2, mit der Bootloader-Ausnahme, die die Weitergabe mit
+    beliebiger Software erlaubt.
+
+1.2 Linux-Umgebung für WSL2 (wsl_rootfs\edubotics-rootfs.tar.gz)
+    Ein Abbild von Ubuntu 22.04 mit Docker Engine, containerd und dem
+    NVIDIA Container Toolkit (jeweils Apache License 2.0). Die
+    Ubuntu-Pakete stehen unter verschiedenen Lizenzen, darunter die GNU
+    General Public License (Version 2 und 3) und die GNU Lesser General
+    Public License (Version 2.1 und 3). Die Liste der enthaltenen Pakete
+    mit Versionen steht im Abbild unter /var/lib/dpkg/status. Die
+    Urheberrechtsdateien der Pakete (/usr/share/doc/<Paket>/copyright)
+    sind im Abbild nicht enthalten; sie stehen für jede Paketversion im
+    Ubuntu-Archiv (https://packages.ubuntu.com, Verweis „Copyright File“)
+    und werden auf Anfrage mit dem Quellcode geliefert (Abschnitt 4).
+
+1.3 Lizenztexte (Ordner licenses\)
+    licenses\Apache-2.0.txt      Apache License 2.0
+    licenses\GPL-2.0-only.txt    GNU General Public License 2.0
+    licenses\GPL-3.0-only.txt    GNU General Public License 3.0
+    licenses\LGPL-2.1-only.txt   GNU Lesser General Public License 2.1
+    licenses\LGPL-3.0-only.txt   GNU Lesser General Public License 3.0
+    Wortlaut aus der SPDX License List, Version 3.29.0.
+
+
+2. Bestandteile, die bei Installation und Betrieb geladen werden
+
+2.1 usbipd-win 5.3.0 (GNU General Public License 2.0). Das
+    Installationsprogramm lädt es direkt von seiner offiziellen
+    Bezugsquelle (https://github.com/dorssel/usbipd-win); es ist nicht
+    Teil dieses Installationsprogramms.
+
+2.2 EduBotics-Docker-Images (ghcr.io/svendanilborodun, Ersatzquelle
+    docker.io/nettername). Sie enthalten Linux-Distributionen
+    (Ubuntu, Alpine Linux, Debian) sowie unter anderem ROS 2
+    (überwiegend Apache License 2.0 und BSD-Lizenzen), die ROS-2-Pakete
+    der ROBOTIS Co., Ltd. (Apache License 2.0), LeRobot
+    (Apache License 2.0), PyTorch, NumPy, OpenCV, PyAV mit FFmpeg (LGPL),
+    nginx, s6-overlay und Eclipse Temurin (GNU General Public License
+    2.0 mit Classpath Exception). Die Lizenzen der Python-Pakete stehen
+    in den Images jeweils im .dist-info-Verzeichnis des Pakets, die der
+    Linux-Pakete unter /usr/share/doc/<Paket>/copyright bzw. in der
+    Paketdatenbank der jeweiligen Distribution.
+
+2.3 Web-Oberfläche. Sie enthält JavaScript-Bibliotheken wie React,
+    Redux Toolkit, Blockly, CodeMirror, three.js, urdf-loader und
+    supabase-js sowie Schriftarten unter der SIL Open Font License 1.1.
+    Die vollständige Liste mit Lizenztexten liefert die Oberfläche selbst
+    unter /third-party-licenses.txt (lokal:
+    http://localhost/third-party-licenses.txt); die Schriftlizenzen
+    unter /fonts/OFL-*.txt.
+
+
+3. Software der ROBOTIS Co., Ltd.
+
+    Teile von EduBotics beruhen auf open_manipulator und
+    physical_ai_tools der ROBOTIS Co., Ltd., lizenziert unter der Apache
+    License 2.0 (licenses\Apache-2.0.txt). EduBotics hat diese Werke
+    verändert und ergänzt; die Ergänzungen und Änderungen von EduBotics
+    stehen unter dem EduBotics-Lizenzvertrag, soweit die Apache License
+    2.0 dies zulässt.
+
+
+4. Angebot zur Herausgabe des Quellcodes (GPL / LGPL)
+
+    Für jeden Bestandteil, den EduBotics unter der GNU General Public
+    License oder der GNU Lesser General Public License weitergibt –
+    insbesondere die Pakete der Linux-Umgebung (1.2), FFmpeg (1.1, 2.2)
+    und die Bestandteile der Docker-Images (2.2) –, liefert EduBotics
+    jedem Empfänger dieses Angebots auf Anfrage den vollständigen
+    korrespondierenden Quellcode in maschinenlesbarer Form, gegen
+    Erstattung der Kosten für Datenträger und Versand oder kostenlos als
+    Download.
+
+    Das Angebot gilt drei Jahre ab dem Zeitpunkt, zu dem EduBotics die
+    betreffende Fassung zuletzt weitergegeben hat, und mindestens so
+    lange, wie EduBotics Ersatzteile oder Kundendienst für diese Fassung
+    anbietet.
+
+    Anfrage an:
+      Sven Danil Borodun (EduBotics)
+      Unsuhrstrasse 10, 45325 Essen, Deutschland
+      E-Mail: svendanilborodun@gmail.com
+    Bitte geben Sie die EduBotics-Version und den gewünschten
+    Bestandteil an.
+
+
+------------------------------------------------------------------------
+English summary
+
+EduBotics is licensed under the EduBotics End-User Licence Agreement
+(LICENSE.txt in the installation folder, LICENSE in the download
+repository). Third-party components keep their own licences: the
+Python packages of the Windows application are listed with their licence
+texts in gui\THIRD_PARTY_PYTHON.txt, the web interface's packages at
+/third-party-licenses.txt, and the full texts of the Apache, GPL and LGPL
+licences are in licenses\. For every component EduBotics distributes
+under the GPL or LGPL (the Ubuntu packages of the WSL2 environment,
+FFmpeg, and the components of the Docker images), EduBotics offers to
+provide the complete corresponding source code to any recipient, for
+three years after it last distributed that version, on request to Sven
+Danil Borodun (EduBotics), Unsuhrstrasse 10, 45325 Essen, Germany,
+svendanilborodun@gmail.com.

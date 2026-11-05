@@ -1,7 +1,7 @@
-// Copyright 2025 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 // Shared design-system primitives used by redesigned student pages.
 //
 // Shared with the teacher web build: every component keeps its Tailwind classes

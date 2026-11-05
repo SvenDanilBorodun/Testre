@@ -20,6 +20,38 @@ Curated 2026-07-03; Orange-Pi entries appended 2026-08-02; the rest not re-curat
 
 ---
 
+- **Shipping from a private repository, and the proprietary licence (2026-11-05, `chore/ship-private-readiness`) — accepted, open or unproven.** The invariants are in `CLAUDE.md` (the licensing paragraph under „Repository topology"; Rule §6's release-channel and Railway-CLI paragraphs; the API docs; the German installer wizard). The runbook is `docs/deploy/PRIVATE-REPOSITORY.md` and the story is in `docs/CLAUDE-CHANGELOG.md`.
+  - **The WSL rootfs ships without its packages' copyright files.**
+    - `wsl_rootfs/Dockerfile`'s prune deletes `/usr/share/doc`, so the image we distribute lacks every Ubuntu package's `copyright` file.
+    - `THIRD_PARTY_NOTICES.txt` §1.2 points at the Ubuntu archive and the written offer, and the GPL/LGPL texts ship in `licenses/`, but the per-package notices are not in the image.
+    - **Fix with the next rootfs change that bumps `ROOTFS_VERSION` anyway:** keep `/usr/share/doc/*/copyright` in the prune. A bump made only for this would force the destructive re-import on every PC.
+  - **The EULA and the notices are drafted, not lawyer-reviewed.** In particular:
+    - §§ 7–8 (warranty and liability for a free versus a paid licence);
+    - § 2.2 (the school clause);
+    - the form of the GPL/LGPL source offer.
+  - **No privacy policy exists yet, although the EULA's § 4.1 refers to one** („Datenschutzerklärung von EduBotics"). A launch requirement for German schools: minors' data, and training hosts outside the EU.
+    - The public teacher web carries no Impressum (DDG § 5).
+    - Web, teacher and Orange-Pi users never see the installer's EULA, and no terms exist for them.
+    - The download repository's README carries the contact and Impressum.
+  - **Third-party apps keep reading the code after the switch.** CodeRabbit reviews this repository's pull requests. Before the flip, review every installed GitHub App and OAuth grant and its data retention. The CLI token cannot list app installations; check Settings → Applications.
+  - **Older installers.** v2.37.0 and v2.36.0 (the rollback target) are mirrored, hash-verified, into the public download repository. Anything older is reachable only from this repository and stops being downloadable anonymously at the flip.
+  - **What was published before keeps the Apache-2.0 grant.**
+    - Until 2026-11-05, 749 EduBotics files carried an Apache-2.0 header: the public repository, the public fork `SWFDtf/Testre` (history to 2026-06-19), and every image and installer up to v2.37.0.
+    - Those grants are irrevocable for those copies; the new headers bind only what is distributed from now on.
+    - The 46 rebranded ROBOTIS files (commit `f74ef852`, 2026-03-28) shipped without the ROBOTIS copyright in every release before the fix. So did `StudentApp.js`, split out of `App.js` in 2026-04.
+    - Nine more ROBOTIS files shipped with a shortened Apache notice or without their `Author:` lines: `App.js`, `App.css`, `RecordPage.js`, `InferencePage.js`, `EpisodeStatus.js`, `FullTaskStatus.js`, `lerobot_dataset_wrapper.py`, `training_manager.py`, `training/__init__.py`.
+  - **Web packages without a licence file of their own.** 13 production packages ship none; the generated `/third-party-licenses.txt` names their declared licence (the `@supabase/*` family, `blockly`, `urdf-loader`, …). `pngparse` 2.0.1 declares none at all. **Trigger:** a licence audit; then add their texts by hand.
+  - **The images carry no EduBotics licence notice inside them:** no `org.opencontainers.image.licenses` label, no NOTICE file in the image.
+  - **Supply chain, P0-9's remainder.**
+    - The installer's `gui/requirements.txt` is not hash-locked; only PyInstaller is pinned.
+    - The installer is not code-signed.
+  - **The public release repository has no immutable releases.** W5 publishes and W5b attaches afterwards; immutability needs a draft → attach → publish flow before W6.
+  - **The release channel's token is a fine-grained PAT that expires.** The release preflight fails a tag whose token no longer works; renew it before it expires.
+  - **A private repository on GitHub Free** enforces no branch protection, rulesets or environment secrets. Actions stop once the included $12 is used up, unless a payment method is set. Runners are 2-core.
+  - **Still public by owner decision (2026-11-05):**
+    - `Ed`, `EduBot`, the `EduBotics` phosphobot fork;
+    - `EduBotics-Solutions`, which says „Open Source" with an MIT licence and offers `edubotics.exe` 1.0, contradicting the EULA.
+
 - **Training-hour ledger (052, v2.37.0) — accepted, open or unproven.** The invariants are in `CLAUDE.md` (Rule §4's ledger paragraph, „Cancel, stop and the training-hour ledger", „Managed ACT training"); the narrative, the measurements and the owner decisions D1–D11, N1–N3, Q-A–Q-E, OQ-1–OQ-3, R3-1–R3-3, G0 and OQ-B1 (plus the verification round's fixes) are in `docs/CLAUDE-CHANGELOG.md` („v2.37.0 … the training-hour ledger").
   - **UNPROVEN until the release's operator check:** 052 and its assertions on a local `supabase start` stack (the numbers in the 052 header); the reset on production (every account 0, the admin's re-grant done). **Proven before the build: gates G0/G0b on the R2 TEST bucket** (`edubotics-training-test`, WEUR, default jurisdiction, created 2026-10-29 for G0 — no test bucket existed before, whatever DEPLOY.md or this file said earlier). G0's first run failed because R2 refuses `Content-MD5` together with `x-amz-checksum-sha256` (400 InvalidRequest „You can only specify one non-default checksum at a time."); G0b found V1 (the SHA-256 signed, no `Content-MD5`, no algorithm header) passing: a wrong body 400 BadDigest and not stored, a missing or forged header 403, HEAD with `ChecksumMode=ENABLED` returns the signed SHA-256. A query-parameter checksum is ignored and an unsigned checksum header is a signature mismatch; an upload without a checksum carries only R2's own CRC64NVME, and **a CopyObject copy carries no SHA-256** (so a kept copy under `keep/` is stream-hashed when it is judged). G0 on the shipped `presign_put` (live run 2 of 6, 2026-10-29): `{"gate": "G0", "verdict": "pass", "a": BadDigest 400 not stored, "b": 200, "c": sha256_ok, "d"/"d2": 403 not stored, "f": left 0}` (the full line is in the commit message of `feat(r2): gate G0b`); it goes into the release notes.
   - **R1 (owner Q-B): zero-charge GPU use is bounded per reservation, not per student** (its hours of counted time plus each attempt's pod start and detection gap, ≤ 4 attempts); it is visible to student, teacher and admin. Trigger: a student with repeated zero-charge S4 trainings.

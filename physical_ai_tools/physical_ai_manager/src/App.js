@@ -1,4 +1,5 @@
-// Copyright 2025 EduBotics
+// Copyright 2025 ROBOTIS CO., LTD.
+// Modifications copyright 2026 Sven Danil Borodun (EduBotics)
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,6 +12,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Author: Kiwoong Park
 
 // „Sucher" (student look): mark <html data-ui="sucher"> first, then its CSS,
 // which follows index.css (and so Tailwind's utilities) in the cascade.

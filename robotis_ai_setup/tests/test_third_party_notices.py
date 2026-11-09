@@ -13,8 +13,9 @@
   the licensor's contact.
 * Until the owner settles the legal entity (2026-11-09), every licence file
   names the licensor, its address and its contact by German placeholders, and
-  no personal contact data (a home address, a personal mail address) appears
-  in any of them.
+  no personal contact data (a home address, a personal mail address, a named
+  court town) appears in any of them. The check describes the SHAPE of such
+  data, never a value, and proves on invented examples that it still bites.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from __future__ import annotations
 import importlib.metadata as md
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -38,9 +40,43 @@ ISS = INSTALLER / "robotis_ai_setup.iss"
 LICENSOR = "[Anbieter – wird nach Klärung der Rechtsform ergänzt]"
 ADDRESS = "[Anschrift – wird ergänzt]"
 CONTACT = "[Kontakt-E-Mail – wird ergänzt]"
-# Personal contact data PR #49 had written into the licence files; the
-# repository was still public, so it went back out (2026-11-09).
-PERSONAL = ("@gmail.com", "Unsuhrstrasse", "45325", "Gerichtsstand Essen")
+# Personal contact data must never stand in a licence file. These patterns
+# describe its shape only — never a real value, and never a hash of one (a
+# five-digit postcode's hash is reversed by trying all 100 000). A legal-entity
+# address that is meant to be published replaces the placeholders later; adjust
+# the patterns in the same change.
+_STREET_SUFFIX = r"(?i:stra(?:ß|ss)e|str\.|weg|allee|platz|gasse|ring|damm|ufer|chaussee|markt)"
+_HOUSE_NUMBER = r"\s*\d{1,4}(?:\s?[a-zA-Z])?\b"
+PERSONAL_DATA_PATTERNS = {
+    "a personal e-mail address": re.compile(
+        r"[\w.+-]+@(?:gmail|googlemail|gmx|web|t-online|outlook|hotmail|live|yahoo|icloud|me|mac|aol"
+        r"|freenet|posteo|mailbox|proton|protonmail|arcor|online)\.[a-z]{2,}\b",
+        re.IGNORECASE,
+    ),
+    # „Musterstraße 12", „Am Markt 3a", „Berliner Straße 7".
+    "a street and house number": re.compile(
+        r"\b[A-ZÄÖÜ][\w-]*?" + _STREET_SUFFIX + _HOUSE_NUMBER
+        + r"|\b[A-ZÄÖÜ][\w-]*\s+" + _STREET_SUFFIX + _HOUSE_NUMBER
+    ),
+    # „12345 Musterstadt", „D-12345 Musterstadt".
+    "a postcode and town": re.compile(r"(?<![\w.,-])(?:D-)?\d{5}\s+[A-ZÄÖÜ][a-zäöüß]{2,}"),
+    # „Gerichtsstand Musterstadt", „Gerichtsstand ist Musterstadt", „Amtsgericht Musterstadt".
+    # The EULA's „Gerichtsstand der Sitz des Lizenzgebers" names no town and passes.
+    "a court in a named town": re.compile(
+        r"\bGerichtsstand\b\s*:?\s*(?:ist\s+)?(?:in\s+)?[A-ZÄÖÜ][a-zäöüß]+"
+        r"|\b(?:Amts|Land)gericht\s+[A-ZÄÖÜ][a-zäöüß]+"
+    ),
+}
+# Invented examples (Erika Mustermann, Musterstadt): each must be caught, so a
+# pattern that stops matching fails here instead of passing every file.
+INVENTED_PERSONAL_DATA = {
+    "a personal e-mail address": ("Kontakt: erika.mustermann@gmail.com", "E-Mail: e.m+lizenz@GMX.de"),
+    "a street and house number": ("Musterstraße 12", "Musterstrasse 4a", "Am Markt 3", "Berliner Straße 7",
+                                  "Lindenweg 1"),
+    "a postcode and town": ("12345 Musterstadt", "D-12345 Musterstadt"),
+    "a court in a named town": ("Gerichtsstand Musterstadt", "Gerichtsstand ist Musterstadt.",
+                                "Gerichtsstand: Musterstadt", "Amtsgericht Musterstadt"),
+}
 LICENCE_FILES = (
     REPO / "LICENSE",
     REPO / "NOTICE",
@@ -48,6 +84,16 @@ LICENCE_FILES = (
     INSTALLER / "assets" / "THIRD_PARTY_NOTICES.txt",
     ISS,
 )
+
+
+def personal_data_findings(text: str) -> list[tuple[str, int]]:
+    """(kind, line number) of every match. The matched text is never returned,
+    so a failure message cannot copy personal data into a CI log."""
+    found = []
+    for kind, pattern in PERSONAL_DATA_PATTERNS.items():
+        for match in pattern.finditer(text):
+            found.append((kind, text.count("\n", 0, match.start()) + 1))
+    return found
 
 
 def _load_py_gen():
@@ -225,13 +271,23 @@ class InstallerLicencePayload(unittest.TestCase):
 
     def test_no_personal_contact_data_in_any_licence_file(self):
         for path in LICENCE_FILES:
-            text = path.read_text(encoding="utf-8")
-            for needle in PERSONAL:
-                with self.subTest(file=path.name, needle=needle):
-                    self.assertNotIn(needle, text)
+            with self.subTest(file=path.name):
+                self.assertEqual(personal_data_findings(path.read_text(encoding="utf-8")), [],
+                                 "personal contact data (kind, line) in a licence file")
         for path in (REPO / "LICENSE", REPO / "NOTICE"):
             with self.subTest(file=path.name):
                 self.assertIn(f"Copyright (c) 2025-2026 {LICENSOR} (EduBotics)", path.read_text(encoding="utf-8"))
+
+    def test_the_personal_data_check_catches_every_kind_and_spares_the_placeholders(self):
+        self.assertEqual(set(INVENTED_PERSONAL_DATA), set(PERSONAL_DATA_PATTERNS))
+        for kind, examples in INVENTED_PERSONAL_DATA.items():
+            for example in examples:
+                with self.subTest(kind=kind, example=example):
+                    self.assertIn(kind, [k for k, _ in personal_data_findings(f"Lizenzgeber:\n  {example}\n")])
+        for clean in (LICENSOR, ADDRESS, CONTACT, "ist Gerichtsstand der Sitz des Lizenzgebers.",
+                      "usbipd-win 5.3.0 (GNU General Public License 3.0)", "Stand: 9. November 2026"):
+            with self.subTest(clean=clean):
+                self.assertEqual(personal_data_findings(clean), [])
 
     def test_usbipd_win_is_named_under_its_own_licence(self):
         # usbipd-win 5.3.0: COPYING.md is the GPL v3 and every source file says

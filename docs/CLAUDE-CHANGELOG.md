@@ -576,7 +576,7 @@ robot stays at the student's PC or Pi, the policy runs on a Modal GPU, observati
 back, reliable on ordinary school internet, safe on an untrusted wire, cheap, German UI
 (`docs/plans/2026-10-11-cloud-inferenz/`, gitignored).
 
-**Step 0, measured before any code (2026-10-11, Essen, home line).** Unpinned Modal containers scattered over four
+**Step 0, measured before any code (2026-10-11, home line).** Unpinned Modal containers scattered over four
 continents, so production pins `region` AND `routing_region` together (EU: TCP connect 32–43 ms vs 107–135 ms to
 the default US ingress). Real 640×480 q80 frames (a pair ≈ 43 KB), 10 min at 2 Hz on an EU L4: HTTPS on an
 `App.server` p50/p95/p99 101/162/217 ms, WebSocket 109/171/207 ms, both far under the p95 350 / p99 700 ms gate,

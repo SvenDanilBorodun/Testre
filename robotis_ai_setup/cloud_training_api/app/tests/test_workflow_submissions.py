@@ -161,7 +161,18 @@ class TestRateLimitRulesUnchanged(unittest.TestCase):
     """POST /workflows/{id}/submit needs no rule of its own: the existing
     ``("POST", "/workflows", 10, 60.0)`` prefix rule covers it (create, clone,
     restore, trajectory upload AND submit share one per-user 10/min budget).
-    The whole table is pinned so a new rule is a deliberate edit here too."""
+    The whole table is pinned so a new rule is a deliberate edit here too.
+
+    The API hardening (2026-11-10) left the TABLE unchanged and changed the KEY:
+    a per-user prefix is keyed by the verified ``sub`` of the access token
+    (app/edge.py::rate_limit_key; a forged or rotating token falls into its
+    address's bucket), no longer by a hash of whatever bearer was sent. The
+    per-user prefix list is pinned below for the same reason as the table."""
+
+    _PER_USER = (
+        "/trainings/", "/workflows", "/me/hf-token", "/me/group-members", "/inference/",
+        "/teacher/", "/admin/",
+    )
 
     _EXPECTED = [
         ("*", "/trainings/start", 10, 60.0),
@@ -209,6 +220,18 @@ class TestRateLimitRulesUnchanged(unittest.TestCase):
 
     def test_the_rule_table_is_unchanged(self):
         self.assertEqual(self._rules(), self._EXPECTED)
+
+    def test_the_per_user_prefixes_are_unchanged_and_keyed_by_the_verified_subject(self):
+        with open(MAIN_PY, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read(), filename=MAIN_PY)
+        value = next(n.value for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                     and any(getattr(t, "id", None) == "_PER_USER_RATE_LIMIT_PREFIXES" for t in n.targets))
+        self.assertEqual(ast.literal_eval(value), self._PER_USER)
+        edge_py = os.path.join(os.path.dirname(MAIN_PY), "edge.py")
+        with open(edge_py, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn('return "user:" + sub', src)
+        self.assertIn("sub = jwt_auth.verified_subject(token)", src)
 
     def test_the_workflows_post_rule_is_the_longest_prefix_matching_submit(self):
         path = "/workflows/wf1/submit"

@@ -21,6 +21,7 @@ inside the terminal transaction (a publish settles at its ``finish_training``).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import HTTPException
@@ -47,16 +48,19 @@ def _read_back(training_id: int) -> dict:
 async def complete_cancel(training_id: int, final: str, message) -> dict:
     """complete_cancel_training; P0049 (another instance, e.g. the cancel sweep, completed
     it first) → read the row back and answer its state (review 3 m11)."""
-    try:
+    def _complete() -> None:
         _sb().rpc(
             "complete_cancel_training",
             {"p_training_id": int(training_id), "p_final": final, "p_message": message},
         ).execute()
+
+    try:
+        await asyncio.to_thread(_complete)
     except Exception as exc:
         if training_dispatch.pg_code(exc) != "P0049":
             raise
         logger.info("cancel of training %s lost a race; reading the row back", training_id)
-    row = _read_back(training_id)
+    row = await asyncio.to_thread(_read_back, training_id)
     return {"status": row.get("status") or final, "charged_hours": row.get("charged_hours")}
 
 
@@ -73,11 +77,14 @@ async def stop(training_id: int, *, owner: str, actor: str, role: str, note: str
     from app.services.training_sweep import LEGACY_CANCEL_GIVEUP_DE, MAX_CANCEL_ATTEMPTS
 
     logger.info("stop of training %s by %s %s", training_id, role, actor)
-    try:
-        data = _sb().rpc("stop_training", {
+    def _stop_training():
+        return _sb().rpc("stop_training", {
             "p_training_id": int(training_id), "p_user_id": str(owner), "p_actor_id": str(actor),
             "p_actor_role": role, "p_note": note,
         }).execute().data
+
+    try:
+        data = await asyncio.to_thread(_stop_training)
     except Exception as exc:
         code = training_dispatch.pg_code(exc)
         if code == "P0002":

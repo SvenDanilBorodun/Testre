@@ -2,17 +2,33 @@ import React, { useState } from 'react';
 import toast from 'react-hot-toast';
 import Modal from './Modal';
 import { Btn } from '../EbUI';
+import {
+  PASSWORD_MAX,
+  passwordErrorDe,
+  passwordHintDe,
+  passwordMinLength,
+} from '../../utils/passwordRules';
 
 const inputClass =
   'w-full h-10 px-3 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-sm text-[var(--ink)] placeholder:text-[var(--ink-4)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-wash)] transition';
 
-export default function PasswordResetModal({ onClose, onSubmit, username }) {
+/**
+ * @param {object} props
+ * @param {'student'|'staff'} [props.audience] whose password is reset: a
+ *   teacher resets a student's (8 characters), an admin a teacher's (12; owner
+ *   decision 2026-11-10, utils/passwordRules.js).
+ */
+export default function PasswordResetModal({ onClose, onSubmit, username, audience = 'student' }) {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const passwordError = passwordErrorDe(password, audience);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (password.length < 6) return;
+    if (passwordError) {
+      toast.error(passwordError);
+      return;
+    }
     setLoading(true);
     try {
       await onSubmit(password);
@@ -38,7 +54,7 @@ export default function PasswordResetModal({ onClose, onSubmit, username }) {
             variant="primary"
             type="submit"
             form="reset-password-form"
-            disabled={loading || password.length < 6}
+            disabled={loading || passwordError !== null}
           >
             {loading ? 'Setzen…' : 'Setzen'}
           </Btn>
@@ -55,13 +71,18 @@ export default function PasswordResetModal({ onClose, onSubmit, username }) {
           className={`${inputClass} font-mono`}
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          placeholder="mindestens 6 Zeichen"
-          minLength={6}
+          placeholder={`mindestens ${passwordMinLength(audience)} Zeichen`}
+          minLength={passwordMinLength(audience)}
+          maxLength={PASSWORD_MAX}
+          aria-describedby="reset-password-hint"
           autoFocus
           required
         />
-        <p className="text-[11px] text-[var(--ink-3)] leading-snug">
-          Gib das neue Passwort dem Schüler weiter.
+        <p id="reset-password-hint" className="text-[11px] text-[var(--ink-3)] leading-snug">
+          {passwordHintDe(audience)}{' '}
+          {audience === 'staff'
+            ? 'Gib das neue Passwort der Lehrkraft weiter.'
+            : 'Gib das neue Passwort dem Schüler weiter.'}
         </p>
       </form>
     </Modal>

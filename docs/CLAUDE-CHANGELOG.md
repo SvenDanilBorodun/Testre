@@ -31,6 +31,30 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 **Not verified here:** the real images (not buildable here; the smoke scenarios first run in `docker-publish.yml::smoke-test`), real rclpy and launch processes, a rig, a Pi. Spec: `docs/plans/2026-11-10-recording-survives-stop.md` (throwaway).
 
+### 2026-11-10 — Step 2 of the launch plan: the cloud API hardened (local token check, admin TOTP, password rule, edge)
+
+**Why.** The audit before launch found that one uvicorn worker could be stalled by anyone: `auth.get_current_user` was `async` but called `get_supabase().auth.get_user(token)` (a network round trip to Supabase Auth) synchronously on the event loop for every request, and about 54 `async def` route handlers (9 admin, 28 teacher, 8 me, 11 workgroups, plus training) called Supabase synchronously too. A flood of fake `x.y.z` tokens therefore stalled every request and every background loop. The rate limiter keyed its per-user buckets on `sha256(unverified token)`, so a rotating fake token got a fresh bucket each time, and `_client_ip` trusted the LEFT-most `X-Forwarded-For` entry, which the client writes. Passwords could be 6 characters, and an admin needed nothing beyond a password. Owner decisions, binding: check the login locally; 12 characters for teachers and admins, 8 for students (new and reset passwords; existing ones keep working); TOTP required for admins only; a 1 MB body cap and no chunked bodies; the client address from the right-most XFF entry with a configurable hop count; accepted: a signed-out token stays valid until it expires (≤ 1 h).
+
+**Measured, not assumed:**
+- PyJWT 2.15.1 (released 2026-09-28): an ES256 verify costs 109 µs on this sandbox; a garbage header is refused in 1 µs.
+- Load test (uvicorn, one worker, a stand-in Supabase on localhost serving the JWKS and a `users` row; every token random; 30 s at 200 rps against `GET /teacher/classrooms`, `/health` and `/version` probed every 50 ms each):
+  - one address, garbage tokens: 60 × 401, then 5 940 × 429 (the failed-authentication cap); `/health` p50 3.3 / p99 10.8 / max 66 ms, `/version` p99 9.6 ms;
+  - a fresh `X-Forwarded-For` per request (every request runs the whole token check, the cap never fires): 6 000 × 401; `/health` p99 11.7 ms, `/version` p99 10.5 ms;
+  - a fresh address and a well-formed ES256 header naming a random `kid` per request (the refetch path): 6 000 × 401, the JWKS fetched twice in 30 s (boot + one refetch after the back-off); `/health` p99 14.3 ms, `/version` p99 14.5 ms.
+  - The code before this change (1a8adba2) with Supabase Auth's `/user` emulated at 80 ms: at only 50 rps for 10 s, `/health` p50 1.2 s / p99 5.4 s and `/version` p99 5.5 s; 238 of the 500 flood requests timed out after 30 s.
+- `app/tests/test_event_loop_not_blocked.py`'s fixed point finds 202 blocking calls on the event loop in the request path before this change and 0 after.
+- Railway's header contract is NOT documented; community staff answers contradict each other (the edge appends to XFF and only the right-most entry is trustworthy / the edge overwrites XFF / use `X-Real-IP`). The right-most entry is the client in both XFF readings; the owner's curl check decides.
+
+**What changed:**
+- `services/jwt_auth.py` (new): the local check against `<SUPABASE_URL>/auth/v1/.well-known/jwks.json`; `auth.py` rewritten around it (`CurrentUser`, the profile read off the loop, 401 `ACCOUNT_GONE_DE` for a deleted account, 503 `auth_unavailable`, the `aal2` admin rule with `mfa_required`, the `EDUBOTICS_ADMIN_SESSION` log line). `AUTH_VERIFY_MODE=remote` is the rollback.
+- 54 await-free route handlers became plain `def`; the async ones (training start/continue/list/get, the legacy reconciler, `/me/delete`, `stop_actions`, the two teacher stop routes) offload their Supabase calls.
+- `app/edge.py` (new): the middleware moved out of `main.py` (testable without every router); per-user rate-limit key = the verified `sub`; the failed-authentication cap (60 401s a minute per address → German 429); a 1 MB body cap on every route; no `Transfer-Encoding` on any body method; `client_ip_from` with `TRUSTED_PROXY_HOPS`.
+- `services/passwords.py` (new) + the four password routes + `bootstrap_admin.py` + the teacher web's `utils/passwordRules.js` and three forms; `tests/test_password_rule_lockstep.py`.
+- Teacher web: `components/admin/AdminMfaGate.jsx` (enrolment / challenge), `features/auth/mfaRequired.js`, `apiClient` carries `err.code`.
+- `PyJWT[crypto]==2.15.1` in `requirements.txt`, both ci.yml installs and Dependabot's patch-only API stack (`tests/test_ci_supply_chain_pins.py::API_STACK`).
+
+**Owner actions left open** (`docs/deploy/DEPLOY.md` §3c): confirm the project's CURRENT JWT signing key is the ES256 key before the deploy (else `AUTH_VERIFY_MODE=remote` until it is); Supabase Auth: TOTP enabled, the project's minimum password length 8, leaked-password protection if the plan has it; the curl check of the client address; the admin's enrolment at the first login.
+
 ### 2026-11-09 — the going-private follow-up, and the classroom Jetson retired
 
 **Why.** Step 1 of the release plan: finish what going private still needed, and retire the classroom Jetson Orin Nano (owner decision: no Jetson is in use at any school, no transition notice; its database objects dropped with a rollback; its code deleted). Stacked on `chore/ship-private-readiness` (PR #49), one PR.

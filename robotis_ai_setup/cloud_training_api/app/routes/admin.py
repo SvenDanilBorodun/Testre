@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from app.auth import get_current_admin
 from app.routes.teacher import history_payload, parse_history_page, parse_request_id, pool_fields, teacher_summary
 from app.services import credit_texts_de as credit_texts
+from app.services import passwords
 from app.services.supabase_client import get_supabase
 from app.services.training_dispatch import pg_code
 from app.services.usernames import synthetic_email, validate_username
@@ -33,13 +34,15 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 class TeacherCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=32)
-    password: str = Field(..., min_length=6, max_length=128)
+    # Checked by hand (services/passwords.py, ≥ 12 for staff since 2026-11-10):
+    # pydantic's 422 is English and echoes the password back.
+    password: str
     full_name: str = Field(..., min_length=1, max_length=100)
     credits: int = Field(default=0, ge=0, le=10000)
 
 
 class PasswordReset(BaseModel):
-    new_password: str = Field(..., min_length=6, max_length=128)
+    new_password: str  # checked by hand, see TeacherCreate.password
 
 
 class TeacherSummary(BaseModel):
@@ -90,7 +93,7 @@ def _teacher_summary_row(t: dict, *, classroom_count: int, old: dict) -> Teacher
 
 
 @router.get("/teachers", response_model=list[TeacherSummary])
-async def list_teachers(admin=Depends(get_current_admin)):
+def list_teachers(admin=Depends(get_current_admin)):
     supabase = get_supabase()
     teachers = (
         supabase.table("users")
@@ -113,13 +116,16 @@ async def list_teachers(admin=Depends(get_current_admin)):
 
 
 @router.post("/teachers", response_model=TeacherSummary)
-async def create_teacher(req: TeacherCreate, admin=Depends(get_current_admin)):
+def create_teacher(req: TeacherCreate, admin=Depends(get_current_admin)):
     supabase = get_supabase()
 
     try:
         username = validate_username(req.username)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    refusal = passwords.password_error_de(req.password, "teacher")
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
 
     existing = (
         supabase.table("users").select("id").eq("username", username).execute()
@@ -137,6 +143,8 @@ async def create_teacher(req: TeacherCreate, admin=Depends(get_current_admin)):
             }
         )
     except Exception as e:
+        if passwords.is_weak_password_error(e):
+            raise HTTPException(status_code=400, detail=passwords.WEAK_PASSWORD_DE)
         msg = str(e).lower()
         if "already" in msg or "exists" in msg or "duplicate" in msg:
             raise HTTPException(status_code=409, detail="Benutzername bereits vergeben")
@@ -192,7 +200,7 @@ def _free_in(exc) -> int | None:
 
 
 @router.post("/teachers/{teacher_id}/credits")
-async def change_teacher_credits(
+def change_teacher_credits(
     teacher_id: str,
     body: dict | None = Body(default=None),
     admin=Depends(get_current_admin),
@@ -252,7 +260,7 @@ def _target_not_found(kind: str) -> HTTPException:
 
 
 @router.post("/credit-grants")
-async def compensate(body: dict | None = Body(default=None), admin=Depends(get_current_admin)):
+def compensate(body: dict | None = Body(default=None), admin=Depends(get_current_admin)):
     """An admin's compensation (owner D4, §8.5): hours straight into the student's or
     group's account, funded from outside the teacher pool, with a mandatory reason the
     teacher sees in the history. Naming a training credits the account that paid for it
@@ -306,7 +314,7 @@ async def compensate(body: dict | None = Body(default=None), admin=Depends(get_c
 
 
 @router.delete("/credit-reasons/{reason_id}")
-async def erase_reason(reason_id: str, admin=Depends(get_current_admin)):
+def erase_reason(reason_id: str, admin=Depends(get_current_admin)):
     """Erase one reason text (an Art. 17 request about what an admin typed, review m11);
     the ledger row keeps a dangling id and the history shows „(gelöscht)"."""
     try:
@@ -327,7 +335,7 @@ async def erase_reason(reason_id: str, admin=Depends(get_current_admin)):
 
 
 @router.get("/credit-history")
-async def admin_credit_history(
+def admin_credit_history(
     scope: str | None = Query(default=None),
     teacher_id: str | None = Query(default=None),
     before: int | None = Query(default=None),
@@ -349,7 +357,7 @@ async def admin_credit_history(
 
 
 @router.get("/refusals")
-async def admin_refusals(
+def admin_refusals(
     user_id: str | None = Query(default=None),
     limit: int | None = Query(default=None),
     admin=Depends(get_current_admin),
@@ -371,11 +379,14 @@ async def admin_refusals(
 
 
 @router.post("/teachers/{teacher_id}/password")
-async def reset_teacher_password(
+def reset_teacher_password(
     teacher_id: str,
     req: PasswordReset,
     admin=Depends(get_current_admin),
 ):
+    refusal = passwords.password_error_de(req.new_password, "teacher")
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
     supabase = get_supabase()
     existing = (
         supabase.table("users").select("role").eq("id", teacher_id).execute()
@@ -385,13 +396,15 @@ async def reset_teacher_password(
     try:
         supabase.auth.admin.update_user_by_id(teacher_id, {"password": req.new_password})
     except Exception as e:
+        if passwords.is_weak_password_error(e):
+            raise HTTPException(status_code=400, detail=passwords.WEAK_PASSWORD_DE)
         logger.error("reset_teacher_password failed: %s", e)
         raise HTTPException(status_code=500, detail="Passwort konnte nicht gesetzt werden")
     return {"ok": True}
 
 
 @router.delete("/teachers/{teacher_id}")
-async def delete_teacher(teacher_id: str, admin=Depends(get_current_admin)):
+def delete_teacher(teacher_id: str, admin=Depends(get_current_admin)):
     supabase = get_supabase()
     existing = (
         supabase.table("users").select("id, role").eq("id", teacher_id).execute()

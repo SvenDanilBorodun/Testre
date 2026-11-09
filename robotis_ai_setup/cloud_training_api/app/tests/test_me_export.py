@@ -79,7 +79,7 @@ class Export(unittest.TestCase):
         from app.services import workgroups
 
         with patch.object(route, "get_supabase", lambda: db), patch.object(workgroups, "get_supabase", lambda: db):
-            resp = asyncio.run(route.export_my_data(profile=dict(PROFILE)))
+            resp = route.export_my_data(profile=dict(PROFILE))
         bundle = content(resp)
         text = json.dumps(bundle)
         for secret in ("should-not-leak", "pod-secret", "fc-secret", "worker_token", "cloud_ref"):
@@ -102,7 +102,7 @@ class Export(unittest.TestCase):
         from app.services import workgroups
 
         with patch.object(route, "get_supabase", lambda: db), patch.object(workgroups, "get_supabase", lambda: db):
-            return content(asyncio.run(route.export_my_data(profile=dict(profile))))
+            return content(route.export_my_data(profile=dict(profile)))
 
     def test_the_ledger_view_names_no_other_person(self):
         # §8.6 / §13: {at, kind, hours, account_kind, training_id, actor_role}; the reason only

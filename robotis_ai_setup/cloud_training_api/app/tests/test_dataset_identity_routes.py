@@ -321,7 +321,7 @@ class TestUpdateMe(unittest.TestCase):
         with patch.object(meroute, "get_supabase", return_value=sb), patch.object(
             meroute, "get_user_profile", return_value=fresh
         ):
-            result = asyncio.run(meroute.update_me(body=body, profile=dict(_PROFILE)))
+            result = meroute.update_me(body=body, profile=dict(_PROFILE))
         return result, sb
 
     def test_valid_username_persists_keyed_to_jwt(self):

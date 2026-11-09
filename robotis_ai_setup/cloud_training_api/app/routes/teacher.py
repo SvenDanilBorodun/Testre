@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import get_current_teacher, get_user_profile
 from app.services import credit_texts_de as credit_texts
+from app.services import passwords
 from app.services.supabase_client import get_supabase
 from app.services.usernames import synthetic_email, validate_username
 from app.validators.workflow import validate_blockly_json
@@ -48,7 +49,9 @@ class ClassroomRename(BaseModel):
 
 class StudentCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=32)
-    password: str = Field(..., min_length=6, max_length=128)
+    # Checked by hand (services/passwords.py, ≥ 8 for students since 2026-11-10):
+    # pydantic's 422 is English and echoes the password back.
+    password: str
     full_name: str = Field(..., min_length=1, max_length=100)
     initial_credits: int = Field(default=0, ge=0, le=1000)
 
@@ -59,7 +62,7 @@ class StudentPatch(BaseModel):
 
 
 class PasswordReset(BaseModel):
-    new_password: str = Field(..., min_length=6, max_length=128)
+    new_password: str  # checked by hand, see StudentCreate.password
 
 
 class ClassroomSummary(BaseModel):
@@ -419,7 +422,7 @@ def _student_summary(
 
 
 @router.get("/classrooms", response_model=list[ClassroomSummary])
-async def list_classrooms(teacher=Depends(get_current_teacher)):
+def list_classrooms(teacher=Depends(get_current_teacher)):
     supabase = get_supabase()
     classrooms = (
         supabase.table("classrooms")
@@ -459,7 +462,7 @@ async def list_classrooms(teacher=Depends(get_current_teacher)):
 
 
 @router.post("/classrooms", response_model=ClassroomSummary)
-async def create_classroom(req: ClassroomCreate, teacher=Depends(get_current_teacher)):
+def create_classroom(req: ClassroomCreate, teacher=Depends(get_current_teacher)):
     supabase = get_supabase()
     try:
         result = (
@@ -481,7 +484,7 @@ async def create_classroom(req: ClassroomCreate, teacher=Depends(get_current_tea
 
 
 @router.get("/classrooms/{classroom_id}", response_model=ClassroomDetail)
-async def get_classroom(classroom_id: str, teacher=Depends(get_current_teacher)):
+def get_classroom(classroom_id: str, teacher=Depends(get_current_teacher)):
     c = _assert_classroom_owned(teacher["id"], classroom_id)
     supabase = get_supabase()
     students_raw = (
@@ -521,7 +524,7 @@ async def get_classroom(classroom_id: str, teacher=Depends(get_current_teacher))
 
 
 @router.get("/classrooms/{classroom_id}/workflow-templates", response_model=list[WorkflowTemplateSummary])
-async def list_workflow_templates(
+def list_workflow_templates(
     classroom_id: str,
     teacher=Depends(get_current_teacher),
     limit: int = Query(DEFAULT_LIST_LIMIT, ge=1, le=MAX_LIST_LIMIT),
@@ -542,7 +545,7 @@ async def list_workflow_templates(
 
 
 @router.post("/classrooms/{classroom_id}/workflow-templates", response_model=WorkflowTemplateSummary)
-async def create_workflow_template(
+def create_workflow_template(
     classroom_id: str,
     payload: WorkflowTemplateCreate,
     teacher=Depends(get_current_teacher),
@@ -577,7 +580,7 @@ async def create_workflow_template(
 
 
 @router.delete("/classrooms/{classroom_id}/workflow-templates/{template_id}")
-async def delete_workflow_template(
+def delete_workflow_template(
     classroom_id: str,
     template_id: str,
     teacher=Depends(get_current_teacher),
@@ -589,7 +592,7 @@ async def delete_workflow_template(
 
 
 @router.patch("/classrooms/{classroom_id}", response_model=ClassroomSummary)
-async def rename_classroom(
+def rename_classroom(
     classroom_id: str,
     req: ClassroomRename,
     teacher=Depends(get_current_teacher),
@@ -625,7 +628,7 @@ async def rename_classroom(
 
 
 @router.delete("/classrooms/{classroom_id}")
-async def delete_classroom(classroom_id: str, teacher=Depends(get_current_teacher)):
+def delete_classroom(classroom_id: str, teacher=Depends(get_current_teacher)):
     _assert_classroom_owned(teacher["id"], classroom_id)
     supabase = get_supabase()
     count_res = (
@@ -663,7 +666,7 @@ async def delete_classroom(classroom_id: str, teacher=Depends(get_current_teache
 
 
 @router.post("/classrooms/{classroom_id}/students", response_model=StudentSummary)
-async def create_student(
+def create_student(
     classroom_id: str,
     req: StudentCreate,
     teacher=Depends(get_current_teacher),
@@ -675,6 +678,9 @@ async def create_student(
         username = validate_username(req.username)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    refusal = passwords.password_error_de(req.password, "student")
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
 
     existing = (
         supabase.table("users").select("id").eq("username", username).execute()
@@ -692,6 +698,8 @@ async def create_student(
             }
         )
     except Exception as e:
+        if passwords.is_weak_password_error(e):
+            raise HTTPException(status_code=400, detail=passwords.WEAK_PASSWORD_DE)
         msg = str(e).lower()
         if "already" in msg or "exists" in msg or "duplicate" in msg:
             raise HTTPException(status_code=409, detail="Benutzername bereits vergeben")
@@ -759,7 +767,7 @@ async def create_student(
 
 
 @router.patch("/students/{student_id}", response_model=StudentSummary)
-async def patch_student(
+def patch_student(
     student_id: str,
     req: StudentPatch,
     teacher=Depends(get_current_teacher),
@@ -1039,7 +1047,7 @@ def _delete_student_hf_artifacts(
 
 
 @router.delete("/students/{student_id}")
-async def delete_student(student_id: str, teacher=Depends(get_current_teacher)):
+def delete_student(student_id: str, teacher=Depends(get_current_teacher)):
     _assert_student_owned(teacher["id"], student_id)
 
     # ORDER MATTERS HERE, and until 2026-08-31 it was wrong in a way that made
@@ -1142,25 +1150,30 @@ async def delete_student(student_id: str, teacher=Depends(get_current_teacher)):
 
 
 @router.post("/students/{student_id}/password")
-async def reset_student_password(
+def reset_student_password(
     student_id: str,
     req: PasswordReset,
     teacher=Depends(get_current_teacher),
 ):
     _assert_student_owned(teacher["id"], student_id)
+    refusal = passwords.password_error_de(req.new_password, "student")
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
     supabase = get_supabase()
     try:
         supabase.auth.admin.update_user_by_id(
             student_id, {"password": req.new_password}
         )
     except Exception as e:
+        if passwords.is_weak_password_error(e):
+            raise HTTPException(status_code=400, detail=passwords.WEAK_PASSWORD_DE)
         logger.error("reset_student_password failed: %s", e)
         raise HTTPException(status_code=500, detail="Passwort konnte nicht gesetzt werden")
     return {"ok": True}
 
 
 @router.post("/students/{student_id}/credits", response_model=CreditsResponse)
-async def adjust_credits(
+def adjust_credits(
     student_id: str,
     body: dict | None = Body(default=None),
     teacher=Depends(get_current_teacher),
@@ -1174,7 +1187,7 @@ async def adjust_credits(
 
 
 @router.get("/students/{student_id}/credit-history")
-async def student_credit_history(
+def student_credit_history(
     student_id: str,
     before: int | None = Query(default=None),
     limit: int | None = Query(default=None),
@@ -1187,7 +1200,7 @@ async def student_credit_history(
 
 
 @router.get("/credit-history")
-async def own_credit_history(
+def own_credit_history(
     before: int | None = Query(default=None),
     limit: int | None = Query(default=None),
     teacher=Depends(get_current_teacher),
@@ -1200,10 +1213,12 @@ async def own_credit_history(
 async def stop_student_training(student_id: str, training_id: int, teacher=Depends(get_current_teacher)):
     """„Training stoppen" (decision 13): the student's own „Abbrechen" path (§8.4) with
     the teacher's role. A training of another student is the same German 404 (P0002)."""
+    import asyncio
+
     from app.services import stop_actions
     from app.services import training_texts_de as texts
 
-    _assert_student_owned(teacher["id"], student_id)
+    await asyncio.to_thread(_assert_student_owned, teacher["id"], student_id)
     return await stop_actions.stop(training_id, owner=student_id, actor=teacher["id"], role="teacher",
                                    note=texts.S32)
 
@@ -1216,12 +1231,12 @@ async def student_training_stop_preview(student_id: str, training_id: int,
 
     from app.routes.training import read_stop_preview
 
-    _assert_student_owned(teacher["id"], student_id)
+    await asyncio.to_thread(_assert_student_owned, teacher["id"], student_id)
     return await asyncio.to_thread(read_stop_preview, training_id, student_id)
 
 
 @router.get("/students/{student_id}/trainings", response_model=list[TrainingSummary])
-async def list_student_trainings(
+def list_student_trainings(
     student_id: str,
     teacher=Depends(get_current_teacher),
 ):
@@ -1270,7 +1285,7 @@ class TrainingCheckpoints(BaseModel):
     "/students/{student_id}/trainings/{training_id}/checkpoints",
     response_model=TrainingCheckpoints,
 )
-async def list_training_checkpoints(
+def list_training_checkpoints(
     student_id: str,
     training_id: int,
     teacher=Depends(get_current_teacher),
@@ -1339,7 +1354,7 @@ class InferenceRunSummary(BaseModel):
     "/students/{student_id}/inference-runs",
     response_model=list[InferenceRunSummary],
 )
-async def list_student_inference_runs(
+def list_student_inference_runs(
     student_id: str,
     teacher=Depends(get_current_teacher),
 ):
@@ -1407,7 +1422,7 @@ class StudentSubmissionDocument(StudentSubmissionSummary):
     "/students/{student_id}/workflows",
     response_model=list[StudentWorkflowSummary],
 )
-async def list_student_workflows(
+def list_student_workflows(
     student_id: str,
     teacher=Depends(get_current_teacher),
 ):
@@ -1430,7 +1445,7 @@ async def list_student_workflows(
     "/students/{student_id}/workflows/{workflow_id}",
     response_model=StudentWorkflowDocument,
 )
-async def get_student_workflow(
+def get_student_workflow(
     student_id: str,
     workflow_id: str,
     teacher=Depends(get_current_teacher),
@@ -1455,7 +1470,7 @@ async def get_student_workflow(
     "/students/{student_id}/submissions",
     response_model=list[StudentSubmissionSummary],
 )
-async def list_student_submissions(
+def list_student_submissions(
     student_id: str,
     teacher=Depends(get_current_teacher),
 ):
@@ -1477,7 +1492,7 @@ async def list_student_submissions(
     "/students/{student_id}/submissions/{submission_id}",
     response_model=StudentSubmissionDocument,
 )
-async def get_student_submission(
+def get_student_submission(
     student_id: str,
     submission_id: str,
     teacher=Depends(get_current_teacher),
@@ -1583,7 +1598,7 @@ def _assert_workgroup_in_classroom(
     "/classrooms/{classroom_id}/progress-entries",
     response_model=list[ProgressEntrySummary],
 )
-async def list_progress_entries(
+def list_progress_entries(
     classroom_id: str,
     student_id: str | None = None,
     workgroup_id: str | None = None,
@@ -1622,7 +1637,7 @@ async def list_progress_entries(
     "/classrooms/{classroom_id}/progress-entries",
     response_model=ProgressEntrySummary,
 )
-async def create_progress_entry(
+def create_progress_entry(
     classroom_id: str,
     req: ProgressEntryCreate,
     teacher=Depends(get_current_teacher),
@@ -1673,7 +1688,7 @@ async def create_progress_entry(
 @router.patch(
     "/progress-entries/{entry_id}", response_model=ProgressEntrySummary
 )
-async def patch_progress_entry(
+def patch_progress_entry(
     entry_id: str,
     req: ProgressEntryPatch,
     teacher=Depends(get_current_teacher),
@@ -1694,7 +1709,7 @@ async def patch_progress_entry(
 
 
 @router.delete("/progress-entries/{entry_id}")
-async def delete_progress_entry(
+def delete_progress_entry(
     entry_id: str, teacher=Depends(get_current_teacher)
 ):
     _assert_entry_owned(teacher["id"], entry_id)

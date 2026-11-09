@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -152,7 +153,7 @@ def _build_my_profile(profile: dict) -> MyProfile:
 
 
 @router.get("", response_model=MyProfile)
-async def read_me(profile=Depends(get_current_profile)):
+def read_me(profile=Depends(get_current_profile)):
     return _build_my_profile(profile)
 
 
@@ -172,7 +173,7 @@ def _proven_name_conflict() -> HTTPException:
 
 
 @router.patch("", response_model=MyProfile)
-async def update_me(
+def update_me(
     body: HfUsernameUpdate, profile=Depends(get_current_profile)
 ):
     """Link (or update) the caller's HuggingFace username (Benutzer-ID).
@@ -249,7 +250,7 @@ async def update_me(
 
 
 @router.get("/export")
-async def export_my_data(profile=Depends(get_current_profile)):
+def export_my_data(profile=Depends(get_current_profile)):
     """GDPR/DSGVO Art. 15 — download everything we have on this user.
 
     Returns the user's profile, every training row, the audit trail of
@@ -445,10 +446,12 @@ async def _cancel_managed_for_deletion(supabase, training_id: int, uid: str) -> 
     from app.services import training_dispatch
 
     try:
-        data = supabase.rpc(
-            "cancel_request_training", {"p_training_id": training_id, "p_user_id": uid,
-                                        "p_actor_role": "student"}
-        ).execute().data
+        data = (await asyncio.to_thread(
+            supabase.rpc(
+                "cancel_request_training", {"p_training_id": training_id, "p_user_id": uid,
+                                            "p_actor_role": "student"}
+            ).execute
+        )).data
     except Exception as exc:
         code = training_dispatch.pg_code(exc)
         if code in ("P0050", "P0051", "P0002"):
@@ -464,10 +467,12 @@ async def _cancel_managed_for_deletion(supabase, training_id: int, uid: str) -> 
     except Exception as exc:  # best effort: the reaper ends a pod no active row owns
         logger.warning("/me/delete: stopping training %s failed: %s", training_id, type(exc).__name__)
     try:
-        supabase.rpc(
-            "complete_cancel_training",
-            {"p_training_id": training_id, "p_final": "canceled", "p_message": None},
-        ).execute()
+        await asyncio.to_thread(
+            supabase.rpc(
+                "complete_cancel_training",
+                {"p_training_id": training_id, "p_final": "canceled", "p_message": None},
+            ).execute
+        )
     except Exception as exc:
         logger.warning("/me/delete: complete_cancel_training failed for %s: %s", training_id, type(exc).__name__)
         return False
@@ -514,12 +519,12 @@ async def delete_my_account(profile=Depends(get_current_profile)):
     # Migration 023: include 'cancel_requested' so a row stuck mid-cancel
     # at account-deletion time is also force-closed. Deletion is the user's
     # decision — we don't retry Modal here, we just close the row out.
-    active = (
+    active = await asyncio.to_thread(
         supabase.table("trainings")
         .select("id, cloud_job_id, managed")
         .eq("user_id", uid)
         .in_("status", ["queued", "running", "cancel_requested"])
-        .execute()
+        .execute
     )
     cancelled_ids: list = []
     for row in active.data or []:
@@ -539,13 +544,15 @@ async def delete_my_account(profile=Depends(get_current_profile)):
                     row["id"], exc,
                 )
         try:
-            supabase.table("trainings").update(
-                {
-                    "status": "canceled",
-                    "terminated_at": datetime.now(timezone.utc).isoformat(),
-                    "error_message": "Automatisch abgebrochen: Kontolöschung angefordert.",
-                }
-            ).eq("id", row["id"]).execute()
+            await asyncio.to_thread(
+                supabase.table("trainings").update(
+                    {
+                        "status": "canceled",
+                        "terminated_at": datetime.now(timezone.utc).isoformat(),
+                        "error_message": "Automatisch abgebrochen: Kontolöschung angefordert.",
+                    }
+                ).eq("id", row["id"]).execute
+            )
             cancelled_ids.append(row["id"])
         except Exception as exc:
             logger.warning(
@@ -562,14 +569,18 @@ async def delete_my_account(profile=Depends(get_current_profile)):
     if profile.get("workgroup_id"):
         wg_id = profile["workgroup_id"]
         try:
-            supabase.table("users").update({"workgroup_id": None}).eq(
-                "id", uid
-            ).execute()
-            supabase.table("workgroup_memberships").update(
-                {"left_at": datetime.now(timezone.utc).isoformat()}
-            ).eq("workgroup_id", wg_id).eq("user_id", uid).is_(
-                "left_at", "null"
-            ).execute()
+            await asyncio.to_thread(
+                supabase.table("users").update({"workgroup_id": None}).eq(
+                    "id", uid
+                ).execute
+            )
+            await asyncio.to_thread(
+                supabase.table("workgroup_memberships").update(
+                    {"left_at": datetime.now(timezone.utc).isoformat()}
+                ).eq("workgroup_id", wg_id).eq("user_id", uid).is_(
+                    "left_at", "null"
+                ).execute
+            )
             logger.info(
                 "Workgroup disengagement on /me/delete: user=%s group=%s",
                 uid, wg_id,
@@ -588,8 +599,8 @@ async def delete_my_account(profile=Depends(get_current_profile)):
     #     what really took effect.
     hf_token_removed = False
     try:
-        removed_rows = (
-            supabase.table("user_hf_credentials").delete().eq("user_id", uid).execute()
+        removed_rows = await asyncio.to_thread(
+            supabase.table("user_hf_credentials").delete().eq("user_id", uid).execute
         )
         hf_token_removed = bool(getattr(removed_rows, "data", None))
     except Exception as exc:
@@ -603,11 +614,11 @@ async def delete_my_account(profile=Depends(get_current_profile)):
     #    must be surfaced — silently returning success used to mean an
     #    admin would never see the request.
     try:
-        result = (
+        result = await asyncio.to_thread(
             supabase.table("users")
             .update({"deletion_requested_at": datetime.now(timezone.utc).isoformat()})
             .eq("id", uid)
-            .execute()
+            .execute
         )
         if not result.data:
             raise RuntimeError("update returned no rows")
@@ -695,7 +706,7 @@ def _valid_tutorial_id(tid: str) -> bool:
 
 
 @router.get("/tutorial-progress", response_model=list[TutorialProgress])
-async def list_tutorial_progress(
+def list_tutorial_progress(
     profile=Depends(get_current_profile),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
@@ -720,7 +731,7 @@ async def list_tutorial_progress(
 
 
 @router.patch("/tutorial-progress/{tutorial_id}", response_model=TutorialProgress)
-async def update_tutorial_progress_endpoint(
+def update_tutorial_progress_endpoint(
     tutorial_id: str,
     body: TutorialProgressUpdate,
     profile=Depends(get_current_profile),
@@ -797,7 +808,7 @@ def _group_member(row: dict, me_id: str) -> dict:
 
 
 @router.get("/group-members", response_model=GroupMembers)
-async def read_my_group_members(profile=Depends(get_current_profile)):
+def read_my_group_members(profile=Depends(get_current_profile)):
     """The members of the CALLER's current workgroup (any role).
 
     Rule §4: the workgroup comes from the caller's own profile (resolved from

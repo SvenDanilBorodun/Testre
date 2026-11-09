@@ -109,7 +109,7 @@ class _FakeDB:
 
 def _run(profile, db):
     with patch.object(meroute, "get_supabase", return_value=db):
-        return asyncio.run(meroute.read_my_group_members(profile=profile))
+        return meroute.read_my_group_members(profile=profile)
 
 
 class TestGroupMembers(unittest.TestCase):

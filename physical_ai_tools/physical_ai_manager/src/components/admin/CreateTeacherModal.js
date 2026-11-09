@@ -2,6 +2,12 @@ import React, { useState } from 'react';
 import toast from 'react-hot-toast';
 import Modal from '../teacher/Modal';
 import { Btn } from '../EbUI';
+import {
+  PASSWORD_MAX,
+  passwordErrorDe,
+  passwordHintDe,
+  passwordMinLength,
+} from '../../utils/passwordRules';
 
 const inputClass =
   'w-full h-10 px-3 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-sm text-[var(--ink)] placeholder:text-[var(--ink-4)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-wash)] transition';
@@ -14,6 +20,8 @@ export default function CreateTeacherModal({ onClose, onSubmit }) {
   const [loading, setLoading] = useState(false);
 
   const usernameValid = /^[a-z0-9][a-z0-9._-]{2,31}$/.test(username);
+  // A teacher's password: at least 12 characters (owner decision 2026-11-10).
+  const passwordError = passwordErrorDe(password, 'staff');
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -21,8 +29,8 @@ export default function CreateTeacherModal({ onClose, onSubmit }) {
       toast.error('Benutzername: 3–32 Zeichen, Kleinbuchstaben, Ziffern, . _ -');
       return;
     }
-    if (password.length < 6) {
-      toast.error('Passwort mindestens 6 Zeichen');
+    if (passwordError) {
+      toast.error(passwordError);
       return;
     }
     setLoading(true);
@@ -55,7 +63,7 @@ export default function CreateTeacherModal({ onClose, onSubmit }) {
             variant="primary"
             type="submit"
             form="create-teacher-form"
-            disabled={loading || !usernameValid || !fullName || password.length < 6}
+            disabled={loading || !usernameValid || !fullName || passwordError !== null}
           >
             {loading ? 'Erstellen…' : 'Erstellen'}
           </Btn>
@@ -103,9 +111,17 @@ export default function CreateTeacherModal({ onClose, onSubmit }) {
             className={`${inputClass} font-mono`}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            minLength={6}
+            minLength={passwordMinLength('staff')}
+            maxLength={PASSWORD_MAX}
+            aria-describedby="create-teacher-password-hint"
             required
           />
+          <p
+            id="create-teacher-password-hint"
+            className="text-[11px] text-[var(--ink-3)] mt-1.5 leading-snug"
+          >
+            {passwordHintDe('staff')}
+          </p>
         </label>
         <label className="block">
           <span className="text-xs font-medium text-[var(--ink-2)] mb-1.5 block">

@@ -14,6 +14,7 @@ import { useMeProfile } from './hooks/useMeProfile';
 import LoginForm from './components/LoginForm';
 import TeacherDashboard from './pages/teacher/TeacherDashboard';
 import AdminDashboard from './pages/admin/AdminDashboard';
+import AdminMfaGate from './components/admin/AdminMfaGate';
 import { signOutStudent } from './utils/signOut';
 
 // The teacher web build keeps its webfonts (Inter Tight + JetBrains Mono) from
@@ -150,7 +151,13 @@ function WebApp() {
   }
 
   if (role === 'admin') {
-    return <AdminDashboard onLogout={handleLogout} />;
+    // Admins only: the admin routes need a two-factor (aal2) session, so the
+    // dashboard renders behind the TOTP enrolment / challenge (2026-11-10).
+    return (
+      <AdminMfaGate onLogout={handleLogout}>
+        <AdminDashboard onLogout={handleLogout} />
+      </AdminMfaGate>
+    );
   }
   if (role === 'teacher') {
     return <TeacherDashboard onLogout={handleLogout} />;

@@ -66,7 +66,10 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
-          python-version: "3.11"
+          # The production image's minor version (cloud_training_api/Dockerfile:
+          # python:3.12.x-slim, digest-pinned); tests/test_cloud_api_base_image.py
+          # holds the two equal.
+          python-version: "3.12"
       - name: Install full deps for the probe
         run: |
           # Use the same requirements as the production image — importing

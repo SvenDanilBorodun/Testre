@@ -55,7 +55,7 @@
 #       (base-version-guard + bump-upstream-digests.sh own them), ros, ubuntu
 #       (wsl_rootfs: any change forces a ROOTFS_VERSION bump and a destructive
 #       re-import on every PC), python (the trainer's digest is the training
-#       lock's; the cloud API's 3.11 → 3.12 move is its own change),
+#       lock's; the cloud API's python:3.12.x-slim digest moves by hand too),
 #       eclipse-temurin (the code runner's JDK 21, test-pinned), nginx (the
 #       Origin-gate behaviour was measured on 1.27.5; patches only). The Modal
 #       images (nvidia/cuda, debian_slim) are declared in Python and invisible

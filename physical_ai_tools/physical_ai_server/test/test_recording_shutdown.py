@@ -16,7 +16,9 @@ Three pieces, each tested where it can be run:
   (generation bump, ``on_recording`` off under the publish lock) and calls the
   helper — gated on the DataManager, never on ``on_recording``;
 * ``main()``: SIGINT set to SIG_DFL BEFORE rclpy.init (so SIGINT, like SIGTERM,
-  only shuts the context down), and the finalize FIRST in the ``finally``.
+  only shuts the context down), and the finalize in the ``finally`` right
+  after the Cloud-Inferenz bye (which test_cloud_inference_node pins first; a
+  cloud run and a recording exclude each other), before everything else.
 
 ``physical_ai_server.py`` imports rclpy and cannot be imported here, so its
 methods are extracted by ``ast`` and exec'd onto a stub node (the
@@ -323,12 +325,13 @@ def test_sigint_is_sig_dfl_before_rclpy_installs_its_handler():
     assert ast.unparse(first) == 'signal.signal(signal.SIGINT, signal.SIG_DFL)'
 
 
-def test_the_finalize_is_the_first_thing_the_finally_does():
+def test_the_finalize_follows_the_cloud_bye_and_precedes_the_rest():
+    tries = [n for n in ast.walk(_MAIN) if isinstance(n, ast.Try) and n.finalbody]
+    calls = [ast.unparse(stmt) for stmt in tries[0].finalbody]
+    assert calls[:2] == ['node._shutdown_cloud_client()',
+                         'node._finalize_recording_on_shutdown()'], calls
     src = _main_src()
     finally_src = src[src.index('finally:'):]
-    first_call = next(line.strip() for line in finally_src.splitlines()[1:]
-                      if line.strip() and not line.strip().startswith('#'))
-    assert first_call == 'node._finalize_recording_on_shutdown()'
     finalize_at = finally_src.index('node._finalize_recording_on_shutdown()')
     for later in ('node._cleanup_hf_api_worker()', 'node._shutdown_sensor_executor()',
                   'executor.shutdown()', 'node.destroy_node()', 'rclpy.shutdown()'):

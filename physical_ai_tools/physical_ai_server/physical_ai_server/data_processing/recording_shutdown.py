@@ -21,7 +21,8 @@ The signal path, as it runs in the shipped image:
   ``sigkill_timeout`` more → in the node, rclpy's handler shuts the context down
   (``main()`` set SIGINT to SIG_DFL first, so SIGINT raises no KeyboardInterrupt,
   exactly like SIGTERM) → ``executor.spin()`` returns → ``main()``'s ``finally``
-  calls ``PhysicalAIServer._finalize_recording_on_shutdown`` FIRST → this module.
+  calls ``PhysicalAIServer._finalize_recording_on_shutdown`` right after the
+  Cloud-Inferenz bye, before anything else goes → this module.
 
 stdlib only: the node calls it from ``main()``'s ``finally`` and before the
 sensor supervisor's ``os._exit``; ``.github/scripts/record_fsm_smoke.py`` drives

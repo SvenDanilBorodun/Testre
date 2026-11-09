@@ -25,11 +25,11 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 **What changed:**
 - `DataManager.end_for_shutdown` (D5 + F3 unchanged: a latched save counted, the running take discarded, finalize, nothing uploaded, the marker cleared only on success; without a dataset a Start's wait ends like STOP; a finalized session is left alone); its own `_dataset_finalized` flag, never LeRobot's private one.
 - `data_processing/recording_shutdown.py` (stdlib): the bounded run on a daemon thread (`SHUTDOWN_FINALIZE_WAIT_S` 30 s), EPIPE-tolerant stdout/stderr.
-- The node: `_finalize_recording_on_shutdown` FIRST in `main()`'s `finally` and before the sensor supervisor's `os._exit(70)`; gated on the DataManager (a collision clears `on_recording` while the session lives); `main()` sets SIGINT to SIG_DFL before `rclpy.init`.
+- The node: `_finalize_recording_on_shutdown` in `main()`'s `finally` right after the Cloud-Inferenz bye (which stays first, pinned by `test_cloud_inference_node.py`) and before the sensor supervisor's `os._exit(70)`; gated on the DataManager (a collision clears `on_recording` while the session lives); `main()` sets SIGINT to SIG_DFL before `rclpy.init`.
 - The chain: the thin Dockerfile writes `SIGINT` to `/etc/s6-overlay/s6-rc.d/physical_ai_server/down-signal` (asserted at build); the node's launch `sigterm_timeout` 10 / `sigkill_timeout` 30; `stop_grace_period: 50s` on physical_ai_server (student, opi, twin); GUI `STACK_STOP_TIMEOUT_S` and Pi `ROBOT_TIER_STOP_TIMEOUT_S` 60 → 120 s (compose stops the services one after another; on the Pi a timed-out stop is followed by `rm -f`).
 - Tests: the FSM and D14 suites, `test/test_recording_shutdown.py`, `test_sensor_executor.py`, `tests/test_recording_stop_budget.py`, and the smoke scenarios `shutdown_sigint_after_two_episodes` / `shutdown_sigterm_after_two_episodes`.
 
-**Not verified here:** the real images (not buildable here; the smoke scenarios run first in `docker-publish.yml::smoke-test`), real rclpy and launch processes, a rig, a Pi. Spec: `docs/plans/2026-11-10-recording-survives-stop.md` (throwaway).
+**Not verified here:** the real images (not buildable here; the smoke scenarios first run in `docker-publish.yml::smoke-test`), real rclpy and launch processes, a rig, a Pi. Spec: `docs/plans/2026-11-10-recording-survives-stop.md` (throwaway).
 
 ### 2026-11-09 — the going-private follow-up, and the classroom Jetson retired
 

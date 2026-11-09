@@ -983,11 +983,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         """The node is going down: end a recording session WITHOUT losing what
         it saved.
 
-        Called FIRST in main()'s ``finally`` (an environment stop: s6's SIGINT to
-        the launch, the launch's SIGINT/SIGTERM to this node, rclpy shuts the
-        context down and spin() returns; an exception out of spin() before a
-        respawn) and by the sensor supervisor before its ``os._exit`` — before
-        the HF worker, the sensor executor and the node go. Before 2026-11-10
+        Called in main()'s ``finally`` right after the Cloud-Inferenz bye (an
+        environment stop: s6's SIGINT to the launch, the launch's SIGINT/SIGTERM
+        to this node, rclpy shuts the context down and spin() returns; an
+        exception out of spin() before a respawn) and by the sensor supervisor
+        before its ``os._exit`` — before the HF worker, the sensor executor and
+        the node go. Before 2026-11-10
         nothing finalized here and every saved episode of the session was lost
         (KNOWN-ISSUES M2).
 
@@ -8763,12 +8764,14 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        # Launch plan step 8 FIRST: a recording session that is still running is
-        # finalized without upload (its saved episodes survive the environment
-        # stop) while the recorder and its sensors still exist. Bounded.
-        node._finalize_recording_on_shutdown()
-        # A live Cloud-Inferenz run next: its bye tells the cloud the robot stopped.
+        # A live Cloud-Inferenz run first: its bye tells the cloud the robot stopped.
         node._shutdown_cloud_client()
+        # Launch plan step 8, right after it (a cloud run and a recording exclude
+        # each other, and without a live run the bye returns at once): a recording
+        # session that is still running is finalized without upload — its saved
+        # episodes survive the environment stop — while the recorder, the HF
+        # worker and the sensors still exist. Bounded.
+        node._finalize_recording_on_shutdown()
         # Cleanup HF API Worker before destroying node
         node._cleanup_hf_api_worker()
         # The sensor executor and its node go first: stop flag, executor

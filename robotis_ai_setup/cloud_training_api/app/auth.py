@@ -20,6 +20,7 @@ import threading
 from collections import OrderedDict
 
 from fastapi import Depends, Header, HTTPException
+from fastapi.responses import JSONResponse
 
 from app.services import jwt_auth
 from app.services.supabase_client import get_supabase
@@ -53,11 +54,22 @@ _PROFILE_COLUMNS = (
 
 class CodedHTTPException(HTTPException):
     """An HTTPException whose JSON body also carries a machine-readable ``code``
-    (main.py registers the handler that renders ``{"detail", "code"}``)."""
+    (main.py registers ``coded_http_exception_handler``)."""
 
     def __init__(self, status_code: int, detail: str, code: str):
         super().__init__(status_code=status_code, detail=detail)
         self.code = code
+
+
+async def coded_http_exception_handler(request, exc: CodedHTTPException):
+    """``{"detail": <German>, "code": <code>}``: a refusal the client must tell
+    apart by more than its status (the teacher web's TOTP screen on
+    ``mfa_required``, a retry on ``auth_unavailable``)."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail, "code": exc.code},
+        headers=getattr(exc, "headers", None),
+    )
 
 
 class CurrentUser:

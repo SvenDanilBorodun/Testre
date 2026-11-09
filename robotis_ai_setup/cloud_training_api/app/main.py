@@ -5,12 +5,11 @@ import re
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from app import edge as _edge
-from app.auth import CodedHTTPException
+from app.auth import CodedHTTPException, coded_http_exception_handler
 from app.routes.admin import router as admin_router
 from app.routes.datasets import router as datasets_router
 from app.routes.health import router as health_router
@@ -904,16 +903,10 @@ app.add_middleware(
 )
 
 
-@app.exception_handler(CodedHTTPException)
-async def _coded_http_exception(request: Request, exc: CodedHTTPException):
-    """An auth refusal the client must tell apart by more than its status (the
-    teacher web's TOTP screen on ``mfa_required``, a retry on
-    ``auth_unavailable``): ``{"detail": <German>, "code": <code>}``."""
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"detail": exc.detail, "code": exc.code},
-        headers=getattr(exc, "headers", None),
-    )
+# An auth refusal the client must tell apart by more than its status (the
+# teacher web's TOTP screen on `mfa_required`, a retry on `auth_unavailable`):
+# `{"detail": <German>, "code": <code>}`.
+app.add_exception_handler(CodedHTTPException, coded_http_exception_handler)
 
 
 app.include_router(health_router)

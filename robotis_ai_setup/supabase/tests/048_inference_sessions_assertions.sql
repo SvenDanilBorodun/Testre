@@ -1,9 +1,7 @@
 -- Behavioural assertions for migration 048 (Cloud-Inferenz sessions), run BY HAND against a fresh
 -- LOCAL database — never CI, never the linked project (it seeds rows).
--- The squashed baseline does not replay as shipped (docs/KNOWN-ISSUES.md, „baseline.sql is NOT
--- replayable from scratch"): use a SCRATCH copy of supabase/ whose baseline has
--- its one `ALTER TABLE public.trainings RENAME COLUMN runpod_job_id TO cloud_job_id;` line guarded as
--- 040_code_programs_assertions.sql's header shows, apply every migration through 048, then
+-- Use a SCRATCH copy of supabase/ holding every migration through 048 except 047 (the baseline
+-- replays on a fresh database as shipped), apply them, then
 --   psql <local db url> -f supabase/tests/048_inference_sessions_assertions.sql
 -- 052 BREAKS this file by design (spec §12.3): its seed INSERTs a trainings row
 -- directly, which 052's trainings_ledger_shape refuses (a new row defaults to

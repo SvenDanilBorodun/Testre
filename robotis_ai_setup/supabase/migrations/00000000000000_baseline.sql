@@ -580,8 +580,26 @@ CREATE POLICY "Admin reads all progress entries"
 --
 -- Rollback (if needed):
 --     ALTER TABLE public.trainings RENAME COLUMN cloud_job_id TO runpod_job_id;
+--
+-- 2026-11-10: guarded. This squashed baseline's CREATE TABLE public.trainings
+-- above already declares cloud_job_id, so the bare RENAME failed on a fresh
+-- database (ERROR: column "runpod_job_id" does not exist) and the file did not
+-- replay. Production never re-runs it: the CLI ledger has carried 00000000000000
+-- since the one-time `migration repair --status applied`, and `db push` compares
+-- versions only. The rename now runs only on a database that still has the old
+-- column, exactly what the bare statement did where it succeeded.
 
-ALTER TABLE public.trainings RENAME COLUMN runpod_job_id TO cloud_job_id;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+              WHERE table_schema = 'public' AND table_name = 'trainings'
+                AND column_name = 'runpod_job_id')
+     AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                      WHERE table_schema = 'public' AND table_name = 'trainings'
+                        AND column_name = 'cloud_job_id') THEN
+    ALTER TABLE public.trainings RENAME COLUMN runpod_job_id TO cloud_job_id;
+  END IF;
+END $$;
 
 COMMENT ON COLUMN public.trainings.cloud_job_id IS
   'Opaque job id returned by the cloud GPU dispatcher. '

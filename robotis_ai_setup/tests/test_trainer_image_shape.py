@@ -307,7 +307,8 @@ class CiWorkflow(unittest.TestCase):
 
     def test_python_tests_install_boto3_and_botocore(self):
         runs = _runs(self.jobs["python-tests"]).replace("\\\n", " ")
-        install = next(ln for ln in runs.splitlines() if "pip install pyyaml pytest" in ln)
+        # The test stack's one install line (every package pinned since 2026-11-10).
+        install = next(ln for ln in runs.splitlines() if re.search(r"pip install pyyaml==\S+ pytest==", ln))
         self.assertIn(f"boto3=={self.boto3}", install)
         self.assertIn(f"botocore=={self.botocore}", install)
 

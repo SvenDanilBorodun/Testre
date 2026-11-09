@@ -2,12 +2,8 @@
 -- Positionen in blockly_json['edubotics-destinations']), run BY HAND against a
 -- fresh LOCAL stack — never CI, never the linked project (it seeds rows).
 --
--- The squashed baseline does NOT replay on a fresh database as shipped
--- (docs/KNOWN-ISSUES.md, „baseline.sql is NOT replayable from scratch"): run
--- it in a SCRATCH copy of supabase/ whose baseline has its one
--- `RENAME COLUMN runpod_job_id` line guarded exactly as
--- 040_code_programs_assertions.sql's header shows, with every migration
--- through 041, then
+-- Run it in a SCRATCH copy of supabase/ holding every migration through 041
+-- (the baseline replays on a fresh database as shipped), then
 --   supabase start   (in the scratch copy; it applies the migrations)
 --   psql <local db url> < supabase/tests/041_code_destinations_assertions.sql
 -- Expected: 21 PASS, 0 FAIL/ERROR (T1..T12, some with a/b/c/d halves).

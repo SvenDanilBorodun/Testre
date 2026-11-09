@@ -341,10 +341,38 @@ def test_a_changed_slot_ends_the_worker_with_nobody_polling(hub, tmp_path):
     hub.token_file.write_text('hf_harnessotherAAAAAAAAAAAAAAAAA')
     t0 = time.monotonic()
     p.wait(timeout=10)
+    # The worker ended, and its cleaner removes the tmp right after (_remove_after_exit).
+    while tmp.exists() and time.monotonic() - t0 < 5:
+        time.sleep(0.02)
     assert time.monotonic() - t0 < 2.0
     out = p.stdout.read()
     assert 'DL_RESULT::{"ok": false, "code": "token_changed"}' in out
     assert not tmp.exists() and not target.exists()
+
+
+def _running(pid):
+    """True while ``pid`` still runs. ``os.kill(pid, 0)`` alone also answers for a
+    process that has EXITED and is waiting to be reaped (a zombie): the orphaned
+    worker's new parent is PID 1 or a subreaper, and when that one reaps is not
+    the worker's doing (a sandbox init was measured reaping an exited orphan
+    1.43-1.49 s after it exited, so the old probe read "still running" past the
+    test's bound while the worker had ended in time). /proc says Z (zombie) or X
+    (dead) for such a process; without /proc (macOS) only the signal probe is
+    left, and launchd reaps at once."""
+    try:
+        stat = Path(f'/proc/{pid}/stat').read_text()
+    except FileNotFoundError:
+        if Path('/proc/self/stat').exists():
+            return False                   # Linux: gone, reaped
+    except OSError:
+        pass
+    else:
+        return stat.rsplit(')', 1)[1].split()[0] not in ('Z', 'X')
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 def test_a_dead_parent_ends_the_worker(hub, tmp_path):
@@ -371,16 +399,63 @@ def test_a_dead_parent_ends_the_worker(hub, tmp_path):
     sup.wait()
     t0 = time.monotonic()
     while time.monotonic() - t0 < 5:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not _running(pid) and not tmp.exists():
             break
         time.sleep(0.05)
     else:
-        os.kill(pid, signal.SIGKILL)
-        pytest.fail('the orphaned worker kept running')
+        if _running(pid):
+            os.kill(pid, signal.SIGKILL)
+            pytest.fail('the orphaned worker kept running')
+        pytest.fail('the orphaned worker left its tmp behind')
+    # The worker's own watch polls every POLL_S (0.5 s) and its cleaner removes the
+    # tmp once it has ended; the bound leaves room for a loaded machine, not for
+    # whoever reaps the orphan afterwards (_running).
     assert time.monotonic() - t0 < 2.0
-    assert not tmp.exists()
+
+
+RACE = textwrap.dedent('''
+    """TEST-ONLY: eight threads keep writing into the tmp (what snapshot_download's
+    pool does) while the watch's exit path runs, exactly as the watch calls it."""
+    import os, sys, threading, time
+    from pathlib import Path
+    from physical_ai_server.daten import download_worker as W
+    tmp = Path(sys.argv[1])
+
+    def write(k):
+        i = 0
+        while True:
+            d = tmp / 'data' / f'chunk-{k:03d}'
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+                (d / f'file-{i:05d}.parquet').write_bytes(b'x' * 4096)
+            except OSError:
+                pass
+            i += 1
+            time.sleep(0.001)
+
+    for k in range(8):
+        threading.Thread(target=write, args=(k,), daemon=True).start()
+    time.sleep(0.05)
+    W._remove_after_exit(tmp)
+    os._exit(3)
+''')
+
+
+def test_the_tmp_goes_although_the_writers_run_until_the_exit(tmp_path):
+    """The watch's exit path against writers that never stop: the tmp must be gone
+    soon after the process ended. An rmtree from inside the process lost this race
+    every time (8 writers: 200 of 200 trials left the tmp), which is what the
+    dead-parent test caught 1 in 30 runs under load."""
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(PKG_PARENT), os.environ.get('PYTHONPATH', '')]))
+    for n in range(5):
+        tmp = tmp_path / f'ds{n}.tmp_sync'
+        r = subprocess.run([sys.executable, '-c', RACE, str(tmp)], env=env, capture_output=True, text=True,
+                           timeout=60)
+        assert r.returncode == 3, r.stderr[-2000:]
+        t0 = time.monotonic()
+        while tmp.exists() and time.monotonic() - t0 < 5:
+            time.sleep(0.02)
+        assert not tmp.exists(), f'trial {n}: the tmp survived the writers'
 
 
 # ── the supervisor (DatenService's DownloadProcess) ──────────────────────────

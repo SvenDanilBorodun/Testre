@@ -4,12 +4,9 @@
 -- SELECT), run BY HAND against a fresh LOCAL database — never CI, never the
 -- linked project (it seeds rows).
 --
--- The squashed baseline does NOT replay on a fresh database as shipped
--- (docs/KNOWN-ISSUES.md, „baseline.sql is NOT replayable from scratch"): run
--- it in a SCRATCH copy of supabase/ whose baseline has its one
--- `RENAME COLUMN runpod_job_id` line guarded exactly as
--- 040_code_programs_assertions.sql's header shows, with every migration
--- through 048 applied by `supabase start`, then 047 with psql as `postgres`:
+-- Run it in a SCRATCH copy of supabase/ holding every migration through 048
+-- except 047 (the baseline replays on a fresh database as shipped), applied by
+-- `supabase start`, then 047 with psql as `postgres`:
 --   psql <local db url> -v ON_ERROR_STOP=1 -f supabase/migrations/20261020120000_047_hide_worker_token.sql
 --   psql <local db url> -f supabase/tests/047_hide_worker_token_assertions.sql
 -- The same file passes unchanged after 049 too (049 grants its own columns by

@@ -5,7 +5,7 @@
  * Licence Agreement; see LICENSE at the repository root.
  */
 
-import { createSlice } from '@reduxjs/toolkit';
+import { createSlice, current, isDraft } from '@reduxjs/toolkit';
 import { signedOut } from '../session/sessionActions';
 // The [VAR:name=json] name gate, shared verbatim with the wire-side gate in
 // `hooks/useRosTopicSubscription`. Imported from `utils/`, NOT from the hook:
@@ -30,6 +30,28 @@ function emptySensorSnapshot() {
 
 // Values kept per variable for the Sammlung drawer's „Zuletzt" list.
 export const VAR_HISTORY_LIMIT = 5;
+
+// The key of a capped `{name: {value, ts}}` map with the oldest `ts` (FIFO
+// eviction for `variables` and `counters`), or null when the map is empty.
+// It reads a plain snapshot (`current`: the base object itself while the map is
+// unmodified, as it is at every call site), never the draft: every entry read
+// through an Immer draft becomes a proxy that is created and finalized again, so
+// each dispatch past the cap paid for 256 of them — 1000 distinct names took
+// 1.4 s on an idle machine and timed out at 5 s under a full test run, and a
+// runaway program's [VAR:] stream paid the same per message in the browser.
+function oldestKeyOf(map) {
+  const plain = isDraft(map) ? current(map) : map;
+  let oldestKey = null;
+  let oldestTs = Infinity;
+  for (const k of Object.keys(plain)) {
+    const t = plain[k]?.ts ?? 0;
+    if (t < oldestTs) {
+      oldestTs = t;
+      oldestKey = k;
+    }
+  }
+  return oldestKey;
+}
 
 // Push {value, ts} to the FRONT of `name`'s history unless the newest entry
 // already holds the same value — a loop re-setting an unchanged variable every
@@ -414,17 +436,8 @@ const workshopSlice = createSlice({
       // entry. Existing-name overwrites are free.
       const isNew = !(name in state.variables);
       if (isNew) {
-        const keys = Object.keys(state.variables);
-        if (keys.length >= VAR_LIMIT) {
-          let oldestKey = null;
-          let oldestTs = Infinity;
-          for (const k of keys) {
-            const t = state.variables[k]?.ts ?? 0;
-            if (t < oldestTs) {
-              oldestTs = t;
-              oldestKey = k;
-            }
-          }
+        if (Object.keys(state.variables).length >= VAR_LIMIT) {
+          const oldestKey = oldestKeyOf(state.variables);
           if (oldestKey) {
             delete state.variables[oldestKey];
             // An evicted variable takes its history with it, or the history
@@ -464,17 +477,8 @@ const workshopSlice = createSlice({
       const ts = Date.now();
       const isNew = !(name in state.counters);
       if (isNew) {
-        const keys = Object.keys(state.counters);
-        if (keys.length >= COUNTER_LIMIT) {
-          let oldestKey = null;
-          let oldestTs = Infinity;
-          for (const k of keys) {
-            const t = state.counters[k]?.ts ?? 0;
-            if (t < oldestTs) {
-              oldestTs = t;
-              oldestKey = k;
-            }
-          }
+        if (Object.keys(state.counters).length >= COUNTER_LIMIT) {
+          const oldestKey = oldestKeyOf(state.counters);
           if (oldestKey) delete state.counters[oldestKey];
         }
       }

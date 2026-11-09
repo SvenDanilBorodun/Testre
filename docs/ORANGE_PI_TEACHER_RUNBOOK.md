@@ -66,6 +66,9 @@ der Ticket-Warteschlange.
 > **eindeutige** Kennung (Hostname `edubotics-NN`, ROS-Domain, frische
 > Schlüssel) — doppelte `.local`-Namen sind das Einzige, was mDNS nicht
 > übersteht, deshalb wird `NN` **abgeleitet, nie von Hand vergeben**.
+> Jeder Klon startet außerdem **nicht eingerichtet** und erzeugt seinen
+> **eigenen Einrichtungscode** (siehe „Schritt 4 — Roboter einrichten"); den
+> Code eines Klons zeigt der Befehl `sudo sh -c 'cd /opt/edubotics && python3 -m pi_agent.setup_code'` im Terminal des Klons.
 
 ## Schritt 2 — Agent installieren (provisionieren)
 
@@ -150,7 +153,10 @@ Das Skript:
    `edubotics-pi-firstboot`,
 9. zieht die **`-opi`-Container-Images** (GHCR zuerst, Docker Hub als
    Ausweichweg),
-10. druckt am Ende das **Gehäuse-Etikett**.
+10. druckt am Ende das **Gehäuse-Etikett**,
+11. und darunter den **Einrichtungscode** (z. B. `ABCD-EFGH`). Er wird nur
+    jetzt angezeigt — bitte notieren (oder aufs Etikett schreiben); er wird
+    in Schritt 4 einmal gebraucht.
 
 ## Schritt 3 — Etikett aufs Gehäuse
 
@@ -176,7 +182,49 @@ Das Skript druckt drei Felder plus QR-Code:
   hat, liest sie die Lehrkraft in der **Pi-IP-Anzeige** des System-Fensters ab
   und trägt sie ins Etikett ein. Danach gilt `http://<IP>/` dauerhaft.
 
-## Schritt 4 — Im Browser verbinden
+## Schritt 4 — Roboter einrichten (Einrichtungscode)
+
+Seit dem Update vom November 2026 braucht **jeder Zugriff auf den Roboter**
+(Robotersteuerung, Kamerabild, Datensätze und das System-Fenster) eine
+**Anmeldung mit einem EduBotics-Konto**. Ein frisch installierter Pi ist
+außerdem **noch nicht eingerichtet**: bis eine Lehrkraft oder ein Admin ihn
+einmal mit dem **Einrichtungscode** einrichtet, nimmt er gar keine Anmeldung an.
+
+1. `http://edubotics-NN.local/` (oder `http://<IP>/`) öffnen. Es erscheint
+   „Diesen Roboter einrichten".
+2. Mit einem **Lehrkräfte- oder Admin-Konto** anmelden (ein Schülerkonto kann
+   nicht einrichten).
+3. Den **Einrichtungscode** eingeben (Groß-/Kleinschreibung und Bindestrich
+   egal) und „Roboter einrichten" drücken. Danach öffnet sich das
+   System-Fenster.
+4. Ab jetzt kann sich **jedes EduBotics-Konto** an diesem Pi anmelden. Der
+   Code ist damit verbraucht.
+
+**Wo ist der Code?**
+
+- am Ende der Installation (`setup.sh`, unter dem Etikett);
+- beim Start auf einem **angeschlossenen Bildschirm** (HDMI-Textkonsole), wenn
+  der Pi noch keinen Code hatte — auf einem Desktop-Image oft nicht sichtbar;
+- nach einem **„Daten zurücksetzen"** einmal im Browser, der zurückgesetzt hat.
+
+**Code verloren oder gesperrt?** (Nach 20 Fehlversuchen sperrt sich ein Code.)
+Im Terminal des Pi (per Tastatur/Bildschirm oder SSH):
+
+```bash
+sudo sh -c 'cd /opt/edubotics && python3 -m pi_agent.setup_code'
+```
+
+Der Befehl ersetzt den alten Code durch einen neuen und zeigt ihn an. Er
+funktioniert nur, solange der Pi **nicht** eingerichtet ist; ein eingerichteter
+Pi bekommt einen neuen Code nur über „Daten zurücksetzen".
+
+> **Bereits installierte Pis nach dem Update:** Ein Pi, der vor diesem Update
+> eingerichtet war, gilt danach als **nicht eingerichtet** — Roboter, Kamera,
+> Daten und System-Fenster sind gesperrt, bis er eingerichtet ist. Für **jeden**
+> Pi einmal im Terminal den Befehl oben ausführen und den Code wie in den
+> Schritten 1–3 eingeben.
+
+## Schritt 5 — Im Browser verbinden
 
 Vom Schüler-PC im selben (Robotik-)Netz:
 
@@ -194,9 +242,11 @@ Vom Schüler-PC im selben (Robotik-)Netz:
    meldet dann „TLS-Inspektion erkannt (Zertifikat neu signiert) — bricht
    Pulls/Uploads/Updater." → siehe Netzwerk-Anleitung, Ausnahme.
 
-## Schritt 5 — Einrichtungsassistent (System-Fenster)
+## Schritt 6 — Einrichtungsassistent (System-Fenster)
 
-Derselbe Ablauf wie in der Windows-App, jetzt im Browser:
+Derselbe Ablauf wie in der Windows-App, jetzt im Browser. Das System-Fenster
+braucht — wie jeder Tab — eine Anmeldung; jedes EduBotics-Konto darf es
+benutzen (Lehrkräfte und Admins sehen am Pi **nur** das System-Fenster):
 
 | Schritt | Aktion |
 |---|---|
@@ -211,7 +261,7 @@ Derselbe Ablauf wie in der Windows-App, jetzt im Browser:
 > „Umgebung starten"-Knopf. Die **Roboter-Container** kommen erst mit
 > „Umgebung starten" hoch (der Dynamixel-Bus muss vorher frei sein).
 
-## Schritt 6 — Aufnehmen & trainieren
+## Schritt 7 — Aufnehmen & trainieren
 
 > Dieser Schritt gilt für **„OMX – Voll"**. Auf den Follower-only-Typen blendet
 > die Web-Oberfläche **Aufnahme, Daten und Training** aus (es gibt keinen
@@ -267,15 +317,27 @@ cat /var/lib/edubotics/.last_image_pull.json  # letzter Image-Update
 | Arme werden nicht erkannt | **Zuerst:** Passt der oben gewählte **Robotertyp** zum angesteckten Arm? Der Scan sucht ausschließlich nach der Arm-Familie dieses Typs, findet den falschen also gar nicht — dann nennt die Meldung den Robotertyp, nicht das Kabel. Sonst: Arm(e) eingesteckt? Läuft bereits eine Umgebung (belegt den seriellen Bus)? Erst „Stoppen", dann neu scannen. |
 | Unterspannungs-Resets in der Aufnahme | Offizielles 5 V/5 A-Netzteil verwenden; Kernel-Log auf `undervoltage`/`reset` prüfen. |
 | Agent-Dienst startet nicht | `journalctl -u edubotics-pi -n 50`. |
+| „Diesen Roboter einrichten" statt der Anmeldung | Der Pi ist (noch oder nach „Daten zurücksetzen"/einem Update) nicht eingerichtet — Schritt 4. |
+| „Der Einrichtungscode ist nach zu vielen Fehlversuchen gesperrt" / „Für diesen Pi gibt es noch keinen Einrichtungscode" | Im Terminal des Pi `sudo sh -c 'cd /opt/edubotics && python3 -m pi_agent.setup_code'` ausführen; er zeigt einen neuen Code. |
+| „Der Roboter erreicht die EduBotics-Cloud gerade nicht und kann die Anmeldung deshalb nicht prüfen" | Der **Pi** (nicht der Browser) braucht ausgehendes HTTPS zur Cloud-API; TLS-Inspektion bricht es. „Netzwerk-Check" im System-Fenster, sonst [Netzwerk-Anleitung](ORANGE_PI_IT_NETZWERK.md). Ohne Internet bleibt der Roboter gesperrt. |
+| „Die Pi-Software ist älter als diese Weboberfläche" | Im System-Fenster „Aktualisieren" ausführen. |
+| „Die Weboberfläche dieses Pis ist älter als die Pi-Software" / „Umgebung starten" wird abgelehnt | Direkt nach einem Update normal: der Pi lädt die neue Weboberfläche selbst (einige Minuten), danach die Seite neu laden. Bleibt es dabei: Pi neu starten. |
 
-## Sicherheitshinweis (bewusste Entscheidung)
+## Sicherheitshinweis
 
-Port 80 (Web-Oberfläche, Robotersteuerung und Kamerabild über denselben Proxy)
-ist **offen im LAN, ohne Authentifizierung** — wer im selben Netzsegment ist,
-kann jeden Arm steuern und jede Kamera sehen.
-Deshalb ist das **eigene Robotik-VLAN** (oder der eigene Pilot-Router) keine
-Kür, sondern die Sicherheitsgrenze. Mildernde Maßnahmen, die trotzdem
-mitkommen: der **`EDUBOTICS_LAN_OPEN=0`**-Schalter (Kiosk: alle Ports zurück
-auf `127.0.0.1`) und die **Host/Origin-Prüfung** auf zustandsändernden
-Management-Endpunkten (blockt bösartige Web-Seiten, lässt LAN-Nachbarn — das
-akzeptierte Restrisiko — unberührt).
+Port 80 (Web-Oberfläche, Robotersteuerung, Kamerabild, Datensätze und
+System-Fenster über denselben Proxy) verlangt seit dem Update vom November 2026
+eine **Anmeldung mit einem EduBotics-Konto**. Ein Gerät im LAN **ohne** Konto
+kann den Arm nicht mehr steuern, keine Kamera sehen, keine Daten lesen und den
+Pi nicht zurücksetzen. Jedes EduBotics-Konto darf jeden eingerichteten Pi
+benutzen, den es erreicht.
+
+Die Verbindung zum Pi ist aber **unverschlüsselt (HTTP)**. Wer im selben
+Netzsegment mitlesen kann, kann eine laufende Anmeldung abgreifen (das
+Anmelde-Cookie des Roboters und für kurze Zeit die Anmeldung des Kontos).
+Deshalb bleibt das **eigene Robotik-VLAN** (oder der eigene Pilot-Router)
+**Voraussetzung für den Betrieb**, nicht Kür. Zusätzlich: der
+**`EDUBOTICS_LAN_OPEN=0`**-Schalter (Kiosk: alle Ports zurück auf `127.0.0.1`)
+und die **Host/Origin-Prüfung** auf zustandsändernden Endpunkten. „Daten
+zurücksetzen" verlangt das eingetippte Wort **ZURÜCKSETZEN** und macht den Pi
+wieder „nicht eingerichtet".

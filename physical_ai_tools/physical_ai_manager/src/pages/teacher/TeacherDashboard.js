@@ -25,6 +25,7 @@ import {
   TopBar,
 } from '../../components/EbUI';
 import Icon from '../../components/icons/Icon';
+import LegalLinks from '../../components/LegalLinks';
 
 export default function TeacherDashboard({ onLogout }) {
   const dispatch = useDispatch();
@@ -271,6 +272,9 @@ export default function TeacherDashboard({ onLogout }) {
           )}
         </main>
       </div>
+
+      {/* Impressum · Datenschutz · Nutzungsbedingungen (launch plan step 4). */}
+      <LegalLinks variant="footer" />
 
       {showHistory && (
         <CreditHistoryDrawer

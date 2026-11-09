@@ -25,6 +25,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabaseClient';
 import { onMfaRequired } from '../../features/auth/mfaRequired';
 import { Btn, LogoMark } from '../EbUI';
+import LegalLinks from '../LegalLinks';
 
 export const MFA_DE = {
   checking: 'Zwei-Faktor-Anmeldung wird geprüft…',
@@ -258,6 +259,7 @@ export default function AdminMfaGate({ onLogout, children }) {
             </form>
           )}
         </div>
+        <LegalLinks />
       </div>
     </div>
   );

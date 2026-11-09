@@ -19,6 +19,7 @@ import { usePiMode } from '../utils/piMode';
 import { useAgentUpdate } from '../hooks/useAgentUpdate';
 import { toastIcon } from '../components/icons/toast';
 import { noteUnauthorized, setPiResetCode } from '../features/piAuth/piAuth';
+import LegalLinks from '../components/LegalLinks';
 
 // The typed confirmation a factory reset needs (owner decision 5, the agent's
 // _FACTORY_RESET_CONFIRM_WORD): compared case-insensitively, umlaut included.
@@ -1121,6 +1122,11 @@ export default function SystemPage() {
         </Card>
         </div>
         </div>
+
+        {/* Impressum · Datenschutz · Nutzungsbedingungen, read from the cloud
+            API (launch plan step 4); nothing while it names none or the Pi is
+            offline. */}
+        <LegalLinks className="mt-8 mb-2 flex justify-center" />
       </div>
     </div>
   );

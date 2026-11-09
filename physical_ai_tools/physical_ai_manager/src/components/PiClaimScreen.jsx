@@ -14,6 +14,7 @@ import React, { useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
 import { useDispatch, useSelector } from 'react-redux';
 import LoginForm from './LoginForm';
+import LegalLinks from './LegalLinks';
 import { Btn, LogoMark } from './EbUI';
 import Icon from './icons/Icon';
 import { claimPi, usePiAuth } from '../features/piAuth/piAuth';
@@ -164,6 +165,7 @@ export default function PiClaimScreen() {
             <p className="font-mono mt-1 break-all select-all">{SETUP_CODE_COMMAND}</p>
           </div>
         </div>
+        <LegalLinks />
       </div>
     </div>
   );

@@ -6,6 +6,7 @@ import { setSession, setIsLoading } from '../features/auth/authSlice';
 import { usernameToEmail } from '../constants/appMode';
 import { isCloudUnreachableAuthError } from '../utils/authGate';
 import { Btn, LogoMark } from './EbUI';
+import LegalLinks from './LegalLinks';
 import packageJson from '../../package.json';
 
 /**
@@ -167,8 +168,11 @@ export default function LoginForm({
             )}
           </form>
 
-          <div className="mt-5 pt-4 border-t border-[var(--line)] flex items-center justify-end text-xs text-[var(--ink-3)]">
-            <span className="font-mono">v{packageJson.version}</span>
+          {/* Impressum · Datenschutz · Nutzungsbedingungen, once the cloud API
+              names them (launch plan step 4); nothing while it does not. */}
+          <div className="mt-5 pt-4 border-t border-[var(--line)] flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-[var(--ink-3)]">
+            <LegalLinks />
+            <span className="font-mono ml-auto">v{packageJson.version}</span>
           </div>
         </div>
       </div>

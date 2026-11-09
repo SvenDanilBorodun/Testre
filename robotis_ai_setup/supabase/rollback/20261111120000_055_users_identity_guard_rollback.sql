@@ -1,24 +1,47 @@
--- Rollback of 055 — the users guard's whole-row rule 1.
+-- Rollback of 055 — public.users without request-role writes.
 --
--- Restores public.users_guard_protected_columns() exactly as 044 created it:
--- rule 1 again names only role, training_credits, hf_username, classroom_id and
--- workgroup_id; rule 2 (P0044) is the same in both. The function's comment is
--- 044's again. The trigger trg_0_users_protected_columns, the EXECUTE revokes and
--- every row stay as they are (CREATE OR REPLACE keeps the function's OID, so the
--- trigger keeps firing it).
+-- Restores what 20261111120000_055_users_identity_guard.sql changed, as 054 left it:
+--   * anon and authenticated get back INSERT, UPDATE, DELETE, TRUNCATE,
+--     REFERENCES and TRIGGER on public.users (the set Supabase's default
+--     privileges give every public table; SELECT was never revoked). 055's
+--     column-level revoke had nothing to revoke on a stock project, so no
+--     column grant is restored;
+--   * the own-row policy "Users update own profile" exactly as 024
+--     (20260520130522_024_advisor_fixes.sql) re-created it, with its comment;
+--   * public.users_guard_protected_columns() exactly as 044 created it: rule 1
+--     names only role, training_credits, hf_username, classroom_id and
+--     workgroup_id; rule 2 (P0044) is the same in both. Its comment is 044's
+--     again. The trigger trg_0_users_protected_columns and the EXECUTE revokes
+--     stay (CREATE OR REPLACE keeps the function's OID, so the trigger keeps
+--     firing it).
 --
 -- WARNING: this RE-OPENS what 055 closed. A signed-in student can again PATCH
 -- their own deletion_requested_at (clear or back-date a GDPR request behind the
 -- API's back), username, full_name, email, created_by, vision_quota_per_term,
 -- vision_used_per_term and created_at through PostgREST. The 055 cloud API keeps
--- working against a database without 055 (it writes these columns with the
--- service role, which both bodies let through), so no API rollback is needed
--- first. Run it only to unblock a regression and roll forward again.
+-- working against a database without 055 (it writes users only with the service
+-- role), so no API rollback is needed first. Run it only to unblock a regression
+-- and roll forward again.
 --
--- Idempotent: re-running writes the same body. The closing DO block checks the
--- restored state.
+-- Idempotent: GRANT of a held privilege is a no-op, the policy is dropped before
+-- it is created, the function is re-created as it is. The closing DO block
+-- checks the restored state.
 
 BEGIN;
+
+GRANT INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+    ON public.users
+    TO anon, authenticated;
+
+DROP POLICY IF EXISTS "Users update own profile" ON public.users;
+CREATE POLICY "Users update own profile"
+  ON public.users FOR UPDATE
+  TO authenticated
+  USING (id = (SELECT auth.uid()))
+  WITH CHECK (id = (SELECT auth.uid()));
+
+COMMENT ON POLICY "Users update own profile" ON public.users IS
+  'Re-created with InitPlan auth.uid(). Semantics unchanged.';
 
 CREATE OR REPLACE FUNCTION public.users_guard_protected_columns()
 RETURNS trigger
@@ -69,6 +92,12 @@ DO $$
 DECLARE
     v_sig REGPROCEDURE := to_regprocedure('public.users_guard_protected_columns()');
 BEGIN
+    IF NOT has_table_privilege('authenticated', 'public.users', 'UPDATE')
+       OR NOT EXISTS (SELECT 1 FROM pg_policies
+                       WHERE schemaname = 'public' AND tablename = 'users'
+                         AND policyname = 'Users update own profile' AND cmd = 'UPDATE') THEN
+        RAISE EXCEPTION '055 rollback: the own-row UPDATE path of 054 is not restored';
+    END IF;
     IF v_sig IS NULL OR NOT EXISTS (
         SELECT 1 FROM pg_proc
          WHERE oid = v_sig AND NOT prosecdef AND proconfig = ARRAY['search_path=""']

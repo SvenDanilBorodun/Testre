@@ -31,3 +31,12 @@ export async function patchMyHfUsername(accessToken, hfUsername) {
 export async function getGroupMembers(accessToken) {
   return apiRequest('/me/group-members', 'GET', accessToken);
 }
+
+/**
+ * Withdraw the caller's own OPEN deletion request (GDPR Art. 17, launch plan
+ * step 5): `{withdrawn, message}` with a German message. Keyed to the JWT
+ * server-side; idempotent (`withdrawn: false` when nothing was open).
+ */
+export async function withdrawDeletionRequest(accessToken) {
+  return apiRequest('/me/delete/withdraw', 'POST', accessToken);
+}

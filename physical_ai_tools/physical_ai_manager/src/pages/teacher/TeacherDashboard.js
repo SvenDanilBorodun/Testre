@@ -3,19 +3,27 @@ import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import { useDispatch, useSelector } from 'react-redux';
 import {
+  confirmDeletionRequest,
   createClassroom,
   getTeacherCreditHistory,
   listClassrooms,
+  listDeletionRequests,
 } from '../../services/teacherApi';
+import { getMe } from '../../services/meApi';
 import {
+  removeStudentFromSelected,
   selectClassroom,
   setClassrooms,
   setClassroomsLoading,
 } from '../../features/teacher/teacherSlice';
+import { updateTeacherPool } from '../../features/auth/authSlice';
 import CreateClassroomModal from '../../components/teacher/CreateClassroomModal';
 import ClassroomDetail from '../../components/teacher/ClassroomDetail';
 import CreditHistoryDrawer from '../../components/teacher/CreditHistoryDrawer';
+import DeletionRequestList from '../../components/teacher/DeletionRequestList';
+import Modal from '../../components/teacher/Modal';
 import { hoursDe, numberDe } from '../../utils/hoursDe';
+import { DELETION_DE, announceStudentDeletion } from '../../utils/deletionRequest';
 import useRefetchOnFocus from '../../hooks/useRefetchOnFocus';
 import {
   Btn,
@@ -45,6 +53,12 @@ export default function TeacherDashboard({ onLogout }) {
 
   const [showCreate, setShowCreate] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  // GDPR Art. 17 (launch plan step 5): the open deletion requests of this
+  // teacher's students; the teacher confirms each (owner decision).
+  const [deletionRequests, setDeletionRequests] = useState([]);
+  const [deletionLoading, setDeletionLoading] = useState(false);
+  const [deletionError, setDeletionError] = useState(null);
+  const [showDeletions, setShowDeletions] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(
     typeof window !== 'undefined' ? window.innerWidth >= 1024 : true
   );
@@ -82,6 +96,60 @@ export default function TeacherDashboard({ onLogout }) {
   }, [fetchClassrooms]);
 
   useRefetchOnFocus(fetchClassrooms);
+
+  const fetchDeletionRequests = useCallback(async () => {
+    if (!token) return;
+    setDeletionLoading(true);
+    try {
+      const list = await listDeletionRequests(token);
+      setDeletionRequests(Array.isArray(list) ? list : []);
+      setDeletionError(null);
+    } catch (err) {
+      // An older Cloud API has no such route (404): no queue, not an error.
+      if (err?.status === 404) {
+        setDeletionRequests([]);
+        setDeletionError(null);
+      } else {
+        setDeletionError(err?.message || DELETION_DE.loadFailed);
+      }
+    } finally {
+      setDeletionLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    fetchDeletionRequests();
+  }, [fetchDeletionRequests]);
+
+  useRefetchOnFocus(fetchDeletionRequests);
+
+  const handleConfirmDeletion = async (req) => {
+    try {
+      const res = await confirmDeletionRequest(token, req.id);
+      setDeletionRequests((list) => list.filter((r) => r.student_id !== req.id));
+      dispatch(removeStudentFromSelected(req.id));
+      announceStudentDeletion(res, toast);
+      fetchClassrooms();
+      try {
+        const me = await getMe(token);
+        dispatch(
+          updateTeacherPool({
+            pool_total: me.pool_total,
+            allocated_total: me.allocated_total,
+            pool_available: me.pool_available,
+            student_count: me.student_count,
+            compensated: me.compensated,
+          })
+        );
+      } catch {}
+    } catch (err) {
+      toast.error(err?.message || 'Fehler');
+      // 409: withdrawn meanwhile; 404: no longer this teacher's student.
+      if (err?.status === 409 || err?.status === 404) fetchDeletionRequests();
+    }
+  };
+
+  const openDeletions = deletionRequests.length;
 
   const handleCreate = async (name) => {
     const created = await createClassroom(token, name);
@@ -157,9 +225,19 @@ export default function TeacherDashboard({ onLogout }) {
             <span>{`Ausgleich vom Admin: ${hoursDe(compensated)}`}</span>
           )}
           <span>Stunden vergibt der Admin. Du verteilst sie an Schüler oder an Arbeitsgruppen.</span>
-          <span>
+          <span className="flex flex-wrap gap-2">
             <Btn variant="secondary" size="sm" onClick={() => setShowHistory(true)} title="Verlauf">
               <Icon name="history" /> Verlauf
+            </Btn>
+            <Btn
+              variant={openDeletions > 0 ? 'danger' : 'secondary'}
+              size="sm"
+              onClick={() => setShowDeletions(true)}
+              title={DELETION_DE.title}
+              data-testid="deletion-requests-button"
+            >
+              <Icon name="trash" />
+              {openDeletions > 0 ? DELETION_DE.openCount(openDeletions) : DELETION_DE.title}
             </Btn>
           </span>
         </div>
@@ -272,6 +350,29 @@ export default function TeacherDashboard({ onLogout }) {
         </main>
       </div>
 
+      {showDeletions && (
+        <Modal
+          title={DELETION_DE.title}
+          onClose={() => setShowDeletions(false)}
+          widthClass="max-w-2xl"
+        >
+          <p className="text-xs text-[var(--ink-3)] mb-2">{DELETION_DE.teacherOnlyOwn}</p>
+          <DeletionRequestList
+            requests={deletionRequests.map((r) => ({
+              id: r.student_id,
+              name: r.full_name || r.username || '—',
+              username: r.username,
+              role: 'student',
+              classroomName: r.classroom_name,
+              requestedAt: r.requested_at,
+              dueBy: r.due_by,
+            }))}
+            loading={deletionLoading}
+            error={deletionError}
+            onConfirm={handleConfirmDeletion}
+          />
+        </Modal>
+      )}
       {showHistory && (
         <CreditHistoryDrawer
           title="Stundenverlauf · Lehrer-Pool"

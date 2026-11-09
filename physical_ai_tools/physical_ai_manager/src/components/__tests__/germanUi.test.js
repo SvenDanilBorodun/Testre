@@ -110,6 +110,11 @@ export const GERMAN_FILES = Object.freeze([
   'features/editDataset/renderProbe.js',
   'pages/EditDatasetPage.js',
   'pages/TrainingPage.js',
+  // GDPR Art. 17 deletion requests (launch plan step 5): the student's notice,
+  // the teacher/admin queue and the one table of their sentences.
+  'components/DeletionRequestNotice.jsx',
+  'components/teacher/DeletionRequestList.js',
+  'utils/deletionRequest.js',
 ]);
 
 const ENGLISH = /\b(the|and|please|select|selected|selectable|failed|failed to|loading|load|cancel|browse|directory|folder|file|merge|output|add|remove|refresh|empty|found|detected|usage|used|free|total|user|dataset|datasets|model|instruction|parent|home|current|path|already|exists|choose|different|existing|more|only|navigation|disabled|repository name|cannot|must|characters|letters|numbers|configuration|type|local|full|will|be|saved|switch|while|in progress|memory|storage|almost|high|very|consider|closing|applications|cleaning)\b/i;

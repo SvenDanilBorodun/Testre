@@ -12,6 +12,7 @@ import {
 import { getMe } from '../../services/meApi';
 import { newRequestId } from '../../services/cloudTrainingApi';
 import { RECLAIM_FOOTNOTE_DE, hoursOf, numberDe, reclaimTitle, std } from '../../utils/hoursDe';
+import { DELETION_DE, announceStudentDeletion, formatDateDe } from '../../utils/deletionRequest';
 import {
   removeStudentFromSelected,
   upsertStudentInSelected,
@@ -252,28 +253,12 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
       await refreshTeacherPool();
 
       // The account deletion SUCCEEDED — 200, and the row is already gone from
-      // the roster above. So this is a warning about what remains, never a
-      // failed request, and the local state must not be rolled back.
-      //
-      // Gated on an EXPLICIT `false`: an older Cloud API answers a bare
-      // `{ok: true}`, and `undefined === false` is false, so it keeps the
-      // previous message byte-for-byte instead of inventing a warning about a
-      // field it never sent.
-      if (res?.hf_erasure_complete === false) {
-        const remaining = Array.isArray(res.hf_failures) ? res.hf_failures.length : 0;
-        toast.error(
-          res.detail
-            || `Das Konto wurde gelöscht, aber ${remaining} HuggingFace-`
-               + 'Repository/-s konnten NICHT gelöscht werden — die Daten '
-               + 'liegen noch dort. Bitte im HuggingFace-Konto der '
-               + 'Schülerin/des Schülers manuell löschen.',
-          // Longer than the 6 s error default: this is an instruction to go
-          // and do something on another site, not a status line.
-          { duration: 15000 }
-        );
-        return;
-      }
-      toast.success('Schüler gelöscht');
+      // the roster above. So a partial HuggingFace erasure is a warning about
+      // what remains, never a failed request, and the local state must not be
+      // rolled back. The reading of the answer (an explicit `false` only, so an
+      // older Cloud API's bare `{ok: true}` keeps the plain message) is shared
+      // with the deletion-request queue: utils/deletionRequest.js.
+      announceStudentDeletion(res, toast);
     } catch (err) {
       toast.error(err.message || 'Fehler');
     } finally {
@@ -346,6 +331,11 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
                 >
                   <Icon name="pencil" size={14} />
                 </button>
+                {student.deletion_requested_at && (
+                  <span title={DELETION_DE.requestedOn(formatDateDe(student.deletion_requested_at))}>
+                    <Pill tone="danger">{DELETION_DE.rosterPill}</Pill>
+                  </span>
+                )}
                 {student.workgroup_id && student.workgroup_name && (
                   <Pill tone="success" title="In Arbeitsgruppe">
                     <span className="inline-flex items-center gap-1">

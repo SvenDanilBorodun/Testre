@@ -31,6 +31,7 @@ import CollisionModal from './components/CollisionModal';
 import PiUpdateGate from './components/PiUpdateGate';
 import PiClaimScreen from './components/PiClaimScreen';
 import PiLoginNotice from './components/PiLoginNotice';
+import DeletionRequestNotice from './components/DeletionRequestNotice';
 import StartupGate from './components/StartupGate';
 import { Avatar, LogoMark } from './components/EbUI';
 import { BrandMark } from './components/sucher';
@@ -613,6 +614,9 @@ function StudentApp() {
                 the mobile header, both outside <main>. */}
         <main className="flex-1 flex flex-col min-h-0 min-w-0 relative overflow-hidden">
           <PiLoginNotice piMode={piMode} />
+          {/* An open GDPR deletion request (launch plan step 5): when, by when,
+              and the withdrawal. Only once the student is through the gate. */}
+          {authGate === 'app' && <DeletionRequestNotice />}
           {authGate === 'loading' ? (
             <div className="flex items-center justify-center h-full">
               <div className="text-[var(--ink-3)] text-lg">Laden…</div>

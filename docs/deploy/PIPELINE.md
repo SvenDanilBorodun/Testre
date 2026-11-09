@@ -35,7 +35,7 @@ Plus `release.yml` which chains all four on `v*.*.*` tag pushes.
 
 ## One-time setup (operator runs this once, ever)
 
-### Step 1: Mint the 12 GitHub Actions secrets
+### Step 1: Mint the 10 GitHub Actions secrets (plus one optional)
 
 Settings → Secrets and variables → Actions → New repository secret:
 
@@ -44,15 +44,15 @@ Settings → Secrets and variables → Actions → New repository secret:
 | `DOCKERHUB_USERNAME` | `nettername` |
 | `DOCKERHUB_TOKEN` | hub.docker.com → Account Settings → Security → New Access Token, scope **Read/Write/Delete** |
 | `RAILWAY_TOKEN` | `railway tokens create --project scintillating-empathy --name gha-deploy` (run from your laptop where Railway CLI is logged in) |
-| `MODAL_TOKEN_ID` | Copy from existing Railway env (`railway variables` shows it; starts `ak-`) |
-| `MODAL_TOKEN_SECRET` | Copy from existing Railway env (starts `as-`) |
 | `SUPABASE_ACCESS_TOKEN` | supabase.com → Account → Access Tokens → Generate new token |
 | `SUPABASE_DB_URL` | Supabase Dashboard → Project Settings → Database → Connection string → URI (pooler, port 6543). Format: `postgresql://postgres.fnnbysrjkfugsqzwcksd:<svc-pw>@aws-0-eu-west-1.pooler.supabase.com:6543/postgres` |
 | `SUPABASE_PROJECT_REF` | `fnnbysrjkfugsqzwcksd` (literal) |
 | `SUPABASE_URL` | `https://fnnbysrjkfugsqzwcksd.supabase.co` (literal) |
-| `SUPABASE_SERVICE_ROLE_KEY` | Copy from existing Railway env |
-| `SUPABASE_ANON_KEY` | Copy from existing Railway env or from `robotis_ai_setup/docker/.env.build` |
+| `SUPABASE_ANON_KEY` | Copy from existing Railway env |
 | `REACT_APP_CLOUD_API_URL` | `https://scintillating-empathy-production-1068.up.railway.app` (literal) |
+| `RELEASES_REPO_TOKEN` | **Optional.** Only with the repository variable `RELEASES_REPO` set (the public release channel of a private repository): a fine-grained PAT with Contents read/write on that repository only. See `docs/deploy/PRIVATE-REPOSITORY.md`. |
+
+No workflow reads `SUPABASE_SERVICE_ROLE_KEY`, `MODAL_TOKEN_ID` or `MODAL_TOKEN_SECRET`: W2's import probe carries a dummy service-role key, and Modal deploys are manual (the Modal token lives with the operator's `modal` CLI). Do not create them; delete a stored copy.
 
 ### Step 2: Register the Supabase baseline as already-applied
 
@@ -397,7 +397,7 @@ Railway dashboard, then re-run W1, then re-run W3.
 
 ## Reference: required GitHub Actions secrets
 
-12 secrets (Step 1 above). Workflows reference these via `${{ secrets.X }}`.
+10 secrets, plus the optional `RELEASES_REPO_TOKEN` (Step 1 above), and the repository variables `RELEASES_REPO` and `SUPABASE_BRANCHING_ENABLED`. Workflows reference these via `${{ secrets.X }}` / `${{ vars.X }}`.
 
 For `release.yml` to invoke child workflows, it uses `secrets: inherit`
 which only works because each child has a `workflow_call:` trigger.

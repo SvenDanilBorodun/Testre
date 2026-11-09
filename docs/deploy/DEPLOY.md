@@ -314,7 +314,10 @@ Pi's open_manipulator base (`docs/arm64_base/README.md`).
 2. Delete the three Railway variables `EDUBOTICS_JETSON_HF_TOKEN`,
    `SUPABASE_JWT_ALGORITHM` and `SUPABASE_JWT_SECRET`.
 3. If `SUPABASE_JWT_ALGORITHM` was ever `HS256` in production, rotate the
-   Supabase JWT secret. The legacy JWT secret also signs the `anon` and
+   Supabase JWT secret, at a time when no managed training is running (a
+   running attempt keeps the anon key it was started with; once that key
+   stops working the attempt is lost and requeued, and its GPU time is paid
+   for nothing). The legacy JWT secret also signs the `anon` and
    `service_role` keys, so rotating it replaces both, and every holder must
    move with it (every reader in the repository, checked 2026-11-09):
    - **anon key:**
@@ -330,9 +333,10 @@ Pi's open_manipulator base (`docs/arm64_base/README.md`).
        app; `modal_app.py` requires `SUPABASE_ANON_KEY` from it);
      - the anon key baked into every shipped React bundle (student, Orange Pi,
        teacher web), replaced only by the rebuilds above;
-     - operators' local copies: `cloud_training_api/.env`, and any copy made
-       from `docker/.env.template` or `physical_ai_manager/.env.example` for a
-       local `build-images.sh` or web build (both read the key from the
+     - operators' local copies: `cloud_training_api/.env`, the gitignored
+       `docker/.env.build` (an operator's note of the build key), and any copy
+       made from `docker/.env.template` or `physical_ai_manager/.env.example`
+       for a local `build-images.sh` or web build (both read the key from the
        environment they run in).
    - **service_role key:**
      - Railway, cloud API service: `SUPABASE_SERVICE_ROLE_KEY`;

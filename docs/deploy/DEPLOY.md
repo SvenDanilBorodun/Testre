@@ -316,13 +316,36 @@ Pi's open_manipulator base (`docs/arm64_base/README.md`).
 3. If `SUPABASE_JWT_ALGORITHM` was ever `HS256` in production, rotate the
    Supabase JWT secret. The legacy JWT secret also signs the `anon` and
    `service_role` keys, so rotating it replaces both, and every holder must
-   move with it: Railway `SUPABASE_SERVICE_ROLE_KEY` and `SUPABASE_ANON_KEY`,
-   the CI secrets `SUPABASE_SERVICE_ROLE_KEY` and `SUPABASE_ANON_KEY`, the
-   Modal secret `edubotics-inference-secrets`, and the anon key baked into
-   every shipped React bundle (student, Orange Pi, teacher web). Plan it with
-   Supabase's signing-keys guide (migrate to JWT signing keys and the
-   publishable/secret API keys, then revoke the legacy secret), which avoids
-   the downtime of a plain legacy rotation.
+   move with it (every reader in the repository, checked 2026-11-09):
+   - **anon key:**
+     - Railway, cloud API service: `SUPABASE_ANON_KEY` (the API hands it to
+       each managed training attempt, RunPod pod or Modal `train_managed`);
+     - Railway, teacher-web service: the build variable
+       `REACT_APP_SUPABASE_ANON_KEY` (Railway passes it to `Dockerfile.web`'s
+       `ARG`; the teacher web needs a rebuild);
+     - the GitHub Actions secret `SUPABASE_ANON_KEY` (W4 bakes it into the
+       student and Orange Pi manager images, so those need a release);
+     - the Modal secrets `edubotics-inference-secrets` (Cloud-Inferenz) and
+       `edubotics-training-secrets` (the stopped legacy `edubotics-training`
+       app; `modal_app.py` requires `SUPABASE_ANON_KEY` from it);
+     - the anon key baked into every shipped React bundle (student, Orange Pi,
+       teacher web), replaced only by the rebuilds above;
+     - operators' local copies: `cloud_training_api/.env`, and any copy made
+       from `docker/.env.template` or `physical_ai_manager/.env.example` for a
+       local `build-images.sh` or web build (both read the key from the
+       environment they run in).
+   - **service_role key:**
+     - Railway, cloud API service: `SUPABASE_SERVICE_ROLE_KEY`;
+     - operators' local copies: `cloud_training_api/.env` (read by
+       `scripts/bootstrap_admin.py` and a local API run) and the environment
+       `tools/feetech_provision.py` is run with;
+     - the GitHub Actions secret `SUPABASE_SERVICE_ROLE_KEY`, if it still
+       exists: no workflow reads it since W2's import probe carries a dummy
+       key (2026-11-05), so delete it rather than update it.
+
+   Plan it with Supabase's signing-keys guide (migrate to JWT signing keys and
+   the publishable/secret API keys, then revoke the legacy secret), which
+   avoids the downtime of a plain legacy rotation.
 
 ---
 

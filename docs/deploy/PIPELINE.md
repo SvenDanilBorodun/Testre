@@ -25,7 +25,7 @@ The four CI-driven workflows in `.github/workflows/`:
 | `supabase-migrate.yml` | `supabase/migrations/**` | Applies migrations to production (or PR-branch for PRs) |
 | `railway-deploy-cloud-api.yml` | `cloud_training_api/**` | Schema-probe → `railway up` → `/health` gate |
 | `railway-deploy-teacher-web.yml` | `physical_ai_manager/**` | Validate → `railway up` teacher-web → `/version.json` gate |
-| `docker-publish.yml` | `docker/**`, `open_manipulator/**`, `physical_ai_tools/**` | Native amd64 + arm64 builds → push → smoke-test |
+| `docker-publish.yml` | `docker/**`, `open_manipulator/**`, `physical_ai_tools/**` | Native amd64 + opi (arm64) builds → push → smoke-test |
 
 Plus `release.yml` which chains all four on `v*.*.*` tag pushes.
 
@@ -411,7 +411,7 @@ Don't remove those triggers.
 - Teacher web: `https://teacher-web-production.up.railway.app`
 - Supabase: `https://fnnbysrjkfugsqzwcksd.supabase.co` (region eu-west-1)
 - Modal app: `edubotics-training` in workspace `svendanilborodun`
-- Docker Hub: `docker.io/nettername/{open-manipulator,physical-ai-server,physical-ai-manager}` (amd64) + same with `-jetson` suffix (arm64)
+- Docker Hub: `docker.io/nettername/{open-manipulator,physical-ai-server,physical-ai-manager,code-runner}` (amd64) + same with `-opi` suffix (arm64, Orange Pi); GHCR `ghcr.io/svendanilborodun/*` is the primary
 
 ---
 

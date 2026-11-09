@@ -4,8 +4,8 @@ Owner decision D7 (2026-09-28): the product draws icons from ONE icon style,
 never glyphs in text. The React side is fenced by
 ``physical_ai_manager/src/components/icons/__tests__/noIconGlyphs.test.js``;
 this is the Python half: every string constant (f-string parts included) of
-the shipped Python — the Windows GUI, the Pi agent, the cloud API, the Jetson
-agent, the Modal worker, the code runner, the ROS server package and the arm
+the shipped Python — the Windows GUI, the Pi agent, the cloud API, the Modal
+worker, the code runner, the ROS server package and the arm
 container's own scripts (``docker/open_manipulator``: ``activation_agent``'s
 ``MSG_*`` reach the Startseite) — outside docstrings and tests. A glyph there
 reaches a tkinter label, a toast, a Protokoll line or a developer console; the
@@ -37,7 +37,6 @@ ROOTS = {
     "gui/main.py": SETUP / "gui" / "main.py",
     "pi_agent": SETUP / "pi_agent",
     "cloud_training_api/app": SETUP / "cloud_training_api" / "app",
-    "jetson_agent": SETUP / "jetson_agent",
     "modal_training": SETUP / "modal_training",
     "docker/code_runner/runner": SETUP / "docker" / "code_runner" / "runner",
     "physical_ai_server": REPO_ROOT / "physical_ai_tools" / "physical_ai_server" / "physical_ai_server",

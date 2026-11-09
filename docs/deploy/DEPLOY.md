@@ -40,7 +40,28 @@ $EDITOR robotis_ai_setup/supabase/rollback/019_<name>_rollback.sql
 
 **Apply (Supabase Studio → SQL Editor):** paste the migration file, Run. For multi-migration rollouts paste `docs/deploy/APPLY_MIGRATIONS.sql`. Verify the new tables/RPCs in Database view.
 
-**Rollback:** paste the matching `rollback/*.sql`. Roll Railway back BEFORE rolling Supabase back.
+**Rollback:** paste the matching `rollback/*.sql`. Roll Railway back BEFORE rolling Supabase back — except for 053, below.
+
+### Migration 053 — the classroom Jetson retired (2026-11-09)
+
+`20261109120000_053_retire_jetson.sql` drops `public.jetsons`, its eleven RPCs
+and `public.inference_runs.jetson_id` (the table, its rows — old
+`backend = 'jetson'` rows included — and its backend CHECK stay). Every
+`jetsons` row and every `jetson_id` value is lost; the rollback restores the
+schema, not the data.
+
+- **Deploy order (W1 → W2, unchanged).** The API of the same release probes no
+  Jetson object, so it boots with or without 053. The OLDER API still serving
+  between W1 and W2 does not: a restart in that window fails its schema probe
+  until W2 deploys; it logs a failed `sweep_jetson_locks` every minute; and a
+  Cloud-Inferenz run that ends in that window gets no teacher history row (the
+  old session sweep still sends `jetson_id`). Keep the window short.
+- **Rollback, in THIS order** (the reverse of the general rule above):
+  `rollback/20261109120000_053_retire_jetson_rollback.sql` FIRST (the API of
+  this release boots on either schema), THEN Railway back to the older release
+  (its boot probe needs the restored objects).
+- Hand-run assertions: `supabase/tests/053_retire_jetson_assertions.sql`
+  (12 PASS on a local stack; never against the linked project).
 
 ---
 
@@ -96,7 +117,7 @@ git push
 
 **Required env vars** (Railway dashboard): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `EDUBOTICS_HF_TOKEN_KEY` (per-student Hugging Face token storage, migration 042: 32 random bytes as standard base64, generate with `python -c "import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())"`; absent, empty or malformed → the API refuses to boot (required since 2026-10-04); optional `EDUBOTICS_HF_TOKEN_KEY_PREVIOUS` for rotation; **set it BEFORE the cloud deploy**; losing it makes every stored token unusable and each student pastes theirs again).
 
-**Production-relevant optional:** `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` + `GUI_RELEASE_REPO` (drives student `.exe` auto-update — normally set automatically by `release.yml` W6 on a `vX.Y.Z` tag; `GUI_DOWNLOAD_URL` is optional and derived from `GUI_VERSION` + `GUI_RELEASE_REPO` when unset), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`, `EDUBOTICS_JETSON_HF_TOKEN` (read-only HF token returned to Jetson agents at `/jetson/register` — REQUIRED if any classroom has a paired Jetson; otherwise `/jetson/register` returns 503).
+**Production-relevant optional:** `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` + `GUI_RELEASE_REPO` (drives student `.exe` auto-update — normally set automatically by `release.yml` W6 on a `vX.Y.Z` tag; `GUI_DOWNLOAD_URL` is optional and derived from `GUI_VERSION` + `GUI_RELEASE_REPO` when unset), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`. (`EDUBOTICS_JETSON_HF_TOKEN`, `SUPABASE_JWT_ALGORITHM` and `SUPABASE_JWT_SECRET` were read only by the retired classroom Jetson's `/jetson/register`; no code reads them since 2026-11-09, and they can be removed from Railway.)
 
 **Never** set `EDUBOTICS_SKIP_SCHEMA_CHECK=1` on Railway.
 
@@ -276,53 +297,21 @@ GUI 2.2.4 auto-pulls on every launch: TCP probe to Docker Hub (5 s offline-skip)
 
 ---
 
-## 4b. Classroom Jetson (v2.3.0+) — arm64 image set + agent install
+## 4b. Classroom Jetson — retired (2026-11-09)
 
-Separate ship path because the audience is different (per-classroom teachers) and the scope is narrow (Inference tab only). See [`docs/JETSON_DEPLOY.md`](../JETSON_DEPLOY.md) for the full runbook.
-
-### Maintainer side — push arm64 images once per release
-
-```bash
-# From a maintainer host with buildx + Docker Hub login.
-docker run --privileged --rm tonistiigi/binfmt --install arm64   # one-time, Mac only
-docker buildx create --name edubotics-arm64 --use --bootstrap
-
-# First time: build the arm64 bases (~30-40 min QEMU, ~10 min native arm64).
-BUILD_BASE_ARM64=1 PLATFORM=arm64 ./robotis_ai_setup/docker/build-images.sh
-
-# Subsequent releases: pulls existing bases, rebuilds the thin overlays.
-PLATFORM=arm64 ./robotis_ai_setup/docker/build-images.sh
-```
-
-Pushed tags (separate repos from amd64 — see `docs/arm64_base/README.md`
-for why):
-- `nettername/open-manipulator-jetson:latest`
-- `nettername/physical-ai-server-jetson:latest`
-- `nettername/open-manipulator-jetson-base:4.1.4` (one-time base)
-- `nettername/physical-ai-server-jetson-base:0.8.2` (one-time base)
-
-`physical-ai-manager` is NOT built for arm64 — the React app stays on the student PC.
-
-### Teacher side — install the agent + pair
-
-```bash
-# On the Jetson with JetPack 6:
-sudo bash /path/to/robotis_ai_setup/jetson_agent/setup.sh
-```
-
-Script registers with the Cloud API, prints a 6-digit pairing code. Teacher enters the code in the admin dashboard → classroom gets bound. See [`docs/JETSON_DEPLOY.md`](../JETSON_DEPLOY.md) for the full walkthrough.
-
-### Required Railway env vars
-
-- `EDUBOTICS_JETSON_HF_TOKEN` — read-only HF token, EduBotics-Solutions/* scope. Returned to agents at `/jetson/register`. Without it, `POST /jetson/register` returns 503 and the setup script aborts.
-- `SUPABASE_JWT_ALGORITHM` — `ES256` (modern Supabase default, JWKS-based EC P-256) / `RS256` (older asymmetric, also JWKS-based) / `HS256` (legacy symmetric, requires `SUPABASE_JWT_SECRET`). Verify your project's signing alg at `https://<project>.supabase.co/auth/v1/.well-known/jwks.json` — look at `keys[0].alg`. Post-2024 Supabase projects publish `ES256`. v2.3.0 the Cloud API forwards this to the agent at register time so the rosbridge proxy picks the right JWT verification path.
-- `SUPABASE_JWT_SECRET` — **required only when `SUPABASE_JWT_ALGORITHM=HS256`**. The symmetric secret from Supabase Dashboard → Settings → API → JWT Secret. Forwarded to the agent at register time and written to `/etc/edubotics/jetson.env` mode 600. Without it, `POST /jetson/register` returns 503. For ES256/RS256 projects, leave unset — verification uses JWKS automatically.
+The classroom Jetson Orin Nano is retired: no `-jetson` images are built, the
+agent (`jetson_agent/`) and its runbook are deleted, the cloud API has no
+`/jetson/*` routes and migration 053 drops its database objects (§1). Owner
+follow-up on Docker Hub / GHCR: the `open-manipulator-jetson`,
+`physical-ai-server-jetson` and `physical-ai-server-jetson-base` repositories
+can be deleted. **`open-manipulator-jetson-base` must stay**: it is the Orange
+Pi's open_manipulator base (`docs/arm64_base/README.md`).
 
 ---
 
 ## 5. git push
 
-CI runs 11 jobs: `python-tests` (now includes jetson agent + jetson route tests), `shell-lint` (now includes `setup.sh`), `compose-validate` (now also validates `docker-compose.jetson.yml`), `overlay-guard`, `modal-import-validate`, `teacher-web-build-validate`, `manager-build-validate`, `tutorials-validate`, `interfaces-validate`, `nginx-validate`, `german-strings-lint`. Most catch a class of regression you'd otherwise discover in production.
+CI runs `.github/workflows/ci.yml`'s validator jobs, among them: `python-tests`, `shell-lint`, `compose-validate`, `overlay-guard`, `modal-import-validate`, `teacher-web-build-validate`, `manager-build-validate`, `tutorials-validate`, `interfaces-validate`, `nginx-validate`, `german-strings-lint`. Most catch a class of regression you'd otherwise discover in production.
 
 ---
 
@@ -398,6 +387,6 @@ The schema fingerprint prevents Railway booting against a half-rolled-back DB �
 - [ ] **Railway env vars** matched against the new code paths? (every new env var the route reads is set; no required env left at default)
 - [ ] **Docker Hub** images pushed with the new content? (latest manifest digest matches the build you just ran; verify with `docker buildx imagetools inspect`)
 - [ ] **GitHub release** matches `VERSION` file? (The release lives in the public repository named by the Actions variable `RELEASES_REPO` once set, else in this one: `docs/deploy/PRIVATE-REPOSITORY.md`. On the tagged path, `release.yml` W5 attaches `EduBotics_Setup.exe` and W6 `publish-gui-version` sets Railway `GUI_VERSION` / `GUI_DOWNLOAD_URL` / `GUI_RELEASE_REPO` automatically + verifies `/version`; only a manual off-pipeline release needs `gh release create v<version> ./installer/output/EduBotics_Setup.exe` AND a hand-set of those three Railway vars — without them the auto-update gate is invisible to existing student installs)
-- [ ] **Smoke test** golden path: a real student logs in via the v<version>.exe → connects to a Jetson if paired → records or runs inference → no console errors. The image-build CI's `manager-build-validate` smoke is necessary but not sufficient.
-- [ ] **Teacher smoke**: a real teacher logs in via Railway teacher-web → opens a classroom → pairs a Jetson via the new modal → forces release → unpairs → no console errors.
+- [ ] **Smoke test** golden path: a real student logs in via the v<version>.exe → records, or runs a model „In der Cloud" → no console errors. The image-build CI's `manager-build-validate` smoke is necessary but not sufficient.
+- [ ] **Teacher smoke**: a real teacher logs in via Railway teacher-web → opens a classroom → opens a student's training history → no console errors.
 - [ ] **CLAUDE.md** §0 last-verified line bumped + the load-bearing section that changed has a fresh entry (§3 if architecture, §7 if Cloud API endpoint, §9 if migration, §11 if GUI, §12 if React, §13 if workflow, §16 if glossary).

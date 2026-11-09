@@ -156,7 +156,7 @@ class TheRobotAndThePageAgreeOnTheState(unittest.TestCase):
             slot.write_text(_PLACEHOLDER_TOKEN, encoding="utf-8")
             present = self.store.state_payload(2, True, environ=env)
         no_slot = self.store.state_payload(3, False, environ={})
-        return {"no personal slot (Jetson image)": no_slot,
+        return {"no personal slot (no HF_TOKEN_PATH)": no_slot,
                 "slot empty": absent, "slot filled": present}
 
     def test_the_key_list_and_order_match_in_every_state(self):
@@ -191,7 +191,7 @@ class TheRobotAndThePageAgreeOnTheState(unittest.TestCase):
         self.assertTrue(states["slot filled"]["present"])
         self.assertIsNotNone(states["slot filled"]["fp"])
         # A robot that takes no personal token says so and claims nothing else.
-        no_slot = states["no personal slot (Jetson image)"]
+        no_slot = states["no personal slot (no HF_TOKEN_PATH)"]
         self.assertFalse(no_slot["accepts"])
         self.assertFalse(no_slot["present"])
         self.assertIsNone(no_slot["fp"])

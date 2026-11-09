@@ -20,9 +20,10 @@
 #   eslint, tailwind, vite and React majors all needed code changes here before).
 # - The internet-facing cloud API stack gets PATCH releases and security fixes
 #   (owner decision 2026-11-09): fastapi, httpx, uvicorn, cryptography, boto3,
-#   botocore, huggingface_hub (and aiohttp, which no manifest read here pins
-#   today: its pins are the server Dockerfile, ci.yml and the generated
-#   training lock, so it still moves by hand). Their entries ignore only minor releases; majors
+#   botocore, huggingface_hub, PyJWT (the local token check, 2026-11-10) (and
+#   aiohttp, which no manifest read here pins today: its pins are the server
+#   Dockerfile, ci.yml and the generated training lock, so it still moves by
+#   hand). Their entries ignore only minor releases; majors
 #   are ignored for every pip dependency by the "*" entry. An `ignore` that
 #   names `update-types` never applies to Dependabot SECURITY updates (GitHub
 #   changelog 2021-05-21; dependabot-core's IgnoreCondition#ignored_versions
@@ -147,6 +148,8 @@ updates:
       - dependency-name: huggingface-hub
         update-types: ["version-update:semver-minor"]
       - dependency-name: aiohttp
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: pyjwt
         update-types: ["version-update:semver-minor"]
 
   - package-ecosystem: docker

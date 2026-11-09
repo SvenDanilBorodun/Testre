@@ -1264,7 +1264,7 @@ class TestTeacherRuns(unittest.TestCase):
 
         with patch.object(teacher, "_assert_student_owned", return_value={}), \
                 patch.object(teacher, "get_supabase", return_value=_DB()):
-            runs = asyncio.run(teacher.list_student_inference_runs("s1", teacher={"id": "t1"}))
+            runs = teacher.list_student_inference_runs("s1", teacher={"id": "t1"})
         self.assertIn("backend", [c.strip() for c in seen["cols"].split(",")])
         self.assertEqual(runs[0].backend, "cloud")
         # an older row without the key reads as a run on the retired classroom Jetson

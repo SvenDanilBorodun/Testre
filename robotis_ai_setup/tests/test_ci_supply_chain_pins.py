@@ -44,7 +44,9 @@ API_REQUIREMENTS = REPO / "robotis_ai_setup" / "cloud_training_api" / "requireme
 # The internet-facing cloud API's libraries (owner decision 2026-11-09: patch
 # releases and security fixes, never a minor or major version update). aiohttp
 # is in no manifest Dependabot reads today; its entry is there for when it is.
-API_STACK = ("fastapi", "httpx", "uvicorn", "cryptography", "boto3", "botocore", "huggingface-hub", "aiohttp")
+API_STACK = ("fastapi", "httpx", "uvicorn", "cryptography", "boto3", "botocore", "huggingface-hub", "aiohttp",
+             # 2026-11-10: the API verifies access tokens locally (services/jwt_auth.py).
+             "pyjwt")
 # The ci.yml jobs that pip-install cloud API libraries by version.
 API_CI_JOBS = ("python-tests", "modal-import-validate")
 _PIN = re.compile(r"(?<![\w.-])'?([A-Za-z][A-Za-z0-9_.-]*)(?:\[[^\]]*\])?==([0-9][0-9A-Za-z.+!-]*)")
@@ -200,7 +202,7 @@ class CloudApiPinsFollowRequirements(unittest.TestCase):
     def test_ci_installs_exactly_the_api_versions_dependabot_may_move(self):
         shipped = _requirement_pins(API_REQUIREMENTS)
         moved = [n for n in API_STACK if n in shipped]
-        self.assertGreaterEqual(len(moved), 7, "requirements.txt pins the stack with ==")
+        self.assertGreaterEqual(len(moved), 8, "requirements.txt pins the stack with ==")
         jobs = {job_id: _ci_pins(job_id) for job_id in API_CI_JOBS}
         for name in moved:
             with self.subTest(dependency=name):

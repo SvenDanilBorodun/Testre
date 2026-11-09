@@ -60,3 +60,54 @@ class RateLimiter:
             while len(keys) > self._MAX_KEYS_PER_BUCKET:
                 keys.popitem(last=False)
             return allowed
+
+
+class FailureCounter:
+    """Failed authentications per client address in a sliding window (the API's
+    failed-authentication cap, app/edge.py::AuthFailureLimitMiddleware).
+
+    ``record`` adds one failure and answers the count in the window; ``count``
+    only reads. LRU-capped like ``RateLimiter`` (the keys are client addresses,
+    which a flood can rotate), and each key keeps at most ``_MAX_PER_KEY``
+    timestamps: once an address is over its cap its requests are refused
+    before they can fail again, so the cap is never far exceeded.
+    """
+
+    _MAX_KEYS = 8192
+    _MAX_PER_KEY = 1024
+
+    def __init__(self) -> None:
+        self._keys: "OrderedDict[str, deque]" = OrderedDict()
+        self._lock = Lock()
+
+    @staticmethod
+    def _prune(hist: deque, now: float, window_s: float) -> None:
+        while hist and now - hist[0] > window_s:
+            hist.popleft()
+
+    def record(self, key: str, window_s: float) -> int:
+        now = time.monotonic()
+        with self._lock:
+            hist = self._keys.get(key)
+            if hist is None:
+                hist = deque(maxlen=self._MAX_PER_KEY)
+                self._keys[key] = hist
+            else:
+                self._keys.move_to_end(key)
+            self._prune(hist, now, window_s)
+            hist.append(now)
+            while len(self._keys) > self._MAX_KEYS:
+                self._keys.popitem(last=False)
+            return len(hist)
+
+    def count(self, key: str, window_s: float) -> int:
+        now = time.monotonic()
+        with self._lock:
+            hist = self._keys.get(key)
+            if hist is None:
+                return 0
+            self._prune(hist, now, window_s)
+            if not hist:
+                del self._keys[key]
+                return 0
+            return len(hist)

@@ -90,7 +90,7 @@ def _teacher_summary_row(t: dict, *, classroom_count: int, old: dict) -> Teacher
 
 
 @router.get("/teachers", response_model=list[TeacherSummary])
-async def list_teachers(admin=Depends(get_current_admin)):
+def list_teachers(admin=Depends(get_current_admin)):
     supabase = get_supabase()
     teachers = (
         supabase.table("users")
@@ -113,7 +113,7 @@ async def list_teachers(admin=Depends(get_current_admin)):
 
 
 @router.post("/teachers", response_model=TeacherSummary)
-async def create_teacher(req: TeacherCreate, admin=Depends(get_current_admin)):
+def create_teacher(req: TeacherCreate, admin=Depends(get_current_admin)):
     supabase = get_supabase()
 
     try:
@@ -192,7 +192,7 @@ def _free_in(exc) -> int | None:
 
 
 @router.post("/teachers/{teacher_id}/credits")
-async def change_teacher_credits(
+def change_teacher_credits(
     teacher_id: str,
     body: dict | None = Body(default=None),
     admin=Depends(get_current_admin),
@@ -252,7 +252,7 @@ def _target_not_found(kind: str) -> HTTPException:
 
 
 @router.post("/credit-grants")
-async def compensate(body: dict | None = Body(default=None), admin=Depends(get_current_admin)):
+def compensate(body: dict | None = Body(default=None), admin=Depends(get_current_admin)):
     """An admin's compensation (owner D4, §8.5): hours straight into the student's or
     group's account, funded from outside the teacher pool, with a mandatory reason the
     teacher sees in the history. Naming a training credits the account that paid for it
@@ -306,7 +306,7 @@ async def compensate(body: dict | None = Body(default=None), admin=Depends(get_c
 
 
 @router.delete("/credit-reasons/{reason_id}")
-async def erase_reason(reason_id: str, admin=Depends(get_current_admin)):
+def erase_reason(reason_id: str, admin=Depends(get_current_admin)):
     """Erase one reason text (an Art. 17 request about what an admin typed, review m11);
     the ledger row keeps a dangling id and the history shows „(gelöscht)"."""
     try:
@@ -327,7 +327,7 @@ async def erase_reason(reason_id: str, admin=Depends(get_current_admin)):
 
 
 @router.get("/credit-history")
-async def admin_credit_history(
+def admin_credit_history(
     scope: str | None = Query(default=None),
     teacher_id: str | None = Query(default=None),
     before: int | None = Query(default=None),
@@ -349,7 +349,7 @@ async def admin_credit_history(
 
 
 @router.get("/refusals")
-async def admin_refusals(
+def admin_refusals(
     user_id: str | None = Query(default=None),
     limit: int | None = Query(default=None),
     admin=Depends(get_current_admin),
@@ -371,7 +371,7 @@ async def admin_refusals(
 
 
 @router.post("/teachers/{teacher_id}/password")
-async def reset_teacher_password(
+def reset_teacher_password(
     teacher_id: str,
     req: PasswordReset,
     admin=Depends(get_current_admin),
@@ -391,7 +391,7 @@ async def reset_teacher_password(
 
 
 @router.delete("/teachers/{teacher_id}")
-async def delete_teacher(teacher_id: str, admin=Depends(get_current_admin)):
+def delete_teacher(teacher_id: str, admin=Depends(get_current_admin)):
     supabase = get_supabase()
     existing = (
         supabase.table("users").select("id, role").eq("id", teacher_id).execute()

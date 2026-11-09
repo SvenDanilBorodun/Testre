@@ -15,6 +15,9 @@ pydantic==2.11.3
 huggingface_hub==1.23.0
 # 042: AES-256-GCM for the per-student Hugging Face token (services/hf_credentials.py).
 cryptography==49.0.0
+# 2026-11-10: the access token is verified locally against the project's JWKS
+# (services/jwt_auth.py). The [crypto] extra is the cryptography pinned above.
+PyJWT[crypto]==2.15.1
 # 049: Cloudflare R2 (S3 API) for managed-training checkpoints (services/r2_client.py).
 boto3==1.43.107
 botocore==1.43.107

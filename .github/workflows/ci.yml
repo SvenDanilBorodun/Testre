@@ -69,10 +69,12 @@ jobs:
           # boto3 + botocore: managed training (spec §4.12, FR-11) — the cloud API's
           # test_r2_client.py proves the presigned PUT's signed headers with real botocore;
           # pinned equal to cloud_training_api/requirements.txt.
+          # PyJWT: the cloud API verifies access tokens locally (2026-11-10,
+          # services/jwt_auth.py); its tests sign real ES256 tokens.
           python -m pip install pyyaml pytest numpy opencv-contrib-python-headless cryptography==49.0.0 \
             pyarrow==25.0.0 av==15.1.0 huggingface_hub==1.23.0 \
             fastapi==0.115.12 httpx==0.28.1 aiohttp==3.14.1 "uvicorn[standard]==0.34.2" \
-            boto3==1.43.107 botocore==1.43.107
+            boto3==1.43.107 botocore==1.43.107 "PyJWT[crypto]==2.15.1"
       - name: Syntax-check Python modules
         # ZERO-FILE FLOOR, the repo's standing rule for scan-based guards (the
         # four ps_* guards and the three lockstep tests all carry one).
@@ -1001,12 +1003,14 @@ jobs:
         # and `.remote.aio(...)`. An SDK rename of either symbol would slip
         # past the modal_app import sweep (decoration-time only). Pull in just
         # enough cloud_training_api deps to materialise the route module and
-        # prove the Modal SDK call sites still parse.
+        # prove the Modal SDK call sites still parse. PyJWT + cryptography: every
+        # route imports app.auth, which verifies access tokens locally (2026-11-10);
+        # pinned equal to cloud_training_api/requirements.txt.
         run: |
           python -m pip install --quiet \
             'fastapi==0.115.12' 'pydantic==2.11.3' 'supabase==2.15.1' \
             'httpx==0.28.1' 'python-dotenv==1.1.0' 'huggingface_hub>=0.25.0' \
-            'boto3==1.43.107' 'botocore==1.43.107'
+            'boto3==1.43.107' 'botocore==1.43.107' 'cryptography==49.0.0' 'PyJWT[crypto]==2.15.1'
           export SUPABASE_URL=http://ci.test
           export SUPABASE_SERVICE_ROLE_KEY=ci-fake
           export MODAL_TOKEN_ID=ci-fake

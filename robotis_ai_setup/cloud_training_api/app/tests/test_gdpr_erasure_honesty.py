@@ -429,8 +429,7 @@ class DeleteStudentTellsTheTeacherTheTruth(unittest.TestCase):
                 patch.object(self.teacher, '_delete_student_hf_artifacts',
                              lambda _sid, _enum=None: (failures, attempted)), \
                 patch.object(self.teacher, 'get_supabase', lambda: sb):
-            return asyncio.run(
-                self.teacher.delete_student('stu1', teacher={'id': 't1'})), sb
+            return self.teacher.delete_student('stu1', teacher={'id': 't1'}), sb
 
     def test_a_clean_erasure_says_so_explicitly(self):
         """Only when something was actually erased — see `attempted=1`.
@@ -572,8 +571,8 @@ class TheDestructiveEndpointIsOwnershipGated(unittest.TestCase):
                              lambda sid: (touched.append(sid) or [], True)), \
                 patch.object(self.teacher, 'get_supabase', lambda: sb):
             with self.assertRaises(self.teacher.HTTPException) as caught:
-                asyncio.run(self.teacher.delete_student(
-                    'not-mine', teacher={'id': 't1'}))
+                self.teacher.delete_student(
+                    'not-mine', teacher={'id': 't1'})
         self.assertEqual(caught.exception.status_code, 404)
         # Enumeration is tracked too, not just erasure: it reads the `datasets`
         # and `trainings` rows of the named student, so running it above the
@@ -654,8 +653,7 @@ class TheRouteIsWiredEndToEnd(unittest.TestCase):
                 patch.object(self.teacher, 'get_supabase', lambda: sb), \
                 patch.object(self.teacher, 'HfApi', lambda **k: api):
             try:
-                res = asyncio.run(
-                    self.teacher.delete_student('stu1', teacher={'id': 't1'}))
+                res = self.teacher.delete_student('stu1', teacher={'id': 't1'})
             except self.teacher.HTTPException as exc:
                 return exc, sb, api
         return res, sb, api
@@ -834,7 +832,7 @@ class TheRouteIsWiredEndToEnd(unittest.TestCase):
                 patch.object(self.teacher, '_assert_student_owned', lambda *a: {}), \
                 patch.object(self.teacher, 'get_supabase', lambda: sb), \
                 patch.object(self.teacher, 'HfApi', lambda **k: api):
-            asyncio.run(self.teacher.delete_student('stu1', teacher={'id': 't1'}))
+            self.teacher.delete_student('stu1', teacher={'id': 't1'})
         self.assertEqual(reads.count('datasets'), 1, reads)
         self.assertEqual(reads.count('trainings'), 1, reads)
         self.assertEqual(api.deleted, [('alice/omx_f_pick', 'dataset')])

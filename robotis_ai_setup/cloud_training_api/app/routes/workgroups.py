@@ -263,7 +263,7 @@ def _group_detail(row: dict) -> WorkgroupDetail:
     "/classrooms/{classroom_id}/workgroups",
     response_model=list[WorkgroupSummary],
 )
-async def list_workgroups(classroom_id: str, teacher=Depends(get_current_teacher)):
+def list_workgroups(classroom_id: str, teacher=Depends(get_current_teacher)):
     _assert_classroom_owned(teacher["id"], classroom_id)
     supabase = get_supabase()
     rows = (
@@ -290,7 +290,7 @@ async def list_workgroups(classroom_id: str, teacher=Depends(get_current_teacher
     "/classrooms/{classroom_id}/workgroups",
     response_model=WorkgroupSummary,
 )
-async def create_workgroup(
+def create_workgroup(
     classroom_id: str,
     req: WorkgroupCreate,
     teacher=Depends(get_current_teacher),
@@ -318,13 +318,13 @@ async def create_workgroup(
 
 
 @router.get("/workgroups/{workgroup_id}", response_model=WorkgroupDetail)
-async def get_workgroup(workgroup_id: str, teacher=Depends(get_current_teacher)):
+def get_workgroup(workgroup_id: str, teacher=Depends(get_current_teacher)):
     group = _assert_workgroup_owned(teacher["id"], workgroup_id)
     return _group_detail(group)
 
 
 @router.patch("/workgroups/{workgroup_id}", response_model=WorkgroupSummary)
-async def rename_workgroup(
+def rename_workgroup(
     workgroup_id: str,
     req: WorkgroupRename,
     teacher=Depends(get_current_teacher),
@@ -353,7 +353,7 @@ async def rename_workgroup(
 
 
 @router.delete("/workgroups/{workgroup_id}")
-async def delete_workgroup(
+def delete_workgroup(
     workgroup_id: str, teacher=Depends(get_current_teacher)
 ):
     _assert_workgroup_owned(teacher["id"], workgroup_id)
@@ -373,7 +373,7 @@ async def delete_workgroup(
     "/workgroups/{workgroup_id}/members",
     response_model=WorkgroupDetail,
 )
-async def add_workgroup_member(
+def add_workgroup_member(
     workgroup_id: str,
     req: WorkgroupMemberAdd,
     teacher=Depends(get_current_teacher),
@@ -462,7 +462,7 @@ async def add_workgroup_member(
 
 
 @router.delete("/workgroups/{workgroup_id}/members/{student_id}")
-async def remove_workgroup_member(
+def remove_workgroup_member(
     workgroup_id: str,
     student_id: str,
     teacher=Depends(get_current_teacher),
@@ -491,7 +491,7 @@ async def remove_workgroup_member(
     "/workgroups/{workgroup_id}/trainings",
     response_model=list[WorkgroupTrainingSummary],
 )
-async def list_workgroup_trainings(
+def list_workgroup_trainings(
     workgroup_id: str, teacher=Depends(get_current_teacher)
 ):
     """All trainings spawned within this workgroup, latest first.
@@ -566,7 +566,7 @@ async def list_workgroup_trainings(
     "/workgroups/{workgroup_id}/credits",
     response_model=WorkgroupCreditsResponse,
 )
-async def adjust_workgroup_credits(
+def adjust_workgroup_credits(
     workgroup_id: str,
     body: dict | None = Body(default=None),
     teacher=Depends(get_current_teacher),
@@ -579,7 +579,7 @@ async def adjust_workgroup_credits(
 
 
 @router.put("/workgroups/{workgroup_id}/member-limit")
-async def set_member_limit(
+def set_member_limit(
     workgroup_id: str,
     body: dict | None = Body(default=None),
     teacher=Depends(get_current_teacher),
@@ -613,7 +613,7 @@ async def set_member_limit(
 
 
 @router.get("/workgroups/{workgroup_id}/credit-history")
-async def workgroup_credit_history(
+def workgroup_credit_history(
     workgroup_id: str,
     before: int | None = Query(default=None),
     limit: int | None = Query(default=None),

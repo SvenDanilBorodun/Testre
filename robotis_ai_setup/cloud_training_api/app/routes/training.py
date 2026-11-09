@@ -416,7 +416,6 @@ async def _sync_modal_status(training: dict) -> dict:
                     "Dispatch lost: training %s queued %s with no cloud_job_id",
                     training["id"], now - requested,
                 )
-                supabase = get_supabase()
                 update_data = {
                     "status": "failed",
                     "terminated_at": now.isoformat(),
@@ -427,9 +426,11 @@ async def _sync_modal_status(training: dict) -> dict:
                         "starten — der Credit wurde freigegeben."
                     ),
                 }
-                supabase.table("trainings").update(update_data).eq(
-                    "id", training["id"]
-                ).execute()
+                await asyncio.to_thread(
+                    lambda: get_supabase().table("trainings").update(update_data).eq(
+                        "id", training["id"]
+                    ).execute()
+                )
                 training["status"] = "failed"
                 training["terminated_at"] = update_data["terminated_at"]
                 training["error_message"] = update_data["error_message"]
@@ -468,7 +469,6 @@ async def _sync_modal_status(training: dict) -> dict:
     if db_status == training["status"]:
         return training
 
-    supabase = get_supabase()
     update_data: dict = {"status": db_status}
     if db_status in ("succeeded", "failed", "canceled"):
         update_data["terminated_at"] = datetime.now(timezone.utc).isoformat()
@@ -482,7 +482,9 @@ async def _sync_modal_status(training: dict) -> dict:
         else:
             update_data["error_message"] = f"Training fehlgeschlagen (Modal-Status: {modal_status})."
 
-    supabase.table("trainings").update(update_data).eq("id", training["id"]).execute()
+    await asyncio.to_thread(
+        lambda: get_supabase().table("trainings").update(update_data).eq("id", training["id"]).execute()
+    )
 
     # Only a pre-052 legacy (`derived`) row reaches this reconciler: its credit is
     # derived from the status, so "failed" frees it; a `ledger` row is managed and
@@ -588,7 +590,7 @@ async def _sweep_user_running_jobs(user_id: str, workgroup_id: str | None = None
         q = q.eq("workgroup_id", workgroup_id)
     else:
         q = q.eq("user_id", user_id)
-    result = q.execute()
+    result = await asyncio.to_thread(q.execute)
 
     async def _sync_one(row):
         try:
@@ -606,7 +608,7 @@ async def _sweep_user_running_jobs(user_id: str, workgroup_id: str | None = None
 
 
 @router.get("/quota", response_model=UserQuota)
-async def get_quota(user=Depends(get_current_user)):
+def get_quota(user=Depends(get_current_user)):
     q = credit_quota_row(str(user.id))
     if q is None:
         raise HTTPException(status_code=404, detail="Benutzerprofil nicht gefunden.")
@@ -620,7 +622,7 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
     reservation in ``start_training_safe`` (which judges role, policy and hours again)."""
     supabase = get_supabase()
     user_id = str(user.id)
-    profile = get_user_profile(user_id)
+    profile = await asyncio.to_thread(get_user_profile, user_id)
     workgroup_id = profile.get("workgroup_id")
     model_type = req.model_type
     key = getattr(req, "idempotency_key", None)
@@ -633,7 +635,7 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
 
     # 1. Students only (H6): teachers and admins have no start path.
     if profile.get("role") != "student":
-        record_refusal(user_id, "start", "role", model_type)
+        await asyncio.to_thread(record_refusal, user_id, "start", "role", model_type)
         raise HTTPException(status_code=403, detail=credit_texts.ROLE_REFUSED_DE)
     # 2. TRAINING_DISPATCH=legacy stops new trainings (§9.1); not the student's doing,
     #    so not recorded.
@@ -642,15 +644,17 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
         raise HTTPException(status_code=503, detail=credit_texts.DISPATCH_OFF_DE)
     # 3. Managed ACT only (H4, decision 12).
     if model_type.lower() not in TRAINABLE_POLICIES:
-        record_refusal(user_id, "start", "policy", model_type)
+        await asyncio.to_thread(record_refusal, user_id, "start", "policy", model_type)
         raise HTTPException(status_code=400, detail=credit_texts.POLICY_REFUSED_DE)
     # 4. A key already used: the same start answers the same row; another one is a 409
     #    (review 3 m10: the database's P0071 is the second line, not the only one).
     if key is not None:
         rows = (
-            supabase.table("trainings").select("id, model_name, status, dataset_name, model_type, "
-                                               "training_params, reserved_hours")
-            .eq("user_id", user_id).eq("idempotency_key", key).execute()
+            await asyncio.to_thread(
+                supabase.table("trainings").select("id, model_name, status, dataset_name, model_type, "
+                                                   "training_params, reserved_hours")
+                .eq("user_id", user_id).eq("idempotency_key", key).execute
+            )
         ).data or []
         if rows:
             row = rows[0]
@@ -660,11 +664,11 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
             return StartTrainingResponse(training_id=row["id"], model_name=row["model_name"],
                                          status=row["status"], reserved_hours=row.get("reserved_hours"), replay=True)
     # 5. Hours: fail fast, before the dataset check (§4.2's one rule, via credit_quota).
-    q = credit_quota_row(user_id)
+    q = await asyncio.to_thread(credit_quota_row, user_id)
     if q is None:
         raise HTTPException(status_code=404, detail="Benutzerprofil nicht gefunden.")
     if int(q.get("o_next_hours") or 0) < 1:
-        raise _hours_refusal(user_id, "start", model_type, q)
+        raise await asyncio.to_thread(_hours_refusal, user_id, "start", model_type, q)
 
     # 6. Sweep stuck LEGACY rows (managed rows are the managed sweep's), then the params.
     await _sweep_user_running_jobs(user_id, workgroup_id=workgroup_id)
@@ -682,8 +686,8 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
 
     # The 60 s dedupe (unchanged; group-scoped when grouped): a hit answers the existing
     # row exactly like a key replay.
-    duplicate = _find_recent_duplicate(
-        user_id, req.dataset_name, model_type,
+    duplicate = await asyncio.to_thread(
+        _find_recent_duplicate, user_id, req.dataset_name, model_type,
         training_params=training_params_dict,
         workgroup_id=workgroup_id,
     )
@@ -719,33 +723,36 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
         model_type, req.dataset_name, output_folder_name=req.training_params.output_folder_name,
     )
     try:
-        rpc_result = supabase.rpc(
-            "start_training_safe",
-            {
-                "p_user_id": user_id,
-                "p_dataset_name": req.dataset_name,
-                "p_model_name": model_name,
-                "p_model_type": model_type,
-                "p_training_params": training_params_dict,
-                "p_total_steps": training_params_dict["steps"],
-                "p_worker_token": None,
-                "p_managed": True,
-                "p_idempotency_key": key,
-                "p_max_hours": cap_hours(),
-            },
-        ).execute()
+        rpc_result = await asyncio.to_thread(
+            supabase.rpc(
+                "start_training_safe",
+                {
+                    "p_user_id": user_id,
+                    "p_dataset_name": req.dataset_name,
+                    "p_model_name": model_name,
+                    "p_model_type": model_type,
+                    "p_training_params": training_params_dict,
+                    "p_total_steps": training_params_dict["steps"],
+                    "p_worker_token": None,
+                    "p_managed": True,
+                    "p_idempotency_key": key,
+                    "p_max_hours": cap_hours(),
+                },
+            ).execute
+        )
     except Exception as e:
         code = training_dispatch.pg_code(e)
         if code in ("P0003", "P0063"):
             logger.info("start refused (%s) for user=%s", code, user_id)
-            record_refusal(user_id, "start", "member_limit" if code == "P0063" else "no_hours", model_type)
+            await asyncio.to_thread(record_refusal, user_id, "start",
+                                    "member_limit" if code == "P0063" else "no_hours", model_type)
             raise HTTPException(status_code=403, detail=credit_texts.MEMBER_LIMIT_DE if code == "P0063"
                                 else credit_texts.NO_HOURS_DE)
         if code == "P0060":
-            record_refusal(user_id, "start", "role", model_type)
+            await asyncio.to_thread(record_refusal, user_id, "start", "role", model_type)
             raise HTTPException(status_code=403, detail=credit_texts.ROLE_REFUSED_DE)
         if code == "P0061":
-            record_refusal(user_id, "start", "policy", model_type)
+            await asyncio.to_thread(record_refusal, user_id, "start", "policy", model_type)
             raise HTTPException(status_code=400, detail=credit_texts.POLICY_REFUSED_DE)
         if code == "P0071":
             raise HTTPException(status_code=409, detail=credit_texts.REQUEST_REUSED_DE)
@@ -762,7 +769,9 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
     training_id = created["training_id"]
     reserved = created.get("reserved_hours")
     if created.get("replay"):
-        rows = supabase.table("trainings").select("model_name, status").eq("id", training_id).execute().data or []
+        rows = (await asyncio.to_thread(
+            supabase.table("trainings").select("model_name, status").eq("id", training_id).execute
+        )).data or []
         row = rows[0] if rows else {"model_name": model_name, "status": "queued"}
         return StartTrainingResponse(training_id=training_id, model_name=row["model_name"], status=row["status"],
                                      reserved_hours=reserved, replay=True)
@@ -772,9 +781,11 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
     fps = (info or {}).get("fps")
     if isinstance(fps, (int, float)) and not isinstance(fps, bool) and fps > 0:
         try:
-            supabase.table("trainings").update({"dataset_fps": fps}).eq("id", training_id).eq(
-                "managed", True
-            ).execute()
+            await asyncio.to_thread(
+                supabase.table("trainings").update({"dataset_fps": fps}).eq("id", training_id).eq(
+                    "managed", True
+                ).execute
+            )
         except Exception as e:  # metadata only: the publish re-reads meta/info.json
             logger.warning("dataset_fps write failed for training %s: %s", training_id, type(e).__name__)
     training_dispatch.kick()
@@ -888,13 +899,15 @@ async def continue_training(req: ContinueTrainingRequest, user=Depends(get_curre
     supabase = get_supabase()
     user_id = str(user.id)
     logger.info("POST /trainings/continue user=%s training_id=%s", user_id, req.training_id)
-    profile = get_user_profile(user_id)
+    profile = await asyncio.to_thread(get_user_profile, user_id)
     if profile.get("role") != "student":
-        record_refusal(user_id, "continue", "role", "act")
+        await asyncio.to_thread(record_refusal, user_id, "continue", "role", "act")
         raise HTTPException(status_code=403, detail=credit_texts.ROLE_REFUSED_DE)
     if not training_dispatch.SETTINGS.managed:
         raise HTTPException(status_code=409, detail=texts.S26)
-    rows = supabase.table("trainings").select("*").eq("id", req.training_id).execute().data or []
+    rows = (await asyncio.to_thread(
+        supabase.table("trainings").select("*").eq("id", req.training_id).execute
+    )).data or []
     parent = rows[0] if rows else None
     if parent is None or parent.get("user_id") != user_id:  # never 403 (Rule §4)
         raise HTTPException(status_code=404, detail=texts.TRAINING_NOT_FOUND_DE)
@@ -919,10 +932,12 @@ async def continue_training(req: ContinueTrainingRequest, user=Depends(get_curre
                        parent["dataset_name"], type(e).__name__)
         raise HTTPException(status_code=502, detail=texts.HF_UNREACHABLE_DE)
     try:
-        data = supabase.rpc("start_continuation_safe", {
-            "p_user_id": user_id, "p_parent_id": req.training_id, "p_note": texts.s28(int(capped)),
-            "p_max_hours": cap_hours(),
-        }).execute().data
+        data = (await asyncio.to_thread(
+            supabase.rpc("start_continuation_safe", {
+                "p_user_id": user_id, "p_parent_id": req.training_id, "p_note": texts.s28(int(capped)),
+                "p_max_hours": cap_hours(),
+            }).execute
+        )).data
     except Exception as e:
         code = training_dispatch.pg_code(e)
         if code == "P0002":
@@ -934,11 +949,12 @@ async def continue_training(req: ContinueTrainingRequest, user=Depends(get_curre
         if code == "P0054":
             raise HTTPException(status_code=409, detail=texts.S25)
         if code in ("P0003", "P0063"):
-            record_refusal(user_id, "continue", "member_limit" if code == "P0063" else "no_hours", "act")
+            await asyncio.to_thread(record_refusal, user_id, "continue",
+                                    "member_limit" if code == "P0063" else "no_hours", "act")
             raise HTTPException(status_code=403, detail=credit_texts.MEMBER_LIMIT_DE if code == "P0063"
                                 else credit_texts.NO_HOURS_DE)
         if code == "P0060":
-            record_refusal(user_id, "continue", "role", "act")
+            await asyncio.to_thread(record_refusal, user_id, "continue", "role", "act")
             raise HTTPException(status_code=403, detail=credit_texts.ROLE_REFUSED_DE)
         if code == "P0061":
             raise HTTPException(status_code=400, detail=credit_texts.POLICY_REFUSED_DE)
@@ -955,7 +971,7 @@ async def continue_training(req: ContinueTrainingRequest, user=Depends(get_curre
 async def list_trainings(user=Depends(get_current_user)):
     supabase = get_supabase()
     user_id = str(user.id)
-    group_ids = resolve_visible_workgroup_ids(user_id)
+    group_ids = await asyncio.to_thread(resolve_visible_workgroup_ids, user_id)
 
     if group_ids:
         # PostgREST OR clause covers (own user_id) OR (in any visible group).
@@ -975,7 +991,7 @@ async def list_trainings(user=Depends(get_current_user)):
             .order("requested_at", desc=True)
             .limit(50)
         )
-    result = q.execute()
+    result = await asyncio.to_thread(q.execute)
 
     # Sync status for any active jobs — parallel so N running rows don't
     # serialize into N× Modal roundtrip latency.
@@ -990,11 +1006,11 @@ async def list_trainings(user=Depends(get_current_user)):
 async def get_training(training_id: int, user=Depends(get_current_user)):
     supabase = get_supabase()
     user_id = str(user.id)
-    result = (
+    result = await asyncio.to_thread(
         supabase.table("trainings")
         .select("*")
         .eq("id", training_id)
-        .execute()
+        .execute
     )
     if not result.data:
         raise HTTPException(status_code=404, detail="Training nicht gefunden.")
@@ -1002,7 +1018,7 @@ async def get_training(training_id: int, user=Depends(get_current_user)):
     if row["user_id"] != user_id:
         # Allow group siblings (current and former) to read.
         wg = row.get("workgroup_id")
-        if not wg or wg not in resolve_visible_workgroup_ids(user_id):
+        if not wg or wg not in await asyncio.to_thread(resolve_visible_workgroup_ids, user_id):
             raise HTTPException(status_code=404, detail="Training nicht gefunden.")
 
     training = await _sync_modal_status(row)

@@ -628,7 +628,7 @@ class TestPatchMe(unittest.TestCase):
         fresh = {**_profile(), "username": "s", "full_name": "S", "classroom_id": None,
                  "workgroup_id": None, "training_credits": 0, "hf_username": raw}
         with patch.object(meroute, "get_user_profile", return_value=fresh):
-            return asyncio.run(meroute.update_me(body=body, profile=profile or _profile()))
+            return meroute.update_me(body=body, profile=profile or _profile())
 
     def test_409_when_a_credential_exists_and_nothing_is_written(self) -> None:
         self.sb.credentials[UID] = {"user_id": UID}

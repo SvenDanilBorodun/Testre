@@ -8,8 +8,9 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
 
+from app import edge as _edge
+from app.auth import CodedHTTPException
 from app.routes.admin import router as admin_router
 from app.routes.datasets import router as datasets_router
 from app.routes.health import router as health_router
@@ -25,7 +26,8 @@ from app.routes.workflows import router as workflows_router
 from app.routes.workgroups import router as workgroups_router
 from app.services.dataset_sweep import sweep_loop as _dataset_sweep_loop
 from app.services.inference_sweep import sweep_loop as _inference_sweep_loop
-from app.services.rate_limiter import RateLimiter
+from app.services.rate_limiter import FailureCounter, RateLimiter
+from app.services import jwt_auth as _jwt_auth
 from app.services import training_dispatch as _training_dispatch
 from app.services.training_sweep import active_sweep_loop as _training_active_sweep_loop
 from app.services.training_sweep import sweep_loop as _training_cancel_sweep_loop
@@ -124,6 +126,19 @@ def _validate_managed_training() -> None:
 
 
 _validate_managed_training()
+
+
+def _validate_edge_settings() -> int:
+    """API hardening (2026-11-10): ``AUTH_VERIFY_MODE`` must be ``local`` (the
+    default: access tokens verified against the project's JWKS) or ``remote``
+    (the rollback to Supabase's ``auth.get_user``), and ``TRUSTED_PROXY_HOPS``
+    an integer 1–5 (default 1). Either malformed stops the boot; the messages
+    name the variable, never the value. Returns the hop count."""
+    _jwt_auth.validate_boot()
+    return _edge.trusted_proxy_hops()
+
+
+_TRUSTED_PROXY_HOPS = _validate_edge_settings()
 
 # One id per process start, the publish/mirror lease owner (FR-4): uvicorn is
 # PID 1 in every Railway container, so a process id would make two instances
@@ -712,17 +727,14 @@ def _parse_and_validate_origins() -> list[str]:
 allowed_origins = _parse_and_validate_origins()
 logger.info("CORS allowed origins: %s", allowed_origins)
 
-# ─── Simple in-process rate limiter ────────────────────────────────────
-# Stops a student script from hammering /trainings/start or the auth
-# endpoints. The RateLimiter implementation lives in
-# app.services.rate_limiter (extracted so it is unit-testable without the
-# full FastAPI app import, and so the LRU key-cap memory guard is
-# documented in one place). Keyed by client IP from X-Forwarded-For for
-# most rules, or a hashed bearer token for the per-user prefixes below.
+# ─── The edge: rate limits, body limits, failed-authentication cap ──────
+# The middleware classes live in app/edge.py (testable without every router);
+# the tables stay literals HERE because several tests read them from this file.
 # State lives in-process, so this only behaves correctly at
 # uvicorn --workers 1 (Railway default). If we ever scale out, swap to
 # Redis-backed slowapi.
 _rate_limiter = RateLimiter()
+_auth_failures = FailureCounter()
 
 # (method, path prefix, limit, window seconds). Method "*" matches any.
 # Method-aware so each verb under one prefix gets its own budget: POST
@@ -804,86 +816,34 @@ _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
 _RATE_LIMIT_RULES.sort(key=lambda rule: len(rule[1]), reverse=True)
 
 
-def _client_ip(request: Request) -> str:
-    """Resolve the real client IP behind Railway's proxy.
-
-    request.client.host is the proxy address — every student's request
-    would carry the same value, so a per-IP limiter would behave as one
-    global bucket. Railway always sets X-Forwarded-For; the leftmost
-    entry is the original client.
-    """
-    xff = request.headers.get("x-forwarded-for", "")
-    if xff:
-        first = xff.split(",")[0].strip()
-        if first:
-            return first
-    return request.client.host if request.client else "unknown"
-
-
-def _user_key_from_jwt(request: Request) -> str | None:
-    """Derive a stable per-token rate-limit bucket key.
-
-    NOTE on the trade-off — the middleware runs BEFORE
-    ``Depends(get_current_user)`` so the JWT signature is unverified at
-    this point. We deliberately do NOT trust the JWT payload (a forged
-    token can claim any ``sub``). Instead, we hash the full token bytes
-    and use the truncated hex digest as the bucket key. Two
-    consequences:
-
-      1. Per-user bucketing still holds for legitimate users — every
-         valid session reuses the same JWT until it expires, so the
-         hash is stable.
-      2. A forged-token attacker gets one bucket per distinct forged
-         token rather than colliding into one bucket per claimed
-         ``sub`` — slightly less aggressive limiting than trusting
-         ``sub`` would be, but no attacker can starve a real user's
-         bucket by spamming forgeries that claim the victim's id.
-
-    The route's ``Depends(get_current_user)`` still authenticates the
-    forged tokens away with a clean 401; the rate limiter only matters
-    for the (legitimate or near-legitimate) traffic that reaches the
-    inner handler.
-    """
-    auth = request.headers.get("authorization") or request.headers.get("Authorization")
-    if not auth or not auth.lower().startswith("bearer "):
-        return None
-    token = auth[len("Bearer "):].strip()
-    if not token:
-        return None
-    import hashlib
-    return "jwt:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
-
-
-# Routes that should rate-limit per AUTHENTICATED USER rather than per
-# IP. Anything missing here keeps the IP-keyed legacy behavior; a request
-# without an Authorization header falls back to IP keying (the
-# _user_key_from_jwt helper returns None → IP path).
+# Every IP-keyed bucket (and the failed-authentication cap) keys on
+# app/edge.py::client_ip: the TRUSTED_PROXY_HOPS-th X-Forwarded-For entry from
+# the RIGHT (default 1, the address Railway's edge added), never the left-most,
+# which the client writes itself.
+#
+# Routes that rate-limit per AUTHENTICATED USER rather than per IP. Since the
+# API hardening (2026-11-10) the key is the VERIFIED `sub` of the access token
+# (app/edge.py::rate_limit_key: the cached signing keys only, never a fetch), so
+# a forged token can neither claim another user's bucket nor get a fresh bucket
+# per rotation: an unverifiable bearer falls back to the client address. A UUID
+# worker token on /trainings/worker keeps its hashed key; under
+# AUTH_VERIFY_MODE=remote the old hashed-token key comes back.
 #
 # /trainings/ (covers the rate-limited /trainings/start + /trainings/cancel
-# rules) is per-user for the same NAT reason: both endpoints require
-# Depends(get_current_user) so a JWT is always present, and IP keying
-# meant 30 students behind one school NAT shared the 10/min start bucket —
-# the 11th student got a spurious 429 even though nobody individually
-# exceeded the limit. The IP fallback still covers any missing header.
+# rules) is per-user because IP keying meant 30 students behind one school NAT
+# shared the 10/min start bucket — the 11th student got a spurious 429 even
+# though nobody individually exceeded the limit.
 #
 # /workflows (no trailing slash so it covers the bare `POST /workflows`
 # create path AS WELL AS `POST /workflows/{id}/{clone,versions/.../restore,
-# trajectories}`) is per-user for the identical NAT reason: the single
-# ("POST", "/workflows", 10, 60.0) rule matches by prefix, so all four
-# workflow POSTs share one bucket — IP-keyed, a 30-student NAT classroom
-# collectively blew the 10/min IP bucket → spurious 429. Every /workflows
-# route requires Depends(get_current_user) (verified: create_workflow,
-# clone_workflow, restore_workflow_version, create_trajectory), so a JWT is
-# always present and there is no no-JWT/beacon fallback to regress. The IP
-# fallback still covers any (unreachable) missing-header case.
+# trajectories,submit}`) is per-user for the identical NAT reason: the single
+# ("POST", "/workflows", 10, 60.0) rule matches by prefix, so every workflow
+# POST shares one bucket. Every /workflows route requires
+# Depends(get_current_user), so a token is always present.
 #
-# /me/hf-token (042) is per-user for the same NAT reason: every route under it
-# requires Depends(get_current_profile), so a JWT is always present.
-#
-# /me/group-members (Daten 2.0) likewise: Depends(get_current_profile).
-#
-# /inference/ (Cloud-Inferenz, 048) likewise: every route requires
-# Depends(get_current_profile), so a JWT is always present.
+# /me/hf-token (042), /me/group-members (Daten 2.0) and /inference/ (048) are
+# per-user for the same NAT reason: every route under them requires
+# Depends(get_current_profile).
 #
 # /teacher/ and /admin/ (052, review m9) likewise: every route requires
 # get_current_teacher / get_current_admin. Several teachers behind one school
@@ -903,7 +863,9 @@ _PER_USER_RATE_LIMIT_PREFIXES = (
 # force a multi-MB allocation. Give 50% headroom over the validator cap
 # so an oversized-but-legitimate payload still gets the German 413 from
 # the validator (which includes the limit in the message) rather than
-# the generic middleware 413.
+# the generic middleware 413. Every OTHER route is capped at
+# app/edge.py::MAX_BODY_BYTES (1 MB, 2026-11-10), and a chunked body is refused
+# on every body method.
 _MAX_WRITE_BODY_BYTES = 384 * 1024
 _BODY_SIZE_LIMITED_PREFIXES: tuple[tuple[str, str], ...] = (
     ("POST", "/workflows"),
@@ -914,109 +876,25 @@ _BODY_SIZE_LIMITED_PREFIXES: tuple[tuple[str, str], ...] = (
 )
 
 
-class BodySizeLimitMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        if request.method in {"POST", "PATCH", "PUT"}:
-            for m, prefix in _BODY_SIZE_LIMITED_PREFIXES:
-                if m == request.method and request.url.path.startswith(prefix):
-                    # Reject Transfer-Encoding: chunked on these
-                    # protected paths — without a Content-Length the
-                    # size check below is useless and an attacker
-                    # could stream multi-MB bodies past the guard.
-                    # 411 Length Required is the standards-correct
-                    # response when the server demands Content-Length.
-                    if request.headers.get("transfer-encoding", "").lower() == "chunked":
-                        logger.warning(
-                            "Rejecting chunked %s %s — Content-Length required.",
-                            request.method, request.url.path,
-                        )
-                        return JSONResponse(
-                            status_code=411,
-                            content={
-                                "detail": (
-                                    "Chunked-Übertragung wird auf diesem "
-                                    "Endpunkt nicht unterstützt."
-                                )
-                            },
-                        )
-                    cl = request.headers.get("content-length")
-                    if cl:
-                        try:
-                            size = int(cl)
-                        except ValueError:
-                            size = -1
-                        if size > _MAX_WRITE_BODY_BYTES:
-                            logger.warning(
-                                "Rejecting oversized %s %s body: %s bytes",
-                                request.method, request.url.path, cl,
-                            )
-                            return JSONResponse(
-                                status_code=413,
-                                content={
-                                    "detail": (
-                                        "Anfrage zu groß "
-                                        f"(>{_MAX_WRITE_BODY_BYTES // 1024} KB)."
-                                    )
-                                },
-                            )
-                    break
-        return await call_next(request)
-
-
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        path = request.url.path
-        method = request.method
-        for rule_method, prefix, limit, window in _RATE_LIMIT_RULES:
-            if rule_method != "*" and rule_method != method:
-                continue
-            # Anchored prefix match: a rule for "/trainings/start" must
-            # NOT match "/trainings/started". Either the path is exactly
-            # the prefix or the prefix must be followed by "/" so the
-            # next segment is fully delimited. Path prefixes that end
-            # in "/" (e.g. "/trainings/") still match all sub-resources
-            # because path == "/trainings/" or path startswith "/trainings/"
-            # via the second branch.
-            if prefix.endswith("/"):
-                matched = path.startswith(prefix)
-            else:
-                matched = path == prefix or path.startswith(prefix + "/")
-            if matched:
-                # The prefix match applies across path lengths, so a
-                # method-pinned rule covers every sub-resource under its
-                # prefix for THAT verb only: the POST /workflows rule never
-                # counts a PATCH, which has its own rule on the same prefix.
-                use_user_key = any(
-                    path.startswith(p) for p in _PER_USER_RATE_LIMIT_PREFIXES
-                )
-                key = None
-                if use_user_key:
-                    key = _user_key_from_jwt(request)
-                if not key:
-                    key = _client_ip(request)
-                bucket_key = f"{rule_method}:{prefix}"
-                if not _rate_limiter.check(bucket_key, key, limit, window):
-                    logger.warning("Rate limit hit on %s %s from %s", rule_method, prefix, key)
-                    # Return a Response directly. Raising HTTPException
-                    # inside BaseHTTPMiddleware.dispatch is a footgun:
-                    # Starlette doesn't route middleware exceptions
-                    # through FastAPI's exception handlers, so the
-                    # client would see a 500 instead of a clean 429.
-                    return JSONResponse(
-                        status_code=429,
-                        content={"detail": "Zu viele Anfragen — bitte einen Moment warten."},
-                    )
-                break
-        return await call_next(request)
-
-
 # Middleware ordering: Starlette wraps in reverse of add_middleware calls
-# (last-added becomes outermost). We want CORS to be the OUTERMOST layer so
-# a 429 from RateLimitMiddleware still carries Access-Control-* headers —
-# otherwise the browser sees the response as a generic CORS failure instead
-# of a structured 429. Therefore: add RateLimit first, then CORS.
-app.add_middleware(RateLimitMiddleware)
-app.add_middleware(BodySizeLimitMiddleware)
+# (last-added becomes outermost): CORS → failed-authentication cap → body
+# limits → rate limits → the app. CORS outermost so a 429/411/413 still carries
+# Access-Control-* headers (the browser would otherwise see a generic CORS
+# failure); the failed-authentication cap next, so an address over its budget
+# is refused before anything else runs.
+app.add_middleware(
+    _edge.RateLimitMiddleware,
+    rules=_RATE_LIMIT_RULES,
+    per_user_prefixes=_PER_USER_RATE_LIMIT_PREFIXES,
+    limiter=_rate_limiter,
+    hops=_TRUSTED_PROXY_HOPS,
+)
+app.add_middleware(
+    _edge.BodySizeLimitMiddleware,
+    limited_prefixes=_BODY_SIZE_LIMITED_PREFIXES,
+    limited_max_bytes=_MAX_WRITE_BODY_BYTES,
+)
+app.add_middleware(_edge.AuthFailureLimitMiddleware, counter=_auth_failures, hops=_TRUSTED_PROXY_HOPS)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -1024,6 +902,19 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+
+@app.exception_handler(CodedHTTPException)
+async def _coded_http_exception(request: Request, exc: CodedHTTPException):
+    """An auth refusal the client must tell apart by more than its status (the
+    teacher web's TOTP screen on ``mfa_required``, a retry on
+    ``auth_unavailable``): ``{"detail": <German>, "code": <code>}``."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail, "code": exc.code},
+        headers=getattr(exc, "headers", None),
+    )
+
 
 app.include_router(health_router)
 app.include_router(version_router)
@@ -1135,6 +1026,21 @@ _BACKGROUND_TASKS: set = set()
 def _keep_task(task) -> None:
     _BACKGROUND_TASKS.add(task)
     task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+
+@app.on_event("startup")
+async def _start_jwks_refresh() -> None:
+    """API hardening (2026-11-10): the signing keys of the access tokens are
+    fetched off the event loop at boot and every ``jwt_auth.JWKS_REFRESH_S``, so
+    the first request finds them cached. A task nothing awaits: neither the
+    startup nor ``/health`` waits for Supabase. Not started under
+    ``AUTH_VERIFY_MODE=remote`` (Supabase checks every token itself then)."""
+    import asyncio as _asyncio
+
+    if _jwt_auth.verify_mode() != "local":
+        logger.warning("AUTH_VERIFY_MODE=remote: every access token is checked by Supabase Auth (rollback)")
+        return
+    _keep_task(_asyncio.create_task(_jwt_auth.refresh_loop()))
 
 
 @app.on_event("startup")

@@ -412,12 +412,10 @@ describe('selectHfInSync / selectHfDecision / selectHfStartBlock on real state',
     expect(selectHfInSync(wrap(run(initial(), accountLoaded({ status: 'none' }), robotMsg())))).toBe(false);
   });
 
-  it('decides from the slice, and steps aside while a Jetson is claimed', () => {
+  it('decides from the slice', () => {
     const state = run(initial(), stored(A), robotMsg());
     expect(selectHfDecision(wrap(state))).toBe('push');
-    expect(selectHfDecision(wrap(state, { jetson: { status: 'connected' } }))).toBe('noop');
     expect(selectHfStartBlock(wrap(state))).toBe('transfer');
-    expect(selectHfStartBlock(wrap(state, { jetson: { status: 'connected' } }))).toBeNull();
   });
 
   it('says "failed" after two failures or an open breaker', () => {
@@ -561,11 +559,8 @@ describe('selectHfRecordHint — the non-blocking Aufnahme hint (owner decision 
     expect(selectHfRecordHint(wrap(initial(), offline, { ui: { hfUserList: [] } }))).toBe('offline');
   });
 
-  it('never without the slice, and never under a claimed Jetson', () => {
+  it('never without the slice', () => {
     expect(selectHfRecordHint({ auth: offline })).toBeNull();
-    const err = accepting(run(initial(), accountFailed('error')));
-    expect(selectHfRecordHint(wrap(err, signedIn, { jetson: { status: 'connected' } }))).toBeNull();
-    expect(selectHfRecordHint(wrap(initial(), offline, { jetson: { status: 'connected' } }))).toBeNull();
   });
 });
 
@@ -604,14 +599,9 @@ describe('selectHfListReloadAllowed — the Benutzer-ID gate (audit S1)', () => 
     expect(selectHfListReloadAllowed(wrap(run(initial(), robotLegacyConfirmed())))).toBe(true);
   });
 
-  it('allows a robot that takes no personal token (the Jetson image)', () => {
+  it('allows a robot that takes no personal token (an image without a slot)', () => {
     const s = run(initial(), accountLoaded({ status: 'none' }), robotMsg({ accepts: false }));
     expect(selectHfListReloadAllowed(wrap(s))).toBe(true);
   });
 
-  it('allows a claimed Jetson whatever the local slot says', () => {
-    const s = run(initial(), accountLoaded({ status: 'none' }), robotMsg({ present: true, fp: B }));
-    expect(selectHfListReloadAllowed(wrap(s, { jetson: { status: 'connected' } }))).toBe(true);
-    expect(selectHfListReloadAllowed(wrap(initial(), { jetson: { status: 'connected' } }))).toBe(true);
-  });
 });

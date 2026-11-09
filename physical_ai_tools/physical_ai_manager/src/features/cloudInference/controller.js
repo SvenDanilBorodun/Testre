@@ -131,11 +131,6 @@ export function getSnapshot() {
   return state;
 }
 
-/** A run (not a reservation) is in progress: the TargetSwitch is locked. */
-export function isLiveRun(snapshot = state) {
-  return BUSY_PHASES.has(snapshot.phase);
-}
-
 /** A reserve (or its automatic retry) runs: the model list is locked (owner, round 2). */
 export function isStartingGpu(snapshot = state) {
   return snapshot.phase === 'reserving';

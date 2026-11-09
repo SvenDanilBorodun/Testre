@@ -21,7 +21,7 @@ import tasksReducer, {
   recordIntent, recordUploadStatus, setHeartbeatStatus, setTaskInfo, setTaskStatus,
 } from '../../tasks/taskSlice';
 import uiReducer, { moveToPage } from '../../ui/uiSlice';
-import rosReducer, { setRosbridgeUrl } from '../../ros/rosSlice';
+import rosReducer from '../../ros/rosSlice';
 import trainingReducer from '../../training/trainingSlice';
 import PageType from '../../../constants/pageType';
 import TaskPhase from '../../../constants/taskPhases';
@@ -30,6 +30,10 @@ import { VIEW, deriveRecordView } from '../../../components/Record/model/phaseMo
 import RECORD_COPY from '../../../components/Record/model/recordCopy';
 import { resetDatenStateForTests } from '../hooks/useDatenState';
 import { EMPTY_RECORD_SESSION, applyRecordIntent, noteRecordNotice } from '../../tasks/recordSession';
+
+// The rosbridge URL a test needs, set the way the store is first built (the app
+// itself derives it from the page's host, features/ros/rosSlice::setRosHost).
+const rosWithUrl = (url) => ({ ...rosReducer(undefined, { type: '@@init' }), rosbridgeUrl: url });
 
 const mockGetHfUsers = vi.fn();
 vi.mock('../../../hooks/useRosServiceCaller', () => ({
@@ -82,11 +86,13 @@ const FORM = {
 };
 
 function makeStore({ form = FORM, url = 'ws://robot/rosbridge' } = {}) {
-  const store = configureStore({ reducer: { tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer } });
+  const store = configureStore({
+    reducer: { tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer },
+    preloadedState: { ros: rosWithUrl(url || '') },
+  });
   store.dispatch(moveToPage(PageType.RECORD));
   store.dispatch(setTaskInfo(form));
   store.dispatch(setHeartbeatStatus('connected'));
-  if (url) store.dispatch(setRosbridgeUrl(url));
   store.dispatch(setTaskStatus({
     robotType: 'omx_f', phase: TaskPhase.READY, running: false, topicReceived: true, taskType: '',
     receivedAt: performance.now(), receivedWallMs: Date.now(),

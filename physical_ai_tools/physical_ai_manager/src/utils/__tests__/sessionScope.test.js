@@ -601,9 +601,9 @@ describe('sign-out lives in exactly one place', () => {
     //
     // Everything LOCAL and SYNCHRONOUS now precedes the single remote call, and
     // the scrub repeats after it because the await is a window in which every
-    // timer and pending handler in the document keeps running. `jetson` stays
-    // first for its own reason: the release beacon needs the JWT the revoke is
-    // about to invalidate.
+    // timer and pending handler in the document keeps running. The cloud
+    // session's end comes first for its own reason: its keepalive POST needs the
+    // JWT the revoke is about to invalidate.
     //
     // Comment lines are stripped, because signOut.js's header narrates this same
     // sequence in prose.
@@ -611,7 +611,7 @@ describe('sign-out lives in exactly one place', () => {
       SOURCE_FILES.find((f) => f.rel === SIGN_OUT_MODULE).text
     );
     const MARKERS = [
-      [/resetJetsonOnLogout\(dispatch/g, 'jetson'],
+      [/endCloudInferenceOnLogout\(accessToken/g, 'cloud'],
       [/dispatch\(signedOut\(\)\)/g, 'broadcast'],
       [/clearStudentScopedStorage\(\)/g, 'scrub'],
       [/await supabase\s*\.\s*auth\s*\.\s*signOut\s*\(/g, 'revoke'],
@@ -624,7 +624,7 @@ describe('sign-out lives in exactly one place', () => {
     }
     seen.sort((a, b) => a[0] - b[0]);
     expect(seen.map(([, name]) => name)).toEqual([
-      'jetson',
+      'cloud',
       'broadcast',
       'scrub',
       'revoke',
@@ -670,13 +670,12 @@ describe('sign-out lives in exactly one place', () => {
   });
 
   it('does not import a hook — dependencies run one way', () => {
-    // utils/signOut used to import resetJetsonOnLogout from hooks/, pulling
-    // react-redux, react-hot-toast and the rosbridge singleton into the util
-    // layer. The Jetson reset now lives in features/jetson/sessionReset, which
-    // both the util and the hook import.
+    // utils/signOut once imported a reset from hooks/, pulling react-redux,
+    // react-hot-toast and the rosbridge singleton into the util layer. The
+    // cloud session's end lives in features/cloudInference/controller.
     const src = SOURCE_FILES.find((f) => f.rel === SIGN_OUT_MODULE).text;
     expect(src).not.toMatch(/from '\.\.\/hooks\//);
-    expect(src).toContain("from '../features/jetson/sessionReset'");
+    expect(src).toContain("from '../features/cloudInference/controller'");
   });
 
   it('clears the Supabase session key only through the pattern sweep', () => {
@@ -719,7 +718,7 @@ describe('sign-out lives in exactly one place', () => {
 // re-classify it. It follows `.github/scripts/compose_env_parity.py`'s
 // INTENTIONAL allowlist, including its rule that a STALE entry is an error too.
 //
-// EXACTLY TWO slices are exempt (`jetson`, `ros`); the other ten answer. `ui`
+// EXACTLY ONE slice is exempt (`ros`); the other ten answer. `ui`
 // used to be on this list on the ground that `ui.hfUserList` „describes the
 // machine, not the person". It did not: the list is the accounts and
 // organisations reachable with the token in the ROBOT's slot, and since that
@@ -727,18 +726,10 @@ describe('sign-out lives in exactly one place', () => {
 // Hugging-Face token, migration 042) the list is the previous student's. `ui`
 // now empties it on `signedOut`, and the `hfToken` slice is new and answers too.
 const SIGNED_OUT_EXEMPT = Object.freeze({
-  jetson:
-    'Handled IMPERATIVELY and FIRST, not reactively: features/jetson/'
-    + 'sessionReset::resetJetsonOnLogout dispatches clearJetson() as step 1 of '
-    + 'signOutStudent, because it also fires an authenticated release beacon '
-    + 'that needs the JWT the revoke is about to invalidate. A signedOut '
-    + 'handler would run too late to be that.',
   ros:
     'Rosbridge URL, host and the image-topic list — facts about which ROBOT this '
     + 'browser talks to. Identical for every student at the PC, and clearing it '
-    + 'would tear down the connection the next student needs. The Jetson '
-    + 'override is not student state either: resetJetsonOnLogout points '
-    + 'rosbridge back at the local rig itself.',
+    + 'would tear down the connection the next student needs.',
 });
 
 describe('every slice in the real store answers session/signedOut', () => {
@@ -790,11 +781,11 @@ describe('every slice in the real store answers session/signedOut', () => {
     expect(missing).toEqual([]);
   });
 
-  it('exempts exactly jetson and ros: ui and hfToken answer for themselves', () => {
+  it('exempts exactly ros: ui and hfToken answer for themselves', () => {
     // Pinned by name. The reason-map above cannot contradict itself, so without
     // this a `ui` entry could be re-added with a fresh reason and the suite
     // would only notice that `ui` both handles the action and is exempted.
-    expect(Object.keys(SIGNED_OUT_EXEMPT).sort()).toEqual(['jetson', 'ros']);
+    expect(Object.keys(SIGNED_OUT_EXEMPT).sort()).toEqual(['ros']);
     const answering = [...sliceFiles.keys()].filter((key) => !(key in SIGNED_OUT_EXEMPT));
     expect(answering).toHaveLength(10);
     expect(answering).toContain('ui');

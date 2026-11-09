@@ -6,8 +6,8 @@
 // The reconnect policy of the rosbridge singleton (spec-r5 §2.3-3). The local,
 // same-origin rosbridge (`ws(s)://<host>/rosbridge`, both platforms through
 // nginx) comes back within 2 s and never gives up, so a page that lost its
-// link during a recording sees the end within ~4 s instead of up to ~30 s. The
-// Jetson proxy (`ws://<ip>:9091`) keeps its exponential backoff and its cap.
+// link during a recording sees the end within ~4 s instead of up to ~30 s. Any
+// other URL keeps an exponential backoff and its cap.
 
 import rosConnectionManager, {
   LOCAL_RECONNECT_MAX_DELAY_MS,
@@ -22,7 +22,6 @@ describe('which rosbridge is local', () => {
     ['ws://edubotics-pi.local/rosbridge', true],
     ['ws://localhost:8080/rosbridge', true],
     ['ws://10.0.0.5:9091', false],
-    ['ws://10.0.0.5:9091/rosbridge', false],
     ['ws://localhost:9090', false],
     ['', false],
     ['not a url', false],
@@ -38,7 +37,7 @@ describe('the reconnect delay', () => {
     expect(delays).toEqual([1000, 2000, 2000, 2000, 2000, 2000]);
   });
 
-  it('the Jetson proxy: unchanged exponential backoff up to 30 s', () => {
+  it('any other rosbridge: exponential backoff up to 30 s', () => {
     const delays = [0, 1, 2, 3, 4, 5, 6, 20].map((n) => reconnectDelayMs('ws://10.0.0.5:9091', n));
     expect(delays).toEqual([1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000]);
   });
@@ -77,7 +76,7 @@ describe('_scheduleReconnect', () => {
     expect(new Set(delays.slice(1))).toEqual(new Set([2000]));
   });
 
-  it('the Jetson proxy still gives up after its 30 attempts', () => {
+  it('any other rosbridge still gives up after 30 attempts', () => {
     scheduleTimes('ws://10.0.0.5:9091', 40);
     expect(delays).toHaveLength(30);
     expect(delays.slice(0, 6)).toEqual([1000, 2000, 4000, 8000, 16000, 30000]);

@@ -18,23 +18,9 @@
 import React, { useCallback, useEffect, useRef } from 'react';
 import clsx from 'clsx';
 import { useSelector } from 'react-redux';
-import ROSLIB from 'roslib';
 import { STREAM_QUALITY } from '../constants/streamConfig';
-import rosConnectionManager from '../utils/rosConnectionManager';
 import { usePiMode, videoStreamBase } from '../utils/piMode';
 import Icon from './icons/Icon';
-
-// H1: during a classroom-Jetson inference session the Jetson's
-// web_video_server (:8080) is bound to loopback only and there is NO LAN
-// route to it — the only LAN surface is the JWT-proxied rosbridge on :9091.
-// So in that case we can't use an <img src="http://<host>:8080/stream">;
-// instead we subscribe to the CompressedImage topic over the already-
-// swapped rosbridge and feed each base64 JPEG frame into the <img> as a
-// data URL. Throttled + queue_length 1 to bound the base64-over-rosbridge
-// bandwidth (≈ jpeg_bytes × 1.33 × (1000/throttle) per camera). 100 ms ≈
-// 10 fps is plenty for a monitor view and keeps two cameras well under a
-// classroom-LAN budget.
-const JETSON_VIEW_THROTTLE_MS = 100;
 
 const classImageGridCell = (topic) =>
   clsx(
@@ -88,18 +74,13 @@ export default function ImageGridCell({
   isActive = true,
   style = {},
   // Aufnahme 2.0: no close button, no plus, no aspect ratio, no rounded frame.
-  // The stream (URL, Jetson path, Pi proxy, the F26 cancel token) is the same.
+  // The stream (URL, Pi proxy, the F26 cancel token) is the same.
   bare = false,
   // Optional: called when the <img> stream fails, so a parent can show its own
   // German fallback. Undefined (the default) changes nothing.
   onStreamError,
 }) {
   const rosHost = useSelector((state) => state.ros.rosHost);
-  // H1: when connected to the classroom Jetson the camera feed must ride
-  // the JWT-proxied rosbridge (web_video_server :8080 is loopback-only on
-  // the Jetson, and rosHost still points at the student's own PC).
-  const jetsonConnected = useSelector((state) => state.jetson.status === 'connected');
-  const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
   // Orange Pi: MJPEG rides the same-origin /video proxy instead of :8080.
   const { piMode, piModeResolved } = usePiMode();
   const containerRef = useRef(null);
@@ -145,7 +126,6 @@ export default function ImageGridCell({
       return undefined;
     }
     let cancelled = false;
-    let subscription = null;
     const run = async () => {
       // Tear down any leftover <img> from a previous run before
       // committing to this effect's stream.
@@ -165,66 +145,28 @@ export default function ImageGridCell({
       img.className = bare ? CLASS_BARE_IMG : CLASS_IMG;
       img.onclick = (e) => e.stopPropagation();
 
-      if (jetsonConnected) {
-        // H1 — rosbridge CompressedImage path (see the module comment).
-        // The /image/get_available_list service strips the trailing
-        // `/compressed`; add it back to subscribe to the actual transport.
-        const fullTopic = topic.endsWith('/compressed') ? topic : `${topic}/compressed`;
-        let ros;
-        try {
-          ros = await rosConnectionManager.getConnection(rosbridgeUrl);
-        } catch (err) {
-          if (!cancelled) {
-            console.error(
-              `ImageGridCell idx ${idx}: rosbridge not connectable for ${fullTopic}:`,
-              err.message
-            );
-          }
-          return;
-        }
-        if (cancelled || !containerRef.current) return;
-        containerRef.current.appendChild(img);
-        currentImgRef.current = img;
-        subscription = new ROSLIB.Topic({
-          ros,
-          name: fullTopic,
-          messageType: 'sensor_msgs/msg/CompressedImage',
-          throttle_rate: JETSON_VIEW_THROTTLE_MS,
-          queue_length: 1,
-        });
-        subscription.subscribe((msg) => {
-          if (cancelled || !currentImgRef.current) return;
-          // rosbridge encodes CompressedImage.data (uint8[]) as base64.
-          currentImgRef.current.src = `data:image/jpeg;base64,${msg.data}`;
-        });
-      } else {
-        const timestamp = Date.now();
-        // Audit F35: STREAM_QUALITY constant shared with CameraFeedOverlay.
-        // Pi mode rides the same-origin /video nginx proxy (port 80 —
-        // school firewalls filter :8080); otherwise direct web_video_server.
-        img.src = `${videoStreamBase(rosHost, piMode)}/stream?quality=${STREAM_QUALITY}&type=ros_compressed&default_transport=compressed&topic=${topic}&t=${timestamp}`;
-        img.onerror = () => {
-          if (cancelled) return;
-          console.error(`Image stream error for idx ${idx}, topic: ${topic}`);
-          if (typeof onStreamErrorRef.current === 'function') onStreamErrorRef.current();
-        };
-        if (cancelled || !containerRef.current) return;
-        containerRef.current.appendChild(img);
-        currentImgRef.current = img;
-      }
+      const timestamp = Date.now();
+      // Audit F35: STREAM_QUALITY constant shared with CameraFeedOverlay.
+      // Pi mode rides the same-origin /video nginx proxy (port 80 —
+      // school firewalls filter :8080); otherwise direct web_video_server.
+      img.src = `${videoStreamBase(rosHost, piMode)}/stream?quality=${STREAM_QUALITY}&type=ros_compressed&default_transport=compressed&topic=${topic}&t=${timestamp}`;
+      img.onerror = () => {
+        if (cancelled) return;
+        console.error(`Image stream error for idx ${idx}, topic: ${topic}`);
+        if (typeof onStreamErrorRef.current === 'function') onStreamErrorRef.current();
+      };
+      if (cancelled || !containerRef.current) return;
+      containerRef.current.appendChild(img);
+      currentImgRef.current = img;
     };
     run().catch((error) => {
       console.error(`Error creating image stream for idx ${idx}:`, error);
     });
     return () => {
       cancelled = true;
-      if (subscription) {
-        try { subscription.unsubscribe(); } catch (_) { /* swallow */ }
-        subscription = null;
-      }
       destroyImage();
     };
-  }, [topic, isActive, rosHost, idx, destroyImage, jetsonConnected, rosbridgeUrl, piMode, piModeResolved, bare]);
+  }, [topic, isActive, rosHost, idx, destroyImage, piMode, piModeResolved, bare]);
 
   // Force cleanup on unmount
   useEffect(() => {

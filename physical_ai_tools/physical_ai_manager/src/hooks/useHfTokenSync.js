@@ -16,9 +16,8 @@
 //                  pure features/hfToken/syncDecision::decideSync, and pushes
 //                  or clears through the plain thunks in hfTokenThunks.js.
 //
-// The robot half is OFF in cloud-only mode, while a classroom Jetson is
-// claimed (its rosbridge is the Jetson proxy, which keeps its own token), and
-// whenever the rosbridge is not the local same-origin one.
+// The robot half is OFF in cloud-only mode and whenever the rosbridge is not
+// the local same-origin one.
 //
 // This hook holds NO token. It sees fingerprints, flags and counts; the token
 // itself exists only inside the push thunk, between the cloud's `reveal` and the
@@ -94,7 +93,6 @@ export default function useHfTokenSync({ onRobotTokenReady } = {}) {
   const userId = useSelector((s) => s.auth?.session?.user?.id ?? null);
   const profileLoaded = useSelector((s) => Boolean(s.auth?.profileLoaded));
   const role = useSelector((s) => s.auth?.role ?? null);
-  const jetsonConnected = useSelector((s) => s.jetson?.status === 'connected');
   const heartbeatStatus = useSelector((s) => s.tasks?.heartbeatStatus);
   const rosbridgeUrl = useSelector((s) => s.ros?.rosbridgeUrl ?? '');
 
@@ -121,7 +119,6 @@ export default function useHfTokenSync({ onRobotTokenReady } = {}) {
   // handful of methods, and a named import missing from such a mock throws on
   // access. Until the profile has loaded this hook must be inert.
   const robotEnabled = accountEnabled
-    && !jetsonConnected
     && heartbeatStatus === 'connected'
     && isLocalRosbridgeUrl(rosbridgeUrl);
 

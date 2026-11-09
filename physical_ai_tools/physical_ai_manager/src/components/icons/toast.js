@@ -38,8 +38,6 @@ export const TOAST_ICONS = Object.freeze({
   record: 'record',
   stop: 'hand',
   simulator: 'simulator',
-  unplugged: 'unplugged',
-  timeout: 'alarm',
 });
 
 /** The toast kind that draws a robot; it needs `{ profile }` (see above). */

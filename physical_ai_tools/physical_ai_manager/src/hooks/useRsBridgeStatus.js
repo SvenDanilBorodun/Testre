@@ -18,7 +18,7 @@ import { rsControlBase, usePiMode } from '../utils/piMode';
 // its broadcaster also floods that topic at ~100 Hz with the limp leader's pose,
 // so the two writers fight and the follower jerks between poses. We probe the
 // GUI's localhost control bridge (roboter_studio_control.py, the same one
-// LeaderToggle uses). When the bridge is ABSENT (Jetson/cloud/old GUI), there is
+// LeaderToggle uses). When the bridge is ABSENT (cloud/old GUI), there is
 // no leader to fight — Roboter Studio there is follower-only by construction —
 // so the probe FAILS OPEN. The base is Windows-loopback (:8769) OR the Pi's
 // same-origin /api/system proxy (rsControlBase, utils/piMode) — a remote browser
@@ -52,7 +52,7 @@ export async function probeRsStatus(base) {
       busy: !!body.busy,
     };
   } catch (e) {
-    // No bridge reachable (Jetson/cloud/old GUI) → don't block.
+    // No bridge reachable (cloud/old GUI) → don't block.
     return UNAVAILABLE;
   } finally {
     clearTimeout(timer);

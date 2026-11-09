@@ -25,7 +25,7 @@ import { selectHfListReloadAllowed } from '../features/hfToken/hfTokenSelectors'
  * account and organisations, the recording would upload under them, and the
  * upload namespace guard would agree because both sides name the same account.
  * `selectHfListReloadAllowed` allows it only when the slot is provably this
- * student's, or provably not a personal slot (the Jetson image), or when an old
+ * student's, or provably not a personal slot (an image without one), or when an old
  * image proved itself silent; a store without the `hfToken` slice is allowed.
  * A blocked call changes nothing and resolves to null, exactly like a failed
  * one, so no caller needed a new branch.

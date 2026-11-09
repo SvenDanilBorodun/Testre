@@ -5,8 +5,9 @@
 
 // Cloud-Inferenz (spec §6.8): the teacher drawer's run list says where each run
 // ran — „Cloud" or „Klassen-Jetson" — under the heading „Inferenz-Läufe". A run
-// from an older API carries no `backend` and reads as the Jetson (every run was
-// the Jetson's then). Teachers read cloud runs; they cannot start one.
+// from an older API carries no `backend` and reads as the classroom Jetson (every
+// run was the Jetson's then; the Jetson is retired, its rows stay). Teachers read
+// cloud runs; they cannot start one.
 
 import React from 'react';
 import { render, screen, within } from '@testing-library/react';

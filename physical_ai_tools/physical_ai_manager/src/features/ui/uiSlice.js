@@ -41,7 +41,6 @@ const initialState = {
   isFirstLoad: {
     home: true,
     record: true,
-    inference: true,
   },
 };
 

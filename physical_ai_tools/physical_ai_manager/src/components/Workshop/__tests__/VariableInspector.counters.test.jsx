@@ -30,7 +30,7 @@ import { Provider } from 'react-redux';
 import { render, screen, renderHook, act, within } from '@testing-library/react';
 
 import workshopReducer from '../../../features/workshop/workshopSlice';
-import rosReducer, { setRosbridgeUrl } from '../../../features/ros/rosSlice';
+import rosReducer from '../../../features/ros/rosSlice';
 import { signedOut } from '../../../features/session/sessionActions';
 import { useRosTopicSubscription } from '../../../hooks/useRosTopicSubscription';
 import VariableInspector from '../VariableInspector';
@@ -39,6 +39,10 @@ import {
   COUNTER_NAMES_SHOWN,
   COUNTER_NAMES_HIDDEN,
 } from '../../../utils/__tests__/counterNames.fixture';
+
+// The rosbridge URL a test needs, set the way the store is first built (the app
+// itself derives it from the page's host, features/ros/rosSlice::setRosHost).
+const rosWithUrl = (url) => ({ ...rosReducer(undefined, { type: '@@init' }), rosbridgeUrl: url });
 
 const storeRef = vi.hoisted(() => ({ current: null }));
 vi.mock('../../../store/store', () => ({
@@ -87,8 +91,8 @@ function workflowStatusCallback() {
 async function wireUp() {
   const store = configureStore({
     reducer: { workshop: workshopReducer, ros: rosReducer },
+    preloadedState: { ros: rosWithUrl('ws://localhost:9090') },
   });
-  store.dispatch(setRosbridgeUrl('ws://localhost:9090'));
   storeRef.current = store;
 
   const wrapper = ({ children }) => <Provider store={store}>{children}</Provider>;

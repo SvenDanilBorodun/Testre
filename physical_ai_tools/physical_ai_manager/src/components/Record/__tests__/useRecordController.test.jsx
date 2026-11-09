@@ -471,7 +471,7 @@ describe('Start and the student\'s own Hugging-Face token', () => {
     }
   });
 
-  it('a robot that takes no personal token (the Jetson image) is never blocked', () => {
+  it('a robot that takes no personal token (accepts: false) is never blocked', () => {
     const store = makeStore({
       hfActions: [accountLoaded({ status: 'none' }), robotHolds(null, { accepts: false })],
     });

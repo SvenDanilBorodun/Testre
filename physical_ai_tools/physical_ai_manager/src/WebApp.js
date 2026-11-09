@@ -77,8 +77,6 @@ function WebApp() {
         );
         // reload:false — a reload would destroy the toast above, and a student
         // who opened the teacher URL would be bounced with no explanation.
-        // (The teacher web never claims a Jetson, so the thunk's beacon step
-        // finds no jetsonId in the store and skips.)
         dispatch(signOutStudent({ reload: false }));
       }
     },

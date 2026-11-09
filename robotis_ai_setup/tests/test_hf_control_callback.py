@@ -12,9 +12,8 @@ in it:
     The chain was callback -> `hf_api_worker` -> `DataManager
     .delete_huggingface_repo` -> `HfApi().delete_repo(repo_id, ...)`. The mode
     has ZERO callers anywhere in the repo (the only `controlHfServer` call
-    sites are `DatasetHuggingfaceSection` upload/download/cancel, `MyModels`
-    download and `PolicyDownloadModal` download/cancel), and a wrong delete is
-    irreversible, so it is refused outright rather than namespace-checked.
+    site left is `MyModels`' download), and a wrong delete is irreversible,
+    so it is refused outright rather than namespace-checked.
 
     **NOT the same 'delete' as `edit_worker.MODE_DELETE`**, which is EPISODE
     deletion in the Daten tab and a live student feature. Nothing here touches

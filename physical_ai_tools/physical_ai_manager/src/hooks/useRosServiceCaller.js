@@ -125,7 +125,9 @@ export function useRosServiceCaller() {
         // save, rosbag2, inference recording or multi-task instructions, but
         // the /task/status adopt path can still write any of them into the
         // store from the robot's last task. So every RECORD-page command
-        // forces them HERE, at send time. Inferenz sends the store as before.
+        // forces them HERE, at send time. Any other page sends the store as
+        // it is (the Inferenz page's mapping is the reference
+        // features/cloudInference/taskInfoWire.js is held to).
         const info = page === PageType.RECORD ? forceRecordTaskInfo(taskInfo) : taskInfo;
 
         const task_instruction = info.taskInstruction.filter(
@@ -381,46 +383,6 @@ export function useRosServiceCaller() {
       }
     },
     [callService, trainingInfo]
-  );
-
-  const browseFile = useCallback(
-    async (action, currentPath = '', targetName = '', targetFiles = null, targetFolders = null) => {
-      try {
-        const requestData = {
-          action: action,
-          current_path: currentPath,
-          target_name: targetName,
-          target_folders: targetFolders,
-        };
-
-        // Only add target_files if we actually have files to search for
-        if (targetFiles && targetFiles.length > 0) {
-          requestData.target_files = targetFiles;
-        } else {
-          requestData.target_files = [];
-        }
-
-        // Only add target_folders if we actually have folders to search for
-        if (targetFolders && targetFolders.length > 0) {
-          requestData.target_folders = targetFolders;
-        } else {
-          requestData.target_folders = [];
-        }
-
-        const result = await callService(
-          '/browse_file',
-          'physical_ai_interfaces/srv/BrowseFile',
-          requestData
-        );
-
-        console.log('browseFile service response:', result);
-        return result;
-      } catch (error) {
-        console.error('Failed to browse file:', error);
-        throw new Error(`${error.message || error}`);
-      }
-    },
-    [callService]
   );
 
   // Daten 2.0 (spec §H1, §J.3): the ONE command surface of the Daten tab —
@@ -822,7 +784,6 @@ export function useRosServiceCaller() {
     getPolicyList,
     getModelWeightList,
     sendTrainingCommand,
-    browseFile,
     datenCommand,
     controlHfServer,
     getTrainingInfo,

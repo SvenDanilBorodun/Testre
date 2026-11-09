@@ -30,7 +30,7 @@
 //   * the server→browser clock offset is the sliding-window MINIMUM of
 //     (arrival − stamp): the fastest delivery seen recently is the best estimate
 //     of "clock difference + pure transport". This absorbs any constant offset —
-//     a WSL2 container clock, a Pi or a Jetson on the LAN — without NTP.
+//     a WSL2 container clock or a Pi on the LAN — without NTP.
 //
 // Deliberate behaviours, each of which a "simplification" would break:
 //   * NO EXTRAPOLATION. Past the newest sample the pose HOLDS. Predicting where

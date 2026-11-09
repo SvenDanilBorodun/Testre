@@ -40,7 +40,7 @@ vi.mock('react-redux', () => ({
 
 function setUp({ status = null, calling = false, error = null,
   connected = true, running = false, workflowRunning = false,
-  jetson = false, caps = null, calibration = null } = {}) {
+  caps = null, calibration = null } = {}) {
   mockActivation = { status, activate, calling, error };
   mockState = {
     tasks: {
@@ -52,7 +52,6 @@ function setUp({ status = null, calling = false, error = null,
       paused: false,
       calibration: calibration || { framesCaptured: 0, calibrated: false },
     },
-    jetson: { status: jetson ? 'connected' : 'idle' },
   };
 }
 
@@ -201,17 +200,6 @@ describe('ActivationCard — the button', () => {
     render(<ActivationCard />);
     expect(screen.getByText(/konnte nicht erreicht werden/)).toBeInTheDocument();
     expect(screen.queryByText('x')).toBeNull();
-  });
-});
-
-describe('ActivationCard — the Jetson owns its own lifecycle', () => {
-  it('renders nothing at all while a classroom Jetson is claimed', () => {
-    // The Jetson agent homes the follower on every CLAIM — itself a logged-in
-    // student's action — and its compose keeps the stack up. Offering a second
-    // activation here would report „nicht aktiv" over an already-homed arm.
-    setUp({ status: null, jetson: true });
-    const { container } = render(<ActivationCard />);
-    expect(container).toBeEmptyDOMElement();
   });
 });
 

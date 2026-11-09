@@ -12,7 +12,6 @@
 
 import tasksReducer, {
   setTaskStatus,
-  clearCapabilities,
   isValidCapabilities,
 } from '../taskSlice';
 
@@ -183,23 +182,3 @@ describe('isValidCapabilities — the shared manifest validator', () => {
   });
 });
 
-describe('taskSlice clearCapabilities — Jetson release reset (audit fix 1b)', () => {
-  it('nulls capabilities + robotProfile but keeps robotType', () => {
-    let state = tasksReducer(
-      init(),
-      setTaskStatus({ robotType: 'omx_f', robotProfile: 'omx_follower', capabilities: CAPS_FOLLOWER })
-    );
-    state = tasksReducer(state, clearCapabilities());
-    // Null caps = "unknown" — the nav capability filter hides NOTHING until
-    // the local rig's idle identity tick re-delivers a manifest.
-    expect(state.taskStatus.capabilities).toBe(null);
-    expect(state.taskStatus.robotProfile).toBe('');
-    expect(state.taskStatus.robotType).toBe('omx_f');
-  });
-
-  it('leaves the rest of taskStatus untouched', () => {
-    let state = tasksReducer(init(), setTaskStatus({ capabilities: CAPS_FULL, usedCpu: 42 }));
-    state = tasksReducer(state, clearCapabilities());
-    expect(state.taskStatus.usedCpu).toBe(42);
-  });
-});

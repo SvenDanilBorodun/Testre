@@ -282,7 +282,6 @@ describe('no icon glyph in the shipped UI (D7)', () => {
 // through components/icons (review round 1, R1-O1).
 export const INLINE_SVG_ALLOWED = Object.freeze({
   'src/components/EbUI.js': 'the EduBotics brand mark (LogoMark), not an icon',
-  'src/components/CompactSystemStatus.js': 'the circular usage gauge, a chart',
   'src/components/Record/PhaseOverlay.jsx':
     'the Aufnahme countdown ring and the reset orbit arrow (illustrations; the robot pictures are PhasePicture\'s renders)',
   'src/components/Workshop/SimScene.jsx': 'the 2D simulator scene',

@@ -69,10 +69,6 @@ export default function HomePage() {
   const workgroupName = useSelector((state) => state.auth.workgroupName);
   const robotProfile = useSelector((state) => state.tasks.taskStatus.robotProfile);
   const robotType = useSelector((state) => state.tasks.taskStatus.robotType);
-  // Layout only: a claimed Jetson hides the activation card (it renders null),
-  // and the Health-Check then takes both rows beside the hero.
-  const jetsonConnected = useSelector((state) => state.jetson?.status === 'connected');
-
   const cloudOnly = isCloudOnlyMode();
   // Held here rather than in either consumer: the hero's dot and the
   // Health-Check's „Arm antwortet" row must be the same fact. Disabled in
@@ -132,13 +128,7 @@ export default function HomePage() {
               page documents is untouched. In cloud mode there is no robot to
               activate and none to give a token to. */}
           {!cloudOnly && (
-            <div
-              className={
-                jetsonConnected
-                  ? 'hidden'
-                  : 'col-span-12 lg:col-start-8 lg:col-end-13 lg:row-start-1'
-              }
-            >
+            <div className="col-span-12 lg:col-start-8 lg:col-end-13 lg:row-start-1">
               <ActivationCard />
             </div>
           )}
@@ -152,9 +142,7 @@ export default function HomePage() {
             className={
               cloudOnly
                 ? 'col-span-12 lg:col-span-5'
-                : jetsonConnected
-                  ? 'col-span-12 lg:col-start-8 lg:col-end-13 lg:row-start-1 lg:row-end-3'
-                  : 'col-span-12 lg:col-start-8 lg:col-end-13 lg:row-start-2'
+                : 'col-span-12 lg:col-start-8 lg:col-end-13 lg:row-start-2'
             }
           >
             <HealthCard jointsLive={jointsLive} cloudOnly={cloudOnly} />

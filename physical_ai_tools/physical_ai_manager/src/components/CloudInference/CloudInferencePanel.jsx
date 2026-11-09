@@ -7,8 +7,8 @@
 // privacy line, the models, the reservation and its summary, today's Cloud-Zeit,
 // Start/Stopp and the run's facts. The session itself is the module-level
 // controller (features/cloudInference/controller.js); this component only shows
-// it and forwards clicks. No ControlPanel here: its Start sends START_INFERENCE
-// with a local policy path.
+// it and forwards clicks. It never sends START_INFERENCE, which names a local
+// policy path: a cloud run starts through StartCloudInference (robotCalls.js).
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';

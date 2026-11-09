@@ -59,7 +59,7 @@ export const supabase = isSupabaseConfigured
 // --- Keep the Realtime websocket's JWT in sync with the auth session ---
 //
 // Every `postgres_changes` subscription in this app (trainings, workflows,
-// datasets, tutorial_progress, jetsons) is RLS-filtered — e.g. the trainings
+// datasets, tutorial_progress) is RLS-filtered — e.g. the trainings
 // SELECT policy is `auth.uid() = user_id`. Realtime enforces those policies
 // using whatever JWT the websocket last authenticated with. If the socket is
 // still on the anon apikey, `auth.uid()` is NULL, RLS drops EVERY event, yet

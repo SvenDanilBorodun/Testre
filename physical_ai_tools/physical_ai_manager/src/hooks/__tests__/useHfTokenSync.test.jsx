@@ -4,7 +4,7 @@
 // Licence Agreement; see LICENSE at the repository root.
 //
 // The reconcile loop that keeps the robot's token slot equal to the signed-in
-// student's account. Backed by a REAL store (auth, tasks, ros, jetson, ui,
+// student's account. Backed by a REAL store (auth, tasks, ros, ui,
 // hfToken) and the real thunks; only the cloud calls and the rosbridge channel
 // are mocked. Timers are faked wherever a delay is the thing under test.
 
@@ -15,9 +15,8 @@ import { configureStore } from '@reduxjs/toolkit';
 
 import authReducer, { setProfile, setSession } from '../../features/auth/authSlice';
 import tasksReducer, { setHeartbeatStatus } from '../../features/tasks/taskSlice';
-import rosReducer, { setRosbridgeUrl } from '../../features/ros/rosSlice';
+import rosReducer from '../../features/ros/rosSlice';
 import uiReducer, { setHfUserList } from '../../features/ui/uiSlice';
-import jetsonReducer, { setJetsonStatus } from '../../store/jetsonSlice';
 import hfReducer, {
   accountLoaded,
   robotStateReceived,
@@ -32,6 +31,10 @@ import {
 } from '../../features/hfToken/syncDecision';
 import { selectHfDecision, selectHfStartBlock } from '../../features/hfToken/hfTokenSelectors';
 import useHfTokenSync, { LEGACY_GRACE_MS } from '../useHfTokenSync';
+
+// The rosbridge URL a test needs, set the way the store is first built (the app
+// itself derives it from the page's host, features/ros/rosSlice::setRosHost).
+const rosWithUrl = (url) => ({ ...rosReducer(undefined, { type: '@@init' }), rosbridgeUrl: url });
 
 vi.mock('../../services/hfTokenApi', () => ({
   __esModule: true,
@@ -76,15 +79,15 @@ const emit = (state) => act(async () => { subscriptions.forEach((s) => s.cb(stat
 function makeStore({ profile = true, role = 'student', heartbeat = 'connected', url = LOCAL_URL, userId = 'u1' } = {}) {
   const store = configureStore({
     reducer: {
-      auth: authReducer, tasks: tasksReducer, ros: rosReducer, jetson: jetsonReducer, ui: uiReducer, hfToken: hfReducer,
+      auth: authReducer, tasks: tasksReducer, ros: rosReducer, ui: uiReducer, hfToken: hfReducer,
     },
+    preloadedState: { ros: rosWithUrl(url) },
   });
   store.dispatch(setSession({ access_token: 'jwt-1', user: { id: userId } }));
   if (profile) {
     store.dispatch(setProfile({ role, username: 'anna', full_name: 'Anna', classroom_id: 'c1' }));
   }
   store.dispatch(setHeartbeatStatus(heartbeat));
-  store.dispatch(setRosbridgeUrl(url));
   return store;
 }
 
@@ -165,17 +168,7 @@ describe('useHfTokenSync — when it is allowed to act', () => {
     expect(subscribeTokenState).not.toHaveBeenCalled();
   });
 
-  it('leaves the robot alone while a classroom Jetson is claimed', async () => {
-    const store = makeStore();
-    store.dispatch(setJetsonStatus('connected'));
-    const { result } = mount(store);
-    await settle();
-    expect(result.current.robotEnabled).toBe(false);
-    expect(subscribeTokenState).not.toHaveBeenCalled();
-    expect(setRobotToken).not.toHaveBeenCalled();
-  });
-
-  it('leaves the robot alone when the rosbridge is not the local one (the Jetson proxy)', async () => {
+  it('leaves the robot alone when the rosbridge is not the local one', async () => {
     const store = makeStore({ url: 'ws://10.0.0.5:9091' });
     const { result } = mount(store);
     await settle();
@@ -437,7 +430,7 @@ describe('useHfTokenSync — the reconcile', () => {
     expect(api.revealHfToken).not.toHaveBeenCalled();
   });
 
-  it('does not push to a robot that does not take a personal token (the Jetson image)', async () => {
+  it('does not push to a robot that does not take a personal token (accepts: false)', async () => {
     const store = makeStore();
     mount(store);
     await settle();
@@ -617,7 +610,7 @@ describe('useHfTokenSync — an old image is told from a slow one (audit S1)', (
     expect(hf(store).robot.legacy).toBe(false);
   });
 
-  it('does not count while there is no subscription (the offline escape, a Jetson)', async () => {
+  it('does not count while there is no subscription (the offline escape, a lost link)', async () => {
     vi.useFakeTimers();
     const store = makeStore({ heartbeat: 'disconnected' });
     mount(store);

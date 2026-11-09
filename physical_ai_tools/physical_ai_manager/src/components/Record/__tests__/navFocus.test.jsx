@@ -22,7 +22,6 @@ import rosReducer from '../../../features/ros/rosSlice';
 import trainingReducer from '../../../features/training/trainingSlice';
 import authReducer, { setSession, setIsLoading } from '../../../features/auth/authSlice';
 import workshopReducer from '../../../features/workshop/workshopSlice';
-import jetsonReducer from '../../../store/jetsonSlice';
 import { setHeartbeatStatus, setTaskStatus } from '../../../features/tasks/taskSlice';
 import { moveToPage } from '../../../features/ui/uiSlice';
 import PageType from '../../../constants/pageType';
@@ -71,7 +70,7 @@ function mountApp() {
   const store = configureStore({
     reducer: {
       tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer,
-      auth: authReducer, workshop: workshopReducer, jetson: jetsonReducer,
+      auth: authReducer, workshop: workshopReducer,
     },
   });
   store.dispatch(setSession({ user: { id: 'u1', email: 'schueler@schule.de' }, access_token: 't' }));

@@ -247,7 +247,7 @@ function dotsFor(view, { episode, session }) {
  *
  * `hfToken` is `features/hfToken/hfTokenSelectors::selectHfStartBlock`'s answer.
  * UNKNOWN NEVER BLOCKS: an account state that has not answered, a robot that
- * has not said it takes a personal token (older image, Jetson) and a store
+ * has not said it takes a personal token (older image) and a store
  * without the feature all arrive as null.
  * @returns {null | {kind: 'disk'|'source'|'hftoken', reason?, problem}}
  */

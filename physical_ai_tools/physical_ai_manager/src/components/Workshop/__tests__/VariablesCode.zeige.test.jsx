@@ -26,7 +26,7 @@ import { render, screen, renderHook, act, within, fireEvent } from '@testing-lib
 
 import workshopReducer from '../../../features/workshop/workshopSlice';
 import studioAssetsReducer, { openDrawer } from '../../../features/workshop/studioAssetsSlice';
-import rosReducer, { setRosbridgeUrl } from '../../../features/ros/rosSlice';
+import rosReducer from '../../../features/ros/rosSlice';
 import { useRosTopicSubscription } from '../../../hooks/useRosTopicSubscription';
 import VariableInspector from '../VariableInspector';
 import SammlungDrawer from '../sammlung/SammlungDrawer';
@@ -35,6 +35,10 @@ import { createDetachedDestinationStore } from '../sammlung/destinationStore';
 import { createCodeAssetDocument } from '../code/codeAssetDocument';
 import { DE } from '../blocks/messages_de';
 import { CODE_DE } from '../code/codeMessagesDe';
+
+// The rosbridge URL a test needs, set the way the store is first built (the app
+// itself derives it from the page's host, features/ros/rosSlice::setRosHost).
+const rosWithUrl = (url) => ({ ...rosReducer(undefined, { type: '@@init' }), rosbridgeUrl: url });
 
 const storeRef = vi.hoisted(() => ({ current: null }));
 vi.mock('../../../store/store', () => ({
@@ -104,8 +108,8 @@ const JAVA = [
 async function wireUp({ language = 'python', files = { 'main.py': PY } } = {}) {
   const store = configureStore({
     reducer: { workshop: workshopReducer, studioAssets: studioAssetsReducer, ros: rosReducer },
+    preloadedState: { ros: rosWithUrl('ws://localhost:9090') },
   });
-  store.dispatch(setRosbridgeUrl('ws://localhost:9090'));
   storeRef.current = store;
   const wrapper = ({ children }) => <Provider store={store}>{children}</Provider>;
   const { result } = renderHook(() => useRosTopicSubscription(), { wrapper });

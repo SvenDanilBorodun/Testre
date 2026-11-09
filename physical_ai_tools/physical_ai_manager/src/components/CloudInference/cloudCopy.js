@@ -12,7 +12,7 @@
 // holds only what the page itself says.
 
 export const cloudCopy = {
-  target: { label: 'Wo soll dein Modell laufen?', cloud: 'In der Cloud', jetson: 'Klassen-Jetson' },
+  target: { cloud: 'In der Cloud' },
   disabled: {
     not_configured: 'Die Cloud-Inferenz ist in dieser Version nicht eingerichtet.',
     no_robot: 'Roboter nicht verbunden. Starte zuerst die Umgebung.',

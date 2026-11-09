@@ -40,16 +40,13 @@ const rosSlice = createSlice({
     // a CROSS-ORIGIN connection to an unauthenticated socket that can drive
     // the arm, with no CORS preflight to stop it.
     //
-    // Both dispatch sites (StudentApp's seed effect, gated on piModeResolved,
-    // and useJetsonConnection's swap-back, which runs long after boot) still
-    // fire only once the marker has resolved. That gate no longer changes the
-    // URL this reducer derives; it is kept as ordering, not as a selector.
+    // The one dispatch site (StudentApp's seed effect, gated on
+    // piModeResolved) still fires only once the marker has resolved. That gate
+    // no longer changes the URL this reducer derives; it is kept as ordering,
+    // not as a selector.
     setRosHost: (state, action) => {
       state.rosHost = action.payload;
       state.rosbridgeUrl = localRosbridgeUrl(action.payload);
-    },
-    setRosbridgeUrl: (state, action) => {
-      state.rosbridgeUrl = action.payload;
     },
     setImageTopicList: (state, action) => {
       state.imageTopicList = action.payload;
@@ -59,7 +56,6 @@ const rosSlice = createSlice({
 
 export const {
   setRosHost,
-  setRosbridgeUrl,
   setImageTopicList,
 } = rosSlice.actions;
 

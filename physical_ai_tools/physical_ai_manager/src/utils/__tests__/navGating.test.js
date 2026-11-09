@@ -5,7 +5,7 @@
 //
 // Locks the two pure sidebar-gating decisions StudentApp uses:
 //  - isCapabilityVisible: the capability filter (null caps hide nothing;
-//    explicit `false` hides; Jetson mode SKIPS the filter — D9).
+//    explicit `false` hides).
 //  - robotGateDecision: requireRobotOrRedirect (cloud mode passes straight
 //    through; otherwise a robot identity is required to enter a hardware page).
 
@@ -21,8 +21,8 @@ const OMX_FOLLOWER = {
 };
 
 // The 6-tab nav map (HOME untagged). Inferenz carries NO capabilityKey —
-// mirrors StudentApp: the tab is ALWAYS visible (documented invariant; hiding
-// it would also hide the classroom-Jetson claim UI).
+// mirrors StudentApp: on a robot that cannot run models the cloud panel says
+// why instead of the tab vanishing.
 const NAV = [
   { key: 'home' },
   { key: 'record', capabilityKey: 'recordable' },
@@ -38,36 +38,30 @@ function visibleKeys(opts) {
 
 describe('isCapabilityVisible — capability nav filter', () => {
   it('null caps hide NOTHING (pre-first-tick / cloud / old image)', () => {
-    expect(visibleKeys({ jetsonConnected: false, caps: null })).toEqual([
+    expect(visibleKeys({ caps: null })).toEqual([
       'home', 'record', 'training', 'inference', 'edit', 'workshop',
     ]);
   });
 
   it('omx_full (all caps true) hides nothing', () => {
-    expect(visibleKeys({ jetsonConnected: false, caps: OMX_FULL })).toEqual([
+    expect(visibleKeys({ caps: OMX_FULL })).toEqual([
       'home', 'record', 'training', 'inference', 'edit', 'workshop',
     ]);
   });
 
   it('omx_follower hides Aufnahme/Training/Daten, keeps Inferenz + Roboter Studio', () => {
-    expect(visibleKeys({ jetsonConnected: false, caps: OMX_FOLLOWER })).toEqual([
+    expect(visibleKeys({ caps: OMX_FOLLOWER })).toEqual([
       'home', 'inference', 'workshop',
     ]);
   });
 
-  it('Jetson mode SKIPS the filter entirely — Training stays visible even with trainable:false (D9)', () => {
-    expect(visibleKeys({ jetsonConnected: true, caps: OMX_FOLLOWER })).toEqual([
-      'home', 'record', 'training', 'inference', 'edit', 'workshop',
-    ]);
-  });
-
   it('an untagged item (HOME) is always visible', () => {
-    expect(isCapabilityVisible({ key: 'home' }, { jetsonConnected: false, caps: OMX_FOLLOWER })).toBe(true);
+    expect(isCapabilityVisible({ key: 'home' }, { caps: OMX_FOLLOWER })).toBe(true);
   });
 
   it('only an EXPLICIT false hides — a missing/undefined cap key does not', () => {
     expect(
-      isCapabilityVisible({ capabilityKey: 'recordable' }, { jetsonConnected: false, caps: {} })
+      isCapabilityVisible({ capabilityKey: 'recordable' }, { caps: {} })
     ).toBe(true);
   });
 
@@ -76,7 +70,6 @@ describe('isCapabilityVisible — capability nav filter', () => {
     // capabilityKey, so no manifest — however restrictive — can hide it.
     expect(
       isCapabilityVisible({ key: 'inference' }, {
-        jetsonConnected: false,
         caps: { ...OMX_FOLLOWER, inferable: false },
       })
     ).toBe(true);

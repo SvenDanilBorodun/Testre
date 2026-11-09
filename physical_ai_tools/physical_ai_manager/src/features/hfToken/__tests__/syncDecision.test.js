@@ -34,7 +34,7 @@ describe('decideSync — the 28-row truth table', () => {
     ['1 disabled', { enabled: false, robot: R(), accountStatus: 'stored', accountFp: A }, 'noop'],
     ['2 robot state unknown', { robot: { known: false }, accountStatus: 'stored', accountFp: A }, 'noop'],
     ['3 robot null', { robot: null, accountStatus: 'stored', accountFp: A }, 'noop'],
-    ['4 Jetson / no slot (accepts false)', { robot: R({ accepts: false }), accountStatus: 'stored', accountFp: A }, 'noop'],
+    ['4 no slot (accepts false)', { robot: R({ accepts: false }), accountStatus: 'stored', accountFp: A }, 'noop'],
     ['5 account unknown', { robot: R({ present: true, fp: B }), accountStatus: 'unknown' }, 'noop'],
     ['6 account loading', { robot: R({ present: true, fp: B }), accountStatus: 'loading' }, 'noop'],
     ['7 account error', { robot: R({ present: true, fp: B }), accountStatus: 'error' }, 'noop'],

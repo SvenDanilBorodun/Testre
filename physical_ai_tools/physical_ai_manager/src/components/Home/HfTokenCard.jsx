@@ -67,10 +67,7 @@ export function formatChecked(iso) {
  * and the retry button cannot disagree.
  * @returns {{tone: string, pill: string, note: ?string, retry: boolean, badNote: boolean}}
  */
-export function robotView({ robot, heartbeatConnected, jetsonConnected, inSync, working, decision, failed }) {
-  if (jetsonConnected) {
-    return { tone: 'neutral', pill: null, note: 'card.jetsonNote', retry: false, badNote: false };
-  }
+export function robotView({ robot, heartbeatConnected, inSync, working, decision, failed }) {
   if (!robot.known) {
     // A robot that never sent the state topic is an image from before this
     // feature: it takes no personal token. One that has not spoken YET is just
@@ -172,7 +169,6 @@ export default function HfTokenCard() {
   const decision = useSelector(selectHfDecision);
   const inSync = useSelector(selectHfInSync);
   const failed = useSelector(selectHfSyncFailed);
-  const jetsonConnected = useSelector((s) => s.jetson?.status === 'connected');
   // „Ohne Anmeldung fortfahren": the account half is off without a JWT, so the
   // state would read „wird geladen" for ever (review i).
   const offline = useSelector(selectHfOfflineEscape);
@@ -235,7 +231,7 @@ export default function HfTokenCard() {
   const working = sync.phase === 'pushing' || sync.phase === 'clearing';
   const view = status === 'stored'
     ? robotView({
-      robot, heartbeatConnected, jetsonConnected, inSync, working, decision, failed,
+      robot, heartbeatConnected, inSync, working, decision, failed,
     })
     : null;
 

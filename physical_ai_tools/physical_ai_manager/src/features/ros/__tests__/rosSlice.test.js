@@ -6,12 +6,10 @@
 // setRosHost derives the LOCAL rosbridge URL through utils/piMode
 // localRosbridgeUrl, which since 2026-08-06 is the same-origin /rosbridge
 // nginx proxy on EVERY local rig (Orange Pi and Windows student PC alike) —
-// see that module for the two reasons. What is load-bearing HERE is the split
-// between the two reducers: setRosHost DERIVES, setRosbridgeUrl is a verbatim
-// PASSTHROUGH, and the Jetson's JWT-gated ws://<ip>:9091 rides the latter. So
-// the security change to the derivation provably cannot reach the Jetson path.
+// see that module for the two reasons. setRosHost is the only way the URL is
+// set.
 
-import reducer, { setRosHost, setRosbridgeUrl } from '../rosSlice';
+import reducer, { setRosHost } from '../rosSlice';
 
 vi.mock('../../../utils/piMode', () => ({
   __esModule: true,
@@ -39,12 +37,5 @@ describe('rosSlice — same-origin rosbridge URL derivation', () => {
     // point at a closed port.
     const state = reducer(undefined, setRosHost('student-pc'));
     expect(state.rosbridgeUrl).not.toContain('9090');
-  });
-
-  it('setRosbridgeUrl still overrides the URL verbatim (Jetson :9091 swap)', () => {
-    const seeded = reducer(undefined, setRosHost('student-pc'));
-    const state = reducer(seeded, setRosbridgeUrl('ws://jetson-lan:9091'));
-    expect(state.rosbridgeUrl).toBe('ws://jetson-lan:9091');
-    expect(state.rosHost).toBe('student-pc');
   });
 });

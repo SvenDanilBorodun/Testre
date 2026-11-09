@@ -7,8 +7,8 @@ Extracts ``user_interaction_callback`` by ``ast`` and execs it onto a stub node
 * wire RERECORD accepted/refused;
 * START_RECORD below the 3 GB disk floor refused BEFORE the `_mode_lock` claim;
 * every changed message German when ``task_info.task_type == 'record'`` and
-  byte-for-byte HEAD's text otherwise (the Inferenz page's ControlPanel reaches
-  FINISH and the not-recording answer too, and must see nothing new);
+  byte-for-byte HEAD's text otherwise (an inference caller reaches FINISH and
+  the not-recording answer too, and must see nothing new);
 * round 5 (O6): every record-command branch takes the recorder lock with a
   bounded try-acquire — a held lock answers BUSY_DE within ~0.25 s and changes
   nothing, never blocking the default callback group; F9: START sets the

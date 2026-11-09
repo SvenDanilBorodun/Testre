@@ -281,17 +281,6 @@ const taskSlice = createSlice({
     resetTaskStatus: (state) => {
       state.taskStatus = initialState.taskStatus;
     },
-    // Drop the capability manifest + profile (used on classroom-Jetson release /
-    // rosbridge re-point). Resetting caps to null makes the nav capability
-    // filter hide NOTHING until the LOCAL rig re-delivers its manifest on the
-    // next idle identity tick — so a stale Jetson (omx_follower) manifest can't
-    // wrongly hide Aufnahme/Daten/Training the moment the lock is released.
-    // robotType is left intact (it is identical on both rigs and the top-bar
-    // "Roboter" chip reads it).
-    clearCapabilities: (state) => {
-      state.taskStatus.capabilities = null;
-      state.taskStatus.robotProfile = '';
-    },
     setTaskType: (state, action) => {
       state.taskInfo.taskType = action.payload;
     },
@@ -393,7 +382,6 @@ export const {
   setTaskInfo,
   setTaskStatus,
   resetTaskStatus,
-  clearCapabilities,
   setTaskType,
   setTaskInstruction,
   setPolicyPath,

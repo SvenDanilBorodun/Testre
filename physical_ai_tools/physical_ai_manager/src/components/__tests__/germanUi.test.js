@@ -21,15 +21,11 @@ import { describe, expect, it } from 'vitest';
 const SRC = path.resolve(__dirname, '../..');
 
 export const GERMAN_FILES = Object.freeze([
-  'components/CompactSystemStatus.js',
   'components/DatasetSelector.js',
   // The per-student Hugging-Face-Token card on the Startseite and its table of
   // sentences (the JSX itself carries none: every string comes from the table).
   'components/Home/HfTokenCard.jsx',
-  'components/FileBrowser.js',
-  'components/FileBrowserModal.js',
   'components/ModelWeightSelector.js',
-  'components/PolicyDownloadModal.js',
   // Aufnahme 2.0 (spec §3.15): every component of the new page. Their words
   // come from the page, so most of the scan falls on components/Record/model/
   // recordCopy.js; what these files still write themselves is judged here.
@@ -50,7 +46,6 @@ export const GERMAN_FILES = Object.freeze([
   'components/Record/StageViewSwitch.jsx',
   'components/Record/TaskCard.jsx',
   'components/Record/model/recordCopy.js',
-  'components/SystemStatus.js',
   // The robot pictures (robot-picture round): their labels are German, their words come from recordCopy.
   'components/icons/RobotGlyph.jsx',
   'components/TagInput.js',

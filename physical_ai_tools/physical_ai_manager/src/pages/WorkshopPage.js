@@ -2126,7 +2126,7 @@ function WorkshopPage({ isActive }) {
               {simMode ? 'Simulator beenden' : 'Test im Simulator'}
             </button>
             {/* Follower-only leader toggle (Windows student rig only; self-hides
-                on Jetson/cloud where the GUI control bridge is absent). */}
+                in cloud mode, where the GUI control bridge is absent). */}
             <LeaderToggle
               isActive={isActive}
               lockedReason={teachOpen ? DE.TEACH_BLOCK_UI_LOCKED : null}

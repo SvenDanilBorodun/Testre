@@ -11,9 +11,8 @@
 // stored, formatted into a message or put into an error. rosbridge itself never
 // logs a service request (rosbridge_library/capabilities/call_service.py).
 //
-// Only the LOCAL rosbridge is ever called: the classroom Jetson proxy is never
-// sent a student's cloud credentials (the cloud target is not offered while a
-// Jetson owns rosbridge anyway, spec §6.2).
+// Only the LOCAL rosbridge is ever called: no other rosbridge is ever sent a
+// student's cloud credentials.
 //
 // Named exports, no hooks: controller.js (a module, not a hook) imports these.
 

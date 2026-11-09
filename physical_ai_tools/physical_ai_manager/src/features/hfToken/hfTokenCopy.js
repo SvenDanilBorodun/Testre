@@ -83,7 +83,6 @@ export const HF_TOKEN_COPY = Object.freeze({
     'Ein anderes Konto hat sein Token auf diesen Roboter gelegt. Drücke „Erneut übertragen“, wenn du wieder dran bist.',
   'card.failedNote':
     'Das Token konnte nicht auf den Roboter übertragen werden. Prüfe die Verbindung und versuche es erneut.',
-  'card.jetsonNote': 'Der Klassen-Jetson nutzt ein eigenes Token. Dein Token bleibt gespeichert.',
   'card.errorGeneric': 'Das hat nicht geklappt. Bitte versuche es noch einmal.',
   'card.removeError': 'Das Token konnte nicht entfernt werden. Bitte versuche es noch einmal.',
 

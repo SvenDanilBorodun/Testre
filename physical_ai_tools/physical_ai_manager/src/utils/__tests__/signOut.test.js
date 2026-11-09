@@ -35,19 +35,12 @@ import {
 } from '../sessionScope';
 
 const signOutMock = vi.fn(() => Promise.resolve({ error: null }));
-const resetJetsonMock = vi.fn();
 const clearRobotHfTokenMock = vi.fn(() => Promise.resolve(true));
 const endCloudMock = vi.fn();
 
 vi.mock('../../lib/supabaseClient', () => ({
   __esModule: true,
   supabase: { auth: { signOut: signOutMock } },
-}));
-// The Jetson release is an authenticated network call (a sendBeacon), not a
-// reducer — mocked so the order assertion can observe it without a socket.
-vi.mock('../../features/jetson/sessionReset', () => ({
-  __esModule: true,
-  resetJetsonOnLogout: resetJetsonMock,
 }));
 
 // The robot's token slot is a rosbridge service call, not a reducer — mocked so
@@ -116,8 +109,6 @@ let originalLocation;
 beforeEach(() => {
   signOutMock.mockClear();
   signOutMock.mockImplementation(() => Promise.resolve({ error: null }));
-  resetJetsonMock.mockClear();
-  resetJetsonMock.mockImplementation(() => {});
   endCloudMock.mockReset();
   clearRobotHfTokenMock.mockReset();
   clearRobotHfTokenMock.mockImplementation(() => Promise.resolve(true));
@@ -577,33 +568,8 @@ describe('logoutBlockReason', () => {
 });
 
 describe('signOutStudent — ordering and failure modes', () => {
-  it('releases the Jetson lock with the still-valid JWT from the store, before signOut', async () => {
+  it('ends the cloud session with the still-valid JWT from the store, first of all', async () => {
     const order = [];
-    resetJetsonMock.mockImplementation(() => order.push('jetson'));
-    signOutMock.mockImplementation(() => {
-      order.push('signOut');
-      return Promise.resolve({ error: null });
-    });
-
-    const { store, signOutStudent, auth } = await freshStore();
-    store.dispatch(auth.setSession({ access_token: 'jwt-abc' }));
-    const { setJetsonInfo } = await import('../../store/jetsonSlice');
-    store.dispatch(setJetsonInfo({ jetson_id: 'jetson-1' }));
-
-    await store.dispatch(signOutStudent({ reload: false }));
-
-    // The thunk reads both out of getState — no caller threads them in any more.
-    expect(resetJetsonMock).toHaveBeenCalledWith(
-      expect.any(Function),
-      'jwt-abc',
-      'jetson-1'
-    );
-    expect(order).toEqual(['jetson', 'signOut']);
-  });
-
-  it('ends the cloud session with the still-valid JWT right after the Jetson reset', async () => {
-    const order = [];
-    resetJetsonMock.mockImplementation(() => order.push('jetson'));
     endCloudMock.mockImplementation(() => order.push('cloud'));
     clearRobotHfTokenMock.mockImplementation(() => {
       order.push('hfClear');
@@ -620,7 +586,8 @@ describe('signOutStudent — ordering and failure modes', () => {
 
     expect(endCloudMock).toHaveBeenCalledTimes(1);
     expect(endCloudMock).toHaveBeenCalledWith('jwt-abc');
-    expect(order).toEqual(['jetson', 'cloud', 'hfClear', 'signOut']);
+    // The thunk reads the token out of getState — no caller threads it in.
+    expect(order).toEqual(['cloud', 'hfClear', 'signOut']);
   });
 
   it('reloads by default and not when asked not to', async () => {
@@ -659,20 +626,15 @@ describe('signOutStudent — ordering and failure modes', () => {
 });
 
 describe('signOutStudent — the robot\'s token slot', () => {
-  const freshAuthedStore = async (claimJetson = null) => {
+  const freshAuthedStore = async () => {
     const ctx = await freshStore();
     ctx.store.dispatch(ctx.auth.setSession({ access_token: 'jwt-abc' }));
-    if (claimJetson) {
-      const { setJetsonInfo, setJetsonStatus } = await import('../../store/jetsonSlice');
-      ctx.store.dispatch(setJetsonInfo({ jetson_id: 'jetson-1' }));
-      ctx.store.dispatch(setJetsonStatus(claimJetson));
-    }
     return ctx;
   };
 
-  it('starts the clear after the Jetson reset and before the revoke resolves', async () => {
+  it('starts the clear after the cloud session ended and before the revoke resolves', async () => {
     const order = [];
-    resetJetsonMock.mockImplementation(() => order.push('jetson'));
+    endCloudMock.mockImplementation(() => order.push('cloud'));
     clearRobotHfTokenMock.mockImplementation(() => {
       order.push('hfClear');
       return Promise.resolve(true);
@@ -685,7 +647,7 @@ describe('signOutStudent — the robot\'s token slot', () => {
     const { store, signOutStudent } = await freshAuthedStore();
     await store.dispatch(signOutStudent({ reload: false }));
 
-    expect(order).toEqual(['jetson', 'hfClear', 'signOut']);
+    expect(order).toEqual(['cloud', 'hfClear', 'signOut']);
     expect(clearRobotHfTokenMock).toHaveBeenCalledTimes(1);
   });
 
@@ -757,24 +719,6 @@ describe('signOutStudent — the robot\'s token slot', () => {
     clearRobotHfTokenMock.mockImplementation(() => { throw new Error('sync boom'); });
     await expect(store.dispatch(signOutStudent({ reload: false }))).resolves.toBeUndefined();
     expect(store.getState().auth.session).toBeNull();
-  });
-
-  it('is skipped while a classroom Jetson is claimed: its proxy keeps its own token', async () => {
-    const { store, signOutStudent } = await freshAuthedStore('connected');
-    await store.dispatch(signOutStudent({ reload: false }));
-    expect(clearRobotHfTokenMock).not.toHaveBeenCalled();
-  });
-
-  it('is NOT skipped for a Jetson that was merely discovered (available or busy)', async () => {
-    // `jetsonId` is set for every paired classroom Jetson, claimed or not. Keying
-    // the skip on it would leave the previous student\'s token on the local robot
-    // for everyone in a classroom that owns a Jetson.
-    for (const status of ['available', 'busy', 'unknown']) {
-      clearRobotHfTokenMock.mockClear();
-      const { store, signOutStudent } = await freshAuthedStore(status);
-      await store.dispatch(signOutStudent({ reload: false }));
-      expect(clearRobotHfTokenMock).toHaveBeenCalledTimes(1);
-    }
   });
 
   it('empties the Benutzer-ID list and resets the hfToken slice with everything else', async () => {

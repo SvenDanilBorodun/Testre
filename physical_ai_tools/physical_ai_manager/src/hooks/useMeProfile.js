@@ -88,10 +88,10 @@ export function useMeProfile({ onProfile } = {}) {
           const status = err?.status ?? err?.response?.status;
           if (status === 401 || status === 403) {
             // reload:false so the German reason above survives — the login form
-            // alone does not say WHY they were bounced. (The thunk still
-            // attempts the Jetson beacon with the now-dead JWT; the server
-            // rejects it and the lock waits for the 5-min sweeper, exactly as
-            // before. A dead token is not worth a second code path.)
+            // alone does not say WHY they were bounced. (The thunk still sends
+            // the cloud session's end with the now-dead JWT; the server rejects
+            // it and the session sweep ends the session by its own clock. A dead
+            // token is not worth a second code path.)
             toast.error('Sitzung abgelaufen — bitte erneut anmelden.');
             dispatch(signOutStudent({ reload: false }));
             return;

@@ -37,7 +37,7 @@ describe('hfTokenCopy', () => {
       'card.reload', 'card.unusable', 'card.unsupported', 'card.unavailable', 'card.loadError', 'card.unknown',
       'card.accountChanged', 'card.pill.active', 'card.pill.working', 'card.pill.waiting', 'card.pill.failed',
       'card.pill.noLink', 'card.pill.takenOver', 'card.pill.notAccepted', 'card.pill.none', 'card.pill.stored',
-      'card.waitingNote', 'card.takenOverNote', 'card.failedNote', 'card.jetsonNote', 'card.errorGeneric',
+      'card.waitingNote', 'card.takenOverNote', 'card.failedNote', 'card.errorGeneric',
       'card.removeError', 'robot.noLink', 'robot.timeout', 'robot.failed',
     ]) {
       expect(HF_TOKEN_COPY).toHaveProperty([key]);

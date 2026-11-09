@@ -3,16 +3,11 @@
 // Proprietary and confidential. Licensed under the EduBotics End-User
 // Licence Agreement; see LICENSE at the repository root.
 //
-// H1 wiring tests: during a classroom-Jetson session the camera cell must
-// render from the CompressedImage topic over the JWT-proxied rosbridge
-// (web_video_server :8080 is loopback-only on the Jetson). This can't be
-// validated against a real Jetson from CI, so we lock the wiring: the
-// `/compressed` topic suffix, the messageType, the throttle/queue, and the
-// base64 -> data: URL frame plumbing — plus that the local (non-Jetson)
-// path still uses web_video_server.
+// The camera cell streams web_video_server through the same-origin /video
+// proxy as an <img> and never opens a rosbridge topic subscription.
 
 import React from 'react';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 // Safe to import the component here even though the vi.mock() calls sit
 // below: Vitest HOISTS every vi.mock() above all imports (like babel-jest's
 // jest.mock), so the component always resolves the mocked react-redux/
@@ -75,42 +70,16 @@ beforeEach(() => {
   mockPiState = { piMode: false, piModeResolved: true };
 });
 
-describe('ImageGridCell — Jetson camera transport (H1)', () => {
-  test('jetson-connected: subscribes to <topic>/compressed and feeds base64 frames as a data URL', async () => {
-    mockState = {
-      ros: { rosHost: 'student-pc', rosbridgeUrl: 'ws://jetson-lan:9091' },
-      jetson: { status: 'connected' },
-    };
-    renderCell('/gripper/image_raw');
-
-    await waitFor(() => expect(mockTopicCtor).toHaveBeenCalledTimes(1));
-    const opts = mockTopicCtor.mock.calls[0][0];
-    expect(opts.name).toBe('/gripper/image_raw/compressed');
-    expect(opts.messageType).toBe('sensor_msgs/msg/CompressedImage');
-    expect(opts.throttle_rate).toBe(100);
-    expect(opts.queue_length).toBe(1);
-    expect(mockSubscribe).toHaveBeenCalledTimes(1);
-
-    // Deliver a frame; the cell's <img> src becomes a JPEG data URL.
-    // getByRole('img') finds the imperatively-appended element — the
-    // component sets img.alt = topic (non-empty), so role 'img' applies.
-    const onMsg = mockSubscribe.mock.calls[0][0];
-    act(() => onMsg({ data: 'QUJD' }));
-    const img = screen.getByRole('img');
-    expect(img.getAttribute('src')).toBe('data:image/jpeg;base64,QUJD');
-  });
-
-  test('not jetson-connected: uses the same-origin /video proxy, no rosbridge subscription', async () => {
+describe('ImageGridCell — camera transport', () => {
+  test('uses the same-origin /video proxy, no rosbridge subscription', async () => {
     // Changed 2026-08-06: web_video_server is no longer host-published on the
     // student rig — both robot transports ride the manager's nginx proxy, so
     // the unauthenticated rosbridge is no longer reachable cross-origin from
-    // any page open in the student's browser. What stays load-bearing here is
-    // the BRANCH: a non-Jetson cell must use an <img> stream (Origin-less, and
-    // therefore deliberately ungated in nginx.conf) and must NOT open a
-    // rosbridge topic subscription.
+    // any page open in the student's browser. The cell must use an <img>
+    // stream (Origin-less, and therefore deliberately ungated in nginx.conf)
+    // and must NOT open a rosbridge topic subscription.
     mockState = {
       ros: { rosHost: '192.168.0.5', rosbridgeUrl: 'ws://192.168.0.5:9090' },
-      jetson: { status: 'available' },
     };
     renderCell('/gripper/image_raw');
 
@@ -128,7 +97,6 @@ describe('ImageGridCell — Pi-mode stream gating (piModeResolved)', () => {
   test('builds no stream until the marker resolves, then rides the /video proxy on a Pi', async () => {
     mockState = {
       ros: { rosHost: '192.168.0.5', rosbridgeUrl: 'ws://192.168.0.5:9090' },
-      jetson: { status: 'available' },
     };
     // Marker still resolving → the effect must NOT build a stream URL off the
     // default piMode=false (on a Pi that's the direct :8080 host port, not the
@@ -136,7 +104,7 @@ describe('ImageGridCell — Pi-mode stream gating (piModeResolved)', () => {
     mockPiState = { piMode: false, piModeResolved: false };
     const { rerender } = renderCell('/gripper/image_raw');
     // One microtask tick: the unresolved-marker path appends nothing, and the
-    // idx=1 non-Jetson append is fully synchronous — so an <img> here would
+    // idx=1 append is fully synchronous — so an <img> here would
     // mean the gate regressed. (Same bare-flush pattern as the PiUpdateGate
     // "never probes" test.)
     await Promise.resolve();
@@ -155,7 +123,7 @@ describe('ImageGridCell — Pi-mode stream gating (piModeResolved)', () => {
 
 describe('ImageGridCell — icons and names (final review, minor 3)', () => {
   beforeEach(() => {
-    mockState = { ros: { rosHost: 'pc', rosbridgeUrl: 'ws://pc/rosbridge' }, jetson: { status: 'available' } };
+    mockState = { ros: { rosHost: 'pc', rosbridgeUrl: 'ws://pc/rosbridge' } };
   });
 
   test('the close button of a camera cell has a German name', () => {
@@ -174,11 +142,11 @@ describe('ImageGridCell — icons and names (final review, minor 3)', () => {
 
 // Aufnahme 2.0 (spec §3.12): the Aufnahme stage draws its own tile chrome, so a
 // camera cell there is BARE — a dark box the image fills, with no close button,
-// no plus and no aspect ratio. The stream itself (URL, Jetson path, Pi proxy,
+// no plus and no aspect ratio. The stream itself (URL, Pi proxy,
 // the F26 cancel token) is the same code; only the frame around it differs.
 describe('ImageGridCell — bare (Aufnahme stage tiles)', () => {
   beforeEach(() => {
-    mockState = { ros: { rosHost: 'pc', rosbridgeUrl: 'ws://pc/rosbridge' }, jetson: { status: 'available' } };
+    mockState = { ros: { rosHost: 'pc', rosbridgeUrl: 'ws://pc/rosbridge' } };
   });
 
   test('a bare cell fills its box, has no close button and no aspect ratio', async () => {

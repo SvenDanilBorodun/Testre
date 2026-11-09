@@ -101,7 +101,6 @@ function baseState(overrides = {}) {
       trainingInfo: { datasetRepoId: null },
       ...overrides.training,
     },
-    jetson: { jetsonId: null, ...overrides.jetson },
   };
 }
 

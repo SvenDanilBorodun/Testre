@@ -17,7 +17,7 @@
  * "wird vorbereitet" overlay while it comes back (~15-20 s); the native camera
  * bridge reconnects on its own.
  *
- * Self-hiding: on Jetson / cloud there is no GUI bridge, so the status probe
+ * Self-hiding: in cloud mode there is no GUI bridge, so the status probe
  * fails and the component renders nothing.
  */
 
@@ -140,7 +140,7 @@ export default function LeaderToggle({ isActive, lockedReason = null }) {
   // the control base and `piModeResolved` gates the FIRST probe so it can't fire
   // with the loopback default during the boot window on a Pi.
   const { piMode, piModeResolved } = usePiMode();
-  // available: null = probing, false = no bridge (Jetson/cloud → hidden), true = present
+  // available: null = probing, false = no bridge (cloud → hidden), true = present
   const [available, setAvailable] = useState(null);
   // The bridge's own answer to „does this rig HAVE a leader arm?" — additive
   // and Pi-only. On Windows a follower-only rig never constructs the :8769
@@ -349,7 +349,7 @@ export default function LeaderToggle({ isActive, lockedReason = null }) {
     };
   }, [preparing, refreshStatus]);
 
-  // Hidden when: still probing, no control bridge at all (Jetson / cloud), the
+  // Hidden when: still probing, no control bridge at all (cloud), the
   // ROS capabilities say this profile has no leader (omx_follower, v1_studio),
   // OR the control bridge itself says so. The last clause is what covers the Pi
   // between mount and the first `/task/status` tick, where `caps` is undefined

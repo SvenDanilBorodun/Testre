@@ -3,29 +3,24 @@
 // Proprietary and confidential. Licensed under the EduBotics End-User
 // Licence Agreement; see LICENSE at the repository root.
 
-// The Inferenz page's two targets (spec §6.2/§6.3, R-6). Pinned:
-//  - useJetsonConnection stays mounted for BOTH targets (discovery, the 30 s
-//    heartbeat and the pagehide beacon must not depend on the target);
-//  - a classroom whose Jetson discovery is pending shows the existing spinner;
-//    a discovery that resolves `resume` (rosbridge moves to the Jetson) shows
-//    the Jetson flow and the cloud view is never rendered against the Jetson's
-//    rosbridge;
-//  - „In der Cloud" is the default when the robot advertises it (owner A-Q5),
-//    and a student without a classroom reaches it;
-//  - the Jetson flow's texts are unchanged; choosing it lets a reservation go.
+// The Inferenz page runs „In der Cloud" only (spec §6.2/§6.3, R-6). Pinned:
+//  - a signed-in student with a robot reaches the cloud view, with or without a
+//    classroom, and the view is handed the gating verdict derived on render;
+//  - an older robot image (no `cloud_inference` capability) still gets the
+//    cloud view, disabled, so its panel can say why (`old_image`);
+//  - `?cloud=1` (no robot) renders the explanation screen, never the view;
+//  - the auth gates keep their texts.
 
 import React from 'react';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import InferencePage from '../InferencePage';
-import { cloudCopy } from '../../components/CloudInference/cloudCopy';
 import TaskPhase from '../../constants/taskPhases';
 
 let mockState;
-const mockDispatch = vi.fn();
 vi.mock('react-redux', () => ({
   __esModule: true,
   useSelector: (sel) => sel(mockState),
-  useDispatch: () => mockDispatch,
+  useDispatch: () => vi.fn(),
 }));
 
 vi.mock('react-hot-toast', () => ({
@@ -34,15 +29,6 @@ vi.mock('react-hot-toast', () => ({
   useToasterStore: () => ({ toasts: [] }),
 }));
 
-const mockJetsonHook = vi.fn(() => ({ connect: vi.fn(), disconnect: vi.fn(), status: 'unknown' }));
-vi.mock('../../hooks/useJetsonConnection', () => ({
-  __esModule: true,
-  useJetsonConnection: () => mockJetsonHook(),
-}));
-vi.mock('../../hooks/useCameraLiveness', () => ({
-  __esModule: true,
-  useCameraLiveness: () => ({ liveTopics: [], liveCount: 0, allConfiguredAlive: false }),
-}));
 vi.mock('../../services/cloudConfig', () => ({
   __esModule: true,
   CLOUD_API_URL: 'https://api.test',
@@ -59,25 +45,15 @@ const mockCloudView = vi.fn();
 vi.mock('../../components/CloudInference/CloudInferenceView', () => ({
   __esModule: true,
   default: (props) => {
-    mockCloudView(props, mockState.ros.rosbridgeUrl);
+    mockCloudView(props);
     return <div data-testid="cloud-view" />;
   },
 }));
-vi.mock('../../components/ControlPanel', () => ({ __esModule: true, default: () => <div data-testid="control-panel" /> }));
-vi.mock('../../components/ImageGrid', () => ({ __esModule: true, default: () => <div data-testid="image-grid" /> }));
-vi.mock('../../components/InferencePanel', () => ({ __esModule: true, default: () => <div /> }));
-vi.mock('../../components/HeartbeatStatus', () => ({ __esModule: true, default: () => <div /> }));
 vi.mock('../../components/LoginForm', () => ({ __esModule: true, default: () => <div data-testid="login-form" /> }));
-
-const releaseSpy = vi.hoisted(() => vi.fn());
-vi.mock('../../features/cloudInference/controller', async (importOriginal) => {
-  const real = await importOriginal();
-  return { ...real, release: (...a) => { releaseSpy(...a); return real.release(...a); } };
-});
 
 const CAPS = { recordable: true, editable: true, trainable: true, inferable: true, roboter_studio: true, has_leader: true };
 
-function baseState({ jetsonStatus = 'available', classroomId = 'c-1', capabilities = { ...CAPS, cloud_inference: true }, rosbridgeUrl = 'ws://localhost/rosbridge' } = {}) {
+function baseState({ classroomId = 'c-1', capabilities = { ...CAPS, cloud_inference: true } } = {}) {
   return {
     auth: {
       isAuthenticated: true, isLoading: false, profileLoaded: true, username: 'lena', fullName: 'Lena Schmidt',
@@ -87,90 +63,46 @@ function baseState({ jetsonStatus = 'available', classroomId = 'c-1', capabiliti
       taskStatus: { robotType: 'omx_f', phase: TaskPhase.READY, running: false, capabilities },
       taskInfo: { tags: [] },
     },
-    ros: { imageTopicList: [], rosbridgeUrl },
-    ui: { isFirstLoad: { inference: false } },
-    jetson: {
-      status: jetsonStatus, online: true, ownerFullName: null, ownerUsername: null, error: null, heartbeatTransient: false,
-    },
+    ros: { imageTopicList: [], rosbridgeUrl: 'ws://localhost/rosbridge' },
   };
 }
 
 beforeEach(() => {
-  mockJetsonHook.mockClear();
   mockCloudView.mockClear();
-  releaseSpy.mockClear();
   mockCloudOnly.current = false;
 });
 
-describe('InferencePage — targets', () => {
-  it('cloud is the default when the robot advertises it, with the switch', () => {
+describe('InferencePage — the cloud is the only target', () => {
+  it('a robot that advertises the cloud gets the enabled cloud view', () => {
     mockState = baseState();
-    render(<InferencePage />);
+    render(<InferencePage isActive />);
     expect(screen.getByTestId('cloud-view')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: cloudCopy.target.cloud })).toHaveAttribute('aria-pressed', 'true');
-    expect(mockJetsonHook).toHaveBeenCalled();
+    expect(mockCloudView).toHaveBeenLastCalledWith(expect.objectContaining({
+      isActive: true,
+      cloud: { offered: true, enabled: true, reason: null },
+    }));
   });
 
   it('a student without a classroom reaches the cloud', () => {
-    mockState = baseState({ jetsonStatus: 'unknown', classroomId: null });
+    mockState = baseState({ classroomId: null });
     render(<InferencePage />);
     expect(screen.getByTestId('cloud-view')).toBeInTheDocument();
-    expect(screen.queryByText('Du bist keiner Klasse zugeordnet')).toBeNull();
   });
 
-  it('a pending classroom discovery shows the existing spinner, not the cloud', () => {
-    mockState = baseState({ jetsonStatus: 'unknown' });
+  it('an older robot image: the cloud view, disabled with its reason', () => {
+    mockState = baseState({ capabilities: { ...CAPS } });
     render(<InferencePage />);
-    expect(screen.getByText('Klassen-Jetson wird gesucht…')).toBeInTheDocument();
-    expect(mockCloudView).not.toHaveBeenCalled();
+    expect(mockCloudView).toHaveBeenLastCalledWith(expect.objectContaining({
+      cloud: { offered: true, enabled: false, reason: 'old_image' },
+    }));
   });
 
-  it('discovery resolving `resume` after mount shows the Jetson flow; the cloud view never meets the Jetson rosbridge', () => {
-    mockState = baseState({ jetsonStatus: 'unknown' });
-    const { rerender } = render(<InferencePage />);
-    // resume: rosbridge moves to the Jetson and the status becomes connected
-    mockState = baseState({ jetsonStatus: 'connected', rosbridgeUrl: 'ws://10.0.0.5:9091' });
-    rerender(<InferencePage />);
-    expect(screen.getByText('Verbunden mit Klassen-Jetson')).toBeInTheDocument();
-    expect(screen.getByTestId('control-panel')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: cloudCopy.target.cloud })).toBeNull();
-    for (const [, url] of mockCloudView.mock.calls) expect(url).not.toContain(':9091');
-    expect(mockCloudView).not.toHaveBeenCalled();
-    // the Jetson lifecycle hook ran on every render of both phases
-    expect(mockJetsonHook.mock.calls.length).toBeGreaterThanOrEqual(2);
-  });
-
-  it('useJetsonConnection is mounted for the cloud target too', () => {
-    mockState = baseState({ jetsonStatus: 'available' });
-    render(<InferencePage />);
-    expect(screen.getByTestId('cloud-view')).toBeInTheDocument();
-    expect(mockJetsonHook).toHaveBeenCalled();
-  });
-
-  it('choosing the Jetson shows its flow with the unchanged texts and lets a reservation go', () => {
-    mockState = baseState({ jetsonStatus: 'available' });
-    render(<InferencePage />);
-    fireEvent.click(screen.getByRole('button', { name: cloudCopy.target.jetson }));
-    expect(releaseSpy).toHaveBeenCalled();
-    expect(screen.getByText('Klassen-Jetson bereit')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Verbinde mit Klassen-Jetson' })).toBeInTheDocument();
-    expect(screen.queryByTestId('cloud-view')).toBeNull();
-  });
-
-  it('an older robot image: cloud offered but disabled, the Jetson flow by default', () => {
-    mockState = baseState({ jetsonStatus: 'no_jetson', capabilities: { ...CAPS } });
-    render(<InferencePage />);
-    expect(screen.getByText('Kein Klassen-Jetson eingerichtet')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: cloudCopy.target.cloud })).toBeDisabled();
-    expect(screen.getByText(cloudCopy.disabled.old_image)).toBeInTheDocument();
-  });
-
-  it('?cloud=1 offers no cloud target: the Jetson flow alone, texts unchanged', () => {
+  it('?cloud=1 (no robot) explains why and renders no cloud view', () => {
     mockCloudOnly.current = true;
-    mockState = baseState({ jetsonStatus: 'unknown', classroomId: null });
+    mockState = baseState();
     render(<InferencePage />);
-    expect(screen.getByText('Du bist keiner Klasse zugeordnet')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: cloudCopy.target.cloud })).toBeNull();
+    expect(screen.getByText('Inferenz braucht deinen Roboter')).toBeInTheDocument();
+    expect(mockCloudView).not.toHaveBeenCalled();
   });
 
   it('the auth gates keep their texts', () => {
@@ -178,5 +110,16 @@ describe('InferencePage — targets', () => {
     mockState.auth.isAuthenticated = false;
     render(<InferencePage />);
     expect(screen.getByTestId('login-form')).toBeInTheDocument();
+
+    mockState = baseState();
+    mockState.auth.isLoading = true;
+    render(<InferencePage />);
+    expect(screen.getByText('Laden…')).toBeInTheDocument();
+
+    mockState = baseState();
+    mockState.auth.profileLoaded = false;
+    render(<InferencePage />);
+    expect(screen.getByText('Profil wird geladen…')).toBeInTheDocument();
+    expect(mockCloudView).not.toHaveBeenCalled();
   });
 });

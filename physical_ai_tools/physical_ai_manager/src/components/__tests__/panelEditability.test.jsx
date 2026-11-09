@@ -4,17 +4,17 @@
 // Licence Agreement; see LICENSE at the repository root.
 //
 // D8 companion #2: the recording form (the Aufnahme page's TaskCard, fed by
-// useRecordController since Aufnahme 2.0 — it replaced InfoPanel) and
-// InferencePanel derive form editability from the EXPLICIT phase/running
-// signal, not the old 1 s /task/status SILENCE detector. With the ~0.5 Hz idle
+// useRecordController since Aufnahme 2.0 — it replaced InfoPanel) derives form
+// editability from the EXPLICIT phase/running signal, not the old 1 s /task/status SILENCE detector. With the ~0.5 Hz idle
 // identity tick, a silence detector would oscillate-lock every field (~1 s per
 // tick, focus/keystroke loss). Contract (updated by audit fix 5): the form is
 // LOCKED until the FIRST real /task/status tick lands (taskStatus.topicReceived)
 // — the initialState is READY/not-running, so without that gate a reload
 // MID-TASK painted a phantom-editable window; a stream of READY / not-running
-// ticks then keeps the form EDITABLE; a RECORDING tick LOCKS it. Each panel's
+// ticks then keeps the form EDITABLE; a RECORDING tick LOCKS it. The panel's
 // own lock indicator is the assertion target („bearbeitbar"/„gesperrt" on the
-// TaskCard, „Bearbeitungsmodus"/„Nur lesen" on InferencePanel).
+// TaskCard). (InferencePanel, the second panel, went with the local inference
+// UI on 2026-11-09.)
 //
 // The TaskCard additionally needs a LIVE robot link (owner decision F6b): while
 // not connected it stays locked and says why.
@@ -30,9 +30,7 @@ import trainingReducer from '../../features/training/trainingSlice';
 import editDatasetReducer from '../../features/editDataset/editDatasetSlice';
 import authReducer from '../../features/auth/authSlice';
 import workshopReducer from '../../features/workshop/workshopSlice';
-import jetsonReducer from '../../store/jetsonSlice';
 import TaskPhase from '../../constants/taskPhases';
-import InferencePanel from '../InferencePanel';
 import TaskCard from '../Record/TaskCard';
 import useRecordController from '../Record/useRecordController';
 
@@ -65,7 +63,6 @@ function makeStore() {
       editDataset: editDatasetReducer,
       auth: authReducer,
       workshop: workshopReducer,
-      jetson: jetsonReducer,
     },
   });
 }
@@ -95,13 +92,6 @@ const PANELS = [
     connect: (store) => store.dispatch(setHeartbeatStatus('connected')),
     editable: () => screen.queryByText('bearbeitbar') !== null,
     locked: () => screen.queryByText('gesperrt') !== null,
-  },
-  {
-    name: 'InferencePanel',
-    Panel: InferencePanel,
-    connect: () => {},
-    editable: () => screen.queryByText(/Bearbeitungsmodus/) !== null,
-    locked: () => screen.queryByText(/Nur lesen/) !== null,
   },
 ];
 

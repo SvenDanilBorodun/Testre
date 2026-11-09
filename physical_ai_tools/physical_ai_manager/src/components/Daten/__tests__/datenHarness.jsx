@@ -157,7 +157,6 @@ export function makeStore({
       }),
       hfToken: () => hfToken,
       ros: () => ({ rosbridgeUrl: 'ws://robot/rosbridge' }),
-      jetson: () => ({ status: 'idle' }),
     },
   });
 }

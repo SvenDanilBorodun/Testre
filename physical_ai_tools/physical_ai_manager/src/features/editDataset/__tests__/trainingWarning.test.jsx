@@ -7,7 +7,7 @@
 // nav item (spec §G1): `changed`/`conflict` warn, `local` warns only on proof
 // (the robot holds this student's token and the hub said „absent"), anything
 // else — unknown, current, newer, an old image, a failed ask, cloud mode — is
-// silent; the tab is hardwareOnly, jetsonIncompatible, `editable`, database.
+// silent; the tab is hardwareOnly, `editable`, database.
 
 import fs from 'fs';
 import path from 'path';
@@ -96,12 +96,11 @@ describe('useDatasetLocalChanges', () => {
 });
 
 describe('the Daten nav item (spec §G1)', () => {
-  it('is hardwareOnly (hidden in ?cloud=1), jetsonIncompatible, editable-gated and uses the database icon', () => {
+  it('is hardwareOnly (hidden in ?cloud=1), editable-gated and uses the database icon', () => {
     const src = fs.readFileSync(path.resolve(__dirname, '../../../StudentApp.js'), 'utf8');
     const line = src.split('\n').find((l) => l.includes('key: PageType.EDIT_DATASET'));
     expect(line).toMatch(/icon: 'database'/);
     expect(line).toMatch(/hardwareOnly: true/);
-    expect(line).toMatch(/jetsonIncompatible: true/);
     expect(line).toMatch(/capabilityKey: 'editable'/);
   });
 });

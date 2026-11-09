@@ -135,8 +135,7 @@ function callSetService(value) {
   return new Promise((resolve) => {
     // getCurrentConnection never connects: if there is no live socket there is
     // nowhere to send the token and the call is refused, not queued for later.
-    // And only the LOCAL rosbridge ever gets a personal token: the classroom
-    // Jetson proxy keeps its own read-only token.
+    // And only the LOCAL rosbridge ever gets a personal token.
     const ros = rosConnectionManager.getCurrentConnection();
     if (!ros || !isLocalRosbridgeUrl(rosConnectionManager.url)) {
       resolve({ success: false, message: hfCopy('robot.noLink') });

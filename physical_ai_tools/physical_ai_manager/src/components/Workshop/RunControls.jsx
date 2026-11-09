@@ -262,7 +262,7 @@ function RunControls({
 
   // Leader-contention gate (see the leader-contention comment above). true ONLY when
   // the bridge is reachable AND the leader is on; false while probing, on any
-  // probe error, and on Jetson/cloud (no bridge) — i.e. it fails open.
+  // probe error, and in cloud mode (no bridge) — i.e. it fails open.
   const { leaderOn: rsLeaderOn } = useRsBridgeStatus();
 
   const isRunning = runState === 'running' || phase === 'running' || paused;

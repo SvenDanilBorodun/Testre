@@ -29,7 +29,6 @@ import adminSlice from '../features/admin/adminSlice';
 import workshopSlice from '../features/workshop/workshopSlice';
 import studioAssetsSlice from '../features/workshop/studioAssetsSlice';
 import hfTokenSlice from '../features/hfToken/hfTokenSlice';
-import jetsonSlice from './jetsonSlice';
 
 export const store = configureStore({
   reducer: {
@@ -43,7 +42,6 @@ export const store = configureStore({
     admin: adminSlice,
     workshop: workshopSlice,
     studioAssets: studioAssetsSlice,
-    jetson: jetsonSlice,
     hfToken: hfTokenSlice,
   },
   middleware: (getDefaultMiddleware) => getDefaultMiddleware(),

@@ -5,7 +5,8 @@
 //
 // The browser's wire to the robot's token slot. Pinned here: the parse is the
 // contract (a malformed message is UNKNOWN, never "no token"), the write side
-// never connects and never reaches the Jetson proxy, every write goes through
+// never connects and never reaches a rosbridge other than the local one, every
+// write goes through
 // one serial queue (a clear follows a pending push), the token is only ever the
 // service request's field, and the clear used by sign-out cannot hang.
 
@@ -204,7 +205,7 @@ describe('setRobotToken — what it refuses', () => {
     expect(mockCalls).toHaveLength(0);
   });
 
-  it('refuses the classroom Jetson proxy: it keeps its own token', async () => {
+  it('refuses any rosbridge that is not the local /rosbridge proxy', async () => {
     rosConnectionManager.url = 'ws://10.0.0.5:9091';
     const result = await setRobotToken(TOKEN);
     expect(result.success).toBe(false);

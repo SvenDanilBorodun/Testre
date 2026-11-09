@@ -93,7 +93,7 @@ export const START_BLOCK = Object.freeze({
  *
  * Unknown NEVER blocks: an account state that has not answered (unknown,
  * loading, error, unsupported, unavailable) and a robot that has not said
- * whether it takes a personal token (older image, Jetson) both return null. The
+ * whether it takes a personal token (older image) both return null. The
  * Benutzer-ID list that decides WHICH namespace a recording uploads under is
  * kept honest at its own choke point (hooks/useHfUserList), not by blocking
  * Start on a guess (owner decision C-1).

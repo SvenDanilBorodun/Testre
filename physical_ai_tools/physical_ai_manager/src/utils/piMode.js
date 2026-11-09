@@ -97,11 +97,7 @@ export function rsControlBase(piMode) {
 // publishes neither port at all.
 //
 // Both functions keep their `piMode` parameter purely so the four call sites
-// and their tests need no churn — it no longer selects behaviour. The Jetson
-// path is untouched by either: `useJetsonConnection` dispatches an explicit
-// `ws://<ip>:9091` through `setRosbridgeUrl` (a passthrough reducer) and
-// ImageGridCell renders Jetson frames from a rosbridge topic subscription
-// rather than from `videoStreamBase`.
+// and their tests need no churn — it no longer selects behaviour.
 
 /**
  * Local rosbridge WebSocket URL — always the same-origin nginx proxy

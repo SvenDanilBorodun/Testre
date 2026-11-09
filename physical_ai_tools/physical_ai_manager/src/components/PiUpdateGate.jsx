@@ -15,7 +15,7 @@
 //   * a live progress/phase display;
 //   * „Ohne Update fortfahren" (skip) that appears ONLY after a FAILED attempt.
 //
-// Pi-only: it renders NOTHING on Windows / cloud / Jetson (guarded on `piMode`),
+// Pi-only: it renders NOTHING on Windows / cloud (guarded on `piMode`),
 // and is mounted app-globally (StudentApp, next to StartupGate) so it gates the
 // whole app, not just the System tab. All strings are German (Rule §1).
 

@@ -22,14 +22,14 @@ import ROSLIB from 'roslib';
  * (spec-r5 §2.3-3). Local = the same-origin nginx proxy `ws(s)://<host>/rosbridge`
  * of the student PC and the Orange Pi; it comes back with the environment, so
  * the page retries every 2 s and never gives up — a page that lost its link
- * during a recording then sees the session's end within ~4 s, not ~30 s. The
- * Jetson proxy (`ws://<ip>:9091`) keeps the exponential backoff and its cap.
+ * during a recording then sees the session's end within ~4 s, not ~30 s. Any
+ * other URL (a developer pointing the page at a rosbridge elsewhere) keeps an
+ * exponential backoff with a 30 s cap and gives up after 30 attempts.
  */
 export const LOCAL_RECONNECT_MAX_DELAY_MS = 2000;
 const REMOTE_RECONNECT_MAX_DELAY_MS = 30000;
-const JETSON_PROXY_PORT = '9091';
 
-/** True for the local same-origin rosbridge (path `/rosbridge`, not the Jetson proxy port). */
+/** True for the local same-origin rosbridge (path `/rosbridge`). */
 export function isLocalRosbridgeUrl(url) {
   if (typeof url !== 'string' || !url) return false;
   let parsed;
@@ -38,7 +38,7 @@ export function isLocalRosbridgeUrl(url) {
   } catch {
     return false;
   }
-  return parsed.pathname.replace(/\/+$/, '') === '/rosbridge' && parsed.port !== JETSON_PROXY_PORT;
+  return parsed.pathname.replace(/\/+$/, '') === '/rosbridge';
 }
 
 /** The wait before reconnect attempt `attempt` (0-based) to `url`. */
@@ -61,25 +61,6 @@ class RosConnectionManager {
     this.maxReconnectAttempts = 30;
     this.reconnectTimer = null;
     this.intentionalDisconnect = false;
-    // Jetson auth: when the URL points at a Jetson rosbridge proxy
-    // (port 9091), the proxy expects the first WS frame to be
-    // {op: "auth", token: "<JWT>"}. We send that on the 'connection'
-    // event BEFORE any user-facing subscribe/advertise. useJetsonConnection
-    // pushes the rotated Supabase access token here via setAuthToken
-    // whenever it changes during a connected session (see its accessToken
-    // effect), so authToken is always current and a reconnect after a
-    // mid-session token rotation carries a live JWT instead of a dead one.
-    this.authToken = null;
-  }
-
-  /**
-   * Set / clear the JWT to send as the first frame on connection.
-   * Called by useJetsonConnection on connect (with the current Supabase
-   * access token) and on disconnect (with null).
-   * @param {string|null} token
-   */
-  setAuthToken(token) {
-    this.authToken = token || null;
   }
 
   /**
@@ -154,23 +135,6 @@ class RosConnectionManager {
         this.connectionPromise = null;
         this.reconnectAttempts = 0;
         this.intentionalDisconnect = false;
-
-        // Jetson auth-op: if a token is set, send it as the FIRST frame
-        // before any subscribe/advertise the user-side `onConnected`
-        // callback might queue. ROSLIB.Ros exposes the raw .socket; we
-        // use it directly because ROSLIB doesn't have an 'auth' op of
-        // its own. The Jetson proxy holds back upstream traffic until
-        // this frame arrives and verifies.
-        if (this.authToken && ros.socket && ros.socket.readyState === 1) {
-          try {
-            ros.socket.send(JSON.stringify({
-              op: 'auth',
-              token: this.authToken,
-            }));
-          } catch (error) {
-            console.warn('Failed to send JWT auth frame:', error);
-          }
-        }
 
         resolve(ros);
 

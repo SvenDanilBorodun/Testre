@@ -147,7 +147,8 @@ export default function StudentTrainingHistoryDrawer({ student, onClose }) {
   useEffect(() => {
     if (!token || !student) return;
     loadTrainings();
-    // Jetson inference run records (PR-5b) — best-effort side load.
+    // Inference run records (Cloud-Inferenz; older rows from the retired
+    // classroom Jetson) — best-effort side load.
     listStudentInferenceRuns(token, student.id)
       .then((runs) => setInferenceRuns(runs))
       .catch(() => setInferenceRuns([]));
@@ -306,8 +307,10 @@ export default function StudentTrainingHistoryDrawer({ student, onClose }) {
                   >
                     <div className="flex items-center justify-between gap-2">
                       <span className="truncate text-[var(--ink)]">{run.policy_repo}</span>
-                      {/* Cloud-Inferenz (048): where the run ran. An older API
-                          sends no `backend`: every run then was the Jetson's. */}
+                      {/* Where the run ran: 'cloud' (Cloud-Inferenz, 048), else
+                          an older run on the retired classroom Jetson (written
+                          before migration 053; an API before 048 sends no
+                          `backend` at all). */}
                       <Pill tone="neutral" className="shrink-0">
                         {run.backend === 'cloud' ? 'Cloud' : 'Klassen-Jetson'}
                       </Pill>

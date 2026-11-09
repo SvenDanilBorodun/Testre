@@ -159,8 +159,8 @@ export default function useRecordController({ isActive = true } = {}) {
   const activation = useRobotActivation({ enabled: connected }).status;
   // Why Start is off for the student's OWN Hugging-Face token, or null. A
   // primitive from tolerant selectors: null without the feature's slice (test
-  // stores), while the account or the robot has not answered, and under a
-  // claimed Jetson — unknown never blocks.
+  // stores) and while the account or the robot has not answered — unknown
+  // never blocks.
   const hfTokenBlock = useSelector(selectHfStartBlock);
   // ... and, when the account state answers nothing usable (or the student is
   // signed in through the offline escape), a NON-blocking hint that names the

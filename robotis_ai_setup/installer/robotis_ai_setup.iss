@@ -37,7 +37,7 @@ AppName=EduBotics
 AppVersion=2.37.0
 AppPublisher=EduBotics
 ; Shown in the .exe's file properties (VersionInfoCopyright defaults to it).
-AppCopyright=© 2025–2026 Sven Danil Borodun (EduBotics)
+AppCopyright=© 2025–2026 [Anbieter – wird nach Klärung der Rechtsform ergänzt] (EduBotics)
 DefaultDirName={autopf}\EduBotics
 DefaultGroupName=EduBotics
 OutputBaseFilename=EduBotics_Setup

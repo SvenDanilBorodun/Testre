@@ -1,11 +1,11 @@
 EduBotics – Hinweise zu Bestandteilen Dritter und Angebot zum Quellcode
 Third-party notices and written offer for source code
-Stand: 5. November 2026
+Stand: 9. November 2026
 
 Herausgeber / Distributor:
-  Sven Danil Borodun (EduBotics)
-  Unsuhrstrasse 10, 45325 Essen, Deutschland
-  E-Mail: svendanilborodun@gmail.com
+  [Anbieter – wird nach Klärung der Rechtsform ergänzt] (EduBotics)
+  [Anschrift – wird ergänzt]
+  E-Mail: [Kontakt-E-Mail – wird ergänzt]
 
 EduBotics selbst steht unter dem EduBotics-Endnutzer-Lizenzvertrag
 (im Installationsordner LICENSE.txt, im Download-Repository LICENSE).
@@ -51,7 +51,7 @@ gewähren, nicht ein.
 
 2. Bestandteile, die bei Installation und Betrieb geladen werden
 
-2.1 usbipd-win 5.3.0 (GNU General Public License 2.0). Das
+2.1 usbipd-win 5.3.0 (GNU General Public License 3.0). Das
     Installationsprogramm lädt es direkt von seiner offiziellen
     Bezugsquelle (https://github.com/dorssel/usbipd-win); es ist nicht
     Teil dieses Installationsprogramms.
@@ -104,9 +104,9 @@ gewähren, nicht ein.
     anbietet.
 
     Anfrage an:
-      Sven Danil Borodun (EduBotics)
-      Unsuhrstrasse 10, 45325 Essen, Deutschland
-      E-Mail: svendanilborodun@gmail.com
+      [Anbieter – wird nach Klärung der Rechtsform ergänzt] (EduBotics)
+      [Anschrift – wird ergänzt]
+      E-Mail: [Kontakt-E-Mail – wird ergänzt]
     Bitte geben Sie die EduBotics-Version und den gewünschten
     Bestandteil an.
 
@@ -124,6 +124,6 @@ licences are in licenses\. For every component EduBotics distributes
 under the GPL or LGPL (the Ubuntu packages of the WSL2 environment,
 FFmpeg, and the components of the Docker images), EduBotics offers to
 provide the complete corresponding source code to any recipient, for
-three years after it last distributed that version, on request to Sven
-Danil Borodun (EduBotics), Unsuhrstrasse 10, 45325 Essen, Germany,
-svendanilborodun@gmail.com.
+three years after it last distributed that version, on request to the
+distributor named above: [Anbieter – wird nach Klärung der Rechtsform ergänzt] (EduBotics),
+[Anschrift – wird ergänzt], [Kontakt-E-Mail – wird ergänzt].

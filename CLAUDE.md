@@ -35,7 +35,7 @@ Students run Windows 11 PCs without GPUs; a managed ACT training runs on a RunPo
 
 Never treat as source: `robotis_ai_setup/gui/dist/` and `installer/output/` (build output, absent from the tree), `installer/assets/edubotics-rootfs.tar.gz(+.sha256)` (gitignored, produced by `wsl_rootfs/build_rootfs.sh`). `docker/versions.env` is CI-generated and absent from the tree (GUI readers fall back to `latest`; the Pi's `pi_agent/constants.py` falls back to `APP_VERSION`). `supabase/_archive/` holds 20 pre-squash `.sql` files (19 numbered 002-021, 014 absent, plus `migration.sql`): git-blame reference only, never applied; its README's "21" count is wrong. The parent `C:\Users\svend\cloud\CLAUDE.md` is a 2-line pointer stub; leave it alone.
 
-**Licensing: EduBotics' own code is proprietary, ROBOTIS-derived code stays Apache-2.0** (owner decision 2026-11-05; licensor Sven Danil Borodun (EduBotics), Essen).
+**Licensing: EduBotics' own code is proprietary, ROBOTIS-derived code stays Apache-2.0** (owner decision 2026-11-05). The licensor's legal form, address and contact are not settled yet: `LICENSE`, `NOTICE`, the EULA, `THIRD_PARTY_NOTICES.txt` and the installer's `AppCopyright` carry the German placeholders „[Anbieter – wird nach Klärung der Rechtsform ergänzt]", „[Anschrift – wird ergänzt]" and „[Kontakt-E-Mail – wird ergänzt]" until they are (the GPL/LGPL written source offer names no reachable contact until then; `tests/test_third_party_notices.py` keeps personal contact data out).
 - **The licence files:**
   - root `LICENSE` and `NOTICE`;
   - the installer's German EULA `installer/assets/license.txt`, which licenses every binary we distribute;

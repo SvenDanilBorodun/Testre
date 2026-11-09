@@ -1,10 +1,10 @@
 EduBotics – Endnutzer-Lizenzvertrag (EULA)
-Stand: 5. November 2026
+Stand: 9. November 2026
 
 Lizenzgeber:
-  Sven Danil Borodun (EduBotics)
-  Unsuhrstrasse 10, 45325 Essen, Deutschland
-  E-Mail: svendanilborodun@gmail.com
+  [Anbieter – wird nach Klärung der Rechtsform ergänzt] (EduBotics)
+  [Anschrift – wird ergänzt]
+  E-Mail: [Kontakt-E-Mail – wird ergänzt]
 
 Bitte lesen Sie diesen Vertrag vollständig, bevor Sie die Software
 installieren. Mit der Annahme dieses Vertrags und der Installation
@@ -91,7 +91,7 @@ einverstanden, brechen Sie die Installation bitte ab.
     finden Sie in der Datei THIRD_PARTY_NOTICES.txt im
     Installationsordner. Das Installationsprogramm lädt außerdem
     usbipd-win von dessen offizieller Bezugsquelle; usbipd-win steht
-    unter der GNU General Public License, Version 2.
+    unter der GNU General Public License, Version 3.
 
 
 6. Sicherheit beim Betrieb von Robotern
@@ -150,14 +150,14 @@ einverstanden, brechen Sie die Installation bitte ab.
 
 10.2 Ist der Lizenznehmer Kaufmann, eine juristische Person des
      öffentlichen Rechts oder ein öffentlich-rechtliches Sondervermögen,
-     ist Gerichtsstand Essen.
+     ist Gerichtsstand der Sitz des Lizenzgebers.
 
 10.3 Ist eine Bestimmung dieses Vertrags unwirksam, bleibt der Vertrag
      im Übrigen wirksam; an die Stelle der unwirksamen Bestimmung treten
      die gesetzlichen Vorschriften (§ 306 BGB).
 
 10.4 Fragen zu diesem Vertrag richten Sie bitte an
-     svendanilborodun@gmail.com.
+     [Kontakt-E-Mail – wird ergänzt].
 
 
-© 2025–2026 Sven Danil Borodun (EduBotics). Alle Rechte vorbehalten.
+© 2025–2026 [Anbieter – wird nach Klärung der Rechtsform ergänzt] (EduBotics). Alle Rechte vorbehalten.

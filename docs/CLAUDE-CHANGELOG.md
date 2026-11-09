@@ -26,7 +26,7 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 - `tests/test_ci_supply_chain_pins.py` (mutation-checked: six deliberate regressions each fail it) and `app/tests/test_api_docs_off.py`.
 - Runbook: `docs/deploy/PRIVATE-REPOSITORY.md`.
 
-**The licence (owner: proprietary EULA; licensor Sven Danil Borodun, Essen).**
+**The licence (owner: proprietary EULA; the licensor's legal form is still open, placeholders since 2026-11-09).**
 - **Before:** the installer said Apache-2.0 (and still named Docker Desktop). 749 EduBotics files carried an Apache-2.0 header, 74 of them in the robot server package that ships as source in the public images. The rebrand commit `f74ef852` (2026-03-28) had replaced „Copyright 2025 ROBOTIS CO., LTD." with „Copyright 2025 EduBotics" in 46 files derived from ROBOTIS's web app, which Apache-2.0 §4(c) forbids.
 - **Licence files:** a German EULA, root `LICENSE`/`NOTICE`, `THIRD_PARTY_NOTICES.txt` with the GPL/LGPL written source offer, and the SPDX 3.29.0 texts of Apache-2.0, GPL-2.0/3.0 and LGPL-2.1/3.0.
 - **Headers:**

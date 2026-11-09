@@ -11,6 +11,10 @@
 * The installer ships the EULA, ``THIRD_PARTY_NOTICES.txt`` and the licence
   texts the notice cites, and the notice carries the GPL/LGPL source offer with
   the licensor's contact.
+* Until the owner settles the legal entity (2026-11-09), every licence file
+  names the licensor, its address and its contact by German placeholders, and
+  no personal contact data (a home address, a personal mail address) appears
+  in any of them.
 """
 
 from __future__ import annotations
@@ -31,8 +35,19 @@ JS_GEN = REPO / "physical_ai_tools" / "physical_ai_manager" / "scripts" / "write
 INSTALLER = REPO / "robotis_ai_setup" / "installer"
 ISS = INSTALLER / "robotis_ai_setup.iss"
 
-LICENSOR = "Sven Danil Borodun"
-CONTACT = "svendanilborodun@gmail.com"
+LICENSOR = "[Anbieter – wird nach Klärung der Rechtsform ergänzt]"
+ADDRESS = "[Anschrift – wird ergänzt]"
+CONTACT = "[Kontakt-E-Mail – wird ergänzt]"
+# Personal contact data PR #49 had written into the licence files; the
+# repository was still public, so it went back out (2026-11-09).
+PERSONAL = ("@gmail.com", "Unsuhrstrasse", "45325", "Gerichtsstand Essen")
+LICENCE_FILES = (
+    REPO / "LICENSE",
+    REPO / "NOTICE",
+    INSTALLER / "assets" / "license.txt",
+    INSTALLER / "assets" / "THIRD_PARTY_NOTICES.txt",
+    ISS,
+)
 
 
 def _load_py_gen():
@@ -182,7 +197,7 @@ class InstallerLicencePayload(unittest.TestCase):
         eula = (INSTALLER / "assets" / "license.txt").read_text(encoding="utf-8")
         self.assertIn(LICENSOR, eula)
         self.assertIn(CONTACT, eula)
-        self.assertIn("Unsuhrstrasse 10, 45325 Essen", eula)
+        self.assertIn(ADDRESS, eula)
         self.assertNotIn("Lizenziert unter der Apache License", eula)
         self.assertNotIn("Docker Desktop", eula)
         self.assertIn("THIRD_PARTY_NOTICES.txt", eula)
@@ -190,7 +205,7 @@ class InstallerLicencePayload(unittest.TestCase):
     def test_the_notice_carries_the_source_offer_and_names_every_licence_file(self):
         notice = (INSTALLER / "assets" / "THIRD_PARTY_NOTICES.txt").read_text(encoding="utf-8")
         self.assertIn(CONTACT, notice)
-        self.assertIn("Unsuhrstrasse 10, 45325 Essen", notice)
+        self.assertIn(ADDRESS, notice)
         self.assertIn("drei Jahre", notice)
         texts = sorted(p.name for p in (INSTALLER / "assets" / "licenses").glob("*.txt"))
         self.assertEqual(texts, ["Apache-2.0.txt", "GPL-2.0-only.txt", "GPL-3.0-only.txt",
@@ -206,7 +221,26 @@ class InstallerLicencePayload(unittest.TestCase):
         self.assertIn('MessagesFile: "compiler:Languages\\German.isl"', self.iss)
 
     def test_the_installer_names_its_copyright_holder(self):
-        self.assertIn("AppCopyright=© 2025–2026 Sven Danil Borodun (EduBotics)", self.iss)
+        self.assertIn(f"AppCopyright=© 2025–2026 {LICENSOR} (EduBotics)", self.iss)
+
+    def test_no_personal_contact_data_in_any_licence_file(self):
+        for path in LICENCE_FILES:
+            text = path.read_text(encoding="utf-8")
+            for needle in PERSONAL:
+                with self.subTest(file=path.name, needle=needle):
+                    self.assertNotIn(needle, text)
+        for path in (REPO / "LICENSE", REPO / "NOTICE"):
+            with self.subTest(file=path.name):
+                self.assertIn(f"Copyright (c) 2025-2026 {LICENSOR} (EduBotics)", path.read_text(encoding="utf-8"))
+
+    def test_usbipd_win_is_named_under_its_own_licence(self):
+        # usbipd-win 5.3.0: COPYING.md is the GPL v3 and every source file says
+        # `SPDX-License-Identifier: GPL-3.0-only` (github.com/dorssel/usbipd-win,
+        # tag v5.3.0, checked 2026-11-09). PR #49 had written version 2.
+        eula = (INSTALLER / "assets" / "license.txt").read_text(encoding="utf-8")
+        notice = (INSTALLER / "assets" / "THIRD_PARTY_NOTICES.txt").read_text(encoding="utf-8")
+        self.assertIn("usbipd-win steht\n    unter der GNU General Public License, Version 3.", eula)
+        self.assertIn("2.1 usbipd-win 5.3.0 (GNU General Public License 3.0).", notice)
 
     def test_the_pi_tarball_carries_the_licence(self):
         import yaml

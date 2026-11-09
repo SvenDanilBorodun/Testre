@@ -1075,6 +1075,40 @@ jobs:
               fi
               echo "OK: '$needle' present"
           done
+      - name: Assert the image serves its CSP and the bundle names no Google font host
+        run: |
+          # F-46: report-only by default, enforced with EDUBOTICS_CSP_ENFORCE=1,
+          # the policy built from the bundle's own two URLs (Dockerfile.web).
+          # F-27: the fonts are self-hosted.
+          set -eu
+          for enforce in '' 1; do
+            cid=$(docker run -d -e EDUBOTICS_CSP_ENFORCE="$enforce" -p 127.0.0.1:18080:8080 edubotics-teacher-web-validate)
+            for _ in $(seq 1 30); do
+              curl -fsS -o /dev/null http://127.0.0.1:18080/ && break
+              sleep 1
+            done
+            headers=$(curl -fsS -D - -o /dev/null http://127.0.0.1:18080/ | tr 'A-Z' 'a-z')
+            report=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/csp-report' \
+              --data '{"csp-report":{"violated-directive":"ci-probe"}}' http://127.0.0.1:18080/csp-report)
+            logs=$(docker logs "$cid" 2>&1)
+            docker rm -f "$cid" >/dev/null
+            echo "$headers" | grep -F "connect-src 'self' https://ci_validate.api.example https://ci_validate.supabase.co wss://ci_validate.supabase.co;"
+            # (`! cmd` would not trip `set -e`, hence the explicit ifs.)
+            if [ -n "$enforce" ]; then
+              want='content-security-policy: '; other='content-security-policy-report-only: '
+            else
+              want='content-security-policy-report-only: '; other='content-security-policy: '
+            fi
+            echo "$headers" | grep -F "$want"
+            if echo "$headers" | grep -q -F "$other"; then echo "FAIL: both CSP headers"; exit 1; fi
+            [ "$report" = 204 ]
+            echo "$logs" | grep -F 'csp-report {\"csp-report\":{\"violated-directive\":\"ci-probe\"}}'
+          done
+          if docker run --rm --entrypoint sh edubotics-teacher-web-validate -c \
+               "grep -r -l -E 'fonts\.(googleapis|gstatic)\.com' /usr/share/nginx/html"; then
+            echo "FAIL: the bundle names a Google font host"
+            exit 1
+          fi
 
   manager-build-validate:
     # Catches the white-screen regression that shipped on 4 published
@@ -1363,18 +1397,31 @@ jobs:
           sudo apt-get install -y nginx-light gettext-base
       - name: nginx -t on web template
         run: |
-          # Render the template with a concrete $PORT (the only var the
-          # template references). Drop our config into sites-enabled and
-          # let nginx validate it the way it would at container start.
-          # Catches bad add_header syntax, missing semicolons, malformed
-          # location blocks etc. before they break the Railway web deploy.
+          # Render the template the way the image does: $PORT, plus the two CSP
+          # variables exported by the shipped nginx.web.csp.envsh from a policy
+          # the shipped scripts/csp-policy.mjs builds (Dockerfile.web), in both
+          # modes (report-only by default, enforced with EDUBOTICS_CSP_ENFORCE=1).
+          # Drop the config into sites-enabled and let nginx validate it the way
+          # it would at container start. Catches bad add_header syntax, missing
+          # semicolons, malformed location blocks etc. before they break the
+          # Railway web deploy.
           export PORT=8080
-          envsubst '$PORT' \
-            < physical_ai_tools/physical_ai_manager/nginx.web.conf.template \
-            > /tmp/nginx.web.conf
+          REACT_APP_SUPABASE_URL=https://CI_VALIDATE.supabase.co \
+          REACT_APP_CLOUD_API_URL=https://CI_VALIDATE.api.example \
+            node physical_ai_tools/physical_ai_manager/scripts/csp-policy.mjs > /tmp/csp-policy.txt
           sudo rm -f /etc/nginx/sites-enabled/default
-          sudo cp /tmp/nginx.web.conf /etc/nginx/sites-enabled/edubotics-web.conf
-          sudo nginx -t
+          for enforce in 0 1; do
+            (
+              export EDUBOTICS_CSP_POLICY_FILE=/tmp/csp-policy.txt EDUBOTICS_CSP_ENFORCE="$enforce"
+              . physical_ai_tools/physical_ai_manager/nginx.web.csp.envsh
+              envsubst '$PORT $EDUBOTICS_CSP_HEADER $EDUBOTICS_CSP_POLICY' \
+                < physical_ai_tools/physical_ai_manager/nginx.web.conf.template \
+                > /tmp/nginx.web.conf
+            )
+            grep -q 'add_header Content-Security-Policy' /tmp/nginx.web.conf
+            sudo cp /tmp/nginx.web.conf /etc/nginx/sites-enabled/edubotics-web.conf
+            sudo nginx -t
+          done
       - name: nginx -t on student template
         run: |
           # The student-mode nginx.conf is plain (no PORT envsubst), so

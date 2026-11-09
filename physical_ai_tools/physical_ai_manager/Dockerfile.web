@@ -42,15 +42,27 @@ RUN test -n "$REACT_APP_SUPABASE_URL"      || (echo "ERROR: --build-arg REACT_AP
 # `npm run build` runs `vite build`.
 RUN npm run build
 RUN printf '{"buildId":"%s","builtAt":"%s"}\n' "${REACT_APP_BUILD_ID}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > build/version.json
+# The Content Security Policy (F-46), built from the SAME two URLs the bundle
+# just inlined, so it can never name another API or Supabase project. Outside
+# build/ on purpose: it is configuration, not something to serve.
+RUN node scripts/csp-policy.mjs > csp-policy.txt && cat csp-policy.txt
 
 FROM nginx:1.27.5-alpine
 COPY --from=build /app/build /usr/share/nginx/html
 
 # nginx:alpine auto-runs envsubst on /etc/nginx/templates/*.template at startup.
-# Filter limits substitution to just $PORT so $uri (etc.) in our conf is left alone.
+# The filter limits substitution to $PORT and the two CSP variables, so $uri
+# (etc.) in our conf is left alone. The CSP pair is exported by
+# 18-edubotics-csp.envsh, which the entrypoint sources BEFORE its
+# 20-envsubst-on-templates.sh: the policy from the file below, the header name
+# from the runtime variable EDUBOTICS_CSP_ENFORCE (1 = enforce; anything else =
+# report-only, the default).
 COPY nginx.web.conf.template /etc/nginx/templates/default.conf.template
+COPY --from=build /app/csp-policy.txt /etc/nginx/edubotics/csp-policy.txt
+COPY nginx.web.csp.envsh /docker-entrypoint.d/18-edubotics-csp.envsh
+RUN chmod 0755 /docker-entrypoint.d/18-edubotics-csp.envsh
 ENV PORT=8080 \
-    NGINX_ENVSUBST_FILTER="^PORT$"
+    NGINX_ENVSUBST_FILTER="^(PORT|EDUBOTICS_CSP_HEADER|EDUBOTICS_CSP_POLICY)$"
 
 EXPOSE 8080
 CMD ["nginx", "-g", "daemon off;"]

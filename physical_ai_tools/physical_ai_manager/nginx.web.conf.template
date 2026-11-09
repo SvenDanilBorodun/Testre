@@ -1,3 +1,29 @@
+# The teacher web's Content Security Policy (F-46, 2026-11-11). Both
+# EDUBOTICS_CSP_* placeholders come from nginx.web.csp.envsh, which nginx:alpine's
+# entrypoint sources before it renders this template: the policy the BUILD wrote
+# from the bundle's own API and Supabase URLs (scripts/csp-policy.mjs), and the
+# header name, Content-Security-Policy-Report-Only unless the Railway variable
+# EDUBOTICS_CSP_ENFORCE is 1. Like the five headers below it is re-declared in
+# every location that sets an add_header of its own.
+#
+# Violation reports (the policy's `report-uri /csp-report`) are written by nginx
+# itself, one JSON-escaped line each, into the service log (Railway: the
+# teacher-web service's logs, search „csp-report"). nginx fills $request_body
+# only for a body it read, so the location proxies the body to a sink server on
+# a unix socket that answers 204. Rate-limited (behind Railway's proxy every
+# client shares one address, so the bucket is effectively global) and capped at
+# 16 KB a report.
+log_format edubotics_csp_report escape=json '$time_iso8601 csp-report $request_body';
+limit_req_zone $binary_remote_addr zone=edubotics_csp_report:1m rate=30r/m;
+
+server {
+    listen unix:/tmp/edubotics-csp-report.sock;
+    access_log off;
+    location / {
+        return 204;
+    }
+}
+
 server {
     listen ${PORT};
     server_name _;
@@ -24,6 +50,9 @@ server {
     # malicious scripts (if any got injected) from quietly requesting
     # camera/mic/geo permission.
     add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
+    # The CSP (top of this file). Its report-only form changes nothing a teacher
+    # sees; the enforced form refuses whatever the policy does not name.
+    add_header ${EDUBOTICS_CSP_HEADER} "${EDUBOTICS_CSP_POLICY}" always;
 
     # HTML shell must never be cached — new deploys need to reach the browser
     # immediately so footer/logo/text changes show up without a hard refresh.
@@ -40,6 +69,7 @@ server {
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
+        add_header ${EDUBOTICS_CSP_HEADER} "${EDUBOTICS_CSP_POLICY}" always;
     }
 
     # Build-id manifest polled by the React app to detect new deployments.
@@ -53,10 +83,11 @@ server {
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
+        add_header ${EDUBOTICS_CSP_HEADER} "${EDUBOTICS_CSP_POLICY}" always;
     }
 
     # Hashed JS/CSS bundles from CRA are content-addressed and safe to cache.
-    # All 5 security headers MUST be re-declared — nginx's add_header
+    # All 5 security headers and the CSP MUST be re-declared — nginx's add_header
     # inheritance drops the server-level ones the moment this block
     # issues any add_header of its own (the Cache-Control line).
     location /static/ {
@@ -67,6 +98,21 @@ server {
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
+        add_header ${EDUBOTICS_CSP_HEADER} "${EDUBOTICS_CSP_POLICY}" always;
+    }
+
+    # CSP violation reports (the policy's report-uri; POST only, sent by the
+    # browser without credentials). Logged with the edubotics_csp_report format
+    # at the top of this file instead of the ordinary access log line. No
+    # add_header here, so the server-level headers apply.
+    location = /csp-report {
+        limit_except POST { deny all; }
+        limit_req zone=edubotics_csp_report burst=30 nodelay;
+        limit_req_status 429;
+        client_max_body_size 16k;
+        client_body_buffer_size 16k;
+        access_log /var/log/nginx/access.log edubotics_csp_report;
+        proxy_pass http://unix:/tmp/edubotics-csp-report.sock:/;
     }
 
     # SPA routing — all paths fall through to index.html

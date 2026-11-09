@@ -1,0 +1,57 @@
+# Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
+#
+# Proprietary and confidential. Licensed under the EduBotics End-User
+# Licence Agreement; see LICENSE at the repository root.
+#
+# shellcheck shell=sh
+#
+# The teacher web's Content Security Policy switch (F-46, 2026-11-11).
+# Dockerfile.web installs this as /docker-entrypoint.d/18-edubotics-csp.envsh;
+# nginx:alpine's entrypoint SOURCES every executable *.envsh in that folder, in
+# `sort -V` order, before 20-envsubst-on-templates.sh renders
+# nginx.web.conf.template, so the two variables exported here reach the
+# template (NGINX_ENVSUBST_FILTER names them).
+#
+#   EDUBOTICS_CSP_POLICY — the policy, read from the file the BUILD wrote from
+#                          the bundle's own two URLs (scripts/csp-policy.mjs);
+#   EDUBOTICS_CSP_HEADER — Content-Security-Policy-Report-Only, unless the
+#                          RUNTIME variable EDUBOTICS_CSP_ENFORCE is exactly 1
+#                          (blanks ignored): then Content-Security-Policy.
+#
+# The switch is a Railway service variable on the teacher-web service, read at
+# every container start: no code change, no rebuild. The owner turns it on after
+# a week in which /csp-report logged nothing (docs/deploy/DEPLOY.md).
+#
+# A missing or unusable policy file stops the container (the entrypoint runs
+# under `set -e`): the deploy fails its gate and the old one keeps serving,
+# rather than a teacher web without its policy going live.
+
+edubotics_csp_file="${EDUBOTICS_CSP_POLICY_FILE:-/etc/nginx/edubotics/csp-policy.txt}"
+if [ ! -s "$edubotics_csp_file" ]; then
+    echo "18-edubotics-csp: ERROR: no policy at $edubotics_csp_file; refusing to start without a Content Security Policy" >&2
+    exit 1
+fi
+EDUBOTICS_CSP_POLICY=$(cat "$edubotics_csp_file")
+# The value lands inside an nginx double-quoted string: no quote, dollar,
+# backslash or line break may reach it.
+# shellcheck disable=SC1003  # '\' is a one-character pattern, not an escape
+case "$EDUBOTICS_CSP_POLICY" in
+    *'"'* | *'$'* | *'\'* | *'
+'*)
+        echo "18-edubotics-csp: ERROR: the policy in $edubotics_csp_file holds a character nginx cannot quote" >&2
+        exit 1
+        ;;
+esac
+
+if [ "$(printf '%s' "${EDUBOTICS_CSP_ENFORCE:-}" | tr -d '[:space:]')" = "1" ]; then
+    EDUBOTICS_CSP_HEADER=Content-Security-Policy
+else
+    EDUBOTICS_CSP_HEADER=Content-Security-Policy-Report-Only
+fi
+export EDUBOTICS_CSP_HEADER EDUBOTICS_CSP_POLICY
+echo "18-edubotics-csp: $EDUBOTICS_CSP_HEADER: $EDUBOTICS_CSP_POLICY"
+
+# The report sink's socket (nginx.web.conf.template): a socket left behind by a
+# killed nginx would make the next start fail to bind it.
+rm -f /tmp/edubotics-csp-report.sock
+unset edubotics_csp_file

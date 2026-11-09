@@ -52,6 +52,14 @@
 //      the scope. So a reported failure sweeps the key itself.
 //   5. the robot's token slot clear is awaited (bounded) — see below — and the
 //      scrub runs AGAIN, for whatever the two await windows re-persisted.
+//   6. Orange Pi only: the ROBOT session ends (features/piAuth,
+//      `endPiSessionOnLogout`, a keepalive POST that survives the reload, NOT
+//      awaited). It is the last remote step on purpose: the token-slot clear of
+//      step 5 runs over rosbridge, and if that websocket has to be re-opened
+//      its gate needs the robot session still alive. Ending it any earlier
+//      would let a dropped socket keep the previous student's token on the
+//      robot. Its local half — this browser treats the robot as locked — is
+//      synchronous, so nothing in this document can still use the session.
 //
 // THE ROBOT'S TOKEN SLOT. The student's Hugging-Face token lives in ONE slot on
 // the robot (features/hfToken/robotChannel), and the next student at a shared PC
@@ -79,6 +87,7 @@ import { signedOut } from '../features/session/sessionActions';
 import { endCloudInferenceOnLogout } from '../features/cloudInference/controller';
 import { CLEAR_BOUND_MS, clearRobotHfToken } from '../features/hfToken/robotChannel';
 import { forgetVormachenCopy } from '../components/Workshop/code/vormachenClipboard';
+import { endPiSessionOnLogout } from '../features/piAuth/piAuth';
 import { clearStudentScopedStorage, clearSupabaseSessionKeys } from './sessionScope';
 
 // Begin clearing the robot's token slot and hand back a promise that NEVER
@@ -163,6 +172,14 @@ export const signOutStudent = ({ reload = true } = {}) => async (dispatch, getSt
   // `removeItem` calls; reasoning about which callers are still alive does not
   // stay correct.
   clearStudentScopedStorage();
+  // Step 6 (Orange Pi): end the ROBOT session — after the token-slot clear,
+  // which may have needed it to re-open rosbridge. Keepalive, never awaited,
+  // never throws; a no-op off a Pi.
+  try {
+    endPiSessionOnLogout();
+  } catch (_) {
+    /* the sign-out never fails on the robot's account */
+  }
 
   if (!reload) return;
   // The blunt-but-complete step, and the reason the broadcast does not have to

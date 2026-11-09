@@ -9,6 +9,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { rsControlBase, usePiMode } from '../utils/piMode';
+import { noteUnauthorized } from '../features/piAuth/piAuth';
 
 // The Roboter-Studio control bridge probe, moved out of RunControls so every
 // Roboter-Studio surface reads ONE answer to "is the leader arm on?".
@@ -39,6 +40,9 @@ export async function probeRsStatus(base) {
   const timer = setTimeout(() => ctrl.abort(), RS_STATUS_TIMEOUT_MS);
   try {
     const res = await fetch(`${base}/roboter-studio/status`, { signal: ctrl.signal });
+    // Orange Pi robot login: a 401 means the session is gone — re-check it
+    // (a no-op off a Pi).
+    if (res.status === 401) noteUnauthorized();
     if (!res.ok) return UNAVAILABLE;
     const body = await res.json().catch(() => ({}));
     // A `null` body throws on the property read and lands in the catch — the

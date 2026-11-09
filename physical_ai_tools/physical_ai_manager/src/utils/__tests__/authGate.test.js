@@ -47,6 +47,66 @@ function base(overrides = {}) {
 
 const EVERY_PAGE = Object.values(PageType);
 
+describe('studentAuthGateDecision — the Orange Pi robot login (2026-11-10)', () => {
+  it('shows the claim screen on EVERY page of an unclaimed Pi', () => {
+    // Owner decision 3: before a teacher/admin claims the Pi with the setup
+    // code, no robot route answers — the System tab included.
+    for (const page of EVERY_PAGE) {
+      for (const isAuthenticated of [false, true]) {
+        expect(
+          studentAuthGateDecision(base({ piMode: true, page, isAuthenticated, piLogin: 'unclaimed' }))
+        ).toBe('claim');
+      }
+    }
+  });
+
+  it('gates the System tab like every tab on a Pi that requires the login', () => {
+    // Owner decision 1: the carve-out ended where the robot asks for a login.
+    expect(
+      studentAuthGateDecision(base({ piMode: true, page: PageType.SYSTEM, piLogin: 'required' }))
+    ).toBe('login');
+    expect(
+      studentAuthGateDecision(base({
+        piMode: true, page: PageType.SYSTEM, piLogin: 'required', isAuthenticated: true,
+      }))
+    ).toBe('app');
+  });
+
+  it('keeps the carve-out where the robot asks for no login', () => {
+    // An agent from before the login (its routes are open; „Aktualisieren" is
+    // the way out) and an agent that does not answer (the page says so) both
+    // read as 'none'.
+    expect(
+      studentAuthGateDecision(base({ piMode: true, page: PageType.SYSTEM, piLogin: 'none' }))
+    ).toBe('app');
+  });
+
+  it('waits for the first answer of the robot instead of guessing', () => {
+    expect(
+      studentAuthGateDecision(base({ piMode: true, page: PageType.SYSTEM, piLogin: 'pending' }))
+    ).toBe('loading');
+  });
+
+  it('refuses the offline escape where nothing works without a login', () => {
+    expect(
+      studentAuthGateDecision(base({
+        piMode: true, page: PageType.HOME, piLogin: 'required', offlineOverride: true,
+      }))
+    ).toBe('login');
+    // …and leaves it alone everywhere else (Windows, a legacy Pi agent).
+    expect(studentAuthGateDecision(base({ offlineOverride: true }))).toBe('app');
+    expect(
+      studentAuthGateDecision(base({ piMode: true, piLogin: 'none', offlineOverride: true }))
+    ).toBe('app');
+  });
+
+  it('never applies a Pi rule off a Pi', () => {
+    for (const piLogin of ['unclaimed', 'required', 'pending']) {
+      expect(studentAuthGateDecision(base({ piMode: false, piLogin }))).toBe('login');
+    }
+  });
+});
+
 describe('studentAuthGateDecision', () => {
   it('never traps an Orange Pi on its System tab', () => {
     // docker-compose.opi.yml brings the manager up with the robot tier DOWN,
@@ -173,7 +233,7 @@ describe('isCloudUnreachableAuthError', () => {
 
 // ── The WIRING, as source text ──────────────────────────────────────────────
 describe('StudentApp asks the gate the right question', () => {
-  it('feeds studentAuthGateDecision all five inputs', () => {
+  it('feeds studentAuthGateDecision all six inputs', () => {
     // A call site that stops passing `piMode` leaves every assertion above
     // green while bricking every Orange Pi in the room.
     const call = /studentAuthGateDecision\(\{([\s\S]*?)\}\)/.exec(appSrc);
@@ -185,9 +245,23 @@ describe('StudentApp asks the gate the right question', () => {
       'offlineOverride',
       'piMode',
       'page',
+      'piLogin',
     ]) {
       expect(args).toContain(input);
     }
+  });
+
+  it('starts the robot login and gates rosbridge on it in Pi mode only', () => {
+    // The gate effect must exist, be Pi-only, and come BEFORE the rosbridge
+    // seed, or the first socket opens before the gate is in place.
+    const gateAt = appSrc.indexOf('rosConnectionManager.setConnectGate(ensurePiSession)');
+    const seedAt = appSrc.indexOf('dispatch(setRosHost(defaultRosHost))');
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(seedAt).toBeGreaterThan(gateAt);
+    const effect = appSrc.slice(appSrc.lastIndexOf('useEffect(', gateAt), gateAt);
+    expect(effect).toContain('!piMode');
+    expect(appSrc).toContain('setPiAccessToken(sessionAccessToken');
+    expect(appSrc).toContain("authGate === 'claim'");
   });
 
   it('makes the auth bootstrap TOTAL, so the spinner can always clear', () => {

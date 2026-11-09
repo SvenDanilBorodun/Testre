@@ -36,6 +36,16 @@ from unittest.mock import MagicMock, patch
 SETUP_DIR = Path(__file__).resolve().parents[2]  # robotis_ai_setup/
 sys.path.insert(0, str(SETUP_DIR))
 
+# Robot login (pi_auth): never read or write the real /var/lib/edubotics claim
+# state and never write a minted setup code to a console from a test. Set before
+# any AgentApp is built; pi_auth resolves the path at call time. The servers
+# below bind 127.0.0.1, so their peer is LOOPBACK and trusted (no session
+# needed) exactly as an operator's curl on the Pi is; the gateway behaviour
+# (a session required) is test_pi_auth.py's subject.
+os.environ.setdefault("EDUBOTICS_PI_AUTH_FILE", os.path.join(
+    tempfile.mkdtemp(prefix="pi-auth-test-"), "pi_auth.json"))
+os.environ.setdefault("EDUBOTICS_PI_CONSOLE", "")
+
 from pi_agent import agent  # noqa: E402
 from pi_agent import config_generator  # noqa: E402
 from pi_agent import phone_camera  # noqa: E402
@@ -359,7 +369,7 @@ class TestLifecycleLockIsBounded(_ServerBase):
             ("/scan-arms", {}),
             ("/cameras/roles", {"cameras": [{"path": "/dev/video0", "role": "scene"}]}),
             ("/robot-type", {"robot_type": "omx_full"}),
-            ("/factory-reset", {"confirm": True, "confirm_again": True}),
+            ("/factory-reset", {"confirm": True, "confirm_again": True, "confirm_text": "ZURÜCKSETZEN"}),
         ):
             with self.subTest(path=path):
                 code, payload = self._post(path, body, origin=None)
@@ -3211,6 +3221,11 @@ class _RobotTypeBase(_ServerBase):
         self._status = {}
         p = patch.object(agent.docker_manager, "get_container_status",
                          side_effect=lambda *a, **k: dict(self._status))
+        p.start()
+        self.addCleanup(p.stop)
+        # The robot-login probe of the manager's nginx is test_pi_auth.py's
+        # subject; here the manager is the current one.
+        p = patch.object(agent.AgentApp, "_manager_login_state", return_value="enforced")
         p.start()
         self.addCleanup(p.stop)
 

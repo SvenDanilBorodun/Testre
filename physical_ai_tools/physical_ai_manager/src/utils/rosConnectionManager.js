@@ -61,6 +61,22 @@ class RosConnectionManager {
     this.maxReconnectAttempts = 30;
     this.reconnectTimer = null;
     this.intentionalDisconnect = false;
+    // Orange Pi robot login (features/piAuth): an async function that must
+    // resolve before a websocket is opened. Null off a Pi.
+    this.connectGate = null;
+    // Bumped by every disconnect(): a gated attempt that outlived a disconnect
+    // neither opens a socket nor revives the reconnect loop.
+    this.disconnectGeneration = 0;
+  }
+
+  /**
+   * Install the connect gate (Pi mode) or remove it (null). A gate that
+   * rejects fails this attempt WITHOUT opening a socket; the reconnect loop
+   * keeps trying, so the connection comes up once the robot session exists.
+   * @param {(() => Promise<void>)|null} gate
+   */
+  setConnectGate(gate) {
+    this.connectGate = typeof gate === 'function' ? gate : null;
   }
 
   /**
@@ -118,7 +134,44 @@ class RosConnectionManager {
     console.log('Creating new global ROS connection to:', rosbridgeUrl);
     this.connecting = true;
 
-    this.connectionPromise = new Promise((resolve, reject) => {
+    if (this.connectGate) {
+      // Pi robot login: no websocket before a session. ONE gated attempt for
+      // every concurrent caller (they all await this promise).
+      const gate = this.connectGate;
+      const generation = this.disconnectGeneration;
+      this.connectionPromise = (async () => {
+        try {
+          await gate();
+        } catch (error) {
+          this.connecting = false;
+          this.connectionPromise = null;
+          // Keep the loop alive: no socket was opened, so no 'close' will
+          // schedule the next attempt, and the first attempt after a URL change
+          // still carries disconnect()'s intentional flag — without this the
+          // page would never connect once the student logs in. Unless the page
+          // itself disconnected meanwhile (a newer generation), and never
+          // stacking a second timer on a pending one.
+          if (generation === this.disconnectGeneration) {
+            this.intentionalDisconnect = false;
+            if (!this.reconnectTimer) this._scheduleReconnect();
+          }
+          throw new Error(`ROS connection waits for the robot login: ${error.message || error}`);
+        }
+        if (generation !== this.disconnectGeneration) {
+          throw new Error('ROS connection was closed while it waited for the robot login');
+        }
+        return this._openSocket(rosbridgeUrl);
+      })();
+      return this.connectionPromise;
+    }
+
+    this.connectionPromise = this._openSocket(rosbridgeUrl);
+    return this.connectionPromise;
+  }
+
+  /** Open the websocket (after any connect gate). */
+  _openSocket(rosbridgeUrl) {
+    return new Promise((resolve, reject) => {
       const ros = new ROSLIB.Ros({ url: rosbridgeUrl });
 
       const connectionTimeout = setTimeout(() => {
@@ -165,8 +218,6 @@ class RosConnectionManager {
         this._scheduleReconnect();
       });
     });
-
-    return this.connectionPromise;
   }
 
   /**
@@ -187,6 +238,7 @@ class RosConnectionManager {
       + `in ${delay}ms`);
 
     this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null;
       if (this.intentionalDisconnect) return;
       try {
         await this.getConnection(this.url);
@@ -201,6 +253,7 @@ class RosConnectionManager {
    */
   disconnect() {
     this.intentionalDisconnect = true;
+    this.disconnectGeneration += 1;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

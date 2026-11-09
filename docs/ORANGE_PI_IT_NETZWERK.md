@@ -11,7 +11,8 @@
 ## Kurzfassung (TL;DR für das Ticket)
 
 1. **Eigenes Robotik-VLAN** (z. B. `ROBOTIK`) mit **abgeschalteter
-   Client-Isolation**. Die Pis gehören **kabelgebunden** hinein, die
+   Client-Isolation** — **Voraussetzung für den Betrieb** (siehe „Warum
+   überhaupt ein eigenes Netzsegment?"). Die Pis gehören **kabelgebunden** hinein, die
    Schüler-PCs erreichen es über eine passende SSID **oder** über die
    Firewall-Freigabe in Schritt 3.
 2. **DHCP-Reservierungen** für jeden Pi anhand der **MAC-Adresse auf dem
@@ -32,14 +33,19 @@ Ticket-Warteschlange starten.
 
 ## Warum überhaupt ein eigenes Netzsegment?
 
-Die EduBotics-Roboterstation bindet ihren Steuer-Port 80 (Web-Oberfläche,
-Robotersteuerung und Kamerabild über denselben Proxy) **offen ins LAN, ohne
-Authentifizierung** — das ist eine bewusste
-Produktentscheidung für den Klasseneinsatz. Das eigene Robotik-VLAN ist
-daher **gleichzeitig die Sicherheitsgrenze und die Lösung für die
-mDNS-Erreichbarkeit** (`.local`-Namen scheitern zuverlässig genau dort, wo
-VLAN-Grenzen oder Client-Isolation im Weg stehen). Beides kommt mit
-demselben Schritt.
+Die EduBotics-Roboterstation bedient alles über Port 80 (Web-Oberfläche,
+Robotersteuerung, Kamerabild, Datensätze, System-Fenster). Seit November 2026
+verlangt jeder dieser Zugriffe eine **Anmeldung mit einem EduBotics-Konto**;
+ein Gerät ohne Konto erreicht den Roboter nicht mehr. Die Verbindung ist aber
+**unverschlüsselt (HTTP, kein TLS)**: wer im selben Netzsegment mitlesen kann,
+kann eine laufende Anmeldung abgreifen — das Anmelde-Cookie des Roboters
+(höchstens 15 Minuten gültig) und, während der Anmeldung, das Zugangs-Token
+des EduBotics-Kontos (höchstens eine Stunde gültig). Ein **eigenes
+Robotik-Segment** (VLAN oder eigener Router), in dem nur die Pis und die
+Klassengeräte hängen, ist deshalb eine **schriftliche Voraussetzung für den
+Betrieb**. Es ist **gleichzeitig die Lösung für die mDNS-Erreichbarkeit**
+(`.local`-Namen scheitern zuverlässig genau dort, wo VLAN-Grenzen oder
+Client-Isolation im Weg stehen). Beides kommt mit demselben Schritt.
 
 ---
 
@@ -95,7 +101,7 @@ Robotik-VLAN hängen — sonst gilt die Zeile für ihr eigenes Netz).
 
 | Zweck | Wer | Ziel-Hosts (FQDN) |
 |---|---|---|
-| EduBotics Cloud-API (Update-Abfrage `/version`, Training, Modelle) | Pi, Browser | `scintillating-empathy-production-1068.up.railway.app` |
+| EduBotics Cloud-API (Update-Abfrage `/version`, **Anmeldung am Roboter** — der Pi prüft jede Anmeldung dort —, Training, Modelle) | Pi, Browser | `scintillating-empathy-production-1068.up.railway.app` |
 | Agent-Update (das geprüfte Paket aus dem Download-Kanal) | Pi | `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com` (zusammen: `github.com`, `*.githubusercontent.com`) |
 | Container-Images (GHCR) | Pi | `ghcr.io`, `pkg-containers.githubusercontent.com` |
 | Container-Images, Ausweichweg (Docker Hub) | Pi | `registry-1.docker.io`, `auth.docker.io`, `production.cloudfront.docker.com`, `production.cloudflare.docker.com` (Docker wechselt das Download-Netz; beide freigeben) |
@@ -175,9 +181,11 @@ migrieren.
 ## Tier 3 — ganz ohne Netzfreigaben (Notbetrieb)
 
 - **(a) Direktes Ethernet-Kabel PC ↔ Pi.** Link-Local-Adressierung + avahi
-  funktionieren auf einer Direktverbindung ohne jede Konfiguration; Aufnahme,
-  Teleop und Roboter Studio laufen, die Cloud-Schritte warten auf eine
-  spätere Internetverbindung.
+  funktionieren auf einer Direktverbindung ohne jede Konfiguration. **Seit der
+  Roboter-Anmeldung (November 2026) braucht der Pi aber Internet**, um eine
+  Anmeldung zu prüfen: ohne Internet bleibt der Roboter gesperrt. Dieser
+  Notbetrieb geht daher nur, wenn der Pi zusätzlich eine Internetverbindung
+  hat (z. B. WLAN oder ein Hotspot).
 - **(b) Kiosk-Modus.** `EDUBOTICS_LAN_OPEN=0` + Monitor/Tastatur direkt am Pi —
   exponiert nichts ins Netz, braucht nur ausgehendes HTTPS für die
   Cloud-Anteile.
@@ -190,6 +198,7 @@ migrieren.
 |---|---|---|
 | „Updates schlagen mit Zertifikatfehler fehl" / „Zertifikat nicht echt" | TLS-Inspektion signiert die Verbindung neu | Ausnahme Schritt 5 |
 | „Anmeldung läuft ständig ab" | TLS-Inspektion / Supabase-Host blockiert | Egress Schritt 4 + Ausnahme Schritt 5 |
+| „Der Roboter erreicht die EduBotics-Cloud gerade nicht und kann die Anmeldung deshalb nicht prüfen" | Der **Pi** erreicht die Cloud-API nicht (Egress gesperrt oder TLS-Inspektion) | Egress Schritt 4 (Cloud-API **für den Pi**) + Ausnahme Schritt 5 |
 | `edubotics-NN.local` nicht auffindbar | mDNS über VLAN/Isolation gefiltert oder `EnableMDNS=0` | `http://<IP>/` vom Etikett verwenden; optional Reflektor Schritt 7 |
 | Web-App lädt, aber der Roboter bleibt „Getrennt" („Verbindung zum Roboter blockiert?") | Eine Middlebox bricht die WebSocket-Verbindung auf Port 80 (`/rosbridge`) ab, oder die Roboter-Umgebung läuft nicht | Umgebung starten; sonst WebSocket auf Port 80 zulassen, Schritt 3 |
 | Cloud-Inferenz bricht ab mit „Die Cloud ist nicht erreichbar. Bitte die Internetverbindung des Roboters prüfen." | `*.modal.direct` blockiert oder per TLS-Inspektion neu signiert | Egress Schritt 4 + Ausnahme Schritt 5 |
@@ -199,7 +208,10 @@ migrieren.
 
 - **80** = der eine Roboter-Port (Bedienung, Kamera und Steuerung laufen über
   denselben Proxy).
-- **Egress 443** = Container-Images, KI-Datensätze, Cloud-Training, Anmeldung.
+- **Egress 443** = Container-Images, KI-Datensätze, Cloud-Training, Anmeldung
+  (auch die Anmeldung am Roboter: der Pi prüft jede Anmeldung bei der Cloud-API).
+- **Eigenes Segment** = Port 80 ist unverschlüsselt; die Anmeldung schützt vor
+  Geräten ohne Konto, aber nicht vor Mitlesern im selben Netz.
 - **Keine TLS-Inspektion** = Image-Pulls und der Updater prüfen echte
   Zertifikate; ein Re-Signieren bricht sie **absichtlich**.
 - **Proxy-Bypass für `*.local`** = lokale Gerätenamen dürfen nicht an den

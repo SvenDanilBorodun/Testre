@@ -18,6 +18,15 @@ import '../components/sucher-pages/system.css';
 import { usePiMode } from '../utils/piMode';
 import { useAgentUpdate } from '../hooks/useAgentUpdate';
 import { toastIcon } from '../components/icons/toast';
+import { noteUnauthorized, setPiResetCode } from '../features/piAuth/piAuth';
+
+// The typed confirmation a factory reset needs (owner decision 5, the agent's
+// _FACTORY_RESET_CONFIRM_WORD): compared case-insensitively, umlaut included.
+export const FACTORY_RESET_WORD = 'ZURÜCKSETZEN';
+export function factoryResetWordMatches(typed) {
+  return typeof typed === 'string'
+    && typed.trim().toLocaleLowerCase('de-DE') === FACTORY_RESET_WORD.toLocaleLowerCase('de-DE');
+}
 
 // ── same-origin agent fetch helper ───────────────────────────────────────────
 
@@ -28,6 +37,8 @@ async function sysFetch(path, { method = 'GET', body } = {}) {
     opts.body = JSON.stringify(body);
   }
   const res = await fetch(`/api/system${path}`, opts);
+  // The robot login: a 401 means the session is gone — re-check it.
+  if (res.status === 401) noteUnauthorized();
   let data = {};
   try {
     data = await res.json();
@@ -132,6 +143,7 @@ export default function SystemPage() {
 
   const [resetStep, setResetStep] = useState(0); // 0 idle · 1 confirm · 2 final
   const [resetting, setResetting] = useState(false);
+  const [resetWord, setResetWord] = useState('');
 
   const [protokollOpen, setProtokollOpen] = useState(false);
   const [logLines, setLogLines] = useState([]);
@@ -388,18 +400,28 @@ export default function SystemPage() {
     try {
       const { ok, data } = await sysFetch('/factory-reset', {
         method: 'POST',
-        body: { confirm: true, confirm_again: true },
+        body: { confirm: true, confirm_again: true, confirm_text: resetWord },
       });
-      if (ok) toast.success(data.message || 'Daten zurückgesetzt.');
-      else toast.error(data.message || 'Zurücksetzen fehlgeschlagen.');
+      if (ok) {
+        toast.success(data.message || 'Daten zurückgesetzt.', { duration: 8000 });
+        // The reset returned the Pi to UNCLAIMED and answered its new setup
+        // code once: hand it to the claim screen (memory only), which the page
+        // shows next, prefilled.
+        if (typeof data.setup_code === 'string' && data.setup_code) {
+          setPiResetCode(data.setup_code);
+        }
+      } else {
+        toast.error(data.message || 'Zurücksetzen fehlgeschlagen.');
+      }
     } catch {
       toast.error('Der Agent ist nicht erreichbar.');
     } finally {
       setResetting(false);
       setResetStep(0);
+      setResetWord('');
       refreshAgentStatus();
     }
-  }, [refreshAgentStatus]);
+  }, [refreshAgentStatus, resetWord]);
 
   // ── Netzwerk-Check ─────────────────────────────────────────────────────────
   const handleNetCheck = useCallback(async () => {
@@ -1059,13 +1081,38 @@ export default function SystemPage() {
           {resetStep === 2 && (
             <div className="rounded-[14px] bg-[var(--danger-wash)] p-3 shadow-[inset_0_0_0_1px_#F1C4C4]">
               <p className="text-sm font-medium text-[color:var(--danger)] mb-2">
-                Letzte Bestätigung: Dies löscht endgültig alle lokalen Daten.
+                Letzte Bestätigung: Dies löscht endgültig alle lokalen Daten. Danach
+                ist der Roboter nicht mehr eingerichtet und braucht den neuen
+                Einrichtungscode, den du gleich siehst.
               </p>
+              <label className="block mb-2">
+                <span className="text-xs text-[var(--ink-2)] block mb-1">
+                  Zur Bestätigung „{FACTORY_RESET_WORD}“ eintippen
+                </span>
+                <input
+                  type="text"
+                  aria-label={`Zur Bestätigung ${FACTORY_RESET_WORD} eintippen`}
+                  className="w-full h-9 px-2 bg-white border border-[var(--line)] rounded-[8px] text-sm text-[var(--ink)]"
+                  value={resetWord}
+                  onChange={(e) => setResetWord(e.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
+                  disabled={resetting}
+                />
+              </label>
               <div className="flex items-center gap-2">
-                <Btn variant="secondary" onClick={() => setResetStep(0)} disabled={resetting}>
+                <Btn
+                  variant="secondary"
+                  onClick={() => { setResetStep(0); setResetWord(''); }}
+                  disabled={resetting}
+                >
                   Abbrechen
                 </Btn>
-                <Btn variant="danger" onClick={handleReset} disabled={resetting}>
+                <Btn
+                  variant="danger"
+                  onClick={handleReset}
+                  disabled={resetting || !factoryResetWordMatches(resetWord)}
+                >
                   {resetting ? 'Wird gelöscht …' : 'Endgültig löschen'}
                 </Btn>
               </div>

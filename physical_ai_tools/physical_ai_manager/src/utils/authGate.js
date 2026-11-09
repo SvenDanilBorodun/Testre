@@ -27,7 +27,10 @@ import PageType from '../constants/pageType';
  *   service unreachable (see isCloudUnreachableAuthError).
  * @param {boolean} o.piMode          this browser is the Orange Pi's own UI.
  * @param {string}  o.page            the current PageType.
- * @returns {'app'|'loading'|'login'}
+ * @param {'none'|'pending'|'unclaimed'|'required'} [o.piLogin] the Pi's robot
+ *   login (features/piAuth::piLoginOf); 'none' off a Pi, for an agent that does
+ *   not answer and for one from before the login (version skew).
+ * @returns {'app'|'loading'|'login'|'claim'}
  */
 export function studentAuthGateDecision({
   isAuthLoading,
@@ -35,21 +38,33 @@ export function studentAuthGateDecision({
   offlineOverride,
   piMode,
   page,
+  piLogin = 'none',
 }) {
-  // FIRST, so nothing can shadow it. The Orange Pi's System tab is the whole
-  // setup wizard AND the only repair surface — Modus/Robotertyp, „Arme
-  // scannen", HF-Token, „Umgebung starten", Update, Reset, Protokoll,
-  // Netzwerk-Check. docker-compose.opi.yml boots the manager with the robot
-  // tier DOWN BY DESIGN, so a student who cannot reach that tab has a brick,
-  // and the Netzwerk-Check is precisely the tool that diagnoses WHY a login
-  // fails (down link, filtered DNS, skewed clock breaking JWT validation).
-  // components/StartupGate.js carves the same page out of its own overlay for
-  // the same reason. Everything else on a Pi IS gated.
-  if (piMode && page === PageType.SYSTEM) return 'app';
+  // An UNCLAIMED Pi (never set up, or factory-reset) offers nothing but the
+  // claim screen, on every page: no robot route answers before a teacher or
+  // admin claims it with the setup code (owner decision 3).
+  if (piMode && piLogin === 'unclaimed') return 'claim';
+  // The Orange Pi's System tab is the whole setup wizard AND the only repair
+  // surface — Modus/Robotertyp, „Arme scannen", „Umgebung starten", Update,
+  // Reset, Protokoll, Netzwerk-Check — and docker-compose.opi.yml boots the
+  // manager with the robot tier DOWN BY DESIGN. It used to be carved out of
+  // the gate for that reason. Since the robot login (2026-11-10) the carve-out
+  // holds only where the robot asks for no login: an agent that does not
+  // answer (its own page says so) and an agent from before the login (its
+  // routes are open, and „Aktualisieren" there is the way forward). A Pi that
+  // REQUIRES a login gates the System tab like every tab (owner decision 1):
+  // its routes would refuse anyway. The Netzwerk-Check, the tool that
+  // diagnoses a failing login, stays reachable to a signed-in student (the
+  // agent serves it without a robot session).
+  if (piMode && piLogin === 'pending') return 'loading';
+  if (piMode && page === PageType.SYSTEM && piLogin !== 'required') return 'app';
   if (isAuthenticated) return 'app';
   // Above isAuthLoading on purpose: once the escape is taken, re-entering the
   // bootstrap must not flash a spinner over a student who is already working.
-  if (offlineOverride) return 'app';
+  // Not on a Pi that requires a robot login: without a login every robot
+  // transport refuses, so the escape would open an app in which nothing works
+  // (StudentApp does not even offer it there).
+  if (offlineOverride && !(piMode && piLogin === 'required')) return 'app';
   if (isAuthLoading) return 'loading';
   return 'login';
 }

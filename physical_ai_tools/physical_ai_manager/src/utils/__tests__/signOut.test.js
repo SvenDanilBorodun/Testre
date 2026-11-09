@@ -37,6 +37,7 @@ import {
 const signOutMock = vi.fn(() => Promise.resolve({ error: null }));
 const clearRobotHfTokenMock = vi.fn(() => Promise.resolve(true));
 const endCloudMock = vi.fn();
+const endPiMock = vi.fn(() => Promise.resolve(true));
 
 vi.mock('../../lib/supabaseClient', () => ({
   __esModule: true,
@@ -53,6 +54,14 @@ vi.mock('../../lib/supabaseClient', () => ({
 vi.mock('../../features/cloudInference/controller', () => ({
   __esModule: true,
   endCloudInferenceOnLogout: endCloudMock,
+}));
+
+// The Orange Pi's robot session end is a keepalive fetch, not a reducer —
+// mocked so the order assertion can observe it. Its own contract is tested in
+// features/piAuth/__tests__/piAuth.test.js.
+vi.mock('../../features/piAuth/piAuth', () => ({
+  __esModule: true,
+  endPiSessionOnLogout: endPiMock,
 }));
 
 vi.mock('../../features/hfToken/robotChannel', () => ({
@@ -110,6 +119,8 @@ beforeEach(() => {
   signOutMock.mockClear();
   signOutMock.mockImplementation(() => Promise.resolve({ error: null }));
   endCloudMock.mockReset();
+  endPiMock.mockReset();
+  endPiMock.mockImplementation(() => Promise.resolve(true));
   clearRobotHfTokenMock.mockReset();
   clearRobotHfTokenMock.mockImplementation(() => Promise.resolve(true));
   localStorage.clear();
@@ -737,5 +748,61 @@ describe('signOutStudent — the robot\'s token slot', () => {
     expect(store.getState().hfToken.account.fp).toBeNull();
     expect(store.getState().hfToken.sync.lastOwnFp).toBeNull();
     expect(store.getState().hfToken.epoch).toBe(1);
+  });
+});
+
+describe('signOutStudent — the Orange Pi robot session', () => {
+  const freshAuthedStore = async () => {
+    const ctx = await freshStore();
+    ctx.store.dispatch(ctx.auth.setSession({ access_token: 'jwt-abc' }));
+    return ctx;
+  };
+
+  it('ends it LAST, after the robot token-slot clear answered', async () => {
+    // The clear runs over rosbridge; if that socket has to be re-opened, its
+    // gate needs the robot session still alive.
+    const order = [];
+    endCloudMock.mockImplementation(() => order.push('cloud'));
+    clearRobotHfTokenMock.mockImplementation(() => {
+      order.push('hfClear');
+      return new Promise((resolve) => {
+        setTimeout(() => { order.push('hfAnswer'); resolve(true); }, 10);
+      });
+    });
+    signOutMock.mockImplementation(() => {
+      order.push('signOut');
+      return Promise.resolve({ error: null });
+    });
+    endPiMock.mockImplementation(() => {
+      order.push('pi');
+      return Promise.resolve(true);
+    });
+    const { store, signOutStudent } = await freshAuthedStore();
+    await store.dispatch(signOutStudent({ reload: false }));
+    expect(order).toEqual(['cloud', 'hfClear', 'signOut', 'hfAnswer', 'pi']);
+  });
+
+  it('is never awaited: a Pi that does not answer holds the sign-out not at all', async () => {
+    endPiMock.mockImplementation(() => new Promise(() => {}));
+    const { store, signOutStudent } = await freshAuthedStore();
+    const started = Date.now();
+    await store.dispatch(signOutStudent());
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(reloadMock).toHaveBeenCalledTimes(1);
+    expect(endPiMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a throwing end never breaks the sign-out', async () => {
+    endPiMock.mockImplementation(() => { throw new Error('boom'); });
+    const { store, signOutStudent } = await freshAuthedStore();
+    await expect(store.dispatch(signOutStudent({ reload: false }))).resolves.toBeUndefined();
+    expect(store.getState().auth.session).toBeNull();
+  });
+
+  it('runs before the reload and on the no-reload path alike', async () => {
+    const { store, signOutStudent } = await freshAuthedStore();
+    await store.dispatch(signOutStudent({ reload: false }));
+    expect(endPiMock).toHaveBeenCalledTimes(1);
+    expect(reloadMock).not.toHaveBeenCalled();
   });
 });

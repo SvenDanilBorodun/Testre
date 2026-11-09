@@ -29,6 +29,8 @@ import SystemPage from './pages/SystemPage';
 import LoginForm from './components/LoginForm';
 import CollisionModal from './components/CollisionModal';
 import PiUpdateGate from './components/PiUpdateGate';
+import PiClaimScreen from './components/PiClaimScreen';
+import PiLoginNotice from './components/PiLoginNotice';
 import StartupGate from './components/StartupGate';
 import { Avatar, LogoMark } from './components/EbUI';
 import { BrandMark } from './components/sucher';
@@ -60,6 +62,13 @@ import {
 import { isCapabilityVisible, robotGateDecision } from './utils/navGating';
 import { studentAuthGateDecision } from './utils/authGate';
 import { usePiMode } from './utils/piMode';
+import {
+  ensurePiSession,
+  piLoginOf,
+  setPiAccessToken,
+  startPiAuth,
+  usePiAuth,
+} from './features/piAuth/piAuth';
 import Icon from './components/icons/Icon';
 import { releasePointerFocus } from './components/Record/ActionBar';
 
@@ -94,6 +103,36 @@ function StudentApp() {
   // baked /pi-mode.json marker resolves (progressive reveal).
   const { piMode, piModeResolved } = usePiMode();
   const currentRosHost = useSelector((state) => state.ros.rosHost);
+
+  // Orange Pi ROBOT LOGIN (features/piAuth, 2026-11-10). Every robot transport
+  // on a Pi needs a robot session the agent mints for an EduBotics login, so on
+  // a Pi: start the login, hand it the Supabase token on every change (a new
+  // token re-exchanges), and gate the rosbridge connection on it. Declared
+  // BEFORE the rosbridge seed below on purpose: effects run in order, so the
+  // gate is in place before the first URL that can open a socket exists.
+  // Off a Pi none of this runs and nothing changes.
+  const piAuth = usePiAuth();
+  const piLogin = piMode ? piLoginOf(piAuth) : 'none';
+  const sessionAccessToken = useSelector((state) => state.auth.session?.access_token ?? null);
+  const authLoadingForPi = useSelector((state) => state.auth.isLoading);
+  useEffect(() => {
+    if (!piModeResolved || !piMode) return undefined;
+    startPiAuth();
+    rosConnectionManager.setConnectGate(ensurePiSession);
+    return () => rosConnectionManager.setConnectGate(null);
+  }, [piMode, piModeResolved]);
+  useEffect(() => {
+    if (!piModeResolved || !piMode) return;
+    setPiAccessToken(sessionAccessToken, { resolved: !authLoadingForPi });
+  }, [piMode, piModeResolved, sessionAccessToken, authLoadingForPi]);
+  // On a Pi that requires the robot login, ANY account may use the robot,
+  // the System tab included (owner decision 2), and a teacher or admin is who
+  // claims an unclaimed one (decision 3). So the student app's wrong-role
+  // bounce is off there; the pages other than System still say why a teacher
+  // account sees nothing (blockRoleMismatch below).
+  const piLoginActive = piMode && (piLogin === 'required' || piLogin === 'unclaimed');
+  const piLoginActiveRef = useRef(piLoginActive);
+  piLoginActiveRef.current = piLoginActive;
 
   // Initialise the local rosbridge host ONCE, not on every render. The
   // previous body-level `dispatch(setRosHost(...))` ran every render and
@@ -234,7 +273,7 @@ function StudentApp() {
   // tab's "Erneut versuchen" button calls) is shared.
   const handleProfile = useCallback(
     (me) => {
-      if (me.role !== 'student') {
+      if (me.role !== 'student' && !piLoginActiveRef.current) {
         toast.error(
           'Dieses Konto ist für die Web-App. Bitte nutze die Lehrer-URL.',
           { duration: 6000 }
@@ -434,7 +473,8 @@ function StudentApp() {
     ? `Abmelden (${identity})`
     : 'Abmelden';
 
-  const blockRoleMismatch = profileLoaded && role && role !== 'student';
+  const blockRoleMismatch = profileLoaded && role && role !== 'student'
+    && !(piLoginActive && page === PageType.SYSTEM);
 
   const authGate = studentAuthGateDecision({
     isAuthLoading,
@@ -442,6 +482,7 @@ function StudentApp() {
     offlineOverride,
     piMode,
     page,
+    piLogin,
   });
 
   return (
@@ -571,22 +612,34 @@ function StudentApp() {
                 sessionScope.test.js pins by exact count lives in the rail or
                 the mobile header, both outside <main>. */}
         <main className="flex-1 flex flex-col min-h-0 min-w-0 relative overflow-hidden">
+          <PiLoginNotice piMode={piMode} />
           {authGate === 'loading' ? (
             <div className="flex items-center justify-center h-full">
               <div className="text-[var(--ink-3)] text-lg">Laden…</div>
             </div>
+          ) : authGate === 'claim' ? (
+            <PiClaimScreen />
           ) : authGate === 'login' ? (
             <LoginForm
               subtitle="Anmelden, um mit deinem Roboter zu arbeiten"
-              footerHint="Noch kein Konto? Bitte frag deine Lehrkraft."
-              onOfflineContinue={() => setOfflineOverride(true)}
+              footerHint={
+                piLogin === 'required'
+                  ? 'Noch kein Konto? Bitte frag deine Lehrkraft. Dieser Roboter braucht eine Anmeldung mit Internetverbindung.'
+                  : 'Noch kein Konto? Bitte frag deine Lehrkraft.'
+              }
+              // No escape on a Pi that requires the robot login: without a
+              // login every robot transport refuses (utils/authGate).
+              onOfflineContinue={
+                piMode && piLogin === 'required' ? null : () => setOfflineOverride(true)
+              }
             />
           ) : blockRoleMismatch ? (
             <div className="flex flex-col items-center justify-center h-full p-10 text-center">
               <h2 className="text-xl font-bold text-[var(--ink)] mb-2">Falsches Konto</h2>
               <p className="text-[var(--ink-3)] max-w-md">
-                Dieses Konto ist für die Web-App gedacht. Bitte melde dich mit einem
-                Schüler-Konto auf diesem Gerät an.
+                {piLoginActive
+                  ? 'Mit einem Lehrkräfte- oder Admin-Konto ist an diesem Roboter nur das System-Fenster nutzbar. Für Aufnahme, Training und Roboter Studio bitte mit einem Schüler-Konto anmelden.'
+                  : 'Dieses Konto ist für die Web-App gedacht. Bitte melde dich mit einem Schüler-Konto auf diesem Gerät an.'}
               </p>
             </div>
           ) : page === PageType.HOME ? (

@@ -14,6 +14,7 @@
 // reloads the SPA on the new buildId once the manager is back.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { noteUnauthorized } from '../features/piAuth/piAuth';
 
 // Same-origin agent fetch (mirrors SystemPage.sysFetch). One connection through
 // the opi manager's nginx reverse proxy (trailing-slash proxy_pass strips the
@@ -25,6 +26,8 @@ async function sysFetch(path, { method = 'GET', body } = {}) {
     opts.body = JSON.stringify(body);
   }
   const res = await fetch(`/api/system${path}`, opts);
+  // The robot login: a 401 means the session is gone — re-check it.
+  if (res.status === 401) noteUnauthorized();
   let data = {};
   try {
     data = await res.json();

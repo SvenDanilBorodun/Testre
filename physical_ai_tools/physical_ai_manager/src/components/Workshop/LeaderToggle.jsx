@@ -28,6 +28,7 @@ import ROSLIB from 'roslib';
 import TaskPhase from '../../constants/taskPhases';
 import rosConnectionManager from '../../utils/rosConnectionManager';
 import { rsControlBase, usePiMode } from '../../utils/piMode';
+import { noteUnauthorized } from '../../features/piAuth/piAuth';
 import Icon from '../icons/Icon';
 import { toastIcon } from '../icons/toast';
 
@@ -107,6 +108,9 @@ async function rsFetch(base, path, options = {}, timeoutMs = STATUS_TIMEOUT_MS) 
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(`${base}${path}`, { ...options, signal: ctrl.signal });
+    // Orange Pi robot login: a 401 means the session is gone — re-check it
+    // (a no-op off a Pi).
+    if (res.status === 401) noteUnauthorized();
     const body = await res.json().catch(() => ({}));
     return { ok: res.ok, status: res.status, body };
   } finally {

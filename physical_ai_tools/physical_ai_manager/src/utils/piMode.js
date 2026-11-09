@@ -35,6 +35,7 @@ import React, {
   useMemo,
   useState,
 } from 'react';
+import { noteUnauthorized, PI_AUTH_PHASE, usePiAuth } from '../features/piAuth/piAuth';
 
 // ── module-level cache ───────────────────────────────────────────────────────
 //
@@ -189,6 +190,9 @@ export async function fetchAgentStatus() {
       cache: 'no-store',
       ...(ctrl ? { signal: ctrl.signal } : {}),
     });
+    // 401: the robot login (2026-11-10) — no robot session in this browser
+    // (yet). Not a healthy answer; tell the login so it re-checks.
+    if (res.status === 401) noteUnauthorized();
     if (!res.ok) return null;
     const json = await res.json();
     return json && typeof json === 'object' ? json : null;
@@ -283,6 +287,13 @@ export function PiModeProvider({ children }) {
     }
     return status;
   }, []);
+
+  // The robot login just produced a session: /status answers now, so read it at
+  // once instead of waiting out the backoff that the 401s before it built up.
+  const piAuthPhase = usePiAuth().phase;
+  useEffect(() => {
+    if (piMode && piAuthPhase === PI_AUTH_PHASE.SESSION) refreshAgentStatus();
+  }, [piMode, piAuthPhase, refreshAgentStatus]);
 
   const value = useMemo(
     () => ({ piMode, piModeResolved, agentStatus, agentReachable, refreshAgentStatus }),

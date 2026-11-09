@@ -3,6 +3,12 @@ import toast from 'react-hot-toast';
 import Modal from './Modal';
 import { Btn } from '../EbUI';
 import { numberDe } from '../../utils/hoursDe';
+import {
+  PASSWORD_MAX,
+  passwordErrorDe,
+  passwordHintDe,
+  passwordMinLength,
+} from '../../utils/passwordRules';
 
 const inputClass =
   'w-full h-10 px-3 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-sm text-[var(--ink)] placeholder:text-[var(--ink-4)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-wash)] transition';
@@ -15,6 +21,8 @@ export default function CreateStudentModal({ onClose, onSubmit, poolAvailable })
   const [loading, setLoading] = useState(false);
 
   const usernameValid = /^[a-z0-9][a-z0-9._-]{2,31}$/.test(username);
+  // A student's password: at least 8 characters (owner decision 2026-11-10).
+  const passwordError = passwordErrorDe(password, 'student');
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -22,8 +30,8 @@ export default function CreateStudentModal({ onClose, onSubmit, poolAvailable })
       toast.error('Benutzername: 3–32 Zeichen, Kleinbuchstaben, Ziffern, . _ -');
       return;
     }
-    if (password.length < 6) {
-      toast.error('Passwort mindestens 6 Zeichen');
+    if (passwordError) {
+      toast.error(passwordError);
       return;
     }
     setLoading(true);
@@ -56,7 +64,7 @@ export default function CreateStudentModal({ onClose, onSubmit, poolAvailable })
             variant="primary"
             type="submit"
             form="create-student-form"
-            disabled={loading || !usernameValid || !fullName || password.length < 6}
+            disabled={loading || !usernameValid || !fullName || passwordError !== null}
           >
             {loading ? 'Erstellen…' : 'Erstellen'}
           </Btn>
@@ -105,12 +113,18 @@ export default function CreateStudentModal({ onClose, onSubmit, poolAvailable })
             className={`${inputClass} font-mono`}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            placeholder="mindestens 6 Zeichen"
-            minLength={6}
+            placeholder={`mindestens ${passwordMinLength('student')} Zeichen`}
+            minLength={passwordMinLength('student')}
+            maxLength={PASSWORD_MAX}
+            aria-describedby="create-student-password-hint"
             required
           />
-          <p className="text-[11px] text-[var(--ink-3)] mt-1.5 leading-snug">
-            Gib das Passwort dem Schüler weiter. Er kann es nicht selbst ändern.
+          <p
+            id="create-student-password-hint"
+            className="text-[11px] text-[var(--ink-3)] mt-1.5 leading-snug"
+          >
+            {passwordHintDe('student')} Gib das Passwort dem Schüler weiter. Er kann es
+            nicht selbst ändern.
           </p>
         </label>
         <label className="block">

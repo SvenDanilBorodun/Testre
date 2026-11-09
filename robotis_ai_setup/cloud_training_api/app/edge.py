@@ -1,3 +1,7 @@
+# Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
+#
+# Proprietary and confidential. Licensed under the EduBotics End-User
+# Licence Agreement; see LICENSE at the repository root.
 """The cloud API's edge: body limits, rate limits, the failed-authentication cap
 and the client address (2026-11-10, API hardening).
 

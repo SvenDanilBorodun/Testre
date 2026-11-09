@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import get_current_teacher, get_user_profile
 from app.services import credit_texts_de as credit_texts
+from app.services import passwords
 from app.services.supabase_client import get_supabase
 from app.services.usernames import synthetic_email, validate_username
 from app.validators.workflow import validate_blockly_json
@@ -48,7 +49,9 @@ class ClassroomRename(BaseModel):
 
 class StudentCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=32)
-    password: str = Field(..., min_length=6, max_length=128)
+    # Checked by hand (services/passwords.py, ≥ 8 for students since 2026-11-10):
+    # pydantic's 422 is English and echoes the password back.
+    password: str
     full_name: str = Field(..., min_length=1, max_length=100)
     initial_credits: int = Field(default=0, ge=0, le=1000)
 
@@ -59,7 +62,7 @@ class StudentPatch(BaseModel):
 
 
 class PasswordReset(BaseModel):
-    new_password: str = Field(..., min_length=6, max_length=128)
+    new_password: str  # checked by hand, see StudentCreate.password
 
 
 class ClassroomSummary(BaseModel):
@@ -675,6 +678,9 @@ def create_student(
         username = validate_username(req.username)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    refusal = passwords.password_error_de(req.password, "student")
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
 
     existing = (
         supabase.table("users").select("id").eq("username", username).execute()
@@ -692,6 +698,8 @@ def create_student(
             }
         )
     except Exception as e:
+        if passwords.is_weak_password_error(e):
+            raise HTTPException(status_code=400, detail=passwords.WEAK_PASSWORD_DE)
         msg = str(e).lower()
         if "already" in msg or "exists" in msg or "duplicate" in msg:
             raise HTTPException(status_code=409, detail="Benutzername bereits vergeben")
@@ -1148,12 +1156,17 @@ def reset_student_password(
     teacher=Depends(get_current_teacher),
 ):
     _assert_student_owned(teacher["id"], student_id)
+    refusal = passwords.password_error_de(req.new_password, "student")
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
     supabase = get_supabase()
     try:
         supabase.auth.admin.update_user_by_id(
             student_id, {"password": req.new_password}
         )
     except Exception as e:
+        if passwords.is_weak_password_error(e):
+            raise HTTPException(status_code=400, detail=passwords.WEAK_PASSWORD_DE)
         logger.error("reset_student_password failed: %s", e)
         raise HTTPException(status_code=500, detail="Passwort konnte nicht gesetzt werden")
     return {"ok": True}

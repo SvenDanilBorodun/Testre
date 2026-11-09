@@ -1,3 +1,7 @@
+# Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
+#
+# Proprietary and confidential. Licensed under the EduBotics End-User
+# Licence Agreement; see LICENSE at the repository root.
 """Runs app/tests/edge_cases.py (the API's edge, 2026-11-10) in a child
 interpreter, where ``fastapi`` is the real package and not one of the stubs
 other suites of this package install during discovery."""

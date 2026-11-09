@@ -1,3 +1,7 @@
+# Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
+#
+# Proprietary and confidential. Licensed under the EduBotics End-User
+# Licence Agreement; see LICENSE at the repository root.
 """The API's edge (app/edge.py, 2026-11-10): the client address, the body
 limits, the per-user rate-limit key and the failed-authentication cap, mounted
 on a small FastAPI app exactly the way main.py mounts them.

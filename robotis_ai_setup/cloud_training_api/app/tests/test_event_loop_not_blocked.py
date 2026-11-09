@@ -1,3 +1,7 @@
+# Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
+#
+# Proprietary and confidential. Licensed under the EduBotics End-User
+# Licence Agreement; see LICENSE at the repository root.
 """No route or auth dependency blocks the event loop (API hardening, 2026-11-10).
 
 The API runs ONE uvicorn worker. A synchronous Supabase (or HTTP) call inside an

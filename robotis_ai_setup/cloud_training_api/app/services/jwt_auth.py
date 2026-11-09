@@ -1,3 +1,7 @@
+# Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
+#
+# Proprietary and confidential. Licensed under the EduBotics End-User
+# Licence Agreement; see LICENSE at the repository root.
 """Local verification of Supabase access tokens (owner decision 2026-11-10).
 
 Every authenticated request used to call ``supabase.auth.get_user(token)``, a

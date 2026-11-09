@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from app.auth import get_current_admin
 from app.routes.teacher import history_payload, parse_history_page, parse_request_id, pool_fields, teacher_summary
 from app.services import credit_texts_de as credit_texts
+from app.services import passwords
 from app.services.supabase_client import get_supabase
 from app.services.training_dispatch import pg_code
 from app.services.usernames import synthetic_email, validate_username
@@ -33,13 +34,15 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 class TeacherCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=32)
-    password: str = Field(..., min_length=6, max_length=128)
+    # Checked by hand (services/passwords.py, ≥ 12 for staff since 2026-11-10):
+    # pydantic's 422 is English and echoes the password back.
+    password: str
     full_name: str = Field(..., min_length=1, max_length=100)
     credits: int = Field(default=0, ge=0, le=10000)
 
 
 class PasswordReset(BaseModel):
-    new_password: str = Field(..., min_length=6, max_length=128)
+    new_password: str  # checked by hand, see TeacherCreate.password
 
 
 class TeacherSummary(BaseModel):
@@ -120,6 +123,9 @@ def create_teacher(req: TeacherCreate, admin=Depends(get_current_admin)):
         username = validate_username(req.username)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    refusal = passwords.password_error_de(req.password, "teacher")
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
 
     existing = (
         supabase.table("users").select("id").eq("username", username).execute()
@@ -137,6 +143,8 @@ def create_teacher(req: TeacherCreate, admin=Depends(get_current_admin)):
             }
         )
     except Exception as e:
+        if passwords.is_weak_password_error(e):
+            raise HTTPException(status_code=400, detail=passwords.WEAK_PASSWORD_DE)
         msg = str(e).lower()
         if "already" in msg or "exists" in msg or "duplicate" in msg:
             raise HTTPException(status_code=409, detail="Benutzername bereits vergeben")
@@ -376,6 +384,9 @@ def reset_teacher_password(
     req: PasswordReset,
     admin=Depends(get_current_admin),
 ):
+    refusal = passwords.password_error_de(req.new_password, "teacher")
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
     supabase = get_supabase()
     existing = (
         supabase.table("users").select("role").eq("id", teacher_id).execute()
@@ -385,6 +396,8 @@ def reset_teacher_password(
     try:
         supabase.auth.admin.update_user_by_id(teacher_id, {"password": req.new_password})
     except Exception as e:
+        if passwords.is_weak_password_error(e):
+            raise HTTPException(status_code=400, detail=passwords.WEAK_PASSWORD_DE)
         logger.error("reset_teacher_password failed: %s", e)
         raise HTTPException(status_code=500, detail="Passwort konnte nicht gesetzt werden")
     return {"ok": True}

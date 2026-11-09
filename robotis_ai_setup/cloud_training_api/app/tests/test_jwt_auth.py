@@ -1,3 +1,7 @@
+# Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
+#
+# Proprietary and confidential. Licensed under the EduBotics End-User
+# Licence Agreement; see LICENSE at the repository root.
 """The local access-token check (services/jwt_auth.py) and the auth dependencies
 (app/auth.py), owner decision 2026-11-10.
 

@@ -102,7 +102,10 @@ The base tag is pinned at `build-images.sh`'s `opi` case (`PAS_BASE_IMAGE`).
 CI builds this base, so an unchanged tag means every later build silently
 resolves the OLD published image and your edit ships nowhere.
 `ci.yml::base-version-guard` fails the PR if a non-comment edit to the base
-Dockerfile lands without the tag moving.
+Dockerfile lands without the tag moving. The same holds for the
+open_manipulator base: an edit to `open_manipulator/docker/Dockerfile` must
+move `OMX_BASE_IMAGE` (`open-manipulator-jetson-base:<tag>`) in the same
+commit, after `BUILD_BASE_OPI_OMX=1 PLATFORM=opi ./build-images.sh` pushed it.
 
 `Dockerfile.arm64cpu` is a stock `ros:jazzy-ros-base` build with plain PyPI:
 it pins `torch==2.7.0` + `torchvision==0.22.0` (the aarch64 PyPI 2.7.0 wheel

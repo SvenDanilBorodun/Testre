@@ -35,6 +35,7 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 - The Pi IT sheet names the phone-camera receiver on TCP 8444 (off by default, opened by no shipped page) and says the Hugging Face upload hosts were not measured.
 - The Dependabot actions PR was red by construction: `test_trainer_image_shape.py` pinned three action SHAs as literals. It now compares the trainer workflow's pins with the other workflows'. Majors stay proposed for GitHub Actions only.
 - Owner decision: the internet-facing cloud API stack gets patch-level and security PRs. Its `ignore` entries name only minor updates, because GitHub never applies an `update-types` ignore to security updates (changelog 2021-05-21; dependabot-core's `IgnoreCondition#ignored_versions`), while a bare name blocks them. `test_ci_supply_chain_pins.py::CloudApiPinsFollowRequirements` makes such a PR red until ci.yml installs the new version, and `test_trainer_image_shape.py` reads the boto3 pins from `requirements.txt` instead of literals.
+- `ci.yml::base-version-guard` now fences the Orange Pi's open_manipulator base too: a non-comment edit to `open_manipulator/docker/Dockerfile` must move `OMX_BASE_IMAGE` in `build-images.sh` (simulated diffs: no bump fails, a bump passes, a comment-only edit passes, a crossed or cosmetic bump fails). `bump-upstream-digests.sh` lists both bases it reports under "To change a base WE build".
 
 ### 2026-11-05 — preparing the private repository and the CI supply chain
 

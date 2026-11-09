@@ -196,8 +196,8 @@ report_row "$PAS_BASE" "docker/physical_ai_server/Dockerfile" || errors=$((error
 report_row "$OMX_BASE" "docker/open_manipulator/Dockerfile"   || errors=$((errors + 1))
 
 # Self-built bases. A MISSING here is a different diagnosis from an upstream
-# MISSING — it means the base Dockerfile was edited and nobody rebuilt/pushed
-# it (exactly what ci.yml::base-version-guard fences at review time).
+# MISSING — it means a base Dockerfile was edited and its tag moved, but nobody
+# rebuilt/pushed it (ci.yml::base-version-guard fences the tag move for both).
 report_row "$PAS_OPI_BASE" "build-images.sh (opi base, hand-built)"     || { errors=$((errors + 1)); selfbuilt_missing=1; }
 report_row "$OMX_OPI_BASE" "build-images.sh (opi OMX base, hand-built)" || { errors=$((errors + 1)); selfbuilt_missing=1; }
 
@@ -235,13 +235,20 @@ To bump a pinned tag (review first!):
   3. Smoke-test the GUI flow + a training job before pushing.
   4. Commit the digest bump in its own commit.
 
-To change a base WE build (Dockerfile.arm64cpu):
+To change a base WE build (the two Orange Pi bases):
+
+  physical-ai-server-opi-base   <- physical_ai_tools/physical_ai_server/Dockerfile.arm64cpu
+                                   rebuild: BUILD_BASE_OPI=1     PLATFORM=opi ./build-images.sh
+                                   pin:     PAS_BASE_IMAGE in build-images.sh (opi case)
+  open-manipulator-jetson-base  <- open_manipulator/docker/Dockerfile (historical repo name)
+                                   rebuild: BUILD_BASE_OPI_OMX=1 PLATFORM=opi ./build-images.sh
+                                   pin:     OMX_BASE_IMAGE in build-images.sh (opi case)
 
   1. Edit the base Dockerfile.
-  2. Rebuild + push it:  BUILD_BASE_OPI=1 PLATFORM=opi ./build-images.sh
-  3. Bump the matching PAS_BASE_IMAGE tag in build-images.sh, SAME commit —
-     ci.yml::base-version-guard enforces this. Nothing in CI builds these
-     bases, so an un-bumped tag means the release silently ships the old one.
+  2. Rebuild + push that base with its command above.
+  3. Bump its pin to the new tag in build-images.sh, SAME commit —
+     ci.yml::base-version-guard enforces this for both. Nothing in CI builds
+     these bases, so an un-bumped tag means the release silently ships the old one.
 
 Modal training base (CUDA) is pinned inline in
 modal_training/modal_app.py — bump that separately.

@@ -237,13 +237,19 @@ jobs:
           echo "rootfs-version-guard OK"
 
   base-version-guard:
-    # The self-built server BASE image is NOT built by CI. No workflow sets
-    # BUILD_BASE_OPI — a maintainer hand-builds the base once
-    # (`BUILD_BASE_OPI=1 PLATFORM=opi ./build-images.sh`) and pushes it, and
-    # every CI build thereafter just resolves the already-PUBLISHED tag pinned
-    # in build-images.sh via `docker manifest inspect`.
+    # The two self-built Orange Pi BASE images are NOT built by CI. No workflow
+    # sets BUILD_BASE_OPI or BUILD_BASE_OPI_OMX — a maintainer hand-builds a base
+    # once (`BUILD_BASE_OPI=1 PLATFORM=opi ./build-images.sh` for the CPU server
+    # base from Dockerfile.arm64cpu, `BUILD_BASE_OPI_OMX=1 PLATFORM=opi
+    # ./build-images.sh` for the open_manipulator base from
+    # open_manipulator/docker/Dockerfile) and pushes it, and every CI build
+    # thereafter just resolves the already-PUBLISHED tag pinned in
+    # build-images.sh (PAS_BASE_IMAGE / OMX_BASE_IMAGE in its opi case) via
+    # `docker manifest inspect`. (amd64 pulls ROBOTIS's published
+    # open_manipulator base, so an edit to that Dockerfile never reaches amd64
+    # either.)
     #
-    # So editing Dockerfile.arm64cpu does nothing on its own
+    # So editing either base Dockerfile does nothing on its own
     # — and does it QUIETLY. The release goes green while shipping the previous
     # base, and the edit looks landed because the file is in git. Rule §5 sends
     # people into exactly these files to bump LeRobot pins, which is what makes
@@ -299,7 +305,7 @@ jobs:
           # prefix also eats a real deleted line whose own text begins with
           # `-- ` at column 0 — git renders that as `--- <text>` — which would
           # let the guard wave through a Dockerfile edit as "no code change".
-          # No such line exists in the base Dockerfile today; this keeps the
+          # No such line exists in either base Dockerfile today; this keeps the
           # guard from quietly acquiring the blind spot it exists to prevent.
           has_code_change() {
             local changed
@@ -312,10 +318,12 @@ jobs:
           }
 
           # The tag pinned for a base repo, read out of build-images.sh at a
-          # given ref. Empty when the assignment is absent/renamed.
+          # given ref: `pin_tag <ref> <VARIABLE> <repo>` reads the
+          # `<VARIABLE>=...<repo>:<tag>` assignment. Empty when the assignment
+          # is absent/renamed.
           pin_tag() {
             git show "$1:$BUILD_SH" 2>/dev/null \
-              | sed -nE "s|^[[:space:]]*PAS_BASE_IMAGE=.*/$2:([A-Za-z0-9._-]+).*|\1|p" \
+              | sed -nE "s|^[[:space:]]*$2=.*/$3:([A-Za-z0-9._-]+).*|\1|p" \
               | head -1
           }
 
@@ -328,29 +336,34 @@ jobs:
           # below fails loudly rather than silently passing.
           pin_moved() {
             local before after
-            before="$(pin_tag "$BASE" "$1")"
-            after="$(pin_tag HEAD "$1")"
+            before="$(pin_tag "$BASE" "$1" "$2")"
+            after="$(pin_tag HEAD "$1" "$2")"
             [ -n "$after" ] && [ "$before" != "$after" ]
           }
 
           rc=0
           check() {
-            local dockerfile="$1" base_repo="$2" rebuild_cmd="$3"
+            local dockerfile="$1" pin_var="$2" base_repo="$3" rebuild_cmd="$4"
             if ! has_code_change "$dockerfile"; then
               echo "OK: ${dockerfile} — no non-comment changes, nothing to enforce."
               return 0
             fi
-            if pin_moved "$base_repo"; then
+            if pin_moved "$pin_var" "$base_repo"; then
               echo "OK: ${dockerfile} changed AND its ${base_repo} pin moved."
               return 0
             fi
-            echo "::error file=${dockerfile}::${dockerfile} changed, but the ${base_repo} tag in ${BUILD_SH} did not. This base is NOT built by CI — the build resolves the tag already published in the registry, so your edit would ship NOTHING while the release still goes green. Rebuild and push the base with '${rebuild_cmd}', then bump PAS_BASE_IMAGE to the new tag in this same commit. Comment-only edits are exempt."
+            echo "::error file=${dockerfile}::${dockerfile} changed, but the ${base_repo} tag in ${BUILD_SH} did not. This base is NOT built by CI — the build resolves the tag already published in the registry, so your edit would ship NOTHING while the release still goes green. Rebuild and push the base with '${rebuild_cmd}', then bump ${pin_var} to the new tag in this same commit. Comment-only edits are exempt."
             rc=1
           }
 
           check physical_ai_tools/physical_ai_server/Dockerfile.arm64cpu \
-                physical-ai-server-opi-base \
+                PAS_BASE_IMAGE physical-ai-server-opi-base \
                 'BUILD_BASE_OPI=1 PLATFORM=opi ./build-images.sh'
+          # The Orange Pi's open_manipulator base; its repo keeps the
+          # historical name open-manipulator-jetson-base (build-images.sh).
+          check open_manipulator/docker/Dockerfile \
+                OMX_BASE_IMAGE open-manipulator-jetson-base \
+                'BUILD_BASE_OPI_OMX=1 PLATFORM=opi ./build-images.sh'
 
           [ "$rc" = "0" ] || exit 1
           echo "base-version-guard OK"

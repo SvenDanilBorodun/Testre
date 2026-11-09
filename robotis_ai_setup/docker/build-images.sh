@@ -87,6 +87,12 @@ case "$PLATFORM" in
         # historical name open-manipulator-jetson-base (see BUILD_BASE_OPI_OMX
         # above). The SERVER base is a plain-PyPI CPU base built from
         # Dockerfile.arm64cpu.
+        # BASE TAG BUMP RULE (enforced by ci.yml::base-version-guard): this tag
+        # MUST move in the same commit as any non-comment edit to
+        # open_manipulator/docker/Dockerfile. No workflow sets
+        # BUILD_BASE_OPI_OMX, so an edited Dockerfile against an unchanged tag
+        # resolves the OLD published base. Rebuild+push it with
+        # `BUILD_BASE_OPI_OMX=1 PLATFORM=opi ./build-images.sh` first.
         OMX_BASE_IMAGE="${REGISTRY}/open-manipulator-jetson-base:4.1.4"
         # BASE TAG BUMP RULE (enforced by ci.yml::base-version-guard): this tag
         # MUST move in the same commit as any non-comment edit to

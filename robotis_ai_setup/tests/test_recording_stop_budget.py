@@ -43,6 +43,8 @@ _DOCKERFILE = _REPO / 'robotis_ai_setup/docker/physical_ai_server/Dockerfile'
 _LAUNCH = _REPO / 'physical_ai_tools/physical_ai_server/launch/physical_ai_server.launch.py'
 _HELPER = (_REPO / 'physical_ai_tools/physical_ai_server/physical_ai_server'
            / 'data_processing/recording_shutdown.py')
+_NODE = (_REPO / 'physical_ai_tools/physical_ai_server/physical_ai_server'
+         / 'physical_ai_server.py')
 _GUI_DM = _REPO / 'robotis_ai_setup/gui/app/docker_manager.py'
 _PI_DM = _REPO / 'robotis_ai_setup/pi_agent/docker_manager.py'
 
@@ -189,6 +191,42 @@ class TheBudgetChain(unittest.TestCase):
         self.assertLess(stop, src.index("['rm', '-f', *_ROBOT_TIER]"),
                         'rm -f SIGKILLs: it must come after the graceful stop')
         self.assertIn('timeout=timeout', src)
+
+
+class TheSmokeScenarioMirrorsTheNode(unittest.TestCase):
+    """The image-only smoke case (.github/scripts/record_fsm_smoke.py) is worth
+    only as much as it resembles the node: the same signal setup before
+    rclpy.init, the same finalize helper in the finally, both signals run."""
+
+    _SMOKE = _REPO / '.github/scripts/record_fsm_smoke.py'
+
+    def setUp(self):
+        self.src = self._SMOKE.read_text(encoding='utf-8')
+        self.tree = ast.parse(self.src)
+
+    def _function(self, name):
+        return next(n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+
+    def test_the_child_sets_sigint_like_the_node_before_rclpy_init(self):
+        child = ast.get_source_segment(self.src, self._function('shutdown_child'))
+        self.assertIn('signal.signal(signal.SIGINT, signal.SIG_DFL)', child)
+        self.assertLess(child.index('signal.signal(signal.SIGINT, signal.SIG_DFL)'),
+                        child.index('rclpy.init()'))
+        node_main = ast.unparse(_function(_NODE, 'main'))
+        self.assertIn('signal.signal(signal.SIGINT, signal.SIG_DFL)', node_main)
+
+    def test_the_child_finalizes_through_the_nodes_helper_in_its_finally(self):
+        child = ast.get_source_segment(self.src, self._function('shutdown_child'))
+        finally_src = child[child.index('finally:'):]
+        self.assertIn('recording_shutdown.finalize_for_shutdown(', finally_src)
+        self.assertIn('recording_shutdown.SHUTDOWN_FINALIZE_WAIT_S', finally_src)
+        # no interpreter teardown: LeRobot's __del__ must not be what saves the data
+        self.assertIn('os._exit(0)', child)
+
+    def test_both_signals_are_run(self):
+        main = ast.get_source_segment(self.src, self._function('main'))
+        self.assertIn("_shutdown_scenario('SIGINT')", main)
+        self.assertIn("_shutdown_scenario('SIGTERM')", main)
 
 
 if __name__ == '__main__':

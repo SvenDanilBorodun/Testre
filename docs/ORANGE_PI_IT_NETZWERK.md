@@ -67,7 +67,7 @@ dauerhaft, auch wenn mDNS auf gehärteten Schul-PCs deaktiviert ist.
 
 ### 3. Eingehende Freigaben (nur falls die Schüler-PCs in einem anderen VLAN sind)
 
-Nur dieser Port, sonst nichts eingehend:
+Nur dieser Port wird gebraucht:
 
 | Freigeben | Port | Zweck |
 |---|---|---|
@@ -76,6 +76,13 @@ Nur dieser Port, sonst nichts eingehend:
 Richtung: **Schüler-PC → Robotik-VLAN**. Keine Freigabe in die Gegenrichtung
 nötig. Die Ports **8080** und **9090** sind am Pi nur noch lokal
 (`127.0.0.1`) gebunden und **nicht** freizugeben.
+
+**TCP 8444 bitte ebenfalls nicht freigeben.** Der Pi-Agent enthält einen
+Empfang für eine Handy-Kamera (HTTPS auf Port 8444, auf allen
+Netzwerkschnittstellen). Er ist ab Werk **aus**, keine ausgelieferte Seite
+schaltet ihn ein, und der Betrieb braucht ihn nicht. Nur wenn er eigens
+eingeschaltet wird, nimmt er Bilder vom Handy an (Richtung Handy → Pi); ein
+Handy in einem anderen VLAN bräuchte dann genau diese Freigabe.
 
 ### 4. Ausgehende Freigaben (Robotik-VLAN → Internet)
 
@@ -92,7 +99,7 @@ Robotik-VLAN hängen — sonst gilt die Zeile für ihr eigenes Netz).
 | Agent-Update (das geprüfte Paket aus dem Download-Kanal) | Pi | `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com` (zusammen: `github.com`, `*.githubusercontent.com`) |
 | Container-Images (GHCR) | Pi | `ghcr.io`, `pkg-containers.githubusercontent.com` |
 | Container-Images, Ausweichweg (Docker Hub) | Pi | `registry-1.docker.io`, `auth.docker.io`, `production.cloudfront.docker.com`, `production.cloudflare.docker.com` (Docker wechselt das Download-Netz; beide freigeben) |
-| Datensätze / Modelle (Hugging Face) | Pi | `huggingface.co`, `*.huggingface.co`, `*.hf.co` (Downloads laufen über `*.cdn.hf.co` und `cas-server.xethub.hf.co`) |
+| Datensätze / Modelle (Hugging Face) | Pi | `huggingface.co`, `*.huggingface.co`, `*.hf.co` (Downloads laufen über `*.cdn.hf.co` und `cas-server.xethub.hf.co`; zum Hochladen siehe unten) |
 | Cloud-Inferenz (Modell auf einer Cloud-GPU in der EU) | Pi | `svendanilborodun--edubotics-inference-cloudinference.eu-west.modal.direct` (zusammen: `*.modal.direct`) |
 | Anmeldung / Datenbank (Supabase, auch WebSocket) | Browser | `fnnbysrjkfugsqzwcksd.supabase.co` |
 | Lehrer-Web-Dashboard (Railway) | Browser | `teacher-web-production.up.railway.app` |
@@ -109,7 +116,9 @@ Robotik-VLAN hängen — sonst gilt die Zeile für ihr eigenes Netz).
 | Agent-Paket und `/version` | wie oben (Cloud-API, `github.com`, `*.githubusercontent.com`) |
 
 Gemessen am 9. November 2026 (Weiterleitungen beim Download von GitHub, GHCR,
-Docker Hub und Hugging Face). Die Anbieter können ihre Download-Netze ändern;
+Docker Hub und Hugging Face). **Nicht gemessen** sind die Ziele beim Hochladen
+zu Hugging Face (Aufnahmen und Datensätze hochladen); erwartet werden
+`huggingface.co` und `*.hf.co`. Die Anbieter können ihre Download-Netze ändern;
 schlägt der „Netzwerk-Check" oder ein Image-Pull trotz Freigabe fehl, zeigt das
 Protokoll des Pi den blockierten Namen.
 

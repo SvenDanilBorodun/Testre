@@ -51,12 +51,16 @@ jobs:
           python-version: "3.12"
       - name: Install test dependencies
         run: |
-          python -m pip install --upgrade pip
-          # pyyaml: the validator jobs below. numpy + opencv-contrib-python-headless
+          python -m pip install pip==26.3
+          # EVERY package below is pinned (2026-11-10; tests/test_ci_supply_chain_pins.py):
+          # unpinned, numpy and opencv had floated to 2.5.4 and 5.0.0.93 while the
+          # server image ships 1.26.4 and 4.10.0.84, so the suites ran against a
+          # stack no robot has. pyyaml: the validator jobs below. numpy + opencv-contrib-python-headless
           # + pytest: the Roboter Studio workflow/IK test suite (pure-Python, no
           # ROS — the workflow modules import pupil_apriltags/rclpy lazily;
           # calibration uses cv2.aruco which is the contrib build; headless
-          # avoids GUI libs on the runner). cryptography: the cloud API's
+          # avoids GUI libs on the runner) — numpy and opencv equal the server
+          # image's (docker/physical_ai_server/Dockerfile). cryptography: the cloud API's
           # AES-GCM token envelope (042); pinned equal to its requirements.txt.
           # pyarrow + av + huggingface_hub: Daten 2.0 (spec §H8) — the versions the
           # server image ships (2.26.0), so the deps-free and pytest suites import
@@ -69,7 +73,7 @@ jobs:
           # boto3 + botocore: managed training (spec §4.12, FR-11) — the cloud API's
           # test_r2_client.py proves the presigned PUT's signed headers with real botocore;
           # pinned equal to cloud_training_api/requirements.txt.
-          python -m pip install pyyaml pytest numpy opencv-contrib-python-headless cryptography==49.0.0 \
+          python -m pip install pyyaml==6.0.3 pytest==9.2.0 numpy==1.26.4 opencv-contrib-python-headless==4.10.0.84 cryptography==49.0.0 \
             pyarrow==25.0.0 av==15.1.0 huggingface_hub==1.23.0 \
             fastapi==0.115.12 httpx==0.28.1 aiohttp==3.14.1 "uvicorn[standard]==0.34.2" \
             boto3==1.43.107 botocore==1.43.107

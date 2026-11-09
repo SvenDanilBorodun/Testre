@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -209,6 +210,55 @@ class CloudApiPinsFollowRequirements(unittest.TestCase):
                     if name in pins:
                         self.assertEqual(pins[name], {shipped[name]},
                                          f"ci.yml::{job_id} installs what requirements.txt ships")
+
+
+SERVER_DOCKERFILE = REPO / "robotis_ai_setup" / "docker" / "physical_ai_server" / "Dockerfile"
+# ci.yml::python-tests pins its server-side test deps to the server image's
+# versions (2026-11-10: unpinned, numpy and opencv had floated to 2.5.4 and
+# 5.0.0.93). CI package -> the server Dockerfile's package of the same release.
+SERVER_LOCKSTEP = {"numpy": "numpy", "opencv-contrib-python-headless": "opencv-contrib-python"}
+
+
+def _python_tests_installs() -> list[list[str]]:
+    """The package arguments of every `pip install` in ci.yml::python-tests."""
+    job = _load(WF / "ci.yml")["jobs"]["python-tests"]
+    runs = "\n".join(step.get("run", "") for step in job.get("steps") or [])
+    installs = []
+    for line in runs.replace("\\\n", " ").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if re.search(r"\bpip install\b", line):
+            args = shlex.split(line.split("pip install", 1)[1])
+            installs.append([a for a in args if not a.startswith("-")])
+    return installs
+
+
+class PythonTestsPinsEveryPackage(unittest.TestCase):
+    def test_every_package_the_job_installs_is_pinned_exactly(self):
+        installs = _python_tests_installs()
+        self.assertGreaterEqual(len(installs), 2, "pip itself, then the test stack")
+        packages = [a for args in installs for a in args]
+        pinned = {_norm(m[1]) for m in map(_PIN.fullmatch, packages) if m}
+        self.assertTrue({"pip", "pytest", "pyyaml", "numpy", "opencv-contrib-python-headless"} <= pinned, pinned)
+        for arg in packages:
+            with self.subTest(package=arg):
+                self.assertIsNotNone(_PIN.fullmatch(arg), "an exact name==version, never a bare name or a range")
+
+    def test_the_server_side_test_deps_equal_the_server_image(self):
+        server = {}
+        for name, version in _PIN.findall(SERVER_DOCKERFILE.read_text(encoding="utf-8")):
+            server.setdefault(_norm(name), set()).add(version)
+        ci = _ci_pins("python-tests")
+        for ci_name, image_name in SERVER_LOCKSTEP.items():
+            with self.subTest(package=ci_name):
+                self.assertEqual(len(server.get(image_name, set())), 1, f"the image pins {image_name} once")
+                self.assertEqual(ci.get(ci_name), server[image_name])
+
+    def test_dependabot_never_moves_the_lockstep_pins_alone(self):
+        pip = next(u for u in _load(DEPENDABOT)["updates"] if u["package-ecosystem"] == "pip")
+        bare = {_norm(e["dependency-name"]) for e in pip.get("ignore") or [] if set(e) == {"dependency-name"}}
+        for name in (*SERVER_LOCKSTEP, "pyarrow", "av"):
+            with self.subTest(dependency=name):
+                self.assertIn(name, bare)
 
 
 class ReleaseChannel(unittest.TestCase):

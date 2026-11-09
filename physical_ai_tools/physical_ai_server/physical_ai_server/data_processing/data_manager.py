@@ -317,6 +317,9 @@ class DataManager:
         self._upload_blocked_reason_de = ''
         self._last_stale_warn_mono = 0.0
         self._discard_pending = False
+        #   _dataset_finalized     _finalize_dataset() succeeded (step 8: the
+        #                          shutdown path leaves such a session alone)
+        self._dataset_finalized = False
         # Round 5 (O1). One recorder lock: the record tick holds it for a whole
         # record step, /task/command for one transition (bounded try-acquire,
         # never blocking the default group), the resync for its recording work.
@@ -425,7 +428,9 @@ class DataManager:
     # student knows the dataset is incomplete and can delete it in the
     # Daten tab. DETECT + INFORM ONLY: the buffered (<10) episodes died
     # with the process — finalizing a crashed session is impossible, so
-    # nothing here ever auto-finalizes or auto-deletes.
+    # nothing here ever auto-finalizes or auto-deletes. An ORDERLY end of the
+    # node (an environment stop) is not a crash: it finalizes first
+    # (end_for_shutdown, launch plan step 8), which clears the marker.
 
     SESSION_MARKER_SUFFIX = '.session.json'
 
@@ -876,6 +881,10 @@ class DataManager:
             return False
         try:
             ds.finalize()
+            # Our own flag (never LeRobot's private one): the shutdown path
+            # (end_for_shutdown) must tell a session that already ended from
+            # one it still has to end.
+            self._dataset_finalized = True
             # The session completed cleanly — drop the crash marker so the
             # next boot raises no stale-session notice.
             self._clear_session_marker()
@@ -1169,6 +1178,42 @@ class DataManager:
         self._stop_save_completed = True
         self._upload_enqueued = True          # never upload after an error stop
         return self._finalize_dataset()
+
+    # end_for_shutdown's answers (the node logs them; the smoke test asserts them).
+    SHUTDOWN_FINALIZED = 'finalized'          # a live session ended now, dataset complete
+    SHUTDOWN_FAILED = 'failed'                # finalize raised: the crash marker stays (F3)
+    SHUTDOWN_ALREADY_FINAL = 'already_final'  # the session had already finalized its dataset
+    SHUTDOWN_NO_DATASET = 'no_dataset'        # nothing saved yet; a Start's wait was ended
+
+    @_recorder_locked
+    def end_for_shutdown(self) -> str:
+        """Launch plan step 8 (2026-11-10): the NODE is going down (an
+        environment stop's SIGINT/SIGTERM, an exception out of spin(), the
+        sensor supervisor's exit) while this DataManager may still hold a
+        recording session. Before, nothing finalized on that path and every
+        episode the session had saved was lost (KNOWN-ISSUES M2).
+
+        It is the error stop (end_after_error, D5) and nothing else: an episode
+        a latched save already committed is counted, the running take is
+        dropped through the official discard, the dataset is finalized, NOTHING
+        is uploaded (the stack is going away; the student uploads from the Daten
+        tab), and the crash marker is cleared ONLY by a successful finalize
+        (F3). Without a dataset a Start that still waits (for an upload of this
+        dataset, its sync download) ends the way STOP ends it, and no dataset is
+        made for the session afterwards. A session that already finalized its
+        dataset (it ended normally; its upload may still run) is left alone, so
+        a second call is harmless. Waits for a record step in flight (the
+        recorder lock), so a save in progress completes first. Returns one of
+        the SHUTDOWN_* answers; raises only what end_after_error raises."""
+        self._upload_enqueued = True          # never upload after the shutdown
+        if getattr(self, '_lerobot_dataset', None) is None:
+            if self._status not in ('finish', 'stop'):
+                self._status = 'stop'
+            return self.SHUTDOWN_NO_DATASET
+        if getattr(self, '_dataset_finalized', False):
+            return self.SHUTDOWN_ALREADY_FINAL
+        finalized = self.end_after_error()
+        return self.SHUTDOWN_FINALIZED if finalized else self.SHUTDOWN_FAILED
 
     @_recorder_locked
     def record_early_save(self) -> str:

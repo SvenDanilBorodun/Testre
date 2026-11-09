@@ -47,6 +47,18 @@ def generate_launch_description():
     # browser within ~2-3 s — no client-side re-selection exists anymore.
     # 2 s delay throttles a crash loop (mirrors web_video_server's policy in
     # physical_ai_server_bringup.launch.py).
+    #
+    # sigterm_timeout / sigkill_timeout (launch plan step 8, 2026-11-10): on an
+    # environment stop s6 sends this launch SIGINT (the down-signal the thin
+    # Dockerfile writes), the launch sends the node SIGINT, then SIGTERM after
+    # sigterm_timeout, then SIGKILL after sigkill_timeout more. The node
+    # finalizes a running recording session in main()'s finally (bounded by
+    # recording_shutdown.SHUTDOWN_FINALIZE_WAIT_S, 30 s); SIGTERM meanwhile is
+    # harmless (rclpy's handler stays installed until rclpy.shutdown(), which
+    # runs after the finalize), only SIGKILL is not. The launch's defaults
+    # (5 + 5 s) would kill a finalize on a slow Pi. compose's stop_grace_period
+    # (50 s) sits above the 40 s here; robotis_ai_setup/tests/
+    # test_recording_stop_budget.py holds the chain together.
     physical_ai_server = Node(
         package='physical_ai_server',
         executable='physical_ai_server',
@@ -55,6 +67,8 @@ def generate_launch_description():
         parameters=config_files,
         respawn=True,
         respawn_delay=2.0,
+        sigterm_timeout='10',
+        sigkill_timeout='30',
     )
 
     return LaunchDescription([

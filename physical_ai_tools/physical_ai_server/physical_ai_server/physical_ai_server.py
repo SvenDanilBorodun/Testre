@@ -27,6 +27,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import signal
 import threading
 import time
 import traceback
@@ -129,6 +130,7 @@ from physical_ai_server.communication.communicator import Communicator
 from physical_ai_server.data_processing import dataset_paths
 from physical_ai_server.data_processing import dataset_sync
 from physical_ai_server.data_processing import record_texts_de
+from physical_ai_server.data_processing import recording_shutdown
 from physical_ai_server.data_processing.data_manager import DataManager, SYNC_UNCHECKED
 from physical_ai_server.data_processing.hf_api_worker import HfApiWorker
 from physical_ai_server.inference import cloud_client, cloud_contract, cloud_protocol, cloud_schedule, cloud_texts_de
@@ -945,6 +947,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self.get_logger().error(f'sensor executor failure {len(failures)}: {error!r}')
         if len(failures) >= self.SENSOR_FAIL_LIMIT:
             self.get_logger().fatal('sensor executor keeps failing: exiting for respawn')
+            # Launch plan step 8: a recording session keeps what it saved before
+            # the process goes (bounded; os._exit runs whatever the outcome).
+            finalize = getattr(self, '_finalize_recording_on_shutdown', None)
+            if finalize is not None:
+                try:
+                    finalize()
+                except Exception:  # noqa: BLE001 — the exit must happen regardless
+                    pass
             os._exit(self.SENSOR_EXIT_CODE)
 
     def _shutdown_sensor_executor(self):
@@ -966,6 +976,70 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 sensor_node.destroy_node()
             except Exception:  # noqa: BLE001
                 pass
+
+    # ── Shutdown: a recording session keeps what it saved (launch plan step 8) ──
+
+    def _finalize_recording_on_shutdown(self, wait_s=None):
+        """The node is going down: end a recording session WITHOUT losing what
+        it saved.
+
+        Called FIRST in main()'s ``finally`` (an environment stop: s6's SIGINT to
+        the launch, the launch's SIGINT/SIGTERM to this node, rclpy shuts the
+        context down and spin() returns; an exception out of spin() before a
+        respawn) and by the sensor supervisor before its ``os._exit`` — before
+        the HF worker, the sensor executor and the node go. Before 2026-11-10
+        nothing finalized here and every saved episode of the session was lost
+        (KNOWN-ISSUES M2).
+
+        Gated on the DataManager, never on ``on_recording``: a collision clears
+        that flag while the session lives on (the CollisionModal is up). The
+        session is taken over first (the generation moves and ``on_recording``
+        goes False under ``_record_publish_lock``), so a record tick still in
+        flight adds no frame and publishes nothing (it re-checks both after the
+        recorder lock, F5). Then ``DataManager.end_for_shutdown`` — the error
+        stop (D5): count a latched save, drop the running take, finalize, upload
+        nothing, crash marker cleared only on success (F3) — runs on its own
+        thread, waited for at most recording_shutdown.SHUTDOWN_FINALIZE_WAIT_S.
+        Nothing is published: the context is down. Idempotent (a finalized
+        session answers ``already_final``); never raises; returns the outcome
+        dict or None."""
+        data_manager = getattr(self, 'data_manager', None)
+        if data_manager is None:
+            return None
+        try:
+            plock = getattr(self, '_record_publish_lock', None)
+            with (plock if plock is not None else contextlib.nullcontext()):
+                self._record_session_gen = getattr(self, '_record_session_gen', 0) + 1
+                self.on_recording = False
+        except Exception:  # noqa: BLE001 — the finalize below matters more
+            pass
+        try:
+            outcome = recording_shutdown.finalize_for_shutdown(
+                data_manager,
+                recording_shutdown.SHUTDOWN_FINALIZE_WAIT_S if wait_s is None else wait_s)
+        except Exception as e:  # noqa: BLE001 — never raise out of the shutdown
+            self._log_shutdown_line('error', f'Shutdown: recording finalize failed: {e!r}')
+            return None
+        verdict = outcome.get('verdict')
+        if verdict in (DataManager.SHUTDOWN_NO_DATASET, DataManager.SHUTDOWN_ALREADY_FINAL):
+            # Nothing was at stake: no dataset open, or the session had ended.
+            self._log_shutdown_line('debug', f'Shutdown: recording {verdict}')
+            return outcome
+        line = (f"Shutdown: recording session {verdict} after {outcome.get('seconds')} s; "
+                f"{outcome.get('saved')} saved episode(s), nothing uploaded")
+        if outcome.get('error'):
+            line += f" ({outcome['error']})"
+        self._log_shutdown_line(
+            'warning' if verdict == DataManager.SHUTDOWN_FINALIZED else 'error', line)
+        return outcome
+
+    def _log_shutdown_line(self, level, line):
+        """A shutdown log line that can never raise (the logger outlives the
+        context; a broken output stream must not matter here)."""
+        try:
+            getattr(self.get_logger(), level)(line)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _init_core_components(self):
         # D8 — monotonic() of the last /task/status publish, updated after EVERY
@@ -8650,6 +8724,13 @@ class _CloudRun:
 
 
 def main(args=None):
+    # Launch plan step 8: SIGINT ends this node exactly like SIGTERM. rclpy's
+    # handler chains to the handler installed before rclpy.init(); with SIG_DFL
+    # there it chains to nothing, so SIGINT (the launch's first shutdown signal,
+    # and s6's down-signal for this service since 2026-11-10) only shuts the
+    # context down and spin() returns — no KeyboardInterrupt can land anywhere
+    # in the finally below, the recording finalize included.
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     rclpy.init(args=args)
     node = PhysicalAIServer()
     # Multi-threaded executor. Originally 3 threads — enough for the
@@ -8682,7 +8763,11 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        # A live Cloud-Inferenz run first: its bye tells the cloud the robot stopped.
+        # Launch plan step 8 FIRST: a recording session that is still running is
+        # finalized without upload (its saved episodes survive the environment
+        # stop) while the recorder and its sensors still exist. Bounded.
+        node._finalize_recording_on_shutdown()
+        # A live Cloud-Inferenz run next: its bye tells the cloud the robot stopped.
         node._shutdown_cloud_client()
         # Cleanup HF API Worker before destroying node
         node._cleanup_hf_api_worker()

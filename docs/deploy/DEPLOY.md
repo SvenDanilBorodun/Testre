@@ -117,7 +117,7 @@ git push
 
 **Required env vars** (Railway dashboard): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `EDUBOTICS_HF_TOKEN_KEY` (per-student Hugging Face token storage, migration 042: 32 random bytes as standard base64, generate with `python -c "import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())"`; absent, empty or malformed → the API refuses to boot (required since 2026-10-04); optional `EDUBOTICS_HF_TOKEN_KEY_PREVIOUS` for rotation; **set it BEFORE the cloud deploy**; losing it makes every stored token unusable and each student pastes theirs again).
 
-**Production-relevant optional:** `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` + `GUI_RELEASE_REPO` (drives student `.exe` auto-update — normally set automatically by `release.yml` W6 on a `vX.Y.Z` tag; `GUI_DOWNLOAD_URL` is optional and derived from `GUI_VERSION` + `GUI_RELEASE_REPO` when unset), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`. (`EDUBOTICS_JETSON_HF_TOKEN`, `SUPABASE_JWT_ALGORITHM` and `SUPABASE_JWT_SECRET` were read only by the retired classroom Jetson's `/jetson/register`; no code reads them since 2026-11-09, and they can be removed from Railway.)
+**Production-relevant optional:** `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` + `GUI_RELEASE_REPO` (drives student `.exe` auto-update — normally set automatically by `release.yml` W6 on a `vX.Y.Z` tag; `GUI_DOWNLOAD_URL` is optional and derived from `GUI_VERSION` + `GUI_RELEASE_REPO` when unset), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`. (`EDUBOTICS_JETSON_HF_TOKEN`, `SUPABASE_JWT_ALGORITHM` and `SUPABASE_JWT_SECRET` were read only by the retired classroom Jetson's `/jetson/register`; no code reads them since 2026-11-09. Do not just delete them: revoke and rotate first, §4b.)
 
 **Never** set `EDUBOTICS_SKIP_SCHEMA_CHECK=1` on Railway.
 
@@ -306,6 +306,23 @@ follow-up on Docker Hub / GHCR: the `open-manipulator-jetson`,
 `physical-ai-server-jetson` and `physical-ai-server-jetson-base` repositories
 can be deleted. **`open-manipulator-jetson-base` must stay**: it is the Orange
 Pi's open_manipulator base (`docs/arm64_base/README.md`).
+
+**Owner action once this release is live, in this order:**
+
+1. Revoke the Hugging Face token that `EDUBOTICS_JETSON_HF_TOKEN` held, at
+   huggingface.co (Settings → Access Tokens, the account that created it).
+2. Delete the three Railway variables `EDUBOTICS_JETSON_HF_TOKEN`,
+   `SUPABASE_JWT_ALGORITHM` and `SUPABASE_JWT_SECRET`.
+3. If `SUPABASE_JWT_ALGORITHM` was ever `HS256` in production, rotate the
+   Supabase JWT secret. The legacy JWT secret also signs the `anon` and
+   `service_role` keys, so rotating it replaces both, and every holder must
+   move with it: Railway `SUPABASE_SERVICE_ROLE_KEY` and `SUPABASE_ANON_KEY`,
+   the CI secrets `SUPABASE_SERVICE_ROLE_KEY` and `SUPABASE_ANON_KEY`, the
+   Modal secret `edubotics-inference-secrets`, and the anon key baked into
+   every shipped React bundle (student, Orange Pi, teacher web). Plan it with
+   Supabase's signing-keys guide (migrate to JWT signing keys and the
+   publishable/secret API keys, then revoke the legacy secret), which avoids
+   the downtime of a plain legacy rotation.
 
 ---
 

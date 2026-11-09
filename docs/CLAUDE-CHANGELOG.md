@@ -19,13 +19,15 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 - The Orange Pi's open_manipulator base (`open-manipulator-jetson-base:4.1.4`) was built ONLY by the Jetson path (`BUILD_BASE_ARM64=1 PLATFORM=arm64`); deleting that path would have left the Pi's base unbuildable. It moved to `BUILD_BASE_OPI_OMX=1 PLATFORM=opi`, name kept.
 - CI durations of successful runs on 4-vCPU public runners: docker build amd64 p50 29.6 / p90 45.4 / max 50.4 min (one release build cancelled at 61.4 under the old 60), opi p90 20.2; python-tests p90 18.0; react-tests p90 4.4; trainer image p90 12.8, max 19.2.
 - Egress hosts for the Pi IT sheet from anonymous HEADs: release assets redirect to `objects.githubusercontent.com`, GHCR blobs to `pkg-containers.githubusercontent.com`, Docker Hub blobs to `production.cloudfront.docker.com`, Hugging Face to `us.aws.cdn.hf.co` and `cas-server.xethub.hf.co`.
-- usbipd-win is GPL-3.0 (its repository's licence), not MIT as `THIRD_PARTY_NOTICES.txt` said.
+- usbipd-win is GPL-3.0 (its repository's `COPYING.md` at tag v5.3.0), not GPL-2.0 as `THIRD_PARTY_NOTICES.txt` and the EULA said.
 - Migrations 000 → 052 replayed on PostgreSQL 16 with stub Supabase roles; 053, its rollback and 053 again cycle cleanly; `053_retire_jetson_assertions.sql` 12 PASS after 053, T1–T4/T6/T7 fail after the rollback as stated; the schema after the rollback equals the one before 053 apart from `inference_runs.jetson_id`'s column position.
 
 **What changed:**
 - Going private: artifact retention (installer 14 → 1 day, opi marker 5 → 1, versions-env 90 → 3); timeouts at twice the p90 (docker build 60 → 120, trainer image 60 → 90, python-tests 25 → 45, react-tests 10 → 20); `.github/dependabot.yml` (7-day cooldown, majors never, every lockstep pin ignored); the Pi runbook provisions from the release tarball, the IT sheet asks for port 80 inbound only; usbipd-win's licence corrected; the licensor's personal data replaced by placeholders.
 - The Jetson: `routes/jetson.py`, `services/jetson_sweep.py` and their probe entries (22 tables / 22 column sets / 45 RPCs); migration 053 and its rollback and assertions; the React slice, client, hooks, logout release, chip, teacher section and pairing modal, target switch, :9091 first frame and `jetsonIncompatible`; the `-jetson` images, `PLATFORM=arm64`, `Dockerfile.arm64` and the Jetson CI steps; `robotis_ai_setup/jetson_agent/` and `docs/JETSON_DEPLOY.md`.
 - Kept on purpose: `inference_runs`, its old `backend = 'jetson'` rows and the backend CHECK (the teacher's history still labels them „Klassen-Jetson"); `touch_updated_at()`; the Pi agent's self-repaired files byte-for-byte (a byte change renews them on every fielded Pi); `sendRecordCommand`'s `start_inference` case and the INFERENCE task type (shared wire contract).
+
+**Owner actions left open:** once this release is live, revoke the Hugging Face token that `EDUBOTICS_JETSON_HF_TOKEN` held, then delete the three Railway variables (`EDUBOTICS_JETSON_HF_TOKEN`, `SUPABASE_JWT_ALGORITHM`, `SUPABASE_JWT_SECRET`); if `SUPABASE_JWT_ALGORITHM` was ever `HS256` in production, rotate the Supabase JWT secret (`docs/deploy/DEPLOY.md` §4b). Fill the licence placeholders before the public launch; by owner decision no release gate checks for them.
 
 ### 2026-11-05 — preparing the private repository and the CI supply chain
 

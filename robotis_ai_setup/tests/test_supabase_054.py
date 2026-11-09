@@ -48,11 +48,14 @@ def _statements(code: str) -> list[str]:
 
 
 class Migration054(unittest.TestCase):
-    def test_the_files_exist_and_054_is_the_newest(self):
+    def test_the_files_exist_and_054_follows_053(self):
         for path in (M054, R054, A054):
             self.assertTrue(path.is_file(), path)
         names = sorted(p.name for p in _MIG.glob('*.sql'))
-        self.assertEqual(names[-1], M054.name)
+        # 054 was the newest until 055 (2026-11-11, the users guard), which
+        # touches none of 054's four functions.
+        self.assertEqual(names[names.index(M054.name) - 1], '20261109120000_053_retire_jetson.sql')
+        self.assertEqual(names[names.index(M054.name) + 1:], ['20261111120000_055_users_identity_guard.sql'])
 
     def test_exactly_the_four_changes_in_one_transaction(self):
         self.assertEqual(_statements(_code(_read(M054))), [

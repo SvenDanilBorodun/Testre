@@ -68,6 +68,7 @@ describe('scripts/csp-policy.mjs', () => {
     ['', 'is not an absolute URL'],
     ['supabase.co', 'is not an absolute URL'],
     ['ftp://x.example', 'must be an http(s) URL'],
+    // eslint-disable-next-line no-script-url -- the value under test
     ['javascript:alert(1)', 'must be an http(s) URL'],
     ['https://user:pw@x.example', 'must not carry credentials'],
   ])('refuses %j (the build fails, naming the variable)', (raw, why) => {
@@ -81,6 +82,7 @@ describe('scripts/csp-policy.mjs', () => {
 });
 
 describe('nginx.web.conf.template carries the CSP', () => {
+  // eslint-disable-next-line no-template-curly-in-string -- nginx/envsubst placeholders, not JS
   const CSP_LINE = 'add_header ${EDUBOTICS_CSP_HEADER} "${EDUBOTICS_CSP_POLICY}" always;';
 
   // Every block that sets an add_header of its own loses the server-level ones
@@ -89,11 +91,12 @@ describe('nginx.web.conf.template carries the CSP', () => {
     const permissions = TEMPLATE.match(/add_header Permissions-Policy /g).length;
     expect(permissions).toBe(4); // server + /index.html + /version.json + /static/
     expect(TEMPLATE.split(CSP_LINE).length - 1).toBe(permissions);
-    const blocks = TEMPLATE.split(/\n\s*location /).slice(1);
-    for (const block of blocks) {
-      const body = block.slice(0, block.indexOf('\n    }'));
-      if (/add_header/.test(body)) expect(body).toContain(CSP_LINE);
-    }
+    const bodies = TEMPLATE.split(/\n\s*location /)
+      .slice(1)
+      .map((block) => block.slice(0, block.indexOf('\n    }')));
+    const withOwnHeaders = bodies.filter((body) => /add_header/.test(body));
+    expect(withOwnHeaders).toHaveLength(3);
+    expect(withOwnHeaders.filter((body) => !body.includes(CSP_LINE))).toEqual([]);
   });
 
   it('the only placeholders are $PORT and the two CSP variables the envsh exports', () => {

@@ -6,6 +6,27 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### 2026-11-10 — a real login for the Orange Pi (Step 3)
+
+**Why.** Until now anyone on a school network could drive a Pi's arm, watch its cameras, read its datasets and factory-reset it through port 80: the only protection was an Origin gate, which stops a browser page but not `curl`/`wscat` (measured 2026-08-08, recorded as the accepted residual „the answer is the VLAN guide"). The launch needs every browser↔robot transport behind an EduBotics account.
+
+**Owner decisions (binding):** (1) full login protection before launch: `/rosbridge`, `/video/stream`, `/daten-api/` (its link tokens kept) and `/api/system/*` need a robot session; (2) any signed-in EduBotics account of any role may use any Pi it can reach once it is set up, the System page included; (3) a fresh Pi is unclaimed and protected by a one-time setup code, claimed by a teacher or admin, spent by the claim, renewed by a factory reset; (4) no HTTPS at launch — a random, HttpOnly, SameSite=Strict, Path=/ cookie, short-lived, and the separate network segment a written launch condition; (5) mutating agent routes refuse an empty Origin unless the peer is loopback, and a factory reset needs a typed confirmation.
+
+**Design choices and why:**
+- The pi_agent mints the session (`pi_agent/pi_auth.py`) after asking the cloud's existing `GET /me` with the browser's own Supabase token (proves the token, names the role) — no cloud change, no crypto in the stdlib-only agent. The token is never stored or logged; the /me call refuses redirects so a captive portal never receives it.
+- Sessions in memory only: a restart logs everyone out and the SPA re-exchanges silently with its Supabase token. Persisting them would have bought at most the 15-minute window offline.
+- nginx `auth_request` to the agent's `/auth/check` gates the three transports; the AGENT gates `/api/system` itself, because a LAN host can add a route to the ros_net gateway IP and reach the agent's gateway listener without nginx (INPUT traffic, outside Docker's FORWARD DROP).
+- The setup code is stored only as a PBKDF2 hash, so it is shown only when minted: by setup.sh after the label, by the root-only CLI `python3 -m pi_agent.setup_code` (loopback-only agent route), by the boot mint of an unclaimed Pi on the HDMI console, and once in the factory-reset answer. Never in a log: the first-boot script's output goes to the journal, so it only deletes `pi_auth.json`.
+
+**Measured, not assumed:**
+- The shipped opi template in a real nginx 1.24 (apt, `--with-http_auth_request_module`) with the REAL agent handler as its upstream and stub upstreams: 401 without a cookie on all three transports (a websocket handshake included), 200 with one, the cookie never reaches the robot nor the access log, `/rosbridge`'s Host/Origin refusals and the Daten `limit_except` still answer first (403), the agent down → 500, an agent from before the login (404 on `/auth/check`) → 500, and the agent's probe reads the shipped config as `enforced` and the template without its `auth_request` lines as `open` (`tests/test_pi_login_nginx.py`). `nginx -t` on the envsubst-rendered template as CI does it: clean.
+- The written acceptance on that harness: `POST /api/system/environment/stop` without Origin → 403, with a forged own-address Origin and no session → 401, nothing stopped.
+- In the field order of an update the NEW agent runs beside the OLD manager (the old agent pulls its own tag, the new agent pulls the new images after its restart); hence the agent measures nginx instead of trusting an image tag (a manual `EDUBOTICS_IMAGE_TAG` pin would defeat a tag comparison).
+
+**What changed:** `pi_agent/pi_auth.py`, `pi_agent/setup_code.py`, the agent's router (public routes, session gate, loopback trust, empty-Origin rule), `/auth/*`, the factory reset, the login guard and the start gate; `setup.sh` (`print_setup_code`, `--prepare-golden`) and the first-boot script; `nginx.opi.conf.template`; the SPA's `features/piAuth`, the rosbridge connect gate, the login gate's `piLogin`/`claim`, `PiClaimScreen`, `PiLoginNotice`, the sign-out's last step, `PiUpdateGate`'s arming, the typed reset confirmation and the 401 handling of every agent/Daten fetch. Not changed: the Windows stack (its nginx, GUI and bridge), the cloud API, the self-repaired system files (no unit, udev rule or compose byte changed, so no fielded Pi renews anything).
+
+**Owner steps:** the runbook's „Anmeldung" section (claim every fielded Pi after the update; the IT sheet's launch condition).
+
 ### 2026-11-09 — the going-private follow-up, and the classroom Jetson retired
 
 **Why.** Step 1 of the release plan: finish what going private still needed, and retire the classroom Jetson Orin Nano (owner decision: no Jetson is in use at any school, no transition notice; its database objects dropped with a rollback; its code deleted). Stacked on `chore/ship-private-readiness` (PR #49), one PR.

@@ -40,7 +40,9 @@
 # fallthrough) PLUS four Pi-only locations: the baked /pi-mode.json
 # marker, the /api/system/ reverse proxy to the pi-agent, and the
 # /rosbridge + /video/ same-origin proxies into the physical_ai_server
-# container. The latter two exist so a remote Chrome needs ONLY port 80:
+# container — and, since the robot login (2026-11-10), the internal
+# /_edubotics_auth subrequest target that gates /rosbridge, /video/stream
+# and /daten-api/ on a robot session (see there). The latter two exist so a remote Chrome needs ONLY port 80:
 # school networks routinely filter non-standard ports (9090/8080), and
 # port 80 is the one port guaranteed reachable if the wizard loads at
 # all. The React app routes rosbridge + MJPEG same-origin in Pi mode
@@ -243,6 +245,40 @@ server {
     # (buffering on, 60s read timeout) would stall the former and freeze
     # the latter. chunked_transfer_encoding off + the long read/send
     # timeouts keep the long-lived streams flowing.
+    # ── Robot login (2026-11-10) ────────────────────────────────────────────
+    # Every robot transport on this port needs a ROBOT SESSION: the
+    # `edubotics_pi_session` cookie the pi-agent mints after an EduBotics login
+    # (pi_agent/pi_auth.py). /rosbridge, /video/stream and /daten-api/ ask the
+    # agent through this internal location (`auth_request`, access phase, i.e.
+    # AFTER the rewrite-phase Host/Origin refusals of /rosbridge): 2xx lets the
+    # request through, 401 is answered as is, and anything else — the agent not
+    # listening yet, a timeout, an OLD agent answering 404 — is a 500. Every
+    # outcome but a live session refuses: the gate fails CLOSED.
+    #
+    # /api/system/ is NOT behind this: the agent enforces the session there
+    # itself, because a LAN host can route to the ros_net gateway IP and reach
+    # the agent without passing nginx. It also needs its public routes (the
+    # login, the claim, /auth/state, /update/check, /netzwerk-check) unguarded.
+    #
+    # Only the Cookie matters to the agent. The original URI is NOT forwarded (a
+    # /daten-api/ path carries a link token) and neither is the Referer; nginx
+    # logs no subrequest (log_subrequest is off), and an auth error during a
+    # /daten-api/ request goes to that location's /dev/null error log, because
+    # nginx logs every error of a request under the MAIN request's location.
+    location = /_edubotics_auth {
+        internal;
+        proxy_pass http://${EDUBOTICS_ROS_NET_GATEWAY}:8769/auth/check;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header Referer "";
+        proxy_set_header Upgrade "";
+        proxy_connect_timeout 3s;
+        proxy_send_timeout 5s;
+        proxy_read_timeout 5s;
+    }
+
     location /api/system/ {
         proxy_pass http://${EDUBOTICS_ROS_NET_GATEWAY}:8769/;
         proxy_http_version 1.1;
@@ -361,8 +397,10 @@ server {
     # allowance does not change it: measured, `curl -H 'Host: <pi-ip>'
     # -H 'Origin: http://<pi-ip>' …/rosbridge` is still proxied, because Origin
     # is a BROWSER control set by the user agent and anything that can forge a
-    # header can forge that one too. Accepted residual; the answer is the
-    # dedicated-VLAN guide, not a tighter regex here.
+    # header can forge that one too. That residual is CLOSED since 2026-11-10 by
+    # the robot login (`auth_request` below), not by a tighter regex here: a
+    # forged Origin gets nowhere without a session cookie minted for an
+    # EduBotics account.
     #
     # `if` here is the documented-safe shape: several `set`s feeding one
     # `return`, with proxy_pass OUTSIDE every `if`. Verified on nginx 1.27.5
@@ -393,11 +431,17 @@ server {
         if ($edubotics_origin_ok = 0) {
             return 403;
         }
+        # The robot login (see /_edubotics_auth): no session, no rosbridge. This
+        # closes the residual the Origin gate above could not — a non-browser
+        # LAN client forging Host and Origin now needs a session cookie too.
+        auth_request /_edubotics_auth;
         set $edubotics_rosbridge physical_ai_server;
         proxy_pass http://$edubotics_rosbridge:9090/;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
+        # The session cookie is the agent's business, never the robot's.
+        proxy_set_header Cookie "";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -455,11 +499,15 @@ server {
     # 2026-08-06; the Pi — the only manager published on 0.0.0.0 by default —
     # did not, which is the parity gap this closes.
     location = /video/stream {
+        # The robot login: an <img> request sends the SameSite=Strict cookie
+        # (same-site), a page on another site does not.
+        auth_request /_edubotics_auth;
         set $edubotics_video physical_ai_server;
         rewrite ^/video/(.*)$ /$1 break;
         proxy_pass http://$edubotics_video:8080;
         proxy_hide_header Access-Control-Allow-Origin;
         proxy_http_version 1.1;
+        proxy_set_header Cookie "";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -485,6 +533,10 @@ server {
         limit_except GET HEAD { deny all; }
         access_log off;
         error_log /dev/null;
+        # The robot login on top of the link token (both must hold): a token
+        # copied out of a page is useless without the session of a signed-in
+        # account, and the sidecar's own token rules are unchanged.
+        auth_request /_edubotics_auth;
         # A document opened at a token URL (a clip, a picture or a JSON answer
         # opened in a tab of its own) never sends that URL on as the Referer of
         # its next request: no-referrer. This block now declares its own
@@ -497,6 +549,7 @@ server {
         set $edubotics_daten physical_ai_server;
         proxy_pass http://$edubotics_daten:8095;
         proxy_http_version 1.1;
+        proxy_set_header Cookie "";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

@@ -8,6 +8,8 @@
 // break a page — an unreachable API, an error, a malformed answer or an older
 // API mean „no links", without a toast or a console line.
 
+import fs from 'fs';
+import path from 'path';
 import React from 'react';
 import { act, render, screen, within } from '@testing-library/react';
 import {
@@ -201,5 +203,25 @@ describe('<LegalLinks />', () => {
     expect(await screen.findByRole('button', { name: 'Anmelden' })).toBeInTheDocument();
     expect(screen.queryByRole('navigation', { name: LEGAL_NAV_LABEL })).toBeNull();
     expect(screen.queryByRole('link')).toBeNull();
+  });
+});
+
+describe('every surface carries the links', () => {
+  // Rendering each page needs its whole store; the login card is rendered
+  // above, and the teacher web's pages were clicked through in a browser
+  // (docs/CLAUDE-CHANGELOG.md 2026-11-11). Here: each surface still mounts it.
+  const SURFACES = {
+    'src/components/LoginForm.js': '<LegalLinks />',
+    'src/pages/teacher/TeacherDashboard.js': '<LegalLinks variant="footer" />',
+    'src/pages/admin/AdminDashboard.js': '<LegalLinks variant="footer" />',
+    'src/components/admin/AdminMfaGate.jsx': '<LegalLinks />',
+    'src/components/PiClaimScreen.jsx': '<LegalLinks />',
+    'src/pages/SystemPage.js': '<LegalLinks className=',
+  };
+
+  it.each(Object.entries(SURFACES))('%s', (file, element) => {
+    const src = fs.readFileSync(path.resolve(__dirname, '../../../..', file), 'utf8');
+    expect(src).toMatch(/^import LegalLinks from '[./]+(components\/)?LegalLinks';$/m);
+    expect(src).toContain(element);
   });
 });

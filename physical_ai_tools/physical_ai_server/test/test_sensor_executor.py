@@ -301,6 +301,25 @@ def test_three_failures_inside_the_window_exit_the_process_for_respawn():
     assert any(level == 'fatal' and 'respawn' in m for level, m in host.logger.lines)
 
 
+def test_the_exit_finalizes_a_recording_first():
+    # Launch plan step 8: a recording session keeps what it saved before the
+    # process goes for respawn; a finalize that raises never stops the exit.
+    for raises in (False, True):
+        _Os.exits = []
+        host = _host_with_executor([RuntimeError('a'), RuntimeError('b'), RuntimeError('c')])
+        order = []
+
+        def _finalize(raises=raises):
+            order.append(('finalize', list(_Os.exits)))
+            if raises:
+                raise RuntimeError('finalize broke')
+        host._finalize_recording_on_shutdown = _finalize
+        with pytest.raises(_Exited):
+            host._sensor_loop()
+        assert order == [('finalize', [])]
+        assert _Os.exits == [70]
+
+
 def test_two_failures_keep_running():
     host = _host_with_executor([RuntimeError('a'), 'ok', RuntimeError('b'), 'ok', 'stop'])
     host._sensor_loop()                      # returns when the test stops it

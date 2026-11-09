@@ -46,9 +46,9 @@ import time
 # and the Pi agent's stop timeouts (120 s).
 SHUTDOWN_FINALIZE_WAIT_S = 30.0
 
-# The poll of the bounded wait (a join in slices, so a KeyboardInterrupt that
-# still reaches the waiting thread cannot cut the finalize short).
-_JOIN_SLICE_S = 0.5
+# The bounded wait polls in slices, so a KeyboardInterrupt that still reaches
+# the waiting thread cannot cut the finalize short.
+_WAIT_SLICE_S = 0.5
 
 VERDICT_TIMEOUT = 'timeout'           # the finalize was still running at the budget
 VERDICT_ERROR = 'error'               # it raised (the crash marker stays)
@@ -106,27 +106,34 @@ def finalize_for_shutdown(data_manager, wait_s=SHUTDOWN_FINALIZE_WAIT_S, *, cloc
     if end is None:
         return {'verdict': VERDICT_UNSUPPORTED, 'seconds': 0.0, 'error': '', 'saved': 0}
     box = {}
+    # The wait is on an Event the worker sets last, never on Thread.join: on
+    # CPython 3.12 (the node's) a KeyboardInterrupt inside join() makes the
+    # thread look stopped while it still runs (its bpo-45274 handling releases
+    # the worker's own tstate lock), so the finalize would be reported done.
+    done = threading.Event()
 
     def _run():
         try:
             box['verdict'] = end()
         except BaseException as e:  # noqa: BLE001 — reported, never raised
             box['error'] = f'{type(e).__name__}: {e}'
+        finally:
+            done.set()
 
     worker = threading.Thread(target=_run, name='recording-shutdown-finalize', daemon=True)
     started = clock()
     worker.start()
     deadline = started + max(0.0, float(wait_s))
-    while worker.is_alive():
+    while not done.is_set():
         remaining = deadline - clock()
         if remaining <= 0:
             break
         try:
-            worker.join(min(remaining, _JOIN_SLICE_S))
+            done.wait(min(remaining, _WAIT_SLICE_S))
         except KeyboardInterrupt:
             continue
     seconds = round(clock() - started, 3)
-    if worker.is_alive():
+    if not done.is_set():
         verdict = VERDICT_TIMEOUT
     elif 'error' in box:
         verdict = VERDICT_ERROR

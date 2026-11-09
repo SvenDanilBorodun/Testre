@@ -25,12 +25,9 @@
 -- pg_blocking_pids shows that call blocked by this session, commits, then reads
 -- the other call's result.
 --
--- The squashed baseline does NOT replay on a fresh database as shipped
--- (docs/KNOWN-ISSUES.md, „baseline.sql is NOT replayable from scratch"): run it in
--- a SCRATCH copy of supabase/ whose baseline has its one
--- `RENAME COLUMN runpod_job_id` line guarded exactly as
--- 040_code_programs_assertions.sql's header shows, with 052 moved OUT of the
--- copy's migrations/ (so `supabase start` applies every migration through 051),
+-- Run it in a SCRATCH copy of supabase/ with 052 and every later migration moved
+-- OUT of the copy's migrations/ (so `supabase start` applies every migration
+-- through 051; the baseline replays on a fresh database as shipped),
 -- and with its own project_id and ports in config.toml. Then, as `postgres`:
 --   1. psql <local db url> -v seed=1 -f supabase/tests/052_credit_ledger_assertions.sql
 --      (BEFORE 052: the pre-052 world — old credits on the old columns, managed

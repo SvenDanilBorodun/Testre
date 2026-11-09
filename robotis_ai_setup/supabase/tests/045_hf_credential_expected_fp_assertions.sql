@@ -2,12 +2,8 @@
 -- an expected fingerprint under the row locks), run BY HAND against a fresh
 -- LOCAL database — never CI, never the linked project (it seeds rows).
 --
--- The squashed baseline does NOT replay on a fresh database as shipped
--- (docs/KNOWN-ISSUES.md, „baseline.sql is NOT replayable from scratch"): run
--- it in a SCRATCH copy of supabase/ whose baseline has its one
--- `RENAME COLUMN runpod_job_id` line guarded exactly as
--- 040_code_programs_assertions.sql's header shows, with every migration
--- through 045, then
+-- Run it in a SCRATCH copy of supabase/ holding every migration through 045
+-- (the baseline replays on a fresh database as shipped), then
 --   supabase start   (in the scratch copy; it applies the migrations)
 --   psql <local db url> < supabase/tests/045_hf_credential_expected_fp_assertions.sql
 -- (2026-10-04 it was run against public.ecr.aws/supabase/postgres:17.6.1.106

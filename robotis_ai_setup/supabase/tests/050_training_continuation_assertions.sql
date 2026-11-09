@@ -6,12 +6,9 @@
 -- charging rule), run BY HAND against a fresh LOCAL database — never CI, never the
 -- linked project (it seeds rows).
 --
--- The squashed baseline does NOT replay on a fresh database as shipped
--- (docs/KNOWN-ISSUES.md, „baseline.sql is NOT replayable from scratch"): run it in
--- a SCRATCH copy of supabase/ whose baseline has its one
--- `RENAME COLUMN runpod_job_id` line guarded exactly as
--- 040_code_programs_assertions.sql's header shows, with every migration through
--- 048 applied by `supabase start`, then 047, 049 and 050 with psql as `postgres`
+-- Run it in a SCRATCH copy of supabase/ holding every migration through 048
+-- except 047 (the baseline replays on a fresh database as shipped), applied by
+-- `supabase start`, then 047, 049 and 050 with psql as `postgres`
 -- (-v ON_ERROR_STOP=1), then
 --   psql <local db url> -f supabase/tests/050_training_continuation_assertions.sql
 -- Every DENIAL is asserted with has_function_privilege / has_table_privilege /

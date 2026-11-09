@@ -6,6 +6,12 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### 2026-11-10 — launch step 12: technical-debt clean-up
+
+**Why.** Six known debts closed before the launch, each with a measurement, none of them a behaviour change for a student. Stacked on the Jetson retirement (migrations through 053).
+
+- **The baseline replays.** The squashed baseline's migration-005 body renamed `trainings.runpod_job_id` to `cloud_job_id` after a `CREATE TABLE` that already declares `cloud_job_id`, so the file failed on a fresh database and every hand-run assertion since 040 carried a hand patch in its header. The rename now runs inside a `DO` block only while the old column exists. Measured: 000 → 053 apply unpatched on PostgreSQL 16.15 (stub Supabase roles, auth schema, publication) by psql and through `supabase db push` 2.122.0 (W1's pin, the npm package's binary, integrity checked), and 053's assertions print 12 PASS on it. Why editing an applied migration is safe: the CLI's ledger is `supabase_migrations.schema_migrations(version, name, statements)`, `db push` reconciles local files against it by version string (`findPendingMigrations`) and reads a file only to apply it; run against a ledger whose baseline row `migration repair` wrote from the ORIGINAL file, the guarded file answered „Remote database is up to date." to `db push`, `--include-all` and `--dry-run`, and the ledger stayed byte-identical.
+
 ### 2026-11-09 — the going-private follow-up, and the classroom Jetson retired
 
 **Why.** Step 1 of the release plan: finish what going private still needed, and retire the classroom Jetson Orin Nano (owner decision: no Jetson is in use at any school, no transition notice; its database objects dropped with a rollback; its code deleted). Stacked on `chore/ship-private-readiness` (PR #49), one PR.

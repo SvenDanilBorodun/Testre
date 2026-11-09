@@ -4,12 +4,9 @@
 -- against a LOCAL database — never CI, never the linked project (it seeds rows
 -- inside a transaction it rolls back).
 --
--- The squashed baseline does NOT replay on a fresh database as shipped
--- (docs/KNOWN-ISSUES.md, „baseline.sql is NOT replayable from scratch"): run
--- it in a SCRATCH copy of supabase/ whose baseline has its one
--- `RENAME COLUMN runpod_job_id` line guarded exactly as
--- 040_code_programs_assertions.sql's header shows, with every migration
--- through 053 applied, then
+-- The baseline replays on a fresh database as shipped, so a local stack of the
+-- checkout itself (`supabase start`, or every migration applied in order by
+-- psql) is the database: with every migration through 053 applied, then
 --   psql <local db url> -f supabase/tests/053_retire_jetson_assertions.sql
 -- Only catalog reads and privilege checks run here; no function runs under a
 -- request role (calling a function the role may not execute crashes the

@@ -167,7 +167,7 @@ class ModificationLinesAreTrue(unittest.TestCase):
             without = b"\n".join(l for l in raw.split(b"\n") if MODIFICATIONS.encode() not in l)
             with self.subTest(file=rel):
                 self.assertNotEqual(without, old, "byte-identical to upstream: no modification line")
-        # 2026-11-09: 47 — the deleted local-inference UI took ten modified
+        # 2026-11-09: 47 — the deleted local-inference UI took eleven modified
         # upstream files with it (see test_modification_lines_… above).
         self.assertGreaterEqual(checked, 47)
 

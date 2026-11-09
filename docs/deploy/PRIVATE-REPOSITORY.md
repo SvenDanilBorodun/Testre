@@ -10,7 +10,7 @@ Every step that touches GitHub settings, Railway or a repository's visibility is
 |---|---|---|
 | GUI and Pi self-updates | **Yes**, until the release channel moves | `/version` hands out `https://github.com/<GUI_RELEASE_REPO>/releases/download/v<X.Y.Z>/…`. A private repository's release assets answer **404** to anonymous clients; `update_checker` reads 404 as "gone" and silently offers no update. |
 | W6's hash downloads | Yes, same reason | `curl` without a token |
-| GHCR images (11 packages) | **No** | A package's visibility is its own and stays public. Anonymous pulls, RunPod's trainer pull and release.yml's anonymous-pull probes keep working. A **new** package name starts private and must be made public by hand on its first push. |
+| GHCR images (the 9 shipped packages: 4 amd64, 4 `-opi`, `edubotics-trainer`) | **No** | A package's visibility is its own and stays public. Anonymous pulls, RunPod's trainer pull and release.yml's anonymous-pull probes keep working. A **new** package name starts private and must be made public by hand on its first push. |
 | Docker Hub `nettername/*` | No | |
 | First installs | No | The installer is downloaded from the release channel, the images from GHCR |
 | Servo-Station test PC | **Yes** | It runs from a checkout of this repository (`docs/servo-station.md`). It needs a GitHub login after the switch. A third party gets a zip of `tools/servo_station/`, never collaborator access. |
@@ -73,7 +73,7 @@ The fine-grained token expires: **renew it before its expiry date**, or the next
 | Pro | Protected branches; environments with deployment branch/tag policies and environment secrets. **Required reviewers and wait timers are public-repo-only on Free/Pro/Team.** | $18/month |
 
 - **Cost:** October 2026 used $28.68 of compute on 4-core public runners; 2-core private runners take roughly 1.3–2× as long. Without a payment method, Actions stops once the included amount is used.
-- **Raise** the 60-minute build timeouts before the flip.
+- The build timeouts were raised for 2-vCPU runners on 2026-11-09 (docker build 120, trainer image 90, python-tests 45, react-tests 20 minutes).
 - **Options to cut minutes:** full image builds only on tags or image path changes; cancel superseded runs; shorter artifact retention; or a self-hosted runner (private repositories only).
 
 ---
@@ -84,7 +84,7 @@ The fine-grained token expires: **renew it before its expiry date**, or the next
 2. Verify:
    - CI is green on a no-op commit;
    - `/version`'s URLs answer 200 anonymously and their hashes match;
-   - anonymous `docker manifest inspect` works on all 11 GHCR images and the Docker Hub twins;
+   - anonymous `docker manifest inspect` works on all 9 GHCR images (the 4 amd64 and 4 `-opi` images and `edubotics-trainer`) and the Docker Hub twins of the eight W4 images;
    - a training starts (RunPod pulls `edubotics-trainer`);
    - the W2/W3 health gates pass;
    - one PC's forced-update path works.

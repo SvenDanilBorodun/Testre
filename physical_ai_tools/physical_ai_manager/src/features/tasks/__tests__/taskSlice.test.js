@@ -181,4 +181,3 @@ describe('isValidCapabilities — the shared manifest validator', () => {
       .toBe(true);
   });
 });
-

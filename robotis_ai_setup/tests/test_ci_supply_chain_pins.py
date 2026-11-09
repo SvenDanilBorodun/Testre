@@ -15,6 +15,12 @@ Pinned here, across every workflow:
   ``vars.RELEASES_REPO`` with this repository as the fallback, so the downloads
   can leave this repository before it goes private
   (docs/deploy/PRIVATE-REPOSITORY.md).
+* **The cloud API stack and Dependabot (2026-11-09).** Dependabot proposes
+  patch releases and security fixes for the internet-facing cloud API's
+  libraries: their ``ignore`` entries name only minor updates, never a bare
+  name (which would block security updates too). ci.yml installs the same
+  versions by hand, and must install exactly what requirements.txt ships, so a
+  Dependabot patch PR is red until ci.yml's pins move with it.
 """
 
 from __future__ import annotations
@@ -33,6 +39,15 @@ REPO = Path(__file__).resolve().parents[2]
 WF = REPO / ".github" / "workflows"
 
 RAILWAY_STEP_NAME = "Install Railway CLI (pinned release binary, SHA-256 checked)"
+DEPENDABOT = REPO / ".github" / "dependabot.yml"
+API_REQUIREMENTS = REPO / "robotis_ai_setup" / "cloud_training_api" / "requirements.txt"
+# The internet-facing cloud API's libraries (owner decision 2026-11-09: patch
+# releases and security fixes, never a minor or major version update). aiohttp
+# is in no manifest Dependabot reads today; its entry is there for when it is.
+API_STACK = ("fastapi", "httpx", "uvicorn", "cryptography", "boto3", "botocore", "huggingface-hub", "aiohttp")
+# The ci.yml jobs that pip-install cloud API libraries by version.
+API_CI_JOBS = ("python-tests", "modal-import-validate")
+_PIN = re.compile(r"(?<![\w.-])'?([A-Za-z][A-Za-z0-9_.-]*)(?:\[[^\]]*\])?==([0-9][0-9A-Za-z.+!-]*)")
 RELEASES_REPO_EXPR = "${{ vars.RELEASES_REPO || github.repository }}"
 RELEASES_TOKEN_EXPR = "${{ vars.RELEASES_REPO && secrets.RELEASES_REPO_TOKEN || secrets.GITHUB_TOKEN }}"
 SOFTPROPS = "softprops/action-gh-release@"
@@ -64,6 +79,30 @@ def _steps(doc: dict):
     for job_id, job in (doc.get("jobs") or {}).items():
         for step in job.get("steps") or []:
             yield job_id, job, step
+
+
+def _norm(name: str) -> str:
+    """PEP 503: huggingface_hub and huggingface-hub are one project."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _requirement_pins(path: Path) -> dict[str, str]:
+    pins = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        match = _PIN.fullmatch(line)
+        if match:
+            pins[_norm(match[1])] = match[2]
+    return pins
+
+
+def _ci_pins(job_id: str) -> dict[str, set[str]]:
+    job = _load(WF / "ci.yml")["jobs"][job_id]
+    runs = "\n".join(step.get("run", "") for step in job.get("steps") or [])
+    pins: dict[str, set[str]] = {}
+    for name, version in _PIN.findall(runs):
+        pins.setdefault(_norm(name), set()).add(version)
+    return pins
 
 
 class RailwayCliPin(unittest.TestCase):
@@ -141,6 +180,35 @@ class PyInstallerPin(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertRegex(line, r"\bpyinstaller==\d+\.\d+\.\d+\b")
                 self.assertRegex(line, r"\bpyinstaller-hooks-contrib==[\d.]+\b")
+
+
+class CloudApiPinsFollowRequirements(unittest.TestCase):
+    def test_the_api_stack_gets_patch_and_security_updates(self):
+        pip = next(u for u in _load(DEPENDABOT)["updates"] if u["package-ecosystem"] == "pip")
+        entries: dict[str, list[dict]] = {}
+        for entry in pip.get("ignore") or []:
+            entries.setdefault(_norm(entry["dependency-name"]), []).append(entry)
+        self.assertIn({"dependency-name": "*", "update-types": ["version-update:semver-major"]}, pip["ignore"])
+        for name in API_STACK:
+            with self.subTest(dependency=name):
+                self.assertTrue(entries.get(name), "listed, so a minor update is never proposed")
+                for entry in entries[name]:
+                    # A bare name (or a `versions` range) also blocks security updates.
+                    self.assertEqual(set(entry), {"dependency-name", "update-types"})
+                    self.assertEqual(entry["update-types"], ["version-update:semver-minor"])
+
+    def test_ci_installs_exactly_the_api_versions_dependabot_may_move(self):
+        shipped = _requirement_pins(API_REQUIREMENTS)
+        moved = [n for n in API_STACK if n in shipped]
+        self.assertGreaterEqual(len(moved), 7, "requirements.txt pins the stack with ==")
+        jobs = {job_id: _ci_pins(job_id) for job_id in API_CI_JOBS}
+        for name in moved:
+            with self.subTest(dependency=name):
+                self.assertIn(name, jobs["python-tests"], "the test suites run against the shipped version")
+                for job_id, pins in jobs.items():
+                    if name in pins:
+                        self.assertEqual(pins[name], {shipped[name]},
+                                         f"ci.yml::{job_id} installs what requirements.txt ships")
 
 
 class ReleaseChannel(unittest.TestCase):

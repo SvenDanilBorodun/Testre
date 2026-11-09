@@ -23,11 +23,15 @@ _REPO = _SETUP.parent
 TRAINER = _SETUP / "runpod_training" / "Dockerfile"
 PROOF = _SETUP / "runpod_training" / "proof" / "Dockerfile.proof"
 LOCK = _SETUP / "modal_training" / "training-lock.txt"
+API_REQUIREMENTS = _SETUP / "cloud_training_api" / "requirements.txt"
 WF = _REPO / ".github" / "workflows"
 BASE = "python:3.12.14-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9"
-CHECKOUT = "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd"
-FREE_DISK = "jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be"
-LOGIN = "docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121"
+# The trainer job's three actions, in step order. Their commits are not written
+# here: each must be pinned to a 40-hex commit and be the SAME commit every other
+# workflow pins for that action (_pins_elsewhere). A literal here broke every
+# grouped Dependabot actions PR, which moves the pin in all workflows at once.
+TRAINER_ACTIONS = ("actions/checkout", "jlumbroso/free-disk-space", "docker/login-action")
+_PINNED_USES = re.compile(r"^(?P<action>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@(?P<sha>[0-9a-f]{40})$")
 
 
 def _instructions(path: Path) -> list[tuple[str, str]]:
@@ -72,6 +76,20 @@ def _on(doc: dict) -> dict:
 
 def _runs(job: dict) -> str:
     return "\n".join(step.get("run", "") for step in job.get("steps", []))
+
+
+def _pins_elsewhere(action: str, *, skip: str) -> set[str]:
+    """Every ref ``action`` is pinned to in every workflow except ``skip``."""
+    refs = set()
+    for path in sorted(WF.glob("*.yml")):
+        if path.name == skip:
+            continue
+        for job in (yaml.safe_load(path.read_text(encoding="utf-8")).get("jobs") or {}).values():
+            for step in job.get("steps") or []:
+                uses = step.get("uses", "").split("#")[0].strip()
+                if uses.startswith(action + "@"):
+                    refs.add(uses.split("@", 1)[1])
+    return refs
 
 
 class TrainerDockerfile(unittest.TestCase):
@@ -200,7 +218,14 @@ class TrainerImageWorkflow(unittest.TestCase):
 
     def test_pinned_actions_and_no_persisted_credentials(self):
         uses = [s["uses"].split("#")[0].strip() for s in self.job["steps"] if "uses" in s]
-        self.assertEqual(uses, [CHECKOUT, FREE_DISK, LOGIN])
+        self.assertEqual([u.split("@", 1)[0] for u in uses], list(TRAINER_ACTIONS))
+        for ref in uses:
+            with self.subTest(uses=ref):
+                pinned = _PINNED_USES.match(ref)
+                self.assertIsNotNone(pinned, "pinned to a full 40-hex commit, never a tag or branch")
+                elsewhere = _pins_elsewhere(pinned["action"], skip="trainer-image.yml")
+                self.assertTrue(elsewhere, "another workflow uses it, so there is a pin to agree with")
+                self.assertEqual(elsewhere, {pinned["sha"]}, "the same commit as every other workflow")
         checkout = next(s for s in self.job["steps"] if s.get("uses", "").startswith("actions/checkout"))
         self.assertIs(checkout["with"]["persist-credentials"], False)
 
@@ -267,16 +292,24 @@ class ReleaseWorkflow(unittest.TestCase):
         self.assertIn("needs.trainer-image.result == 'success'", job["if"])
 
 
+def _shipped(name: str) -> str:
+    """The cloud API's own pin (requirements.txt), which Dependabot may move."""
+    text = API_REQUIREMENTS.read_text(encoding="utf-8")
+    (version,) = re.findall(rf"^{re.escape(name)}==([0-9][0-9A-Za-z.]*)$", text, re.M)
+    return version
+
+
 class CiWorkflow(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.jobs = _workflow("ci.yml")["jobs"]
+        cls.boto3, cls.botocore = _shipped("boto3"), _shipped("botocore")
 
     def test_python_tests_install_boto3_and_botocore(self):
         runs = _runs(self.jobs["python-tests"]).replace("\\\n", " ")
         install = next(ln for ln in runs.splitlines() if "pip install pyyaml pytest" in ln)
-        self.assertIn("boto3==1.43.107", install)
-        self.assertIn("botocore==1.43.107", install)
+        self.assertIn(f"boto3=={self.boto3}", install)
+        self.assertIn(f"botocore=={self.botocore}", install)
 
     def test_runpod_training_is_a_compileall_root(self):
         self.assertIn("robotis_ai_setup/runpod_training", _runs(self.jobs["python-tests"]))
@@ -288,7 +321,7 @@ class CiWorkflow(unittest.TestCase):
         self.assertIn('want="smoke_test,train_managed"', runs)
         self.assertNotIn("registered_functions", runs, "deprecated in modal 1.6, removed in 1.7")
         self.assertIn("from app.services import training_dispatch, runpod_client", runs)
-        self.assertIn("'boto3==1.43.107' 'botocore==1.43.107'", runs)
+        self.assertIn(f"'boto3=={self.boto3}' 'botocore=={self.botocore}'", runs)
 
 
 class EntryDefaults(unittest.TestCase):

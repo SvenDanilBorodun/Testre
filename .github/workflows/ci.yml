@@ -1084,7 +1084,7 @@ jobs:
           for enforce in '' 1; do
             cid=$(docker run -d -e EDUBOTICS_CSP_ENFORCE="$enforce" -p 127.0.0.1:18080:8080 edubotics-teacher-web-validate)
             for _ in $(seq 1 30); do
-              curl -fsS -o /dev/null http://127.0.0.1:18080/ && break
+              curl -fsS -o /dev/null http://127.0.0.1:18080/ 2>/dev/null && break
               sleep 1
             done
             headers=$(curl -fsS -D - -o /dev/null http://127.0.0.1:18080/ | tr 'A-Z' 'a-z')

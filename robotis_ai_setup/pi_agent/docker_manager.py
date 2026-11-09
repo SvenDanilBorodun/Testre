@@ -1069,19 +1069,30 @@ def start_robot_tier(log=None) -> bool:
     return _compose_up(*_ROBOT_TIER, log=log, timeout=DOCKER_STARTUP_TIMEOUT + 180)
 
 
+# How long the graceful `compose stop` of the robot tier may take. Compose stops
+# physical_ai_server before open_manipulator, each within its stop_grace_period;
+# physical_ai_server's is 50 s since launch plan step 8 (2026-11-10), because it
+# finalizes a running recording before it exits. A timed-out `stop` is followed
+# by `rm -f`, which SIGKILLs whatever still runs — so this must never be the
+# shorter bound. tests/test_recording_stop_budget.py holds it above the graces.
+ROBOT_TIER_STOP_TIMEOUT_S = 120
+
+
 def stop_robot_tier(log=None) -> bool:
     """Stop + remove ONLY the robot-tier containers. NEVER ``compose down`` —
     the ros_net network + the always-on manager must survive (``down`` deletes
     ros_net and severs the agent's gateway listener). The graceful ``stop``
     (SIGTERM) lets open_manipulator's entrypoint run its torque-disable trap
-    before exit (Rule §2). Idempotent — a no-op when nothing is present."""
+    before exit (Rule §2) and physical_ai_server finalize a running recording
+    (launch plan step 8). Idempotent — a no-op when nothing is present."""
     log = log or (lambda _m: None)
     ok = True
-    for action in (["stop", *_ROBOT_TIER], ["rm", "-f", *_ROBOT_TIER]):
+    for action, timeout in ((["stop", *_ROBOT_TIER], ROBOT_TIER_STOP_TIMEOUT_S),
+                            (["rm", "-f", *_ROBOT_TIER], 60)):
         try:
             subprocess.run(
                 _compose(*action),
-                capture_output=True, text=True, timeout=60, env=_scrubbed_env(),
+                capture_output=True, text=True, timeout=timeout, env=_scrubbed_env(),
             )
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
             log(f"Docker Compose Fehler: {e}")

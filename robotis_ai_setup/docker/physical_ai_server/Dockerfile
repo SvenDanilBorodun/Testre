@@ -18,6 +18,29 @@ RUN find /etc/s6-overlay/s6-rc.d -type f \
     find /usr/local/lib/s6-services -type f -name "*.sh" -exec sed -i 's/\r$//' {} + && \
     echo "Fixed CRLF in s6 service files"
 
+# Launch plan step 8 (2026-11-10): „Umgebung stoppen“ during a recording must
+# END the session, not lose it. s6 brings the physical_ai_server longrun down
+# with its down-signal, SIGTERM by default, and the supervised process is
+# `ros2 launch` (the run script execs it). Jazzy's launch answers SIGTERM by
+# cancelling its own task and exiting WITHOUT signalling its children (its log
+# says „using SIGTERM can result in orphaned processes“); the node then got its
+# SIGTERM only from the finish script's `kill -TERM -<pgid>`, with its output
+# pipe already broken, and SIGKILL a few seconds later. SIGINT makes the launch
+# shut down in order: SIGINT to every child (stdin is /dev/null under s6, so the
+# launch is non-interactive), SIGTERM after the node's sigterm_timeout, SIGKILL
+# after its sigkill_timeout (physical_ai_server.launch.py), and the node
+# finalizes a running recording in main()'s finally meanwhile. s6-rc-compile
+# copies `down-signal` into the compiled service; s6-overlay compiles at boot.
+# Both flavors (amd64 and opi) get it here; the bases are not touched.
+# robotis_ai_setup/tests/test_recording_stop_budget.py pins this block.
+RUN set -e && \
+    svc=/etc/s6-overlay/s6-rc.d/physical_ai_server && \
+    test -f "$svc/run" && \
+    grep -qx 'longrun' "$svc/type" && \
+    printf 'SIGINT\n' > "$svc/down-signal" && \
+    grep -qx 'SIGINT' "$svc/down-signal" && \
+    echo "[STOP] s6 down-signal of physical_ai_server: SIGINT"
+
 # Re-build physical_ai_interfaces with the v1 + audit additions.
 #
 # Why this exists: the upstream base image (robotis/physical-ai-server:amd64-0.8.2)

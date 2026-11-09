@@ -229,6 +229,14 @@ services:
         condition: service_healthy
     tty: true
     restart: "no"
+    # Launch plan step 8 (2026-11-10): an environment stop during a recording
+    # finalizes the session (its saved episodes survive, nothing is uploaded)
+    # before the node exits. The node waits for that at most 30 s, the launch
+    # SIGKILLs it 40 s after its SIGINT (sigterm_timeout 10 + sigkill_timeout 30,
+    # physical_ai_server.launch.py); docker's default 10 s would SIGKILL a
+    # finalize on a slow Pi. A stop with nothing to finalize still takes ~1-3 s.
+    # robotis_ai_setup/tests/test_recording_stop_budget.py holds the chain.
+    stop_grace_period: 50s
     cap_add:
       - SYS_NICE
     ulimits:

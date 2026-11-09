@@ -86,6 +86,13 @@ fi
 rm -rf "${ENV_DIR}/phone-cert" 2>/dev/null || true
 # Persisted per-machine state that must re-derive from the NEW machine-id.
 rm -f "${STATE_DIR}/.ros_domain_id" "${STATE_DIR}/.last_image_pull.json" 2>/dev/null || true
+# Robot login: never inherit the bench unit's claim or setup code (an image
+# captured without `setup.sh --prepare-golden`). The agent, which starts after
+# this unit, mints this clone's own code and shows it on the HDMI console —
+# never here: this script's output goes to the journal, and a setup code must
+# never be logged. Re-show one later with:
+#   sudo sh -c 'cd /opt/edubotics && python3 -m pi_agent.setup_code'
+rm -f "${STATE_DIR}/pi_auth.json" 2>/dev/null || true
 
 # ── 4. Regenerate the managed .env (drop the bench HF token + stale arm ports) ─
 # The agent unit's EnvironmentFile is optional (`EnvironmentFile=-`), so a

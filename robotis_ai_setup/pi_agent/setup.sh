@@ -25,6 +25,9 @@
 #   8. Install + enable the edubotics-pi + edubotics-pi-firstboot systemd units.
 #   9. Pull the -opi images (GHCR primary, Hub fallback).
 #  10. Print the case label/QR: hostname + wired NIC MAC + a BLANK IP field.
+#  11. Print a fresh one-time SETUP CODE (robot login): a teacher or admin
+#      enters it once in the browser to claim this Pi. Shown only here, never
+#      logged; an already-claimed Pi keeps its claim and gets none.
 #
 # Operator/maintainer tool → log lines are ENGLISH (and deliberately avoid the
 # [FEHLER]/[WARNUNG]/[STOPP] German marker prefixes german-strings-lint scans
@@ -111,6 +114,9 @@ c.generate_cloud_only_env(ros_net_subnet=(os.environ.get("SUBNET") or None))' \
     fi
     rm -rf "${ENV_DIR}/phone-cert" 2>/dev/null || true
     rm -f "${STATE_DIR}/.ros_domain_id" "${STATE_DIR}/.last_image_pull.json" 2>/dev/null || true
+    # Robot login: a clone must neither inherit the bench unit's claim nor its
+    # setup code. Each clone's agent mints its own code at first boot.
+    rm -f "${STATE_DIR}/pi_auth.json" 2>/dev/null || true
     log "Done. Power off now and capture the eMMC/NVMe image."
     log "Each clone will self-personalize (hostname edubotics-NN + secrets) on first boot."
     exit 0
@@ -592,6 +598,22 @@ print_label() {
     printf '============================================================\n'
 }
 
+# ─── Robot login: the one-time setup code ─────────────────────────────────────
+# The agent stores the code only as a hash, so it can be shown only when it is
+# minted: ask the running agent (loopback-only route) for a fresh one and print
+# it here, in the operator's terminal — never into a log. A Pi that is already
+# set up (a re-run of this idempotent script) keeps its claim and gets no code.
+print_setup_code() {
+    local rc=0
+    ( cd "$INSTALL_DIR" && python3 -m pi_agent.setup_code --label ) || rc=$?
+    if [ "$rc" = "3" ]; then
+        log "This Pi is already set up (claimed) — no new setup code."
+    elif [ "$rc" != "0" ]; then
+        warn "Could not show a setup code now. Later, on this Pi:"
+        warn "  sudo sh -c 'cd ${INSTALL_DIR} && python3 -m pi_agent.setup_code'"
+    fi
+}
+
 # ─── Orchestration ────────────────────────────────────────────────────────────
 HOSTNAME_ASSIGNED=""
 
@@ -659,3 +681,4 @@ log "Manager/wizard is serving on http://127.0.0.1/ (version.json / index reacha
 
 log "Agent running. Web wizard: http://$(hostname).local/"
 print_label
+print_setup_code

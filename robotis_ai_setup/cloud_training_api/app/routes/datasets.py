@@ -166,8 +166,7 @@ def _hf_repo_author(repo_id: str) -> str | None:
 def _map_register_dataset_error(exc: Exception) -> HTTPException:
     """Convert Postgres SQLSTATEs from register_dataset_safe to HTTP.
 
-    Mirrors the _map_pg_error helper in routes/jetson.py. Migration 026
-    raises:
+    Migration 026 raises:
       P0034 → 403  HF-author anchor mismatch (the IDOR block)
       P0002 → 404  user row not found (auth.users / public.users skew)
     Anything else surfaces as a 500 so an operator notices.

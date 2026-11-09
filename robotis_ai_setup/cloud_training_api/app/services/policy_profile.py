@@ -40,11 +40,11 @@ only"; not enforced in code):
      (huggingface.co/google/paligemma-3b-pt-224) or all three FAIL at train
      start with a 401. smolvla is immune (apache-2.0 deps).
   2. INFERENCE IS EXPORT-ONLY for pi0/pi05/pi0_fast: ~3B VLAs need ~10-13 GB and
-     CANNOT run on the EduBotics inference fleet (student PCs have no GPU; the
-     classroom Jetson Orin Nano is 8 GB shared / 6 GB container cap → OOM; LeRobot
-     v0.5.1 has no quantized path). They are trainable-but-undeployable in-fleet
-     (teacher/external-GPU export only). smolvla (450 MB) WOULD fit the Jetson
-     but is gated off on aarch64 (inference_manager, bug #3636) — kept gated.
+     CANNOT run on the EduBotics inference fleet (student PCs and Orange Pis
+     carry CPU torch; Cloud-Inferenz runs ACT only; LeRobot v0.5.1 has no
+     quantized path). They are trainable-but-undeployable in-fleet
+     (teacher/external-GPU export only). smolvla is also gated off on aarch64
+     (inference_manager, bug #3636) — kept gated.
 
 The flag is ``--policy.pretrained_path`` (NOT ``--policy.path``): on v0.5.1
 ``pretrained_path`` is the real ``PreTrainedConfig`` field; ``--policy.path`` is

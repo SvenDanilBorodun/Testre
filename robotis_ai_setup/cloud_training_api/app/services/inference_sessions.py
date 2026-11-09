@@ -92,7 +92,7 @@ HF_BASE_URL = "https://huggingface.co"
 MAX_CAMERAS = 4
 MAX_DIM = 32
 MAX_IMAGE_SIDE = 8192
-INFERENCE_RUNS_KEEP = 50  # == routes/jetson.py::_INFERENCE_RUNS_KEEP
+INFERENCE_RUNS_KEEP = 50  # the newest rows kept per student
 
 # spec §4.3 — keys == the SQL end_reason CHECK (test_end_reason_maps_cover_the_sql_check)
 END_REASON_DE = {
@@ -524,7 +524,6 @@ def log_ended_sessions(sb, limit=100) -> int:
         runs.append({
             "student_user_id": r["user_id"],
             "classroom_id": r.get("classroom_id"),
-            "jetson_id": None,
             "policy_repo": r.get("model_repo") or "",
             "started_at": r.get("connected_at"),
             "duration_s": r.get("active_seconds"),
@@ -545,7 +544,7 @@ def log_ended_sessions(sb, limit=100) -> int:
 
 
 def _retain_newest(sb, student_id) -> None:
-    """Keep the newest INFERENCE_RUNS_KEEP rows of one student (routes/jetson.py's rule)."""
+    """Keep the newest INFERENCE_RUNS_KEEP rows of one student."""
     try:
         keep = (sb.table("inference_runs").select("id").eq("student_user_id", student_id)
                 .order("created_at", desc=True).limit(INFERENCE_RUNS_KEEP).execute().data or [])

@@ -47,7 +47,7 @@ def _ensure_stubs() -> None:
     if "app.auth" not in sys.modules:
         # Superset stub: this file is alphabetically first under `unittest
         # discover`, so its shims must satisfy every route any sibling test
-        # later imports (jetson uses get_current_teacher, etc.).
+        # later imports (teacher uses get_current_teacher, etc.).
         m = types.ModuleType("app.auth")
         m.get_current_profile = lambda *a, **kw: {}
         m.get_current_user = lambda *a, **kw: SimpleNamespace(id="u1")

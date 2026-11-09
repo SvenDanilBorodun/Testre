@@ -1317,7 +1317,7 @@ async def list_training_checkpoints(
         training_id=training_id, model_name=model_name, steps=steps)
 
 
-# ---------- Jetson inference run records (leLab-comparison PR-5b) ----------
+# ---------- Inference run records (leLab-comparison PR-5b, Cloud-Inferenz 048) ----------
 
 
 class InferenceRunSummary(BaseModel):
@@ -1328,8 +1328,9 @@ class InferenceRunSummary(BaseModel):
     exit_reason: str
     error_message_de: str
     created_at: str
-    # Migration 048: 'jetson' (the classroom Jetson) or 'cloud' (Cloud-Inferenz,
-    # written by the session sweep). Teachers READ their students' cloud runs;
+    # Migration 048: 'cloud' (Cloud-Inferenz, written by the session sweep) or
+    # 'jetson' (a run on the retired classroom Jetson, written before migration
+    # 053; those rows stay readable). Teachers READ their students' cloud runs;
     # they cannot start one (students only, owner A-Q4).
     backend: str = "jetson"
 
@@ -1342,7 +1343,7 @@ async def list_student_inference_runs(
     student_id: str,
     teacher=Depends(get_current_teacher),
 ):
-    """Compact inference run records (classroom Jetson and Cloud-Inferenz) for failure forensics."""
+    """Compact inference run records (Cloud-Inferenz; older rows from the retired classroom Jetson) for failure forensics."""
     _assert_student_owned(teacher["id"], student_id)
     supabase = get_supabase()
     result = (

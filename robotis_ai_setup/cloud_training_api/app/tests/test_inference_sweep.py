@@ -115,10 +115,10 @@ class TestLogEndedSessions(unittest.TestCase):
         update_ops = next(ops for t, ops in db.calls if t == "inference_sessions" and ops[0][0] == "update")
         self.assertIn(("is_", ("run_logged_at", "null"), {}), update_ops)
         self.assertEqual(db.inserted, [
-            {"student_user_id": "u1", "classroom_id": "c-1", "jetson_id": None,
+            {"student_user_id": "u1", "classroom_id": "c-1",
              "policy_repo": "EduBotics-Solutions/m", "started_at": "2026-10-11T10:00:00+00:00", "duration_s": 42,
              "exit_reason": "stopped", "error_message_de": "", "backend": "cloud"},
-            {"student_user_id": "u1", "classroom_id": "c-1", "jetson_id": None,
+            {"student_user_id": "u1", "classroom_id": "c-1",
              "policy_repo": "EduBotics-Solutions/m", "started_at": "2026-10-11T10:00:00+00:00", "duration_s": 42,
              "exit_reason": "error", "error_message_de": "Die Verbindung zur Cloud war zu lange unterbrochen.",
              "backend": "cloud"},

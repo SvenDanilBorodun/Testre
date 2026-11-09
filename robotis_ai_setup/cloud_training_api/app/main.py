@@ -15,8 +15,6 @@ from app.routes.datasets import router as datasets_router
 from app.routes.health import router as health_router
 from app.routes.hf_token import router as hf_token_router
 from app.routes.inference import router as inference_router
-from app.routes.jetson import router as jetson_router
-from app.routes.jetson import teacher_router as jetson_teacher_router
 from app.routes.me import router as me_router
 from app.routes.policies import router as policies_router
 from app.routes.teacher import router as teacher_router
@@ -27,7 +25,6 @@ from app.routes.workflows import router as workflows_router
 from app.routes.workgroups import router as workgroups_router
 from app.services.dataset_sweep import sweep_loop as _dataset_sweep_loop
 from app.services.inference_sweep import sweep_loop as _inference_sweep_loop
-from app.services.jetson_sweep import sweep_loop as _jetson_sweep_loop
 from app.services.rate_limiter import RateLimiter
 from app.services import training_dispatch as _training_dispatch
 from app.services.training_sweep import active_sweep_loop as _training_active_sweep_loop
@@ -136,19 +133,11 @@ BOOT_ID = _training_dispatch.BOOT_ID
 
 def _warn_optional_secrets() -> None:
     """Log WARNING at boot for env vars that aren't strictly required but
-    silently disable specific routes when missing. Migration 019 added
-    EDUBOTICS_JETSON_HF_TOKEN — without it /jetson/register returns 503
-    and no Jetson can be set up. Operators deploying a classroom-Jetson
-    feature flag should see a clear log line during Railway boot rather
-    than discover the misconfiguration when a teacher tries to pair a
-    Jetson.
+    silently disable specific features when missing, so the operator sees a
+    clear log line during the Railway boot rather than discovering the
+    misconfiguration later.
     """
     optional_warns = (
-        (
-            "EDUBOTICS_JETSON_HF_TOKEN",
-            "/jetson/register will return 503 — classrooms cannot pair Jetsons. "
-            "Set the read-only HF org token on Railway to enable.",
-        ),
         (
             "HF_TOKEN",
             "dataset reconciliation sweep + GDPR Art. 17 cleanup disabled.",
@@ -225,25 +214,6 @@ def _warn_optional_secrets() -> None:
                 gui_version_env,
                 in_tree_version,
             )
-
-    # Conditional: when SUPABASE_JWT_ALGORITHM=HS256 (legacy Supabase
-    # auth, pre-2024), the Jetson rosbridge proxy needs the shared HMAC
-    # secret to verify student JWTs. Without it, every WebSocket
-    # connection closes 4401 and no inference works.
-    # Modern Supabase projects (post-2024) default to ES256 with a
-    # JWKS endpoint, which needs NO shared secret — only SUPABASE_URL
-    # for the JWKS lookup. Default left as ES256 to match Supabase's
-    # current default; legacy projects need to set the env var.
-    if os.environ.get("SUPABASE_JWT_ALGORITHM") == "HS256" and not os.environ.get(
-        "SUPABASE_JWT_SECRET"
-    ):
-        logger.warning(
-            "env var SUPABASE_JWT_SECRET not set but SUPABASE_JWT_ALGORITHM=HS256 — "
-            "/jetson/register will return 503 because Jetson agents cannot verify "
-            "student JWTs without the shared HMAC secret. "
-            "Set SUPABASE_JWT_SECRET on Railway (Supabase Dashboard → Settings → API → JWT Secret) "
-            "OR switch to ES256/RS256 (the default for modern Supabase projects)."
-        )
 
 
 _warn_optional_secrets()
@@ -325,7 +295,6 @@ def _validate_required_schema() -> None:
         "tutorial_progress",  # 016
         "datasets",
         "progress_entries",
-        "jetsons",  # 019 — classroom Jetson Orin Nano support
         "workflow_submissions",  # 040 — Roboter Studio „Abgeben" snapshots
         "user_hf_credentials",  # 042 — a student's own HF token, AES-GCM encrypted
         "inference_sessions",  # 048 — Cloud-Inferenz sessions (service-role only)
@@ -363,9 +332,6 @@ def _validate_required_schema() -> None:
         # A deploy that lands the new code before the ALTER TABLE would 500 on
         # every profile read; fail the deploy fast instead.
         ("users", "hf_username"),
-        # Migration 022 — jetsons pair-intent columns (Fix #1 of the
-        # 2026-05 audit). Without these the new two-step pair flow 500s.
-        ("jetsons", "intent_token, intent_teacher_id"),
         # Migration 023 — trainings cancel-sweep columns (Fix #3 of the
         # 2026-05 audit). The status CHECK constraint expansion can't be
         # probed via PostgREST, but the new columns can.
@@ -373,8 +339,8 @@ def _validate_required_schema() -> None:
         # 028: full-log pointer written by the extended
         # update_training_progress RPC on terminal transitions.
         ("trainings", "log_url"),
-        # 029: compact Jetson inference run records (student-self write,
-        # teacher read).
+        # 029: compact inference run records (teacher read; the session sweep
+        # writes the Cloud-Inferenz rows, old classroom-Jetson rows stay).
         ("inference_runs", "id, student_user_id, policy_repo, exit_reason"),
         # Migration 033 — Roboter Studio Phase-3 Sim-Szene. WorkflowResponse
         # round-trips this column on every read; routes/workflows.py writes it
@@ -515,51 +481,6 @@ def _validate_required_schema() -> None:
             "p_version_id": dummy,
             "p_user_id": dummy,
         }),
-        # Migration 019 — classroom Jetson lifecycle RPCs. Each probe
-        # passes the signature the routes use; an existence-check P0002
-        # ("nicht gefunden") response proves the RPC is callable, while
-        # PGRST202 means the migration hasn't been applied yet.
-        ("claim_jetson", {"p_jetson_id": dummy, "p_user_id": dummy}),
-        ("release_jetson", {"p_jetson_id": dummy, "p_user_id": dummy}),
-        ("heartbeat_jetson", {"p_jetson_id": dummy, "p_user_id": dummy}),
-        ("agent_heartbeat_jetson", {
-            "p_jetson_id": dummy,
-            "p_agent_token": dummy,
-            "p_lan_ip": "",
-            "p_agent_version": "",
-        }),
-        # Migration 022 — pair_jetson now requires p_intent_token. The
-        # 4-arg overload is DROP'd by 022 so the probe MUST send the
-        # 5-arg shape, otherwise PostgREST reports the function as
-        # missing and the deploy aborts. claim_pair_intent is the new
-        # /pair-intent RPC.
-        ("pair_jetson", {
-            "p_classroom_id": dummy,
-            "p_pairing_code": "_probe",
-            "p_teacher_id": dummy,
-            "p_mdns_name": "_probe",
-            "p_intent_token": dummy,
-        }),
-        ("claim_pair_intent", {
-            "p_pairing_code": "_probe",
-            "p_teacher_id": dummy,
-        }),
-        ("force_release_jetson", {"p_jetson_id": dummy, "p_teacher_id": dummy}),
-        ("sweep_jetson_locks", {}),
-        # Migration 020 — v2.3.0 follow-up RPCs (agent-side claim-fail
-        # release, teacher pairing-code regeneration, teacher unpair).
-        # Same fingerprint pattern: PGRST202 means the migration hasn't
-        # been applied yet to the live DB and Railway should abort the
-        # deploy instead of returning 200 from /health and 500'ing the
-        # first teacher who tries to rotate a code.
-        ("agent_release_jetson", {"p_jetson_id": dummy, "p_agent_token": dummy}),
-        ("regenerate_pairing_code", {
-            "p_jetson_id": dummy,
-            "p_teacher_id": dummy,
-            "p_new_code": "_probe",
-            "p_expires_at": "1970-01-01T00:00:00+00:00",
-        }),
-        ("unpair_jetson", {"p_jetson_id": dummy, "p_teacher_id": dummy}),
         # Migration 026 — atomic register_dataset upsert + HF-author
         # anchor check. Without this RPC, /datasets POST 500s on the
         # supabase-py rpc('register_dataset_safe') call (PGRST202).
@@ -846,36 +767,6 @@ _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     # 20/min is more than enough for any classroom while stopping a
     # broken recording loop from spamming.
     ("POST", "/datasets", 20, 60.0),
-    # Jetson agent bootstrap (no auth). IP-keyed because the agent has
-    # no JWT yet. Five registrations per minute per public IP is fine
-    # for a teacher physically setting up a Jetson; a rogue actor on
-    # the LAN would burn through the pool without getting credentials
-    # bound to any classroom.
-    #
-    # MUST come BEFORE the broader "/jetson/" rule below — the
-    # middleware's first-match-wins (break-on-match) ordering means a
-    # less-specific prefix listed first shadows a more-specific one.
-    # The original "/jetson/" rule was listed first and turned this
-    # 5/60s into dead code.
-    ("POST", "/jetson/register", 5, 60.0),
-    # Classroom Jetson claim/heartbeat/release/agent-heartbeat/
-    # agent-release/release-beacon — single prefix rule for everything
-    # under /jetson/{id}/. Per-user (JWT sub keyed) when an
-    # Authorization header is present; falls back to IP keying when
-    # absent (agent endpoints + release-beacon body-token path).
-    #
-    # Why 30/60s and not 10/60s: a classroom of 30 students all closing
-    # their browser tab at the end of a lesson would each fire one
-    # navigator.sendBeacon('release-beacon') call. The beacon path has
-    # no JWT header (sendBeacon can't set headers) so it falls back to
-    # IP keying; 30 students from one NAT IP would exceed 10/60s and
-    # some beacons would get 429'd, sending their locks back to the
-    # 5-min sweeper — exactly what v2.3.0 fixed. 30/60s comfortably
-    # absorbs that storm and still catches a tight-loop bug. For the
-    # JWT-authenticated paths (claim, heartbeat, release) the
-    # per-user-keying means 30/min/user is still very generous (claim
-    # is 1x/session, heartbeat is 2/min, release is 1x/session).
-    ("POST", "/jetson/", 30, 60.0),
     # Tutorial progress upsert — a Blockly editor that auto-saves on
     # every step transition can burst a few requests per minute per
     # student; 30/60s easily absorbs that while stopping a runaway
@@ -905,8 +796,8 @@ _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     ("GET", "/inference/usage", 30, 60.0),
 ]
 
-# Sort rules longest-prefix-first so a more-specific rule (e.g.
-# /jetson/register) always wins over a broader one (/jetson/). Without
+# Sort rules longest-prefix-first so a more-specific prefix always wins
+# over a broader one for the same verb. Without
 # this, a newly-added narrow rule listed AFTER a broad rule in the
 # literal becomes dead code on the first-match-wins middleware path.
 # Done in code so future additions can't regress by accidental ordering.
@@ -964,11 +855,9 @@ def _user_key_from_jwt(request: Request) -> str | None:
 
 
 # Routes that should rate-limit per AUTHENTICATED USER rather than per
-# IP. Anything missing here keeps the IP-keyed legacy behavior. The
-# /jetson/ prefix uses per-JWT-sub keying for claim/heartbeat/release
-# so a NAT'd classroom of 30 students doesn't share one bucket. The
-# /jetson/register sub-prefix has no JWT and falls back to IP keying
-# (the _user_key_from_jwt helper returns None → IP path).
+# IP. Anything missing here keeps the IP-keyed legacy behavior; a request
+# without an Authorization header falls back to IP keying (the
+# _user_key_from_jwt helper returns None → IP path).
 #
 # /trainings/ (covers the rate-limited /trainings/start + /trainings/cancel
 # rules) is per-user for the same NAT reason: both endpoints require
@@ -1002,7 +891,7 @@ def _user_key_from_jwt(request: Request) -> str | None:
 # also keys the existing POST /teacher/classrooms and /teacher/workgroups rules
 # per teacher, which is what those limits meant anyway.
 _PER_USER_RATE_LIMIT_PREFIXES = (
-    "/jetson/", "/trainings/", "/workflows", "/me/hf-token", "/me/group-members", "/inference/",
+    "/trainings/", "/workflows", "/me/hf-token", "/me/group-members", "/inference/",
     "/teacher/", "/admin/",
 )
 
@@ -1085,8 +974,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             # NOT match "/trainings/started". Either the path is exactly
             # the prefix or the prefix must be followed by "/" so the
             # next segment is fully delimited. Path prefixes that end
-            # in "/" (e.g. "/jetson/") still match all sub-resources
-            # because path == "/jetson/" or path startswith "/jetson/"
+            # in "/" (e.g. "/trainings/") still match all sub-resources
+            # because path == "/trainings/" or path startswith "/trainings/"
             # via the second branch.
             if prefix.endswith("/"):
                 matched = path.startswith(prefix)
@@ -1148,8 +1037,6 @@ app.include_router(datasets_router)
 app.include_router(policies_router)
 app.include_router(admin_router)
 app.include_router(workflows_router)
-app.include_router(jetson_router)
-app.include_router(jetson_teacher_router)
 app.include_router(inference_router)
 
 
@@ -1173,19 +1060,6 @@ async def _start_dataset_sweep() -> None:
         logger.info("dataset_sweep: HF_TOKEN not set, loop not started")
         return
     _asyncio.create_task(_dataset_sweep_loop())
-
-
-@app.on_event("startup")
-async def _start_jetson_sweep() -> None:
-    """Migration 019: auto-release classroom-Jetson locks whose student
-    heartbeat is older than 5 minutes. Pairs with the agent's transition
-    watcher to recover from browser crashes / abandoned sessions."""
-    import asyncio as _asyncio
-
-    if os.environ.get("JETSON_SWEEPER_DISABLED") == "1":
-        logger.info("jetson_sweep: disabled via env")
-        return
-    _asyncio.create_task(_jetson_sweep_loop())
 
 
 @app.on_event("startup")

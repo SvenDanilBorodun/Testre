@@ -8,7 +8,7 @@ argument-name set), so every probe names EXACTLY the migration's parameters
 id 0, which never exists, so each call answers P0002, P0049 or false and
 writes nothing (proven through PostgREST on a local stack, spec §3.1).
 
-The 23 / 23 / 56 totals are pinned in ``test_schema_probe_040.py``. Migration 052
+The 22 / 22 / 45 totals are pinned in ``test_schema_probe_040.py``. Migration 052
 re-created start_training_safe (ten arguments), finish_training (nine) and
 cancel_request_training (three), so those three probes name 052's parameters
 (LATEST_DEFINITION; the new ones are checked in ``test_schema_probe_052.py``).

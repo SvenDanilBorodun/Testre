@@ -9,7 +9,7 @@ PostgREST on the review-2 build, spec §12.1). A database without 052 answers PG
 An RPC the service role cannot execute (42501, „permission denied" — an INVOKER caller
 of a revoked internal helper) used to read as „exists" and passed the deploy gate; the
 probe now treats it like a missing function. 052's fix round 2 adds ``mark_checkpoint_ready``
-(V3-M1), probed with training 0 (false, nothing written). The 23 / 23 / 56 totals are pinned in
+(V3-M1), probed with training 0 (false, nothing written). The 22 / 22 / 45 totals are pinned in
 ``test_schema_probe_040.py``.
 """
 
@@ -246,7 +246,7 @@ class TestFortyTwoFiveOhOneFailsTheBoot(unittest.TestCase):
 
     def test_a_healthy_database_boots_and_every_rpc_is_asked(self):
         calls = self._run({})
-        self.assertEqual(len(calls), 56)
+        self.assertEqual(len(calls), 45)
         self.assertIn("mark_checkpoint_ready", calls)
         for name in NEW_RPCS + WIDENED_RPCS:
             self.assertIn(name, calls)
@@ -268,7 +268,7 @@ class TestFortyTwoFiveOhOneFailsTheBoot(unittest.TestCase):
                 "credit_assign": self._Err("{'code': 'P0066'}"),
                 "stop_training": self._Err("{'code': 'P0002'}"),
                 "finish_training": self._Err("{'code': 'P0049'}")}
-        self.assertEqual(len(self._run(errs)), 56)
+        self.assertEqual(len(self._run(errs)), 45)
 
 
 if __name__ == "__main__":

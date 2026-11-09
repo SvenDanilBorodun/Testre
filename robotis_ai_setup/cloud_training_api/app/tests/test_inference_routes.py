@@ -1267,7 +1267,7 @@ class TestTeacherRuns(unittest.TestCase):
             runs = asyncio.run(teacher.list_student_inference_runs("s1", teacher={"id": "t1"}))
         self.assertIn("backend", [c.strip() for c in seen["cols"].split(",")])
         self.assertEqual(runs[0].backend, "cloud")
-        # an older row (or API) without the key reads as the Jetson
+        # an older row without the key reads as a run on the retired classroom Jetson
         path = os.path.join(os.path.dirname(HERE), "routes", "teacher.py")
         with open(path, encoding="utf-8") as fh:
             tree = ast.parse(fh.read())

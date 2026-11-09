@@ -1022,9 +1022,10 @@ class TestWorkflowsRateLimitedPerUser(unittest.TestCase):
 
     def test_existing_per_user_prefixes_not_regressed(self):
         prefixes = _extract_per_user_prefixes()
-        # The two pre-existing per-user prefixes must still be present.
-        self.assertIn("/jetson/", prefixes)
+        # The pre-existing per-user prefix must still be present (the second
+        # one, "/jetson/", went with the classroom Jetson, migration 053).
         self.assertIn("/trainings/", prefixes)
+        self.assertNotIn("/jetson/", prefixes)
 
     def test_workflows_prefix_has_no_trailing_slash(self):
         # A trailing slash would fail to match the bare `POST /workflows` create

@@ -179,8 +179,7 @@ class TestRateLimitRulesUnchanged(unittest.TestCase):
         # here, not appended (review 3 m2).
         ("POST", "/teacher/students", 60, 60.0),
         ("POST", "/datasets", 20, 60.0),
-        ("POST", "/jetson/register", 5, 60.0),
-        ("POST", "/jetson/", 30, 60.0),
+        # The two /jetson rules went with the classroom Jetson (migration 053).
         ("PATCH", "/me/tutorial-progress", 30, 60.0),
         ("GET", "/me/export", 3, 3600.0),
         # 042 — per-student Hugging Face token, appended in this order.

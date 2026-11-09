@@ -6,6 +6,31 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### 2026-11-10 — a recording session survives an environment stop (launch plan step 8)
+
+**Why.** „Umgebung stoppen" (or any orderly end of the node) during a recording lost every episode the session had saved (KNOWN-ISSUES M2, confirmed by running: after `s6-svc -d` with 2 saved episodes `info.json` said 2, the data parquet was unreadable, `meta/episodes` absent, stray `tmp*/…_streaming.mp4`, and the next Start of that task was refused). `main()`'s `finally` never finalized.
+
+**How the signal really travelled (read from the pinned sources, not assumed):**
+- `docker stop`/`compose stop|down` → SIGTERM to PID 1, s6-svscan (s6-overlay 3.2.1.0). Stage 3 runs `s6-rc -bda change`, which brings a longrun down with `s6-svc -dwD` (no timeout unless `timeout-down`) and its **down-signal, SIGTERM by default**, to the supervised process: `ros2 launch`, which the run script `exec`s.
+- Jazzy's `launch` (`launch_service.py::_on_sigterm`) answers SIGTERM by cancelling its own task and exiting, logging „using SIGTERM can result in orphaned processes": the children are never signalled. The node then got SIGTERM only from the upstream finish script's `kill -TERM -<pgid>`, with its stdout pipe already broken (a `print` would raise BrokenPipeError); s6-supervise kills a finish script after 5 s (`timeout-finish` default, `s6-supervise.c`), stage 3 then `kill -TERM -1`, `S6_KILL_GRACETIME` 3 s, `kill -KILL -1`; docker's own SIGKILL at 10 s.
+- rclpy jazzy (`signal_handler.cpp`) installs SIGINT and SIGTERM handlers that chain to the previous handler unless it is SIG_DFL/SIG_IGN and shut every context down from a deferred thread; `MultiThreadedExecutor.spin()` then returns. Python's own SIGINT handler is not SIG_DFL, so SIGINT also raised KeyboardInterrupt in the main thread.
+- On SIGINT, `launch` shuts down in order and, when non-interactive (`ros2 launch -n` defaults to `not sys.stdin.isatty()`; s6-linux-init resets stdin to /dev/null), sends SIGINT to every child, SIGTERM after each process's `sigterm_timeout`, SIGKILL after `sigkill_timeout` more (`execute_local.py`, defaults 5 + 5 s).
+
+**Measured, not assumed** (LeRobot 0.5.1 in a private venv, CPU torch, two 480×640 cameras, 30 fps, streaming h264, a 4-vCPU x86 host):
+- `save_episode` 0.25 s, growing with the concatenated video chunk to 0.83 s at 8 episodes (313 MB of video); the official discard of a running take (`clear_episode_buffer`) 1.04 s; `finalize()` 8 ms; the dataset then loads in 0.13 s.
+- A SIGKILL after 2 saved episodes: with `metadata_buffer_size` 10 the data parquet is unreadable (ArrowInvalid) and `meta/episodes` absent; with 1 the episodes parquet exists but is unreadable too. Both of LeRobot's ParquetWriters stay open across episodes and write their footer only on close, so a smaller buffer gains nothing for a hard crash. **Decision: keep the default 10.**
+- The new smoke scenarios against the real writer, with stand-in ROS packages whose rclpy reproduces the chaining above: signal → child exit 1.07 s, of it the finalize 1.03 s; without the finalize both scenarios fail exactly like M2 (unreadable dataset, marker kept, stray streaming temp files, the next session's dataset init refused). Without `os._exit` at the child's end LeRobot's `__del__` safety net had finalized at interpreter teardown and hidden the defect — the node cannot rely on that.
+- Python 3.12's `Thread.join` mis-marks a still-running thread stopped when a KeyboardInterrupt lands inside it (its bpo-45274 handling releases the worker's own tstate lock); the helper's bounded wait is an `Event`, not a join.
+
+**What changed:**
+- `DataManager.end_for_shutdown` (D5 + F3 unchanged: a latched save counted, the running take discarded, finalize, nothing uploaded, the marker cleared only on success; without a dataset a Start's wait ends like STOP; a finalized session is left alone); its own `_dataset_finalized` flag, never LeRobot's private one.
+- `data_processing/recording_shutdown.py` (stdlib): the bounded run on a daemon thread (`SHUTDOWN_FINALIZE_WAIT_S` 30 s), EPIPE-tolerant stdout/stderr.
+- The node: `_finalize_recording_on_shutdown` FIRST in `main()`'s `finally` and before the sensor supervisor's `os._exit(70)`; gated on the DataManager (a collision clears `on_recording` while the session lives); `main()` sets SIGINT to SIG_DFL before `rclpy.init`.
+- The chain: the thin Dockerfile writes `SIGINT` to `/etc/s6-overlay/s6-rc.d/physical_ai_server/down-signal` (asserted at build); the node's launch `sigterm_timeout` 10 / `sigkill_timeout` 30; `stop_grace_period: 50s` on physical_ai_server (student, opi, twin); GUI `STACK_STOP_TIMEOUT_S` and Pi `ROBOT_TIER_STOP_TIMEOUT_S` 60 → 120 s (compose stops the services one after another; on the Pi a timed-out stop is followed by `rm -f`).
+- Tests: the FSM and D14 suites, `test/test_recording_shutdown.py`, `test_sensor_executor.py`, `tests/test_recording_stop_budget.py`, and the smoke scenarios `shutdown_sigint_after_two_episodes` / `shutdown_sigterm_after_two_episodes`.
+
+**Not verified here:** the real images (not buildable here; the smoke scenarios run first in `docker-publish.yml::smoke-test`), real rclpy and launch processes, a rig, a Pi. Spec: `docs/plans/2026-11-10-recording-survives-stop.md` (throwaway).
+
 ### 2026-11-09 — the going-private follow-up, and the classroom Jetson retired
 
 **Why.** Step 1 of the release plan: finish what going private still needed, and retire the classroom Jetson Orin Nano (owner decision: no Jetson is in use at any school, no transition notice; its database objects dropped with a rollback; its code deleted). Stacked on `chore/ship-private-readiness` (PR #49), one PR.

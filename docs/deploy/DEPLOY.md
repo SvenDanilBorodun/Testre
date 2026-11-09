@@ -63,6 +63,37 @@ schema, not the data.
 - Hand-run assertions: `supabase/tests/053_retire_jetson_assertions.sql`
   (12 PASS on a local stack; never against the linked project).
 
+### Migration 055 — `public.users` default-deny; deletion requests (2026-11-11, launch plan step 5)
+
+`20261111120000_055_users_identity_guard.sql` revokes INSERT, UPDATE, DELETE,
+TRUNCATE, REFERENCES and TRIGGER on `public.users` from `anon` and
+`authenticated` (table and column level), drops the own-row policy „Users update
+own profile" and keeps 044's guard (rule 1 on the whole row, rule 2 P0044
+unchanged). It changes no API-visible shape and touches no row.
+
+- **Deploy order (W1 → W2, either order is safe).** 055 lands with W1; the API
+  of the same release (the deletion-request routes, the complete export,
+  `/me/delete/withdraw`) with W2, the teacher web with W3, the student SPA with
+  W4. The API writes `users` only with the service role, so an OLDER API works on
+  a database with 055, and the NEW API works on a database without it (055 is
+  defense in depth for what the API already does). An old student SPA never
+  wrote `users`; an old teacher web simply shows no queue.
+- **After W1:** in the SQL editor, `SELECT has_table_privilege('authenticated',
+  'public.users', 'UPDATE')` answers `false`, and the migration's NOTICE said
+  „055 self-check passed" (it aborts and changes nothing otherwise — e.g. if a
+  PUBLIC grant exists; then find it, revoke it, and push again).
+- **Rollback:** `rollback/20261111120000_055_users_identity_guard_rollback.sql`
+  (re-grants the six privileges, re-creates 024's policy, restores 044's guard
+  body). No API rollback is needed either way. It re-opens the student-writable
+  columns, `deletion_requested_at` among them.
+- Hand-run assertions: `supabase/tests/055_users_identity_guard_assertions.sql`
+  (36 PASS on a local stack; never against the linked project). It breaks
+  044's T7/T8 by design.
+- **Tell the teachers** (owner step, see the step-5 report): the dashboard's
+  „Löschanfragen" button lists their students' requests; the GDPR deadline is one
+  month from the request; „Löschung ausführen" deletes the account for good;
+  recordings in a student's own Hugging Face account must be deleted there.
+
 ---
 
 ## 2. Modal — training app

@@ -33,6 +33,14 @@ import { registerSammlungCategories } from './sammlung/toolboxCategories';
 import { attachAssetReferenceValidators } from './sammlung/referenceValidators';
 import { EMPTY_SAMMLUNG_PROVIDER } from './sammlung/provider';
 
+// Blockly's own media (the trash/zoom sprites, the drag cursors, the click
+// sounds) from our own origin, never Blockly's default media path on Google's
+// appspot host (which every page with a canvas used to contact; the teacher
+// web's CSP allows only 'self').
+// public/blockly-media/ is a byte-identical copy of node_modules/blockly/media,
+// pinned by __tests__/blocklyMedia.test.js (2026-11-11).
+export const BLOCKLY_MEDIA_PATH = '/blockly-media/';
+
 let blocksRegistered = false;
 function registerAllBlocksOnce() {
   if (blocksRegistered) return;
@@ -445,6 +453,7 @@ function BlocklyWorkspace({
       if (disposed || !container) return;
 
       const workspace = Blockly.inject(container, {
+        media: BLOCKLY_MEDIA_PATH,
         toolbox: buildToolbox(restrictedBlocksRef.current),
         readOnly,
         trashcan: !readOnly,
@@ -463,8 +472,12 @@ function BlocklyWorkspace({
         // clamp in two notches and grew blocks over the trash can.
         move: { scrollbars: true, drag: true, wheel: true },
         // v12 — sound effects are subtle but disable on prefers-reduced-motion.
-        sounds: !window.matchMedia
-          || !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+        // Blockly FETCHES its sound files even where it cannot play them, so
+        // they are asked for only where Web Audio exists (every browser, but
+        // not jsdom, whose Node fetch cannot resolve the relative media path).
+        sounds: typeof window.AudioContext === 'function'
+          && (!window.matchMedia
+            || !window.matchMedia('(prefers-reduced-motion: reduce)').matches),
       });
       workspaceRef.current = workspace;
       setReadyTick((n) => n + 1);

@@ -15,23 +15,22 @@ die Windows-App (jetzt als **System-Fenster** im Browser), nimmt Demos auf,
 trainiert in der Cloud und nutzt optional Roboter Studio. Der Pi ersetzt den
 Windows-PC + WSL2 auf der Roboterseite vollständig.
 
-**Inferenz** (das Ausführen trainierter Modelle) läuft weiterhin **nur auf dem
-Klassen-Jetson** — die Inferenz-Tab-Verbindung ist unverändert (siehe
-[`JETSON_DEPLOY.md`](JETSON_DEPLOY.md)). Der Pi **nimmt auf und trainiert**;
-der Jetson **führt aus**.
+**Inferenz** (das Ausführen trainierter Modelle) läuft **„In der Cloud"**: Das
+Modell rechnet auf einer Cloud-GPU in einem EU-Rechenzentrum, der Arm bleibt am
+Pi und führt die Bewegungen aus. Der Pi selbst rechnet keine Modelle (er hat
+keine GPU) und es wird nichts heruntergeladen.
 
 ## Vor dem Start — Netzwerk klären
 
 Schulnetze sind der häufigste Stolperstein. **Bitte zuerst die
 [Netzwerk-Anleitung für die IT](ORANGE_PI_IT_NETZWERK.md) an die IT geben** —
-sie ist als fertiges Ticket formuliert (VLAN, Ports 80/8080/9090/9091,
-Egress-Liste, TLS-/Proxy-Ausnahmen, MAC-Registrierung).
+sie ist als fertiges Ticket formuliert (VLAN, Port 80, Egress-Liste,
+TLS-/Proxy-Ausnahmen, MAC-Registrierung).
 
-> Für den **Browser** genügt inzwischen **Port 80** allein: Web-Oberfläche,
-> rosbridge und Videostrom laufen am Pi über denselben Proxy. 8080 und 9090
-> stehen nur noch für Diagnose/Rückfallweg offen, 9091 gehört zum
-> Klassenraum-Jetson. Bleibt im Ticket also nur 80 übrig, funktioniert der
-> Unterricht trotzdem vollständig.
+> Für den **Browser** genügt **Port 80**: Web-Oberfläche, rosbridge und
+> Videostrom laufen am Pi über denselben Proxy. Die Ports 8080 und 9090 sind
+> nur noch auf dem Pi selbst erreichbar (für die Fehlersuche per SSH) und
+> müssen **nicht** freigegeben werden.
 
 Für den **Pilot** genügt oft **Tier 2** aus jener Anleitung: ein eigener,
 mitgebrachter Router/Access-Point. Damit läuft alles sofort, unabhängig von
@@ -62,23 +61,53 @@ der Ticket-Warteschlange.
    Internetzugang sicherstellen.
 
 > **Golden Image für die Flotte:** Eine einzige Station wie unten
-> provisionieren, dann `sudo ./setup.sh --prepare-golden` ausführen und das
-> Image abziehen. Jeder Klon vergibt sich beim **ersten Boot** automatisch eine
+> provisionieren, dann `sudo /opt/edubotics/pi_agent/setup.sh --prepare-golden`
+> ausführen und das Image abziehen. Jeder Klon vergibt sich beim **ersten Boot** automatisch eine
 > **eindeutige** Kennung (Hostname `edubotics-NN`, ROS-Domain, frische
 > Schlüssel) — doppelte `.local`-Namen sind das Einzige, was mDNS nicht
 > übersteht, deshalb wird `NN` **abgeleitet, nie von Hand vergeben**.
 
 ## Schritt 2 — Agent installieren (provisionieren)
 
-Mit eingesteckten Armen + Kameras, als root:
+Der Agent kommt **ausschließlich als geprüftes Paket aus dem öffentlichen
+Download-Kanal** — dieselbe Datei, mit der sich jeder Pi später selbst
+aktualisiert. Welche Fassung gerade freigegeben ist und wo sie liegt, sagt die
+EduBotics-Cloud unter `/version` (Felder `pi_agent_download_url` und
+`pi_agent_sha256`). Ein Zugang zum Quellcode wird **nicht** gebraucht.
+
+Mit eingesteckten Armen + Kameras, im Terminal des Pi:
 
 ```bash
-# Optional: abweichende Cloud-API-URL setzen (sonst Produktions-Standard).
-export EDUBOTICS_UPDATE_API_URL="https://scintillating-empathy-production-1068.up.railway.app"
+# 1) Ein leeres Arbeitsverzeichnis anlegen (nicht im Home-Verzeichnis selbst
+#    entpacken: das Skript sieht sich neben dem entpackten Ordner um).
+mkdir -p ~/edubotics-install && cd ~/edubotics-install
 
-# Provisionierung als root.
-sudo ./robotis_ai_setup/pi_agent/setup.sh
+# 2) Die aktuelle Freigabe abfragen: Download-Adresse und SHA-256-Prüfsumme.
+curl -fsS -o version.json \
+  https://scintillating-empathy-production-1068.up.railway.app/version
+URL=$(python3 -c 'import json; print(json.load(open("version.json"))["pi_agent_download_url"] or "")')
+SHA=$(python3 -c 'import json; print(json.load(open("version.json"))["pi_agent_sha256"] or "")')
+echo "Paket:      $URL"
+echo "Prüfsumme:  $SHA"
+
+# 3) Herunterladen und die Prüfsumme vergleichen.
+curl -fL -o edubotics-pi-agent.tar.gz "$URL"
+echo "$SHA  edubotics-pi-agent.tar.gz" | sha256sum -c -
+
+# 4) Nur bei „edubotics-pi-agent.tar.gz: OK": entpacken und als root provisionieren.
+tar xzf edubotics-pi-agent.tar.gz
+sudo ./pi_agent/setup.sh
 ```
+
+- **Ist eines der beiden Felder leer**, liegt gerade keine geprüfte Freigabe
+  vor (die Veröffentlichung ist unterwegs oder fehlgeschlagen): **abbrechen**
+  und später erneut versuchen. Nie ein Paket ohne Prüfsumme installieren.
+- **Meldet `sha256sum` „FAILED"**, ist die Datei beschädigt oder unterwegs
+  verändert worden (oft eine TLS-Inspektion, siehe
+  [Netzwerk-Anleitung](ORANGE_PI_IT_NETZWERK.md)): **nicht entpacken**, Datei
+  löschen, Ursache klären.
+- Das Paket bringt seine feste Image-Version mit (`pi_agent/docker/versions.env`)
+  und die Lizenztexte (`pi_agent/LICENSE.txt`, `pi_agent/THIRD_PARTY_NOTICES.txt`).
 
 Das Skript:
 
@@ -168,12 +197,11 @@ Derselbe Ablauf wie in der Windows-App, jetzt im Browser:
 > ausschließlich Roboter Studio: der Inferenz-Tab ist sichtbar, ein Start wird
 > aber auf Deutsch abgelehnt.
 >
-> **Inferenz braucht am Pi grundsätzlich einen Klassenraum-Jetson.** Ein
-> lokaler Start scheitert an der GPU — der Orange Pi hat keine. Die Absage im
-> Protokoll ist für Windows geschrieben und nennt NVIDIA-Treiber, `nvidia-smi`
-> in der WSL2-Distro und `docker-compose.gpu.yml`: **diese drei Hinweise am Pi
-> ignorieren**, es gibt dort nichts davon. Der Weg zur Inferenz führt über den
-> Jetson, den der Inferenz-Tab genau deshalb immer anbietet.
+> **Inferenz läuft am Pi „In der Cloud".** Der Pi hat keine GPU; das Modell
+> rechnet auf einer Cloud-GPU, der Arm bleibt am Pi. Dafür braucht die Station
+> ausgehendes HTTPS zur Cloud-Inferenz (siehe
+> [Netzwerk-Anleitung](ORANGE_PI_IT_NETZWERK.md)) und die Schülerin bzw. der
+> Schüler ein fertig trainiertes ACT-Modell.
 
 1. **Aufnahme**-Tab: Demos mit Leader→Follower-Teleop aufnehmen (inkl.
    Kollisions-Nothalt, unverändert).
@@ -181,10 +209,9 @@ Derselbe Ablauf wie in der Windows-App, jetzt im Browser:
    manuelle Armsteuerung.
 3. **Training**: Datensatz in die Cloud hochladen und ein Modell trainieren
    (bestehender Ablauf, unverändert).
-4. **Inferenz**: den **Follower-Arm + 2 Kameras** an den **Klassen-Jetson**
-   umstecken und über den Inferenz-Tab verbinden (siehe
-   [`JETSON_DEPLOY.md`](JETSON_DEPLOY.md)). Der Pi selbst führt keine Modelle
-   aus.
+4. **Inferenz**: im Inferenz-Tab ein trainiertes Modell wählen und
+   „In der Cloud starten". Arm und Kameras bleiben am Pi; der Leader-Arm muss
+   dafür in den Follower-Modus geschaltet sein (die Seite sagt es).
 
 ## Updates
 
@@ -220,8 +247,9 @@ cat /var/lib/edubotics/.last_image_pull.json  # letzter Image-Update
 
 ## Sicherheitshinweis (bewusste Entscheidung)
 
-Die Steuer-Ports (80/8080/9090) sind **offen im LAN, ohne Authentifizierung** —
-wer im selben Netzsegment ist, kann jeden Arm steuern und jede Kamera sehen.
+Port 80 (Web-Oberfläche, Robotersteuerung und Kamerabild über denselben Proxy)
+ist **offen im LAN, ohne Authentifizierung** — wer im selben Netzsegment ist,
+kann jeden Arm steuern und jede Kamera sehen.
 Deshalb ist das **eigene Robotik-VLAN** (oder der eigene Pilot-Router) keine
 Kür, sondern die Sicherheitsgrenze. Mildernde Maßnahmen, die trotzdem
 mitkommen: der **`EDUBOTICS_LAN_OPEN=0`**-Schalter (Kiosk: alle Ports zurück

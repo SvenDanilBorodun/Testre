@@ -27,8 +27,10 @@ permissions:
 jobs:
   python-tests:
     runs-on: ubuntu-latest
-    # main alone needed 14 of 15 minutes; the Cloud-Inferenz suites add about one.
-    timeout-minutes: 25
+    # 45: measured p50 12.8 / p90 18.0 / max 20.2 min on 4-vCPU public runners
+    # (Sept–Nov 2026). A private repository's runners have 2 vCPU / 8 GB and the
+    # pytest suites are CPU-bound, so 25 would cut a slow run short.
+    timeout-minutes: 45
     env:
       # test_code_insert_cases.py compiles the insertion fixture with javac
       # ($JAVA_HOME_21_X64 on this runner): a lost JDK fails, never skips.
@@ -1560,8 +1562,11 @@ jobs:
     # Node setup, action pins and `npm ci` are copied from react-lint above so
     # the two React jobs cannot drift on toolchain: same node 22, same npm cache
     # keyed on the same lockfile.
+    #
+    # 20: measured p90 4.4 / max 4.7 min on 4-vCPU public runners; vitest's
+    # worker pool follows the core count, and private runners have 2 vCPU.
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:

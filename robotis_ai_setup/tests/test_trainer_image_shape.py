@@ -195,7 +195,8 @@ class TrainerImageWorkflow(unittest.TestCase):
         self.assertEqual(self.doc["permissions"], {})
         self.assertEqual(self.job["permissions"], {"contents": "read", "packages": "write"})
         self.assertEqual(self.job["runs-on"], "ubuntu-latest")
-        self.assertEqual(self.job["timeout-minutes"], 60)
+        # 90 since 2026-11-09: private-repository runners have half the cores.
+        self.assertEqual(self.job["timeout-minutes"], 90)
 
     def test_pinned_actions_and_no_persisted_credentials(self):
         uses = [s["uses"].split("#")[0].strip() for s in self.job["steps"] if "uses" in s]

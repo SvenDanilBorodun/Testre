@@ -186,11 +186,15 @@ jobs:
     # buildx invocations work without change — buildx just no longer needs
     # to thunk through QEMU because the runner kernel is already arm64.
     runs-on: ${{ matrix.runner }}
-    # 60-min budget per matrix entry — physical-ai-server is ~15 GB and
+    # 120-min budget per matrix entry — physical-ai-server is ~15 GB and
     # the `--no-cache --pull` policy means every build replays from
-    # scratch. Typical amd64 build is 25-35 min, arm64 is 15-20 min on
-    # native silicon. 60 min absorbs Docker Hub rate-limit retries.
-    timeout-minutes: 60
+    # scratch. Measured on 4-vCPU public runners (Sept–Nov 2026, successful
+    # runs): amd64 p50 29.6 / p90 45.4 / max 50.4 min, opi p90 20.2 min; one
+    # release build was cancelled at 61.4 min under the old 60. A private
+    # repository's runners have 2 vCPU / 8 GB, and colcon, pip and the
+    # `docker export | import` flatten are CPU-bound, so 120 covers twice the
+    # p90 plus Docker Hub rate-limit retries.
+    timeout-minutes: 120
     strategy:
       fail-fast: false  # each flavor should still build if another fails
       matrix:
@@ -314,7 +318,10 @@ jobs:
           name: opi-build-success
           path: opi-build-success.txt
           if-no-files-found: error
-          retention-days: 5
+          # Read only by `retag` in this same run (needs: [build]), minutes
+          # later. One day keeps a "re-run failed jobs" of retag working and
+          # keeps the private repository's artifact quota free.
+          retention-days: 1
 
   retag:
     # Apply the canonical tag set to whatever build-images.sh just pushed.
@@ -673,7 +680,10 @@ jobs:
         with:
           name: versions-env
           path: out/versions.env
-          retention-days: 90
+          # Nothing downloads it (release-installer.yml regenerates the file);
+          # it is an operator convenience of a few bytes. Three days instead of
+          # 90 keeps the private repository's artifact quota free.
+          retention-days: 3
           if-no-files-found: error
 
   smoke-test:

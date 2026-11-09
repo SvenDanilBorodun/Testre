@@ -235,7 +235,12 @@ jobs:
         with:
           name: EduBotics_Setup
           path: robotis_ai_setup/installer/output/EduBotics_Setup.exe
-          retention-days: 14
+          # ~255 MB per run. A private repository shares 500 MB (Free) or 2 GB
+          # (Pro) of artifact storage across ALL artifacts, so a 14-day copy of
+          # every build filled it within two releases (2026-11-09: 1.78 GB
+          # live). On a tag the .exe is attached to the release below; on a
+          # workflow_dispatch proof build, download it the same day.
+          retention-days: 1
           if-no-files-found: error
 
       - name: Check the public release channel (tag pushes only)

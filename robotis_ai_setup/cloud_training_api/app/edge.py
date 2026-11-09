@@ -30,6 +30,10 @@ tests read them from its source — and passes them in.
   Requests without the header (``/health``, ``/version``, preflights) pass. A
   school behind one NAT address shares the budget: 60 failures a minute is far
   above what signed-in students produce (supabase-js refreshes before expiry).
+* ``PublicReadCorsMiddleware`` — ``Access-Control-Allow-Origin: *`` on GET/HEAD
+  of ``/version`` (2026-11-11): its legal links are read by every SPA, a Pi's
+  at a LAN address ``ALLOWED_ORIGINS`` cannot list. An allowed origin still
+  gets its own echo from ``CORSMiddleware``.
 * ``client_ip_from`` — the ``TRUSTED_PROXY_HOPS``-th address from the RIGHT of
   ``X-Forwarded-For`` (default 1: the address Railway's edge added), never the
   left-most, which the client writes itself. Fewer entries than hops → the
@@ -47,6 +51,7 @@ import re
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from starlette.datastructures import MutableHeaders
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.services import jwt_auth
@@ -237,3 +242,41 @@ class AuthFailureLimitMiddleware(BaseHTTPMiddleware):
                     ip, self.limit, self.window_s,
                 )
         return response
+
+
+class PublicReadCorsMiddleware:
+    """``Access-Control-Allow-Origin: *`` on GET/HEAD of a few PUBLIC paths
+    (launch plan step 4, 2026-11-11; today exactly ``/version``).
+
+    ``/version`` carries the legal links every SPA shows, and a Pi's SPA runs at
+    whatever LAN address the school gave it, which ``ALLOWED_ORIGINS`` (exact
+    origins, credentials allowed) cannot list. The answer holds nothing private
+    and no route under it reads a cookie or a token, so any origin may read it
+    WITHOUT credentials. Added INSIDE ``CORSMiddleware``: for an allowed origin
+    that middleware still replaces the star with the origin itself (and its
+    credentials header); for any other origin the star stays. A plain ASGI
+    middleware (no task per request); only a response that carries no
+    ``Access-Control-Allow-Origin`` yet is touched.
+    """
+
+    def __init__(self, app, *, paths):
+        self.app = app
+        self.paths = frozenset(paths)
+
+    async def __call__(self, scope, receive, send):
+        if (
+            scope.get("type") != "http"
+            or scope.get("method") not in ("GET", "HEAD")
+            or scope.get("path") not in self.paths
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_star(message):
+            if message.get("type") == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                if "access-control-allow-origin" not in headers:
+                    headers["Access-Control-Allow-Origin"] = "*"
+            await send(message)
+
+        await self.app(scope, receive, send_with_star)

@@ -36,11 +36,25 @@ Two changes from the v1 shape:
      (set by release.yml W6 AFTER it hashes the exact attached tarball,
      empty-on-failure so it is never stale). Old GUIs simply ignore the
      extra keys — the response stays backward-compatible.
+
+  6. OPTIONAL, ADDITIVE legal links (launch plan step 4, 2026-11-11):
+     `legal_impressum_url`, `legal_datenschutz_url` and
+     `legal_nutzungsbedingungen_url`, each an https URL or null, from the
+     Railway variables LEGAL_IMPRESSUM_URL, LEGAL_DATENSCHUTZ_URL and
+     LEGAL_NUTZUNGSBEDINGUNGEN_URL (app/services/legal_links.py, validated at
+     boot). The student and Pi SPA, the teacher web and the Windows GUI show a
+     link exactly while its key is set. Every browser origin may read this
+     response (`Access-Control-Allow-Origin: *`, app/edge.py::
+     PublicReadCorsMiddleware): a Pi's SPA runs at whatever LAN address the
+     school gave it, which ALLOWED_ORIGINS cannot list, and nothing here is
+     private.
 """
 
 import os
 
 from fastapi import APIRouter
+
+from app.services import legal_links
 
 router = APIRouter()
 
@@ -167,4 +181,8 @@ async def get_latest_version():
         # ignore them, so the payload stays backward-compatible.
         "pi_agent_download_url": _resolve_pi_agent_download_url(version),
         "pi_agent_sha256": _resolve_pi_agent_sha256(),
+        # OPTIONAL, ADDITIVE (launch plan step 4): the three legal links, each
+        # an https URL or None, always present. An older API lacks the keys,
+        # which every client reads exactly like None: no link.
+        **legal_links.links(),
     }

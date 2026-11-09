@@ -117,7 +117,7 @@ git push
 
 **Required env vars** (Railway dashboard): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `EDUBOTICS_HF_TOKEN_KEY` (per-student Hugging Face token storage, migration 042: 32 random bytes as standard base64, generate with `python -c "import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())"`; absent, empty or malformed → the API refuses to boot (required since 2026-10-04); optional `EDUBOTICS_HF_TOKEN_KEY_PREVIOUS` for rotation; **set it BEFORE the cloud deploy**; losing it makes every stored token unusable and each student pastes theirs again).
 
-**Production-relevant optional:** `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` + `GUI_RELEASE_REPO` (drives student `.exe` auto-update — normally set automatically by `release.yml` W6 on a `vX.Y.Z` tag; `GUI_DOWNLOAD_URL` is optional and derived from `GUI_VERSION` + `GUI_RELEASE_REPO` when unset), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`, `AUTH_VERIFY_MODE` and `TRUSTED_PROXY_HOPS` (§3c; leave both unset unless §3c says otherwise). (`EDUBOTICS_JETSON_HF_TOKEN`, `SUPABASE_JWT_ALGORITHM` and `SUPABASE_JWT_SECRET` were read only by the retired classroom Jetson's `/jetson/register`; no code reads them since 2026-11-09. Do not just delete them: revoke and rotate first, §4b.)
+**Production-relevant optional:** `LEGAL_IMPRESSUM_URL`, `LEGAL_DATENSCHUTZ_URL`, `LEGAL_NUTZUNGSBEDINGUNGEN_URL` (the legal links, section 3d; an invalid one stops the boot), `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` + `GUI_RELEASE_REPO` (drives student `.exe` auto-update — normally set automatically by `release.yml` W6 on a `vX.Y.Z` tag; `GUI_DOWNLOAD_URL` is optional and derived from `GUI_VERSION` + `GUI_RELEASE_REPO` when unset), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`, `AUTH_VERIFY_MODE` and `TRUSTED_PROXY_HOPS` (§3c; leave both unset unless §3c says otherwise). (`EDUBOTICS_JETSON_HF_TOKEN`, `SUPABASE_JWT_ALGORITHM` and `SUPABASE_JWT_SECRET` were read only by the retired classroom Jetson's `/jetson/register`; no code reads them since 2026-11-09. Do not just delete them: revoke and rotate first, §4b.)
 
 **Never** set `EDUBOTICS_SKIP_SCHEMA_CHECK=1` on Railway.
 
@@ -187,6 +187,8 @@ Railway sometimes ignores the `cloud_training_api/Dockerfile` and falls back to 
 cd physical_ai_tools/physical_ai_manager
 ./scripts/railway-deploy.sh   # railway up --path-as-root .
 ```
+Its one runtime variable, `EDUBOTICS_CSP_ENFORCE`, switches the Content
+Security Policy from report-only to enforced (section 3d).
 
 ## 3c. The cloud API's login check, the admin's second factor and the edge (2026-11-10)
 
@@ -263,6 +265,60 @@ password would need.
 old hashed-token rate-limit key) without a code rollback. A code rollback to
 the previous API needs nothing else: the teacher web's gate then only adds the
 second factor for admins, and the older API accepts an `aal2` token too.
+
+## 3d. Legal links and the teacher web's Content Security Policy (2026-11-11)
+
+Both are runtime switches on Railway: no code change, no rebuild. A variable
+change makes Railway redeploy the service; the next container start reads it.
+
+**The legal links — cloud API service** (`scintillating-empathy`). Three
+optional variables, each the absolute `https://` address of a published page:
+
+| Variable | Link text everywhere |
+|---|---|
+| `LEGAL_IMPRESSUM_URL` | „Impressum" |
+| `LEGAL_DATENSCHUTZ_URL` | „Datenschutz" |
+| `LEGAL_NUTZUNGSBEDINGUNGEN_URL` | „Nutzungsbedingungen" |
+
+- Unset or empty: that link is shown nowhere. Set: it appears on the login
+  card (student app, teacher web, the Pi claim screen), the teacher and admin
+  dashboards, the admin's two-factor screen, the Pi System page and under the
+  Windows GUI's version line, read from `GET /version`.
+- **An invalid value stops the API's boot** (not `https://`, no host,
+  credentials, whitespace, quotes, angle brackets, backslash, backtick, longer
+  than 2048 characters): the new deploy fails its `/health` gate and the old
+  one keeps serving; the Railway log names the variable. Fix the value.
+- Set them only once the page really exists (an Impressum link to a 404 is
+  worse than none), all three at once if possible (`railway variables --set …`
+  three times with `--skip-deploys` on the first two, so only one redeploy
+  runs).
+- Check: `curl -s https://<api>/version` shows the three `legal_*_url` keys;
+  `curl -sI -H 'Origin: http://192.168.1.23' https://<api>/version | grep -i
+  access-control-allow-origin` answers `*` (how a Pi's page reads it).
+
+**The CSP — teacher-web service.** The image always sends a policy built from
+its own `REACT_APP_CLOUD_API_URL` and `REACT_APP_SUPABASE_URL`; one runtime
+variable decides how:
+
+- `EDUBOTICS_CSP_ENFORCE` unset (the default), or anything but `1`:
+  `Content-Security-Policy-Report-Only`. Nothing is blocked; every violation a
+  browser sees is POSTed to `/csp-report` and logged by nginx as one line
+  starting `csp-report` in the teacher-web service's Railway logs.
+- `EDUBOTICS_CSP_ENFORCE=1`: `Content-Security-Policy`. Violations are blocked
+  (and still reported).
+- **The one-week rule:** after the first deploy with the policy, watch the
+  teacher-web logs for `csp-report` for one week of normal teacher and admin
+  use (a template edited, a student's program opened, the admin's two-factor
+  login). No line in that week → set `EDUBOTICS_CSP_ENFORCE=1`. A line → read
+  its `violated-directive` and `blocked-uri`; a legitimate source is a code
+  change to `scripts/csp-policy.mjs` (never a wildcard), and the week starts
+  again. A report from a browser extension (`blocked-uri` `chrome-extension`
+  / `moz-extension`) is noise.
+- Check after each deploy: `curl -sI https://<teacher web>/ | grep -i
+  content-security` names the expected header.
+- **Rollback:** unset `EDUBOTICS_CSP_ENFORCE` (back to report-only). The
+  policy's API and Supabase hosts follow the build variables automatically;
+  a new Supabase project or API host needs nothing else.
 
 ---
 

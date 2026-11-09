@@ -16,8 +16,8 @@
 // Every directive is as tight as the click-through allowed (CLAUDE.md, the
 // React dual build bullet; docs/CLAUDE-CHANGELOG.md 2026-11-11):
 //   * script-src 'self'          — Vite emits no inline script, nothing evals;
-//   * style-src 'unsafe-inline'  — react-hot-toast (goober), Blockly and its
-//     plugins and CodeMirror inject <style> elements at run time;
+//   * style-src 'unsafe-inline'  — react-hot-toast (goober, in the entry chunk),
+//     Blockly and its plugins inject <style> elements at run time;
 //   * img-src data:              — the admin's TOTP QR code (Supabase answers a
 //     data: URI) and Blockly's own SVG data icons;
 //   * connect-src                — the API, Supabase over https and wss

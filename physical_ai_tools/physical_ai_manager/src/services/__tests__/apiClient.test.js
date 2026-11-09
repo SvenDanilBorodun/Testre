@@ -10,6 +10,7 @@
 // and the re-login logic silently never fired.
 
 import { apiRequest } from '../apiClient';
+import { onMfaRequired } from '../../features/auth/mfaRequired';
 
 vi.mock('../cloudConfig', () => ({
   CLOUD_API_URL: 'https://api.test.example',
@@ -90,5 +91,34 @@ describe('apiClient.apiRequest error contract', () => {
       },
     });
     await expect(apiRequest('/x', 'DELETE', 'jwt')).resolves.toBeNull();
+  });
+
+  // 2026-11-10: the API's machine-readable reason rides on the error, and an
+  // admin route's `mfa_required` sends the admin back to the TOTP screen.
+  test('carries the code and announces mfa_required', async () => {
+    const heard = vi.fn();
+    const off = onMfaRequired(heard);
+    try {
+      global.fetch.mockResolvedValue(
+        jsonResponse(403, { detail: 'Zwei-Faktor-Anmeldung erforderlich', code: 'mfa_required' })
+      );
+      await expect(apiRequest('/admin/teachers', 'GET', 'jwt')).rejects.toMatchObject({
+        status: 403,
+        code: 'mfa_required',
+        detail: 'Zwei-Faktor-Anmeldung erforderlich',
+      });
+      expect(heard).toHaveBeenCalledTimes(1);
+
+      global.fetch.mockResolvedValue(jsonResponse(403, { detail: 'Nur für Lehrkräfte erlaubt.' }));
+      const err = await apiRequest('/teacher/classrooms', 'GET', 'jwt').catch((e) => e);
+      expect(err.code).toBeUndefined();
+      global.fetch.mockResolvedValue(
+        jsonResponse(503, { detail: 'Die Anmeldung kann gerade nicht geprüft werden.', code: 'auth_unavailable' })
+      );
+      await expect(apiRequest('/me', 'GET', 'jwt')).rejects.toMatchObject({ status: 503, code: 'auth_unavailable' });
+      expect(heard).toHaveBeenCalledTimes(1);
+    } finally {
+      off();
+    }
   });
 });

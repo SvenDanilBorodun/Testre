@@ -162,8 +162,17 @@ describe('setVariable VAR_LIMIT — 256 names, FIFO by ts', () => {
     expect(state.variables.v0.value).toBe(99);
   });
 
-  test('a runaway 1000-name loop stays capped at 256', () => {
-    expect(ownKeys(fill(1000))).toHaveLength(256);
+  test('a runaway loop of new names stays capped at 256 and keeps the newest', () => {
+    // 556 names: past the cap every one of the first 256 is evicted, and 44 of
+    // the names added after the cap too, so eviction also ran among entries that
+    // had replaced evicted ones. It used to dispatch 1000 names, which proved no
+    // more (the cap logic is the same for every name past the 256th) and cost
+    // ~1.4 s alone — each dispatch at the cap pays Immer's copy of a 256-entry
+    // map — and so ran past vitest's 5 s timeout in a loaded full-suite run.
+    const state = fill(556);
+    const survivors = Array.from({ length: 256 }, (_, i) => `v${300 + i}`);
+    expect(ownKeys(state).sort()).toEqual(survivors.sort());
+    expect(Object.keys(state.variableHistory).sort()).toEqual(survivors.sort());
   });
 });
 

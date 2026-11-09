@@ -164,8 +164,12 @@ describe('setCounter cap — 256 names, FIFO by ts', () => {
     expect(state.counters.c0.value).toBe(99);
   });
 
-  test('a runaway 1000-name loop stays capped at 256', () => {
-    expect(keys(fill(1000))).toHaveLength(256);
+  test('a runaway loop of new names stays capped at 256 and keeps the newest', () => {
+    // 556 names evict all of the first 256 and 44 of their replacements; the old
+    // 1000-name loop proved no more and cost the most of any test in this file
+    // (see the variables twin).
+    const state = fill(556);
+    expect(keys(state).sort()).toEqual(Array.from({ length: 256 }, (_, i) => `c${300 + i}`).sort());
   });
 });
 

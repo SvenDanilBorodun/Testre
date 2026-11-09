@@ -12,10 +12,13 @@ keep today's direct update.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import re
 import unittest
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app.tests.test_dataset_identity_routes import _ensure_stubs
@@ -35,12 +38,25 @@ def content(resp):
     return json.loads(resp.body) if hasattr(resp, "body") else resp.content
 
 
+def _user_row(uid, **over):
+    """Every column of a public.users row (FakeDB refuses a select of a missing one)."""
+    row = {"id": uid, "email": f"{uid}@edubotics.local", "role": "student", "username": uid, "full_name": "Anna",
+           "classroom_id": None, "workgroup_id": None, "created_by": "teacher-9", "created_at": "2026-09-01T08:00:00+00:00",
+           "deletion_requested_at": None, "hf_username": None, "training_credits": 0,
+           "vision_quota_per_term": None, "vision_used_per_term": 0}
+    row.update(over)
+    return row
+
+
 def _db():
     db = FakeDB(Clock())
     for t in ("workgroup_memberships", "workflows", "datasets", "workflow_versions", "tutorial_progress",
-              "progress_entries", "users", "user_hf_credentials", "classrooms"):
+              "progress_entries", "users", "user_hf_credentials", "classrooms", "workflow_trajectories",
+              "workflow_submissions", "inference_sessions", "inference_runs", "credit_accounts"):
         db.tables[t] = []
-    db.tables["users"].append({"id": "u-1", "deletion_requested_at": None, "workgroup_id": None})
+    db.tables["users"].append(_user_row("u-1"))
+    db.tables["users"].append(_user_row("t-1", role="teacher"))
+    db.auth = SimpleNamespace(admin=SimpleNamespace(get_user_by_id=lambda uid: SimpleNamespace(user=None)))
     return db
 
 
@@ -172,6 +188,238 @@ class Export(unittest.TestCase):
         self.assertEqual(bundle["credit_ledger"], [{"at": "t", "kind": "grant", "hours": 20, "account_kind": "teacher",
                                                     "training_id": None, "actor_role": "admin",
                                                     "reason": "Schuljahr"}])
+
+
+# Every column of each table, read from a database replayed 000 → 055 with psql
+# (information_schema.columns, 2026-11-11). The export names each one except the
+# credentials and other people's ids listed in EXCLUDED.
+TABLE_COLUMNS = {
+    "users": {"id", "email", "training_credits", "created_at", "role", "username", "full_name", "classroom_id",
+              "created_by", "deletion_requested_at", "workgroup_id", "vision_quota_per_term",
+              "vision_used_per_term", "hf_username"},
+    "workflows": {"id", "owner_user_id", "classroom_id", "name", "description", "blockly_json", "is_template",
+                  "created_at", "updated_at", "workgroup_id", "sim_scene", "code_language", "code_files"},
+    "workflow_versions": {"id", "workflow_id", "blockly_json", "note", "created_at", "saved_by", "code_files",
+                          "code_language"},
+    "datasets": {"id", "owner_user_id", "workgroup_id", "hf_repo_id", "name", "description", "episode_count",
+                 "total_frames", "fps", "robot_type", "created_at", "updated_at", "discovered_via_sweep"},
+    "workflow_trajectories": {"id", "workflow_id", "owner_user_id", "name", "samples", "point_count", "duration_s",
+                              "fps", "created_at", "updated_at", "robot_profile"},
+    "workflow_submissions": {"id", "workflow_id", "student_user_id", "classroom_id", "name", "code_language",
+                             "code_files", "blockly_json", "sim_scene", "note", "submitted_at"},
+    "inference_sessions": {"id", "user_id", "classroom_id", "workgroup_id", "training_id", "model_repo",
+                           "model_revision", "policy_type", "token_hash", "status", "conn_id", "modal_session_id",
+                           "edge_token_enc", "edge_attached_at", "edge_terminated_at", "session_s", "reserve_until",
+                           "created_at", "connected_at", "last_server_heartbeat_at", "client_heartbeat_at",
+                           "max_end_at", "ended_at", "end_reason", "active_seconds", "stats", "run_logged_at"},
+    "inference_runs": {"id", "student_user_id", "classroom_id", "policy_repo", "started_at", "duration_s",
+                       "exit_reason", "error_message_de", "created_at", "backend"},
+    "user_hf_credentials": {"user_id", "token_ciphertext", "token_fp", "token_hint", "hf_username", "token_role",
+                            "validated_at", "created_at", "updated_at"},
+    "progress_entries": {"id", "classroom_id", "student_id", "entry_date", "note", "created_at", "updated_at",
+                         "workgroup_id"},
+    "credit_accounts": {"kind", "owner_id", "parent_teacher_id", "free", "reserved", "spent", "member_hour_limit",
+                        "closed_at", "created_at"},
+}
+EXCLUDED = {
+    "users": set(),
+    "workflows": set(),
+    "workflow_versions": set(),   # saved_by is read, then replaced by saved_by_me
+    "datasets": set(),
+    "workflow_trajectories": set(),
+    "workflow_submissions": set(),
+    "inference_sessions": {"token_hash", "conn_id", "modal_session_id", "edge_token_enc"},
+    "inference_runs": set(),
+    "user_hf_credentials": {"user_id", "token_ciphertext", "token_fp", "token_hint"},
+    "progress_entries": set(),
+    "credit_accounts": {"owner_id", "parent_teacher_id"},
+}
+COLUMN_LISTS = {
+    "users": "_EXPORT_PROFILE_COLUMNS",
+    "workflows": "_EXPORT_WORKFLOW_COLUMNS",
+    "workflow_versions": "_EXPORT_VERSION_COLUMNS",
+    "datasets": "_EXPORT_DATASET_COLUMNS",
+    "workflow_trajectories": "_EXPORT_TRAJECTORY_COLUMNS",
+    "workflow_submissions": "_EXPORT_SUBMISSION_COLUMNS",
+    "inference_sessions": "_EXPORT_INFERENCE_SESSION_COLUMNS",
+    "inference_runs": "_EXPORT_INFERENCE_RUN_COLUMNS",
+    "user_hf_credentials": "_EXPORT_HF_CREDENTIAL_COLUMNS",
+    "progress_entries": "_EXPORT_PROGRESS_COLUMNS",
+    "credit_accounts": "_EXPORT_CREDIT_ACCOUNT_COLUMNS",
+}
+
+
+def _row(table, **over):
+    row = {c: None for c in TABLE_COLUMNS[table]}
+    row.update(over)
+    return row
+
+
+class ExportCompleteness(unittest.TestCase):
+    """Launch plan step 5 (F-56): the tables the export used to miss, explicit columns everywhere."""
+
+    def _bundle(self, db, profile=PROFILE):
+        from app.services import workgroups
+
+        with patch.object(route, "get_supabase", lambda: db), patch.object(workgroups, "get_supabase", lambda: db):
+            resp = route.export_my_data(profile=dict(profile))
+        return content(resp)
+
+    def test_every_column_list_is_the_table_minus_its_credentials(self):
+        for table, name in COLUMN_LISTS.items():
+            with self.subTest(table=table):
+                cols = [c.strip() for c in getattr(route, name).split(",")]
+                self.assertEqual(len(cols), len(set(cols)))
+                self.assertEqual(set(cols), TABLE_COLUMNS[table] - EXCLUDED[table])
+
+    def test_no_read_of_the_export_is_select_star(self):
+        import ast
+
+        for fn in (route.export_my_data, route._export_attempts, route._export_credit_account,
+                   route._export_auth_account, route._export_ledger):
+            tree = ast.parse(inspect.getsource(fn).lstrip())
+            selects = [n for n in ast.walk(tree)
+                       if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "select"]
+            for call in selects:
+                with self.subTest(fn=fn.__name__, line=call.lineno):
+                    # one argument: a literal column list or one of the module's column constants
+                    self.assertEqual(len(call.args), 1)
+                    arg = call.args[0]
+                    if isinstance(arg, ast.Constant):
+                        self.assertNotIn("*", arg.value)
+                    else:
+                        self.assertIsInstance(arg, ast.Name)
+                        self.assertNotIn("*", getattr(route, arg.id))
+        self.assertGreaterEqual(len([n for n in ast.walk(ast.parse(inspect.getsource(route.export_my_data).lstrip()))
+                                     if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "select"]), 16)
+
+    def _seeded(self):
+        db = _db()
+        me, other = "u-1", "u-2"
+        db.tables["users"].append(_user_row(other))
+        db.tables["users"][0].update(deletion_requested_at="2026-11-11T09:00:00+00:00", vision_used_per_term=3)
+        db.tables["workflows"] += [_row("workflows", id="wf-1", owner_user_id=me, name="Mein Programm"),
+                                   _row("workflows", id="wf-2", owner_user_id=other, name="Fremd")]
+        db.tables["workflow_versions"] += [
+            _row("workflow_versions", id="v-1", workflow_id="wf-1", saved_by=me),
+            _row("workflow_versions", id="v-2", workflow_id="wf-1", saved_by="sibling-7"),
+            _row("workflow_versions", id="v-3", workflow_id="wf-2", saved_by=other)]
+        db.tables["workflow_trajectories"] += [
+            _row("workflow_trajectories", id="tr-1", workflow_id="wf-1", owner_user_id=me, name="Winken",
+                 samples={"fps": 25, "points": [[0, 0, 0, 0, 0, 0, 0]]}),
+            _row("workflow_trajectories", id="tr-2", workflow_id="wf-2", owner_user_id=other, name="Fremd")]
+        db.tables["workflow_submissions"] += [
+            _row("workflow_submissions", id="sub-1", workflow_id="wf-1", student_user_id=me, name="Abgabe"),
+            _row("workflow_submissions", id="sub-2", workflow_id="wf-2", student_user_id=other)]
+        db.tables["inference_sessions"] += [
+            _row("inference_sessions", id="is-1", user_id=me, model_repo="EduBotics-Solutions/m",
+                 token_hash="hash-must-not-leak", conn_id="conn-must-not-leak",
+                 modal_session_id="sd-must-not-leak", edge_token_enc="edge-must-not-leak", status="ended",
+                 stats={"chunks": 3}),
+            _row("inference_sessions", id="is-2", user_id=other, token_hash="other-hash")]
+        db.tables["inference_runs"] += [
+            _row("inference_runs", id=1, student_user_id=me, policy_repo="EduBotics-Solutions/m", backend="cloud"),
+            _row("inference_runs", id=2, student_user_id=other, policy_repo="other/repo")]
+        db.tables["user_hf_credentials"] += [
+            _row("user_hf_credentials", user_id=me, token_ciphertext="v1.cipher-must-not-leak",
+                 token_fp="fp-must-not-leak", token_hint="hf_…hint", hf_username="anna-hf", token_role="write",
+                 validated_at="2026-11-01T10:00:00+00:00"),
+            _row("user_hf_credentials", user_id=other, token_ciphertext="v1.other", hf_username="bob-hf")]
+        db.tables["credit_accounts"] += [
+            _row("credit_accounts", kind="student", owner_id=me, parent_teacher_id="teacher-9", free=2, reserved=1,
+                 spent=4),
+            _row("credit_accounts", kind="student", owner_id=other, parent_teacher_id="teacher-9", free=9)]
+        return db
+
+    def test_the_new_keys_carry_exactly_the_callers_rows(self):
+        bundle = self._bundle(self._seeded())
+        self.assertEqual([r["id"] for r in bundle["workflow_trajectories"]], ["tr-1"])
+        self.assertEqual(bundle["workflow_trajectories"][0]["samples"], {"fps": 25, "points": [[0, 0, 0, 0, 0, 0, 0]]})
+        self.assertEqual([r["id"] for r in bundle["workflow_submissions"]], ["sub-1"])
+        self.assertEqual([r["id"] for r in bundle["inference_sessions"]], ["is-1"])
+        self.assertEqual(bundle["inference_sessions"][0]["stats"], {"chunks": 3})
+        self.assertEqual([r["id"] for r in bundle["inference_runs"]], [1])
+        self.assertEqual(bundle["hf_credential"], {"hf_username": "anna-hf", "token_role": "write",
+                                                   "validated_at": "2026-11-01T10:00:00+00:00",
+                                                   "created_at": None, "updated_at": None})
+        self.assertEqual(bundle["credit_account"], {"kind": "student", "free": 2, "reserved": 1, "spent": 4,
+                                                    "member_hour_limit": None, "closed_at": None,
+                                                    "created_at": None})
+        self.assertEqual([w["id"] for w in bundle["workflows"]], ["wf-1"])
+
+    def test_no_credential_and_no_other_persons_data_reaches_the_bundle(self):
+        text = json.dumps(self._bundle(self._seeded()))
+        for secret in ("hash-must-not-leak", "conn-must-not-leak", "sd-must-not-leak", "edge-must-not-leak",
+                       "cipher-must-not-leak", "fp-must-not-leak", "hf_…hint", "token_hash", "token_ciphertext",
+                       "edge_token_enc", "parent_teacher_id"):
+            self.assertNotIn(secret, text)
+        for foreign in ("u-2", "other-hash", "v1.other", "bob-hf", "other/repo", "Fremd", "sibling-7"):
+            self.assertNotIn(foreign, text)
+
+    def test_the_profile_is_every_column_of_the_own_row(self):
+        bundle = self._bundle(self._seeded())
+        self.assertEqual(set(bundle["profile"]), TABLE_COLUMNS["users"])
+        self.assertEqual(bundle["profile"]["id"], "u-1")
+        self.assertEqual(bundle["profile"]["deletion_requested_at"], "2026-11-11T09:00:00+00:00")
+        self.assertEqual(bundle["profile"]["vision_used_per_term"], 3)
+
+    def test_a_version_saved_by_a_sibling_says_only_that_it_was_not_me(self):
+        bundle = self._bundle(self._seeded())
+        by_id = {v["id"]: v for v in bundle["workflow_versions"]}
+        self.assertEqual(set(by_id), {"v-1", "v-2"})
+        self.assertIs(by_id["v-1"]["saved_by_me"], True)
+        self.assertIs(by_id["v-2"]["saved_by_me"], False)
+        for v in by_id.values():
+            self.assertNotIn("saved_by", v)
+
+    def test_the_auth_account_is_exported_without_ids_and_with_a_note_when_unreadable(self):
+        db = self._seeded()
+        factor = SimpleNamespace(id="factor-id-must-not-leak", factor_type="totp", friendly_name="Handy",
+                                 status="verified", created_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
+                                 secret="totp-secret-must-not-leak")
+        user = SimpleNamespace(id="u-1", email="anna@edubotics.local",
+                               created_at=datetime(2026, 9, 1, 8, 0, tzinfo=timezone.utc),
+                               updated_at=None, last_sign_in_at=datetime(2026, 11, 10, 7, 30, tzinfo=timezone.utc),
+                               email_confirmed_at=None, confirmed_at=None, factors=[factor],
+                               app_metadata={"provider": "email"}, user_metadata={})
+        asked = []
+        db.auth = SimpleNamespace(admin=SimpleNamespace(
+            get_user_by_id=lambda uid: asked.append(uid) or SimpleNamespace(user=user)))
+        bundle = self._bundle(db)
+        self.assertEqual(asked, ["u-1"])
+        self.assertEqual(bundle["auth_account"]["email"], "anna@edubotics.local")
+        self.assertEqual(bundle["auth_account"]["last_sign_in_at"], "2026-11-10T07:30:00+00:00")
+        self.assertEqual(bundle["auth_account"]["mfa_factors"], [
+            {"factor_type": "totp", "friendly_name": "Handy", "status": "verified",
+             "created_at": "2026-09-02T00:00:00+00:00"}])
+        self.assertNotIn("auth_account_note", bundle)
+        text = json.dumps(bundle)
+        self.assertNotIn("factor-id-must-not-leak", text)
+        self.assertNotIn("totp-secret-must-not-leak", text)
+
+        def broken(_uid):
+            raise RuntimeError("GoTrue 503")
+
+        db.auth = SimpleNamespace(admin=SimpleNamespace(get_user_by_id=broken))
+        bundle = self._bundle(db)
+        self.assertIsNone(bundle["auth_account"])
+        self.assertEqual(bundle["auth_account_note"], route.AUTH_ACCOUNT_UNREADABLE_DE)
+        self.assertIn("später", bundle["auth_account_note"])
+        self.assertNotIn("GoTrue", json.dumps(bundle))
+        # an answer for another account is never exported
+        db.auth = SimpleNamespace(admin=SimpleNamespace(
+            get_user_by_id=lambda uid: SimpleNamespace(user=SimpleNamespace(id="u-2", email="b@x"))))
+        bundle = self._bundle(db)
+        self.assertIsNone(bundle["auth_account"])
+
+    def test_a_teacher_gets_no_student_account_and_their_own_pool_account(self):
+        db = self._seeded()
+        db.tables["credit_accounts"].append(_row("credit_accounts", kind="teacher", owner_id="t-1", free=40))
+        bundle = self._bundle(db, {"id": "t-1", "role": "teacher", "workgroup_id": None, "classroom_id": None})
+        self.assertEqual(bundle["credit_account"]["kind"], "teacher")
+        self.assertEqual(bundle["credit_account"]["free"], 40)
+        self.assertEqual(bundle["workflow_submissions"], [])
+        self.assertIsNone(bundle["hf_credential"])
 
 
 class Delete(unittest.IsolatedAsyncioTestCase):

@@ -744,12 +744,22 @@ class TestExportCannotCarryTheCiphertext(unittest.TestCase):
             self.assertNotIn("token_ciphertext", s)
         self.assertNotIn("user_hf_credentials", " ".join(strings))
 
-    def test_the_export_handler_never_reads_the_credentials_table(self) -> None:
+    def test_the_export_reads_the_credentials_table_only_for_its_metadata(self) -> None:
+        # Since launch plan step 5 (F-56) the export carries the stored token's
+        # METADATA (account name, kind, timestamps): Art. 15 covers the fact that a
+        # credential is stored. It reads the table through one explicit column list
+        # that names no part of the token; app/tests/test_me_export.py proves a seeded
+        # ciphertext, fingerprint and hint never reach the bundle.
         import inspect
 
         src = inspect.getsource(meroute.export_my_data)
-        self.assertNotIn("user_hf_credentials", src)
-        self.assertNotIn("token_ciphertext", src)
+        self.assertEqual(src.count('"user_hf_credentials"'), 1)
+        self.assertIn('.select(_EXPORT_HF_CREDENTIAL_COLUMNS)', src)
+        cols = {c.strip() for c in meroute._EXPORT_HF_CREDENTIAL_COLUMNS.split(",")}
+        self.assertEqual(cols, {"hf_username", "token_role", "validated_at", "created_at", "updated_at"})
+        for secret in ("token_ciphertext", "token_fp", "token_hint"):
+            self.assertNotIn(secret, src)
+            self.assertNotIn(secret, cols)
 
 
 def _main_tree():

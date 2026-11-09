@@ -48,7 +48,10 @@ _PROFILE_COLUMNS = (
     # boot-time schema probe (main.py::_validate_required_schema)
     # guarantees the column exists before this select runs, so a
     # missing column is a deploy-ordering bug, not a runtime NULL.
-    "hf_username"
+    "hf_username, "
+    # GDPR Art. 17 (baseline 007; server-only since 055): GET /me shows an open
+    # deletion request, /me/delete keeps the first request time.
+    "deletion_requested_at"
 )
 
 

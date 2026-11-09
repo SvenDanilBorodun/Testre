@@ -99,8 +99,8 @@ class TestMigration048Shape(unittest.TestCase):
         # 048 was the newest migration when it shipped; the only files sorted
         # after it are the RunPod training build's 047 (written later, the
         # number it had been earmarked), 049, v2.33.0's 050, the V1's 051, the
-        # training-hour ledger's 052, the Jetson retirement's 053 and the advisor
-        # clean-up's 054, in that order.
+        # training-hour ledger's 052, the Jetson retirement's 053, the advisor
+        # clean-up's 054 and the users guard's 055, in that order.
         self.assertEqual(names[names.index(mine) + 1:], [
             "20261020120000_047_hide_worker_token.sql",
             "20261020130000_049_managed_training.sql",
@@ -109,6 +109,7 @@ class TestMigration048Shape(unittest.TestCase):
             "20261028120000_052_credit_ledger.sql",
             "20261109120000_053_retire_jetson.sql",
             "20261110120000_054_advisor_cleanup.sql",
+            "20261111120000_055_users_identity_guard.sql",
         ])
         self.assertTrue(os.path.isfile(ROLLBACK))
         self.assertTrue(os.path.isfile(ASSERTIONS))

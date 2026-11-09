@@ -88,7 +88,11 @@ class LicenceHeaders(unittest.TestCase):
         # 2026-11-05: 61 = the ROBOTIS files EduBotics changed (by content against the
         # absorbed b0b601fa tree) plus StudentApp.js, split out of App.js. A ROBOTIS
         # file that is byte-identical to upstream carries NO modification line.
-        self.assertGreaterEqual(count, 61)
+        # 2026-11-09: 51 — the local-inference UI the Inferenz page no longer
+        # renders was deleted (ControlPanel, InferencePanel, PolicyDownloadModal,
+        # the file browser and its modal, CompactSystemStatus, SystemStatus,
+        # EpisodeStatus, FullTaskStatus, ProgressBar, constants/paths.js).
+        self.assertGreaterEqual(count, 51)
 
     def test_proprietary_headers_are_complete_and_never_mixed(self):
         count = 0
@@ -103,7 +107,9 @@ class LicenceHeaders(unittest.TestCase):
             elif EDU_COPYRIGHT.search(text) and MODIFICATIONS not in text:
                 with self.subTest(file=rel):
                     self.fail("an EduBotics copyright without the proprietary header or a modification line")
-        self.assertGreaterEqual(count, 705)
+        # 2026-11-09: 690 — 705 minus the 15 proprietary React files of the retired
+        # classroom Jetson and the deleted local-inference UI.
+        self.assertGreaterEqual(count, 690)
 
     def test_a_proprietary_header_never_sits_beside_an_upstream_author(self):
         """An `Author:` line comes from ROBOTIS code (EduBotics files carry none):
@@ -161,7 +167,9 @@ class ModificationLinesAreTrue(unittest.TestCase):
             without = b"\n".join(l for l in raw.split(b"\n") if MODIFICATIONS.encode() not in l)
             with self.subTest(file=rel):
                 self.assertNotEqual(without, old, "byte-identical to upstream: no modification line")
-        self.assertGreater(checked, 50)
+        # 2026-11-09: 47 — the deleted local-inference UI took ten modified
+        # upstream files with it (see test_modification_lines_… above).
+        self.assertGreaterEqual(checked, 47)
 
 
 class FontLicences(unittest.TestCase):

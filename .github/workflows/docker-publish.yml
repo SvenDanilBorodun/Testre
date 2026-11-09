@@ -4,20 +4,16 @@ name: docker-publish
 #   - nettername/open-manipulator          (amd64)
 #   - nettername/physical-ai-server        (amd64)
 #   - nettername/physical-ai-manager       (amd64)
-#   - nettername/open-manipulator-jetson   (arm64)
-#   - nettername/physical-ai-server-jetson (arm64)
 #   - nettername/open-manipulator-opi      (arm64 — Orange Pi 5 Pro, CPU)
 #   - nettername/physical-ai-server-opi    (arm64 — Orange Pi 5 Pro, CPU)
 #   - nettername/physical-ai-manager-opi   (arm64 — Orange Pi 5 Pro)
 #   - nettername/code-runner               (amd64 — Roboter Studio Python/Java sandbox)
 #   - nettername/code-runner-opi           (arm64 — Orange Pi 5 Pro)
 #
-# nettername/physical-ai-manager-jetson does NOT exist (manager only
-# runs on student PCs, not on Jetson). The Orange Pi (opi) flavor DOES
-# ship a manager — the Pi serves the React SPA itself (see build-images.sh
-# and physical_ai_manager/Dockerfile.opi). nettername/code-runner-jetson
-# does not exist either: the Roboter-Studio tab is jetsonIncompatible, so
-# the sandbox ships only where a student can reach it (amd64 + opi).
+# The Orange Pi (opi) flavor ships a manager — the Pi serves the React SPA
+# itself (see build-images.sh and physical_ai_manager/Dockerfile.opi). The
+# arm64 classroom-Jetson pair (*-jetson) was retired on 2026-11-09 and is no
+# longer built.
 # nettername/robotis-ai-training is NOT built here — it's owned by
 # Modal now (see build-images.sh:395-397). The stale Docker Hub copy
 # is on the cleanup list in tools/docker-hub-cleanup.sh.
@@ -171,14 +167,14 @@ jobs:
     # NOTE: `matrix` context is NOT available in job-level `if:` per GHA
     # docs (only github / inputs / needs / vars are). Per-arch gating
     # would need step-level if's, which adds complexity for no real win
-    # — we always build both arches. Operators wanting to rebuild only
+    # — we always build both flavors. Operators wanting to rebuild only
     # one arch can re-run the failed matrix entry from the Actions UI.
     if: |
       always() &&
       needs.dirty-tree-guard.result == 'success'
     # Each platform builds on its own NATIVE runner — no QEMU emulation.
-    # amd64 → ubuntu-latest (x86_64, GH-managed, free for public repos)
-    # arm64 → ubuntu-24.04-arm (aarch64-native, GA since 2025-01)
+    # amd64 → ubuntu-latest (x86_64, GH-managed)
+    # opi   → ubuntu-24.04-arm (aarch64-native, GA since 2025-01)
     # Native arm64 is ~3-4× faster than QEMU cross-build (~10 min vs ~30 min)
     # AND eliminates the class of subtle bugs where aarch64 binaries under
     # qemu-user produce different bytes than on real silicon (FP edge cases,
@@ -201,16 +197,14 @@ jobs:
         include:
           - platform: amd64
             runner: ubuntu-latest
-          - platform: arm64
-            runner: ubuntu-24.04-arm
-          # opi (Orange Pi 5 Pro): arm64 too, but a CPU-only base + a manager.
+          # opi (Orange Pi 5 Pro): arm64, a CPU-only base + a manager.
           # build-images.sh's PLATFORM=opi case handles the divergence.
           - platform: opi
             runner: ubuntu-24.04-arm
     # opi is a SECONDARY flavor built on a MANUALLY-published CPU base
     # (BUILD_BASE_OPI). Decouple it from the core release: an opi-leg failure
     # (missing/stale opi base, Rockchip build hiccup) must NOT fail the build
-    # job and block the amd64/Jetson GHCR publish. The retag + dual-push
+    # job and block the amd64 GHCR publish. The retag + dual-push
     # integrity + smoke-test steps below all tolerate a missing opi image, so
     # the core release completes and opi simply lands on the next good build.
     continue-on-error: ${{ matrix.platform == 'opi' }}
@@ -236,12 +230,9 @@ jobs:
         # the remaining headroom (these jobs don't rely on the
         # preinstalled node/python tool cache, and we always `--pull`
         # our base images so the cached ones are dead weight).
-        # arm64 (Jetson) builds to 7.4 GB and fits the runner's default free
-        # space, so it SKIPS this step. opi RUNS it too (platform != 'arm64'):
-        # the opi leg builds the manager AND runs flatten_image's
-        # `docker export | import`, a ~15-18 GB transient peak that needs the
-        # same headroom as amd64 — more work than the Jetson arm64 leg.
-        if: matrix.platform != 'arm64'
+        # opi needs it too: the opi leg builds the manager AND runs
+        # flatten_image's `docker export | import`, a ~15-18 GB transient peak
+        # that needs the same headroom as amd64.
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
         with:
           tool-cache: true         # reclaims ~5 GB (no step needs node/python)
@@ -276,7 +267,7 @@ jobs:
           # Dockerfile's `FROM node:22` + `FROM nginx:...` (Docker OFFICIAL images)
           # are the surface that 429'd v2.8.2's build — mirror.gcr.io serves
           # byte-identical official images with no Hub pull limit. Third-party/own
-          # repos not in the mirror (robotis/*, nettername/*-jetson-base) get a
+          # repos not in the mirror (robotis/*, nettername/*-base) get a
           # 404 from the mirror and buildkit transparently falls back to docker.io
           # (authenticated via the login below), so nothing breaks.
           buildkitd-config-inline: |
@@ -290,7 +281,7 @@ jobs:
       - name: Run build-images.sh
         working-directory: robotis_ai_setup/docker
         # The existing script already does --no-cache --pull on every
-        # buildx call and pushes amd64 directly / arm64 via --push.
+        # buildx call, builds with --load and pushes from the local daemon.
         # We pass env it expects via the env: block above; no Bash flags
         # are added. The script's `${VAR:?}` enforcement still applies.
         run: bash build-images.sh
@@ -305,7 +296,7 @@ jobs:
       # the opi build actually succeeded (`success() && ... 'opi'` — if
       # build-images.sh failed above, `success()` is false and no marker is
       # produced). The retag job downloads it and skips ALL opi retagging unless
-      # the marker's sha == github.sha. amd64/jetson never run these steps.
+      # the marker's sha == github.sha. amd64 never runs these steps.
       - name: Record opi build-success marker
         if: success() && matrix.platform == 'opi'
         env:
@@ -410,11 +401,10 @@ jobs:
             *)      SEMVER="" ;;
           esac
 
-          # These three lists are held to gui/app/constants.py::IMAGE_NAMES and
+          # These two lists are held to gui/app/constants.py::IMAGE_NAMES and
           # pi_agent/constants.py::IMAGE_NAMES by tests/test_publish_lists_lockstep.py.
           AMD64_REPOS="open-manipulator physical-ai-server physical-ai-manager code-runner"
-          ARM64_REPOS="open-manipulator-jetson physical-ai-server-jetson"
-          # Orange Pi 5 Pro (arm64, CPU) — includes a manager and the code runner, unlike the Jetson set.
+          # Orange Pi 5 Pro (arm64, CPU) — the same four images as amd64.
           OPI_REPOS="open-manipulator-opi physical-ai-server-opi physical-ai-manager-opi code-runner-opi"
 
           # _tag_exists: FREE existence probe via the Docker Hub web API
@@ -474,8 +464,8 @@ jobs:
           # _retag_primary: GHCR is the student-facing primary, so a GHCR retag is
           # normally FATAL under `set -e`. But opi is DECOUPLED from the core
           # release — a transient opi GHCR hiccup must NOT fail the retag job and
-          # block the amd64/Jetson publish. When IS_OPI=1 the GHCR retag becomes
-          # best-effort (::warning, never a hard fail); amd64/jetson stay fatal
+          # block the amd64 publish. When IS_OPI=1 the GHCR retag becomes
+          # best-effort (::warning, never a hard fail); amd64 stays fatal
           # (byte-identical to the prior direct `_retag` behavior).
           _retag_primary() {
             local target="$1" source="$2"
@@ -488,21 +478,21 @@ jobs:
             _retag "$target" "$source"
           }
 
-          for REPO in $AMD64_REPOS $ARM64_REPOS $OPI_REPOS; do
+          for REPO in $AMD64_REPOS $OPI_REPOS; do
             # opi is decoupled (its build leg is continue-on-error): gate its
             # retag on the BUILD-SUCCESS MARKER for THIS run (OPI_OK above), not
             # on a Hub existence probe. The old `_tag_exists "$REPO" latest`
             # probe was satisfied by the PRIOR release's opi :latest, so a
             # failed opi build silently promoted last release's opi image under
             # the new semver tags — with the integrity check green (stale ==
-            # stale). The amd64/Jetson repos are always present and always
+            # stale). The amd64 repos are always present and always
             # retagged, exactly as before.
             IS_OPI=0
             case " $OPI_REPOS " in
               *" $REPO "*)
                 IS_OPI=1
                 if [ "$OPI_OK" != "1" ]; then
-                  echo "::warning::opi image ${REPO} not built this run (no matching build-success marker) — skipping its retag (opi is decoupled from the core amd64/Jetson release)."
+                  echo "::warning::opi image ${REPO} not built this run (no matching build-success marker) — skipping its retag (opi is decoupled from the core amd64 release)."
                   continue
                 fi
                 ;;
@@ -514,7 +504,7 @@ jobs:
             # other GHCR tag is then derived from GHCR:latest (intra-GHCR), so we
             # read image manifests FROM Docker Hub at most ONCE per repo. GHCR is
             # the student-facing primary, so this copy stays FATAL for the core
-            # amd64/Jetson repos; for opi repos _retag_primary downgrades a GHCR
+            # amd64 repos; for opi repos _retag_primary downgrades a GHCR
             # failure to a ::warning (opi transients must not block the release).
             _retag_primary "$GHCR_SRC" "$HUB_SRC"
 
@@ -546,8 +536,8 @@ jobs:
           HUB="nettername"
           GHCR="ghcr.io/svendanilborodun"
           # NOTE: this is the SECOND hardcoded repo list (the retag step above has
-          # the first, AMD64_REPOS/ARM64_REPOS/OPI_REPOS) — keep BOTH in sync.
-          REPOS="open-manipulator physical-ai-server physical-ai-manager code-runner open-manipulator-jetson physical-ai-server-jetson open-manipulator-opi physical-ai-server-opi physical-ai-manager-opi code-runner-opi"
+          # the first, AMD64_REPOS/OPI_REPOS) — keep BOTH in sync.
+          REPOS="open-manipulator physical-ai-server physical-ai-manager code-runner open-manipulator-opi physical-ai-server-opi physical-ai-manager-opi code-runner-opi"
           # opi subset — decoupled from the core release, so a missing opi image
           # here (opi build leg skipped/failed) is a WARNING, never a fatal.
           OPI_REPOS="open-manipulator-opi physical-ai-server-opi physical-ai-manager-opi code-runner-opi"
@@ -561,9 +551,10 @@ jobs:
             docker buildx imagetools inspect "$1" 2>/dev/null | grep -oE 'sha256:[0-9a-f]{64}' | sort -u
           }
           # Integrity invariant: GHCR's :latest must CONTAIN Hub's :latest
-          # manifest — either equal to it (the arm64/jetson repos, where
-          # build-images.sh already pushed an index to Hub) OR wrapping it as a
-          # child. The amd64 :latest legitimately differs at the TOP level: Hub
+          # manifest — either equal to it (a repo for which Hub already holds an
+          # index) OR wrapping it as a child. The :latest legitimately differs at
+          # the TOP level for every image build-images.sh pushed with a raw
+          # single-platform `docker push` (amd64 and opi): Hub
           # is a raw single-platform `docker push` (CLAUDE.md §dual-store), while
           # `imagetools create` wraps that exact manifest in an OCI index on GHCR
           # — same content (the child digest is byte-identical), so the Docker Hub
@@ -590,7 +581,7 @@ jobs:
               # expected whenever the opi retag was skipped/best-effort this run
               # (build failed, marker absent, or a transient GHCR hiccup on the
               # decoupled leg) — Hub carries a newer/older opi :latest than
-              # GHCR. That must WARN, never fail the core amd64/Jetson release.
+              # GHCR. That must WARN, never fail the core amd64 release.
               case " $OPI_REPOS " in
                 *" $REPO "*)
                   echo "::warning::opi ${REPO}: Hub top digest ${H} not in GHCR :latest digest set (opi decoupled — retag skipped or best-effort this run). GHCR opi :latest may be stale until the next good opi build."
@@ -691,7 +682,7 @@ jobs:
     needs: [retag]
     # opi is decoupled (see the build job): if the opi image wasn't published
     # this run its pulls 404 — that must not fail the workflow or block the core
-    # amd64/Jetson release. The opi leg is non-fatal; amd64/Jetson stay strict.
+    # amd64 release. The opi leg is non-fatal; amd64 stays strict.
     continue-on-error: ${{ matrix.platform == 'opi' }}
     # Native per-arch runners so each image is exercised on real silicon —
     # we now actually test arm64 images instead of trusting "build succeeded".
@@ -716,14 +707,6 @@ jobs:
             arm_repo: open-manipulator
             manager_repo: physical-ai-manager
             runner_repo: code-runner
-          - platform: arm64
-            runner: ubuntu-24.04-arm
-            server_repo: physical-ai-server-jetson
-            arm_repo: open-manipulator-jetson
-            # No manager-jetson repo (manager only ships on student PCs), and
-            # no code-runner-jetson (the Roboter-Studio tab is jetsonIncompatible).
-            manager_repo: ""
-            runner_repo: ""
           # opi (Orange Pi 5 Pro): arm64 CPU flavor, and it DOES ship a manager
           # (the Pi serves the SPA), so the bundle-grep step runs for opi too,
           # and a code runner, so the runner size gate + parity run for opi too.
@@ -747,7 +730,7 @@ jobs:
         # Docker Hub (audit B1). Run this BEFORE the GHCR login below so the probe
         # is genuinely anonymous. New GHCR packages default to Private, so this
         # most affects the newer *-opi repos (opi is continue-on-error, so a
-        # private opi package warns rather than blocking the amd64/Jetson release).
+        # private opi package warns rather than blocking the amd64 release).
         #
         # FIRST PUBLISH. "Private by default" also means a package that has NEVER
         # been pushed answers exactly like one that REGRESSED to Private — both
@@ -762,7 +745,7 @@ jobs:
         # fatal for everyone: that is a publish failure, not a visibility one.
         # tests/test_publish_lists_lockstep.py pins all three properties.
         #
-        # RETRIED, because on the amd64/arm64 legs this step is NOT
+        # RETRIED, because on the amd64 leg this step is NOT
         # continue-on-error and it is the last gate before the release proceeds:
         # a single un-retried GHCR 5xx/429/DNS blip would fail W4 -> W5 skipped
         # -> the release stops after W1 migrations and both Railway deploys
@@ -881,7 +864,7 @@ jobs:
         # build-images.sh already stamps org.opencontainers.image.revision from
         # BUILD_ID (set to github.sha by this workflow's build job), and the
         # amd64/opi flatten round-trips labels through `docker import -c LABEL`,
-        # so the label survives on all three flavors. Comparing it to github.sha
+        # so the label survives on both flavors. Comparing it to github.sha
         # makes "smoke-tested a stale image" structurally impossible rather than
         # something a reviewer has to remember.
         env:
@@ -903,12 +886,10 @@ jobs:
         # DataManager + LeRobot writer +
         # streaming h264 encoder, asserting what lands ON DISK — the one thing
         # the stub-based unit tests cannot see. No network (push_to_hub off),
-        # datasets in a temp dir inside the throwaway container. Jetson is
-        # excluded: it never records. opi inherits the job's continue-on-error.
-        # The image name goes through env: (no expression inside run:). Runs
-        # only after the revision check above, so it never exercises a stale
-        # retag.
-        if: matrix.platform == 'amd64' || matrix.platform == 'opi'
+        # datasets in a temp dir inside the throwaway container. opi inherits
+        # the job's continue-on-error. The image name goes through env: (no
+        # expression inside run:). Runs only after the revision check above, so
+        # it never exercises a stale retag.
         timeout-minutes: 10
         env:
           SERVER_IMAGE: ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest
@@ -929,8 +910,7 @@ jobs:
         # integrity gate, the hints. One JSON line; exit 0 only when all hold.
         # No network (HF_HUB_OFFLINE=1). Same shape as the record-FSM step: the
         # image name goes through env: (no expression inside run:), after the
-        # revision check, Jetson excluded (it never edits datasets).
-        if: matrix.platform == 'amd64' || matrix.platform == 'opi'
+        # revision check.
         timeout-minutes: 10
         env:
           SERVER_IMAGE: ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest
@@ -953,8 +933,7 @@ jobs:
         # install), never the checkout's. pytest ships in the image. A skip
         # fails the step: in this image nothing may skip for want of LeRobot.
         # Same shape as the steps above: the image name through env:, after
-        # the revision check, Jetson excluded (it never edits datasets).
-        if: matrix.platform == 'amd64' || matrix.platform == 'opi'
+        # the revision check.
         timeout-minutes: 10
         env:
           SERVER_IMAGE: ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest
@@ -970,8 +949,7 @@ jobs:
         # CUDA out of the shipped bytes. A fat (CUDA-back) physical-ai-server is
         # ~16 GB; the slimmed CPU image measures 5.56 GB. Gate on REAL bytes,
         # NOT a `find … nvidia` that a base-layer whiteout would false-pass. The
-        # image is already pulled by the step above. (The arm64 *-jetson image
-        # KEEPS CUDA and is intentionally exempt.)
+        # image is already pulled by the step above.
         run: |
           set -e
           # UNITS — measured with `docker image history`, NOT `docker image
@@ -1021,8 +999,7 @@ jobs:
         # blow past this ceiling. Gate on REAL uncompressed bytes (docker image
         # inspect .Size), not a `find … nvidia`. The image is already pulled by
         # the ROS-Jazzy step above. Separate from (and lower than) the amd64
-        # CUDA-slim gate — do NOT fold the two. (The arm64 *-jetson image KEEPS
-        # CUDA and has no size gate at all.)
+        # CUDA-slim gate — do NOT fold the two.
         run: |
           set -e
           SIZE=$(docker image inspect ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest --format '{{.Size}}')
@@ -1055,8 +1032,7 @@ jobs:
           echo "OK: opi server image is within the size ceiling (${SIZE} bytes)."
       - name: Pull + assert code-runner is THIS run's build and under its size ceiling
         if: matrix.runner_repo != ''
-        # The Roboter Studio sandbox (amd64 + opi; the Jetson leg has no
-        # runner_repo). Two assertions, both against REAL bytes/labels of the
+        # The Roboter Studio sandbox (amd64 + opi). Two assertions, both against REAL bytes/labels of the
         # pulled GHCR image:
         #   (1) org.opencontainers.image.revision == github.sha — the same
         #       "which image" guard the server step above carries. The runner is
@@ -1106,8 +1082,8 @@ jobs:
         # example in the simulator in both languages, the Python put-back
         # case. The rig-emulation fixture comes from the checkout (the image
         # excludes test/), mounted next to the script. After both revision
-        # checks, so it never runs a stale retag; amd64 + opi (the Jetson leg
-        # has no runner), opi inheriting the job's continue-on-error. Image
+        # checks, so it never runs a stale retag; amd64 + opi, opi inheriting
+        # the job's continue-on-error. Image
         # names go through env: (no expression inside run:).
         if: matrix.runner_repo != ''
         timeout-minutes: 12
@@ -1163,7 +1139,6 @@ jobs:
           UNAME_M=$(uname -m)
           case "${{ matrix.platform }}" in
             amd64) EXPECTED="x86_64" ;;
-            arm64) EXPECTED="aarch64" ;;
             opi)   EXPECTED="aarch64" ;;
           esac
           if [ "$UNAME_M" != "$EXPECTED" ]; then

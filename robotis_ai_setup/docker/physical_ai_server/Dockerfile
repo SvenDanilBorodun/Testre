@@ -1,9 +1,8 @@
 # Base image is parameterised so a single Dockerfile builds for both
-# architectures. amd64 uses the ROBOTIS-published base; arm64 uses our
-# own base built once from the upstream physical_ai_tools/physical_ai_server/
-# Dockerfile.arm64 sources (see docs/arm64_base/README.md). The
-# build-images.sh script passes the right base via --build-arg
-# BASE_IMAGE=... per platform.
+# flavors. amd64 uses the ROBOTIS-published base; opi (Orange Pi, arm64) uses
+# our own CPU base built once from physical_ai_tools/physical_ai_server/
+# Dockerfile.arm64cpu (see docs/arm64_base/README.md). The build-images.sh
+# script passes the right base via --build-arg BASE_IMAGE=... per platform.
 ARG BASE_IMAGE=robotis/physical-ai-server:amd64-0.8.2
 FROM ${BASE_IMAGE}
 
@@ -269,9 +268,9 @@ RUN python3 -m pip install --no-cache-dir urdf-parser-py==0.0.4 \
 RUN echo "AGPL audit: relies on explicit dependency manifest, see Dockerfile comment"
 
 # ── amd64-only: drop CUDA / GPU torch (student PCs have NO GPU) ──────────────
-# Gated by SLIM_CUDA, passed =1 ONLY for amd64 by build-images.sh; arm64/Jetson
-# never set it, so this whole step is a no-op there and the shared Dockerfile
-# stays Jetson-safe. The inherited base is built on nvidia/cuda:12.8.0-devel with
+# Gated by SLIM_CUDA, passed =1 ONLY for amd64 by build-images.sh; opi passes
+# 0 (its CPU base has no CUDA to strip), so this whole step is a no-op there.
+# The inherited base is built on nvidia/cuda:12.8.0-devel with
 # torch 2.7.0+cu128 — ~13 GB of CUDA a GPU-less student image never uses:
 # inference is hard-gated (inference_manager.load_policy() returns a German
 # "needs GPU" error when torch.cuda.is_available() is False), recording never
@@ -345,11 +344,10 @@ RUN if [ "$SLIM_CUDA" = "1" ]; then \
         # school connection actually downloads.
         #
         # This MUST stay inside the SLIM_CUDA=1 branch, and "consolidating" it
-        # out is a regression in two different directions: Jetson/arm64 KEEPS
-        # its GPU torch (where NCCL is a legitimate dependency) and is never
-        # flattened, so running it there would buy zero download bytes for real
-        # runtime risk; opi has neither path at all (measured 0 MB), so it is a
-        # no-op there regardless.
+        # out is a regression: a GPU flavor (the retired Jetson kept its GPU
+        # torch, where NCCL is a legitimate dependency) must never lose it, and
+        # opi has neither path at all (measured 0 MB), so it is a no-op there
+        # regardless.
         #
         # Every removal is nonexistence-tolerant on purpose, because this block
         # runs under `set -eux`: `rm -f`/`rm -rf` treat a missing operand as
@@ -382,15 +380,15 @@ RUN if [ "$SLIM_CUDA" = "1" ]; then \
         [ -z "$rem" ] || { echo "[SLIM] ERROR: GPU wheels survived: $rem"; exit 1; }; \
         [ ! -d /usr/local/cuda ] || { echo "[SLIM] ERROR: /usr/local/cuda still present"; exit 1; }; \
     else \
-        echo "[SLIM] SLIM_CUDA=0 — no torch swap. Covers TWO different flavors: Jetson/arm64 (KEEPS its GPU torch by design) and opi (its CPU base already ships CPU torch, so there is nothing to strip). The TORCH_EXPECT_CPU gate below is what tells them apart."; \
+        echo "[SLIM] SLIM_CUDA=0 — no torch swap (opi: its CPU base already ships CPU torch, so there is nothing to strip). The TORCH_EXPECT_CPU gate below asserts the result."; \
     fi
 
 # ── Rule §5 torch gate — runs on EVERY flavor, not just the SLIM_CUDA=1 swap ──
 # "One PyTorch surface (torch 2.7.x), three CUDA channels" is a Rule §5 invariant,
 # and torch/torchvision are the ONLY Rule §5 pins this thin overlay does not
 # re-install — every flavor INHERITS torch from its base (amd64: the ROBOTIS
-# cuda base, then swapped to +cpu above; arm64: the Jetson AI Lab base; opi:
-# the explicit torch==2.7.0 pin in Dockerfile.arm64cpu). So this file must at
+# cuda base, then swapped to +cpu above; opi: the explicit torch==2.7.0 pin in
+# Dockerfile.arm64cpu). So this file must at
 # least ASSERT what it inherited.
 #
 # It previously did not. The only torch assertion lived INSIDE the
@@ -401,8 +399,9 @@ RUN if [ "$SLIM_CUDA" = "1" ]; then \
 # base image which is hand-rebuilt (not CI-built), so the one layer CI DOES
 # build every push is exactly where the assert belongs.
 #
-# TORCH_EXPECT_CPU is passed IN by build-images.sh (=1 for amd64 + opi, left 0
-# for arm64) rather than re-derived here from SLIM_CUDA: the two are not the
+# TORCH_EXPECT_CPU is passed IN by build-images.sh (=1 for amd64 + opi; its
+# default 0 is a GPU flavor's, which none ships today) rather than re-derived
+# here from SLIM_CUDA: the two are not the
 # same question. SLIM_CUDA asks "should this build strip CUDA?" — opi answers no
 # because there is nothing to strip, while still being a CPU flavor. Deriving
 # one from the other is what made the opi gap invisible in the first place.
@@ -420,8 +419,8 @@ print('[TORCH] Rule §5 gate OK')" "$TORCH_EXPECT_CPU"
 
 # Cross-arch package floor — pin safetensors / protobuf / pillow / numpy to a
 # single version on BOTH arches. v0.5.1 resolves these naturally to compatible
-# versions, but we pin explicitly to keep amd64 + arm64 producing byte-identical
-# site-packages. Versions chosen from Phase 0's verified pip resolve of
+# versions, but we pin explicitly to keep amd64 + opi (arm64) producing
+# byte-identical site-packages. Versions chosen from Phase 0's verified pip resolve of
 # `lerobot[pi,smolvla,peft]==0.5.1` on Python 3.12.
 #
 #   safetensors==0.7.0   (LCD across arches; v0.8 still rc as of 2026-05)
@@ -443,7 +442,7 @@ print('[TORCH] Rule §5 gate OK')" "$TORCH_EXPECT_CPU"
 # make_pre_post_processors still work under 1.26.4. The build-time functional
 # decode gate below proves the fix held. Pre-existing since v2.5.0; fixed v2.5.4.
 #
-# Mirrored in physical_ai_tools/physical_ai_server/Dockerfile.{amd64,arm64}.
+# Mirrored in physical_ai_tools/physical_ai_server/Dockerfile.{amd64,arm64cpu}.
 # `--force-reinstall` so the pins override any transitive resolve (incl. lerobot's
 # numpy>=2) from the earlier pip layers.
 RUN python3 -m pip install --no-cache-dir --force-reinstall \
@@ -471,8 +470,8 @@ RUN python3 -m pip install --no-cache-dir --force-reinstall \
 #       the SPA ships from the separate physical-ai-manager image; this copy is never
 #       built/served but carries files deleted from the repo (TokenInputPopup.js,
 #       ResumePolicySelector.js) that trip audits. Whiteout-hidden, base bytes remain.)
-#   /opt/torch2trt/.git  (NVIDIA leftover in the arm64 Jetson base; path absent on amd64,
-#       where the rm is a harmless no-op)
+#   /opt/torch2trt/.git  (NVIDIA leftover of the retired arm64 Jetson base; absent on
+#       amd64 and opi, where the rm is a harmless no-op)
 #
 # ── talos_system_manager: the directory goes, and so must its s6 service ─────
 # EduBotics does NOT import from talos_system_manager, so the ~216 MB directory
@@ -512,8 +511,7 @@ RUN python3 -m pip install --no-cache-dir --force-reinstall \
 # Deliberately in the THIN OVERLAY, not the bases: CI builds this layer on every
 # push, so the saving lands without the manual base rebuild the base Dockerfiles
 # need (see docs/arm64_base/README.md), and amd64 + opi are FLATTENed afterwards
-# so the bytes are actually reclaimed rather than whiteout-hidden (Jetson is not
-# flattened — the uninstall is a harmless whiteout there). The policy-import gate
+# so the bytes are actually reclaimed rather than whiteout-hidden. The policy-import gate
 # below runs AFTER this block, so a future lerobot that hard-imports wandb at
 # module scope fails the BUILD instead of a student's inference run.
 RUN set -e && \
@@ -692,7 +690,7 @@ print(f\"cv_bridge functional decode gate OK (numpy {np.__version__})\")'"
 
 # Build-time PERSONAL-TOKEN gate (042). The per-student token reaches the rig as
 # a file at $HF_TOKEN_PATH that huggingface_hub must re-read on EVERY call. This
-# pins the three facts the whole design rests on, on every flavor (amd64, Jetson,
+# pins the three facts the whole design rests on, on every flavor (amd64 and
 # opi — one thin Dockerfile): the constant honours the env var, a rewritten file
 # is seen at once, a deleted file means no token, and nothing disables the
 # implicit token. huggingface_hub is not pinned here (lerobot's >=1,<2 range).
@@ -720,13 +718,13 @@ print('[HF-TOKEN] HF_TOKEN_PATH gate OK', huggingface_hub.__version__)"
 #
 # 1) PYTHONPATH=/opt/talos_system_manager:… set by upstream — the dir is
 #    rm -rf'd above so this entry is dangling. Bare ENV PYTHONPATH=
-#    empties the var on both amd64 and arm64.
+#    empties the var on both flavors.
 #
-# 2) Jetson AI Lab base ships TWINE_*/SCP_UPLOAD_* env vars containing
-#    NVIDIA devpi upload credentials (TWINE_PASSWORD=Nvid…14chars,
-#    SCP_UPLOAD_PASS=nvidia). Leaking real creds into a public Docker
-#    image is the failure mode this closes. Empty on amd64 too — the
-#    arm64 base sets them, amd64 base doesn't, blanket-scrub is harmless.
+# 2) The retired Jetson AI Lab base shipped TWINE_*/SCP_UPLOAD_* env vars
+#    containing NVIDIA devpi upload credentials. Leaking real creds into a
+#    public Docker image is the failure mode this closed. Neither shipped
+#    base sets them today; the blanket scrub stays, harmless, in case a
+#    base ever does again.
 ENV PYTHONPATH= \
     TWINE_PASSWORD= \
     TWINE_USERNAME= \

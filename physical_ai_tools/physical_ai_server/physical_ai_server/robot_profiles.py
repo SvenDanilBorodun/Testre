@@ -55,8 +55,7 @@ _logger = logging.getLogger(__name__)
 # module in the SAME commit (a HOME/gripper change is ask-first, Rule §2).
 _OMX_HOME_JOINTS_RAD = (0.0, -math.pi / 2, math.pi / 2, 0.0, 0.0)
 # SEPARATE, more-folded safe-home pose (±pi/4). UNCONSUMED seam data this round:
-# collision_monitor.SAFE_HOME_ARM, jetson_agent.SAFE_HOME_JOINTS and
-# entrypoint_omx.sh keep their OWN hardcoded copies (the ±pi/2 vs ±pi/4
+# collision_monitor.SAFE_HOME_ARM keeps its OWN hardcoded copy (the ±pi/2 vs ±pi/4
 # divergence is preserved byte-identical, not reconciled — a recovery-pose
 # change is ask-first). Carried so a future arm can supply its own.
 _OMX_SAFE_HOME_ARM_RAD = (0.0, -0.785398, 0.785398, 0.0, 0.0)

@@ -13,7 +13,7 @@ name: release
 #   W3 railway-deploy-teacher-web
 #       │
 #       ▼
-#   W4 docker-publish        (builds + pushes 4 amd64 + 2 jetson + 4 -opi images)
+#   W4 docker-publish        (builds + pushes 4 amd64 + 4 -opi images)
 #       │
 #       ▼
 #   W5 release-installer

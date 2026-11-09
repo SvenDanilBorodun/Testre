@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # EduBotics on Orange Pi 5 Pro — one-shot provisioning installer (deploy plan §7).
 #
-# Mirrors robotis_ai_setup/jetson_agent/setup.sh MINUS the NVIDIA hard-checks:
-# the Pi has no CUDA and never runs local inference (Jetson-only, plan §3/§11).
+# Derived from the retired classroom Jetson's setup.sh MINUS the NVIDIA
+# hard-checks: the Pi has no CUDA and never runs local inference (its students
+# run models „In der Cloud").
 # Run as root on a fresh Armbian / Orange Pi Ubuntu image with both OpenRB-150
 # arm boards + both USB cameras plugged in:
 #

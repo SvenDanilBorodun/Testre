@@ -13,7 +13,7 @@ rosbridge, so this file never carries one). Differences from the GUI:
     is emitted as a managed key (there is no native capture bridge, so the
     Windows ``native_bridge`` branch and the phone-as-cam_id-2 line are gone).
   - ``ROS_DOMAIN_ID`` is derived from ``/etc/machine-id`` (hash mod 233,
-    matching the Jetson setup.sh convention), not ``uuid.getnode()``.
+    the convention the retired Jetson's setup.sh used), not ``uuid.getnode()``.
   - New Orange-Pi managed keys: ``EDUBOTICS_LAN_OPEN`` (LAN exposure switch)
     and ``EDUBOTICS_ROS_NET_SUBNET`` (docker bridge subnet), plus the DERIVED
     ``EDUBOTICS_BIND_HOST`` (0.0.0.0 / 127.0.0.1) and
@@ -210,7 +210,7 @@ def _resolve_ros_domain_id() -> int:
     """Resolve a STABLE per-machine ROS_DOMAIN_ID.
 
     Order: EDUBOTICS_ROS_DOMAIN env override → persisted file → derive from
-    /etc/machine-id (hash mod 233; matches the Jetson setup.sh convention) →
+    /etc/machine-id (hash mod 233; the retired Jetson setup.sh's convention) →
     persist. Honest note: on the Pi ``ros_net`` is a docker BRIDGE network, so
     DDS never leaves the host and a domain collision between two Pis is
     harmless — the derivation is kept for fleet-convention consistency and

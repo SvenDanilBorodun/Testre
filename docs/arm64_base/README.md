@@ -7,13 +7,14 @@
 > bases below already exist in the registry and are simply resolved by
 > `docker manifest inspect`.
 
-EduBotics ships two arm64 device flavors, each with its own base set:
+EduBotics ships one arm64 device flavor:
 
-- **Jetson** (`-jetson`) — the classroom inference rig. GPU torch on the
-  NVIDIA L4T/CUDA base. See [`docs/JETSON_DEPLOY.md`](../JETSON_DEPLOY.md).
 - **Orange Pi 5 Pro** (`-opi`) — the full student stack on a Rockchip
   RK3588S board (**no CUDA — ever**). CPU-only torch on a stock ROS base.
   See [`docs/ORANGE_PI_DEPLOY_PLAN.md`](../ORANGE_PI_DEPLOY_PLAN.md).
+
+(The second one, the classroom Jetson `-jetson` with its GPU L4T base, was
+retired on 2026-11-09; `Dockerfile.arm64` and `PLATFORM=arm64` are gone.)
 
 ## The base image set
 
@@ -25,20 +26,19 @@ are build inputs and stay on Docker Hub.
 
 | Base image | Built from | Flavor(s) that consume it | How to (re)build |
 |---|---|---|---|
-| `${REGISTRY}/open-manipulator-jetson-base:4.1.4` | `open_manipulator/docker/Dockerfile` (`FROM ros:jazzy-ros-base` — **CUDA/L4T-free**) | Jetson **and** Orange Pi | `BUILD_BASE_ARM64=1 PLATFORM=arm64` |
-| `${REGISTRY}/physical-ai-server-jetson-base:0.8.2` | `physical_ai_tools/physical_ai_server/Dockerfile.arm64` (`FROM robotis/ros:jazzy-ros-base-torch2.7.0-cuda12.8.0` — L4T, GPU torch) | Jetson only | `BUILD_BASE_ARM64=1 PLATFORM=arm64` |
-| `${REGISTRY}/physical-ai-server-opi-base:0.8.2` | `physical_ai_tools/physical_ai_server/Dockerfile.arm64cpu` (`FROM ros:jazzy-ros-base` — stock, plain PyPI, **CPU torch 2.7.0**) | Orange Pi only | `BUILD_BASE_OPI=1 PLATFORM=opi` |
+| `${REGISTRY}/open-manipulator-jetson-base:4.1.4` | `open_manipulator/docker/Dockerfile` (`FROM ros:jazzy-ros-base` — **CUDA/L4T-free**) | Orange Pi | `BUILD_BASE_OPI_OMX=1 PLATFORM=opi` |
+| `${REGISTRY}/physical-ai-server-opi-base:0.8.2-opi2` | `physical_ai_tools/physical_ai_server/Dockerfile.arm64cpu` (`FROM ros:jazzy-ros-base` — stock, plain PyPI, **CPU torch 2.7.0**) | Orange Pi | `BUILD_BASE_OPI=1 PLATFORM=opi` |
 
-### Why the Orange Pi has no dedicated open_manipulator base
+### Why the Orange Pi's open_manipulator base is called `…-jetson-base`
 
 The `open_manipulator` base is `FROM ros:jazzy-ros-base` (stock ROS 2 Jazzy
 plus the Dynamixel + C++ `ros2_control` packages) — it carries **no CUDA and
-no L4T**. So the Orange Pi flavor **REUSES** the Jetson OMX base
-(`open-manipulator-jetson-base:4.1.4`) verbatim. There is no
-`open-manipulator-opi-base`, and `PLATFORM=opi` never builds an OMX base —
-it only *resolves* the Jetson one. The `-opi` divergence is entirely on the
-**server** side, where the Jetson base's CUDA/L4T payload is unusable on
-Rockchip, hence the separate CPU base above.
+no L4T**. It was first built for the classroom Jetson and the Orange Pi has
+reused it verbatim ever since; when the Jetson was retired its build moved to
+`BUILD_BASE_OPI_OMX=1 PLATFORM=opi`, but the repository kept its name:
+renaming it would need a manual rebuild + push before any release could
+resolve it. **Do not delete `open-manipulator-jetson-base` on Docker Hub** —
+every Orange Pi build resolves it.
 
 ## Prerequisites
 
@@ -55,8 +55,8 @@ docker login          # for REGISTRY=nettername
 #      open_manipulator/  physical_ai_tools/  robotis_ai_setup/
 ```
 
-**Where to run it — native arm64 is strongly preferred.** All three base
-builds emit `linux/arm64` images. On a native arm64 host (an
+**Where to run it — native arm64 is strongly preferred.** Both base builds
+emit `linux/arm64` images. On a native arm64 host (an
 `ubuntu-24.04-arm` GitHub runner, an Ampere/Graviton box, or an Apple-Silicon
 Linux VM) the build is native and fast. On an amd64 host you must emulate
 via QEMU (see below) — correct but ~5-8× slower, with occasional
@@ -71,30 +71,10 @@ docker run --privileged --rm tonistiigi/binfmt --install arm64
 docker buildx create --name edubotics-arm --use --bootstrap
 ```
 
-`build-images.sh` passes `--platform linux/arm64` on every arm64/opi buildx
+`build-images.sh` passes `--platform linux/arm64` on every opi buildx
 call, so no further per-command flags are needed.
 
-## Building the Jetson bases (both, one-time)
-
-```bash
-cd robotis_ai_setup/docker
-# Builds + pushes BOTH the open-manipulator-jetson-base and the
-# physical-ai-server-jetson-base, then continues on to build the thin Jetson
-# layers on top. ~30-40 min per base under QEMU on a Mac; much faster native.
-BUILD_BASE_ARM64=1 PLATFORM=arm64 ./build-images.sh
-```
-
-`BUILD_BASE_ARM64=1` forces the two Jetson bases to build from upstream
-sources (context = `physical_ai_tools/` for the server base so the
-`docker/s6-*` COPYs resolve). Omit it on subsequent releases — the bases are
-then resolved via `docker manifest inspect` and only the thin layers
-rebuild:
-
-```bash
-PLATFORM=arm64 ./build-images.sh    # bases resolved, thin layers rebuilt + pushed
-```
-
-## Building the Orange Pi CPU server base (one-time)
+## Building the Orange Pi bases (one-time)
 
 ```bash
 cd robotis_ai_setup/docker
@@ -111,6 +91,10 @@ export CLOUD_API_URL=https://scintillating-empathy-production-1068.up.railway.ap
 # It builds + pushes physical-ai-server-opi-base:<tag> from Dockerfile.arm64cpu
 # (--platform linux/arm64 --push; context = physical_ai_tools/).
 BUILD_BASE_OPI=1 PLATFORM=opi ./build-images.sh
+
+# The open_manipulator base, only when it must be rebuilt (it exists; see
+# above). Same script, same three variables, --push:
+BUILD_BASE_OPI_OMX=1 PLATFORM=opi ./build-images.sh
 ```
 
 The base tag is pinned at `build-images.sh`'s `opi` case (`PAS_BASE_IMAGE`).
@@ -125,13 +109,13 @@ it pins `torch==2.7.0` + `torchvision==0.22.0` (the aarch64 PyPI 2.7.0 wheel
 is genuinely CPU-only — ~99 MB, zero `nvidia-*` deps) **before** LeRobot so
 `lerobot==0.5.1`'s resolve can't drag in torch 2.10.x, then installs
 `lerobot[pi,smolvla,peft]==0.5.1` under the same `numpy==1.26.4` /
-`scipy>=1.14.0,<1.18` cross-arch floor as the sibling bases (Rule §5 — this
-file is the FOURTH LeRobot pin site). It has **no** CUDA or L4T references.
+`scipy>=1.14.0,<1.18` cross-arch floor as the amd64 base (Rule §5 — this
+file is one of the five LeRobot pin sites). It has **no** CUDA or L4T
+references.
 
-**The Orange Pi OMX base is NOT built here** — `PLATFORM=opi` reuses the
-already-built `open-manipulator-jetson-base:4.1.4`. Build that once via the
-Jetson path above (`BUILD_BASE_ARM64=1 PLATFORM=arm64`) if it does not yet
-exist; `PLATFORM=opi` will otherwise abort with a hint pointing back here.
+Without `BUILD_BASE_OPI_OMX=1`, `PLATFORM=opi` only resolves the
+open_manipulator base and aborts with a hint pointing back here if it is
+missing.
 
 Subsequent opi releases resolve the base and only rebuild the thin layers:
 
@@ -161,8 +145,6 @@ label):
   inherited from the original deploy plan and never matched the code — 7 GB
   left barely 1.2x headroom over the target, so the first honest build would
   have failed the release for being the size it was designed to be.)
-- **arm64/Jetson**: NEVER flattened — it deliberately keeps GPU torch and
-  the full CUDA/L4T payload.
 
 ## Verifying a pushed base (architecture / manifest)
 
@@ -170,21 +152,20 @@ After a base build, confirm the pushed image reports the expected
 architecture before building thin layers on it:
 
 ```bash
-# Should show `Platform: linux/arm64` for every arm64/opi base.
-docker buildx imagetools inspect ${REGISTRY}/physical-ai-server-opi-base:0.8.2
-docker buildx imagetools inspect ${REGISTRY}/physical-ai-server-jetson-base:0.8.2
+# Should show `Platform: linux/arm64` for both opi bases.
+docker buildx imagetools inspect ${REGISTRY}/physical-ai-server-opi-base:0.8.2-opi2
 docker buildx imagetools inspect ${REGISTRY}/open-manipulator-jetson-base:4.1.4
 ```
 
 The thin-layer builds and CI (`docker-publish.yml::smoke-test`) also assert
 `uname -m == aarch64` and run `image_source_parity.sh` on the shipped
 images, so an arch or source-drift mistake surfaces loudly at publish time
-rather than on a bench Pi/Jetson.
+rather than on a bench Pi.
 
 ## After the bases exist
 
 Everyday releases go through GitHub Actions (`docker-publish.yml`, W4 in the
-golden order) — the `build`/`retag`/`smoke-test` matrix now carries three
-flavors (`amd64`, `arm64`, `opi`) and dual-pushes each thin image to GHCR
+golden order) — the `build`/`retag`/`smoke-test` matrix carries two
+flavors (`amd64`, `opi`) and dual-pushes each thin image to GHCR
 (primary) + Docker Hub (fallback). Local `build-images.sh` runs are
 dev-only; never push production thin layers from a workstation (Rule §6).

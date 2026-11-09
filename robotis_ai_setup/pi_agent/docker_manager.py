@@ -6,8 +6,8 @@ wrapper), because the Pi runs Docker Engine directly. The image-digest
 pre-check is flipped from ``linux/amd64`` to ``linux/arm64`` in BOTH the
 legacy single-digest probe (``_get_remote_manifest_digest``) and the
 set-membership machinery (``_parse_digest_candidates`` /
-``_get_remote_digest_candidates``), reusing the arm64 twins the Jetson
-agent already carries.
+``_get_remote_digest_candidates``), reusing the arm64 twins the retired
+Jetson agent carried.
 
 Two lifecycle laws distinguish this from the GUI:
 
@@ -22,8 +22,8 @@ Two lifecycle laws distinguish this from the GUI:
      The graceful ``stop`` (SIGTERM) still lets ``open_manipulator``'s
      entrypoint run its torque-disable trap before exit (Rule §2 preserved).
 
-The compose driver runs with a SCRUBBED environment (like the Jetson
-agent) so the systemd unit's ``EDUBOTICS_AGENT_TOKEN`` / secrets never leak
+The compose driver runs with a SCRUBBED environment (like the retired
+Jetson agent) so the systemd unit's ``EDUBOTICS_AGENT_TOKEN`` / secrets never leak
 into container processes; compose reads every ``${VAR}`` from ``--env-file``.
 """
 
@@ -92,7 +92,7 @@ EDUBOTICS_DATA_VOLUME_SUFFIXES = (
     "edubotics_calib",
 )
 
-# Per-attempt pull timeout. Larger than the Jetson's 180 s default because the
+# Per-attempt pull timeout. Larger than the retired Jetson agent's 180 s because the
 # arm64 opi server image is one ~5-6 GB layer that a slow classroom link needs
 # minutes to fetch; `docker pull` resumes from cached layers on retry so a
 # timeout-then-retry is cheap. Override with EDUBOTICS_PULL_ATTEMPT_TIMEOUT_S.
@@ -365,7 +365,7 @@ def _pull_one_image(
     ``_reset_dockerd`` on stall): on the Pi dockerd is a systemd service SHARED
     with the always-on manager, so restarting it would drop the wizard the
     student is looking at. Instead we rely on ``docker pull`` resuming from
-    cached layers on retry (cheap) — the Jetson agent's proven native approach.
+    cached layers on retry (cheap) — the retired Jetson agent's proven native approach.
 
     ``retry_gate``: optional predicate consulted BEFORE every retry (never before
     the first attempt). Returning False ends the loop immediately — the caller's
@@ -614,7 +614,7 @@ def get_last_pull_status() -> dict:
 def check_for_updates(log=None, missing_out: Optional[list] = None) -> bool:
     """Refresh the opi images to the pinned tag on GHCR (Docker Hub fallback).
 
-    Same three-layer defence as the GUI/Jetson: offline short-circuit, arm64
+    Same three-layer defence as the GUI: offline short-circuit, arm64
     manifest-digest pre-check (set membership — skip a pull when the local
     RepoDigest is already in the registry's candidate set), and last-pull
     persistence for the freshness banner. Per-image failures are non-fatal.

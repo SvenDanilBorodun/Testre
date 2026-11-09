@@ -272,7 +272,8 @@ def _watch_subprocess(proc: subprocess.Popen, generation: int = 0) -> None:
 
 # How long the child gets to close itself after WM_CLOSE before we terminate it.
 # The work being waited for is short by construction — `navigator.sendBeacon`
-# hands the Jetson release to the browser's own delivery queue and returns, and
+# hands the cloud session's end to the browser's own delivery queue (a keepalive
+# fetch on `pagehide`) and returns, and
 # JogPanel's re-torque is a single rosbridge service call — but a WinForms
 # FormClosed -> WebView2 teardown -> DOM pagehide chain is several hops. 2.5 s
 # is a compromise: long enough for that chain on a busy classroom PC, short
@@ -344,9 +345,9 @@ def destroy_all() -> None:
     `FormClosed` nor the DOM's `pagehide`/`beforeunload` — so EVERY
     browser-side teardown hook was dead, with three shipped consequences:
 
-      * `useJetsonConnection`'s release beacon never fired, so the exclusive
-        claim leaked for the full 5-minute sweeper window and THE NEXT STUDENT
-        WAS REFUSED THE JETSON;
+      * the classroom Jetson's release beacon (retired since 2026-11-09) never
+        fired, so the exclusive claim leaked for the full 5-minute sweeper
+        window and THE NEXT STUDENT WAS REFUSED THE JETSON;
       * `JogPanel`'s unmount re-torque never ran, leaving the follower limp
         until the 30 s `_manual_idle_watchdog` caught it;
       * `RecordPanel`'s teardown never ran.

@@ -7,7 +7,7 @@ WHY THIS EXISTS
 ---------------
 `ci.yml::env-forwarding-guard` proves that every `EDUBOTICS_*` name a shipped
 source reads appears in an `environment:` list — but it builds a UNION over all
-four shipped compose files and reduces it with `comm`. A key present on ONE
+three shipped compose files and reduces it with `comm`. A key present on ONE
 target therefore satisfies it for EVERY target, and a key on the WRONG SERVICE
 of the right file satisfies it too. Both failure modes shipped together:
 `EDUBOTICS_ROBOT_TYPE` was on the opi compose but only under
@@ -20,18 +20,6 @@ with all six keys deleted from the opi compose.
 This job closes exactly that gap. It compares the two files SERVICE BY SERVICE,
 so neither "present somewhere else" nor "present on another service" can hide a
 missing forward.
-
-SCOPE — the Jetson compose is deliberately OUT
-----------------------------------------------
-`jetson_agent/docker-compose.jetson.yml` is NOT a target here, not even
-advisorily. It is a legitimately different and much smaller product surface
-(7 + 3 env keys against 23 + 47 + 1 here), the Jetson is a shared classroom
-inference target rather than a full rig, and gating it would demand a Jetson
-parity audit nobody has scoped. Adding it later means doing that audit — not
-flipping a warning to an error. It is also a different SHAPE, not just a
-smaller one: it uses compose's bare pass-through form (`- ROS_DOMAIN_ID`, twice)
-to inherit a value from the host env, which the parser below deliberately
-refuses. Teaching it that form is part of the same audit.
 
 SCOPE — the shipped pi_agent twin is deliberately NOT re-checked
 ---------------------------------------------------------------

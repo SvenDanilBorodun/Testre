@@ -1615,8 +1615,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
         Deliberately NOT part of _init_ros_publisher: test_signal_status_node_wiring
         execs that method with a fixed namespace. The topic is published even when
-        this image takes no personal token (accepts=False), so the SPA can tell a
-        Jetson image from an old image that has no topic at all.
+        this image takes no personal token (accepts=False), so the SPA can tell an
+        image without the slot from an old image that has no topic at all.
         """
         state_qos = QoSProfile(
             depth=1,

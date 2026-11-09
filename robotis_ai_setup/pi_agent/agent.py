@@ -7,8 +7,8 @@ agent is the brain the SPA drives — through the manager's same-origin
 ``/api/system`` reverse proxy (nginx strips ``/api/system`` so the agent sees
 bare paths: ``/status``, ``/scan-arms``, ``/roboter-studio/status`` …).
 
-It merges the Jetson agent's systemd/scrubbed-env skeleton (``jetson_agent/
-agent.py``) with the platform-neutral GUI brain (the Phase-A ``pi_agent``
+It merges the systemd/scrubbed-env skeleton of the classroom Jetson's agent
+(retired and deleted 2026-11-09) with the platform-neutral GUI brain (the Phase-A ``pi_agent``
 modules: ``config_generator`` / ``docker_manager`` / ``identify_arm`` /
 ``camera_enum`` / ``update_checker`` / ``phone_camera`` / ``lan_ip``). Every
 Windows/WSL2 artifact is shed (no usbipd, no ``wsl -d`` tunnelling, no MSMF

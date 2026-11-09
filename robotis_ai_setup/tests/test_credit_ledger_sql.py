@@ -214,7 +214,11 @@ class FilesAndOrder(unittest.TestCase):
 
     def test_052_sorts_after_051(self):
         self.assertGreater(M052.name, M051.name)
-        self.assertEqual(sorted(p.name for p in _MIG.glob("*.sql"))[-1], M052.name)
+        # 052 was the newest migration until 053 (2026-11-09: the classroom
+        # Jetson's objects dropped), which touches no credit object. A later
+        # migration must be added here deliberately.
+        names = sorted(p.name for p in _MIG.glob("*.sql"))
+        self.assertEqual(names[names.index(M052.name) + 1:], ["20261109120000_053_retire_jetson.sql"])
 
     def test_one_transaction_each(self):
         for p in (M052, R052):

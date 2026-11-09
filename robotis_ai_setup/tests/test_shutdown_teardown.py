@@ -8,9 +8,9 @@ used `Popen.terminate()`, which on Windows is `TerminateProcess`: it delivers
 neither WinForms' `FormClosed` nor the DOM's `pagehide`/`beforeunload`. Three
 shipped consequences, one with a direct classroom symptom:
 
-  * `useJetsonConnection` releases the exclusive claim on `pagehide` via
-    `navigator.sendBeacon`, so the lock leaked for the full 5-minute sweeper
-    window and THE NEXT STUDENT WAS REFUSED THE JETSON;
+  * the classroom Jetson's release (retired since 2026-11-09) went out on
+    `pagehide` via `navigator.sendBeacon`, so the lock leaked for the full
+    5-minute sweeper window and THE NEXT STUDENT WAS REFUSED THE JETSON;
   * `JogPanel`'s unmount re-torque never ran, so a hand-guide session could end
     with the follower left limp until the 30 s `_manual_idle_watchdog`;
   * `RecordPanel`'s teardown never ran.
@@ -297,7 +297,7 @@ class TheChildIsAskedToCloseBeforeItIsKilled(_Rig):
         self.assertEqual(
             self.posted, [proc.pid],
             'nothing asked the webview child to close — every browser-side '
-            'teardown hook (the Jetson release beacon, JogPanel’s re-torque) '
+            'teardown hook (JogPanel’s re-torque, the cloud run’s pagehide stop) '
             'is dead again')
 
     def test_a_child_that_closes_itself_is_NOT_terminated(self):
@@ -595,8 +595,8 @@ class StoppingTheEnvironmentAlsoClosesTheBrowserWindow(unittest.TestCase):
         """Ordering, so the graceful close still has a live rosbridge.
 
         `destroy_all` posts WM_CLOSE and gives the DOM a moment; JogPanel's
-        unmount re-torque is a rosbridge service call, and the Jetson release
-        beacon is an HTTPS POST. Tearing the containers down first would make
+        unmount re-torque is a rosbridge service call, and the cloud run's
+        pagehide stop is one too. Tearing the containers down first would make
         the re-torque unreachable — the exact teardown the graceful close
         exists to deliver.
         """
@@ -735,8 +735,8 @@ class TheSCANPathClosesTheChildToo(unittest.TestCase):
         """Same ordering rule `_stop_environment` keeps, same reason.
 
         `destroy_all` posts WM_CLOSE and gives the DOM a moment; JogPanel's
-        unmount re-torque is a rosbridge service call and the Jetson release
-        beacon is an HTTPS POST, so tearing the containers down first makes the
+        unmount re-torque is a rosbridge service call and so is the cloud run's
+        pagehide stop, so tearing the containers down first makes the
         teardown the graceful close exists to deliver unreachable.
         """
         code = ast.unparse(self.do_scan)
@@ -746,7 +746,7 @@ class TheSCANPathClosesTheChildToo(unittest.TestCase):
             code.index('webview_window.destroy_all()'),
             code.index('docker_manager.ensure_environment_stopped'),
             'the containers are torn down before the child is asked to close, '
-            'so JogPanel\'s re-torque and the Jetson release beacon have no '
+            'so JogPanel\'s re-torque and the cloud run\'s pagehide stop have no '
             'rosbridge left to reach')
 
     def test_a_failing_close_does_not_abort_the_scan(self):

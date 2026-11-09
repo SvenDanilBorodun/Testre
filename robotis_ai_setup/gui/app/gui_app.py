@@ -3078,7 +3078,7 @@ class EduBoticsApp:
             # where that condition is False.
             #
             # FIRST, so the graceful close still has a live rosbridge for
-            # JogPanel's unmount re-torque and the Jetson release beacon, the
+            # JogPanel's unmount re-torque and the cloud run's pagehide stop, the
             # same ordering `_stop_environment` keeps. Best-effort: a failure
             # here must never stop the scan the student asked for.
             #
@@ -4336,7 +4336,7 @@ class EduBoticsApp:
     def _start_camera_bridge(self, phone_enabled: bool = False):
         """Start native Windows camera capture → TCP stream into the container.
 
-        No-op when cameras run via usb_cam (Jetson). Maps each assigned camera's
+        No-op when cameras run via usb_cam (native Linux). Maps each assigned camera's
         OpenCV index to its role (gripper -> cam_id 0, scene -> cam_id 1,
         matching the container's EDUBOTICS_CAMERA_NAMES order). When
         ``phone_enabled`` is True, also starts the phone HTTPS receiver and
@@ -4957,8 +4957,8 @@ class EduBoticsApp:
         #   * the Roboter-Studio bridge holds 127.0.0.1:8769 and a thread — it
         #     starts BEFORE _open_webview, so a partial start leaves it up,
         #   * the webview child is now closed GRACEFULLY (WM_CLOSE first) so the
-        #     browser's teardown hooks — the Jetson release beacon, JogPanel's
-        #     re-torque — actually run.
+        #     browser's teardown hooks — JogPanel's re-torque, the cloud run's
+        #     pagehide stop — actually run.
         self._stop_camera_bridge()
         self._stop_phone_server()
         self._stop_rs_control_server()

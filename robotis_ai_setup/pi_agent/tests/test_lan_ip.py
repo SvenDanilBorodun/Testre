@@ -1,8 +1,8 @@
 """Cross-platform unit tests for pi_agent.lan_ip.
 
 Deps-free: the one network call is exercised both for real (returns SOME
-string) and mocked (deterministic IP + OSError→""), mirroring the Jetson
-agent's ``TestDetectLanIp``. Runs on Linux CI and macOS dev hosts.
+string) and mocked (deterministic IP + OSError→""), mirroring the retired
+Jetson agent's ``TestDetectLanIp``. Runs on Linux CI and macOS dev hosts.
 """
 
 from __future__ import annotations

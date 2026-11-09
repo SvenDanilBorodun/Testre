@@ -77,7 +77,7 @@ def _read_version_file() -> str:
 APP_VERSION = _read_version_file()
 
 # Cloud API URL for the update check (`/version`). Same host the Windows
-# GUI + the Jetson agent use; override for dev/testing.
+# GUI uses; override for dev/testing.
 UPDATE_API_URL = os.environ.get(
     "EDUBOTICS_UPDATE_API_URL",
     "https://scintillating-empathy-production-1068.up.railway.app",
@@ -545,7 +545,7 @@ ROS_DOMAIN_FILE = os.environ.get(
 )
 
 # Source of the stable machine identifier for the ROS_DOMAIN_ID derivation
-# (hash mod 233), matching the Jetson setup.sh convention. uuid.getnode() is
+# (hash mod 233), the retired Jetson setup.sh's convention. uuid.getnode() is
 # the fallback when this is unreadable.
 MACHINE_ID_FILE = os.environ.get("EDUBOTICS_MACHINE_ID_FILE", "/etc/machine-id")
 

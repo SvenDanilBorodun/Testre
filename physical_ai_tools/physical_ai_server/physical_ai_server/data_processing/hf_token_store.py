@@ -50,7 +50,7 @@ TOKEN_IN_TEXT = re.compile(r'hf_[A-Za-z0-9_-]{16,}')
 
 def token_path(environ=None) -> Optional[str]:
     """The slot's absolute path, or None when this image does not take a
-    personal token (the Jetson sets no HF_TOKEN_PATH)."""
+    personal token (its compose sets no HF_TOKEN_PATH)."""
     env = os.environ if environ is None else environ
     raw = (env.get(PATH_ENV) or '').strip()
     return raw if raw and os.path.isabs(raw) else None
@@ -152,7 +152,7 @@ def encode_payload(payload: dict) -> str:
 def purge_legacy(environ=None, home: Optional[str] = None) -> List[str]:
     """Delete the token files the old `huggingface-cli login` path wrote into the
     persistent `huggingface_cache` volume. Only on an image that takes a personal
-    token (the Jetson keeps its classroom token untouched). Returns the removed
+    token (an image without the slot keeps its files untouched). Returns the removed
     paths; their content is never read or logged."""
     env = os.environ if environ is None else environ
     if not accepts(env):

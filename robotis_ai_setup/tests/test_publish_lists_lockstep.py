@@ -6,7 +6,7 @@ than the fleet itself does (deps-free text test).
 pulls. Between the repo and that machine sit the lists that PUBLISH the images,
 each hand-written and none derived from the other:
 
-  - docker-publish.yml's retag lists (AMD64_REPOS / ARM64_REPOS / OPI_REPOS),
+  - docker-publish.yml's retag lists (AMD64_REPOS / OPI_REPOS),
     its flat dual-push integrity list (REPOS=, whose own comment says "keep
     BOTH in sync"), its third OPI_REPOS restatement, and the smoke-test matrix's
     repo columns;
@@ -124,7 +124,6 @@ class TestDockerPublishListsCarryTheRunner(unittest.TestCase):
 
     def test_retag_lists_are_the_fleets_image_names(self):
         (amd64,) = _shell_list(self.text, "AMD64_REPOS")
-        (arm64,) = _shell_list(self.text, "ARM64_REPOS")
         opi_lists = _shell_list(self.text, "OPI_REPOS")
         self.assertEqual(amd64, self._gui_names(),
                          "AMD64_REPOS must be gui IMAGE_NAMES, in order")
@@ -132,23 +131,24 @@ class TestDockerPublishListsCarryTheRunner(unittest.TestCase):
         for opi in opi_lists:
             self.assertEqual(opi, self._pi_names(),
                              "every OPI_REPOS restatement must be pi IMAGE_NAMES, in order")
-        # A10: no Jetson runner. The Roboter-Studio tab is jetsonIncompatible.
-        self.assertFalse(any(_RUNNER in name for name in arm64), arm64)
 
-    def test_the_flat_integrity_list_is_the_three_lists_joined(self):
+    def test_no_retired_jetson_list_or_repo_is_left(self):
+        # The arm64 classroom-Jetson pair was retired on 2026-11-09: no
+        # ARM64_REPOS list, and no *-jetson repo in any list or matrix leg.
+        self.assertEqual(_shell_list(self.text, "ARM64_REPOS"), [])
+        self.assertNotRegex(self.text, r"\b[a-z-]+-jetson\b(?!-base)")
+
+    def test_the_flat_integrity_list_is_the_two_lists_joined(self):
         (amd64,) = _shell_list(self.text, "AMD64_REPOS")
-        (arm64,) = _shell_list(self.text, "ARM64_REPOS")
         opi = _shell_list(self.text, "OPI_REPOS")[0]
         (flat,) = _shell_list(self.text, "REPOS")
-        self.assertEqual(flat, amd64 + arm64 + opi,
+        self.assertEqual(flat, amd64 + opi,
                          "REPOS= (the 'keep BOTH in sync' list) drifted from the retag lists")
 
     def test_the_smoke_matrix_carries_a_runner_repo_per_platform(self):
         matrix = _smoke_matrix(self.text)
-        self.assertEqual(set(matrix), {"amd64", "arm64", "opi"})
+        self.assertEqual(set(matrix), {"amd64", "opi"})
         self.assertEqual(matrix["amd64"].get("runner_repo"), _RUNNER)
-        self.assertEqual(matrix["arm64"].get("runner_repo"), "",
-                         "the Jetson leg must name NO runner (A10), explicitly")
         self.assertEqual(matrix["opi"].get("runner_repo"), _RUNNER_OPI)
 
     def test_the_anonymous_pull_probe_and_the_parity_step_see_the_runner(self):
@@ -306,10 +306,11 @@ class TestBuildImagesBuildsAndPushesTheRunner(unittest.TestCase):
         self.assertIsNotNone(m, f"{platform}: no RUNNER_OUT_REPO in its case arm")
         return m.group(1)
 
-    def test_runner_out_repo_is_set_per_platform_and_empty_on_the_jetson(self):
-        self.assertEqual(set(self.cases), {"amd64", "arm64", "opi"})
+    def test_runner_out_repo_is_set_per_platform(self):
+        # Exactly the two shipped platforms: the arm64 classroom-Jetson case
+        # (which named no runner) was retired on 2026-11-09.
+        self.assertEqual(set(self.cases), {"amd64", "opi"})
         self.assertEqual(self._runner_out_repo("amd64"), '"${REGISTRY}/code-runner"')
-        self.assertEqual(self._runner_out_repo("arm64"), '""')
         self.assertEqual(self._runner_out_repo("opi"), '"${REGISTRY}/code-runner-opi"')
 
     def test_the_runner_is_built_only_when_its_out_repo_is_non_empty(self):

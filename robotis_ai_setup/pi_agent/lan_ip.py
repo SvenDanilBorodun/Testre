@@ -4,11 +4,10 @@ The System window's Pi-IP-Anzeige (see the deploy plan §6) reads this off the
 ``/status`` endpoint so the teacher can write the reserved IP onto the case
 label and reach the wizard at ``http://<ip>/`` wherever mDNS is GPO-disabled.
 
-Ported verbatim from ``jetson_agent/agent.py::_detect_lan_ip`` (agent.py:504) —
-same UDP-connect trick, same OSError→"" contract — so the two agents report the
-Pi/Jetson address identically. Kept in its own module because the Pi agent
-consumes it from more places (status endpoint + the Netzwerk-Check hints) than
-the single Jetson heartbeat call site.
+Ported verbatim from the retired Jetson agent's ``_detect_lan_ip`` (deleted
+2026-11-09) — the UDP-connect trick and the OSError→"" contract. Kept in its own
+module because the Pi agent consumes it from more than one place (status
+endpoint + the Netzwerk-Check hints).
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 # EduBotics Pi-Agent runtime dependencies (Orange Pi 5 Pro, arm64).
 #
-# The agent's CORE is stdlib-only (like the Jetson agent): http.server for the
+# The agent's CORE is stdlib-only: http.server for the
 # management API, urllib for the cloud /version + Netzwerk-Check, ssl for the
 # TLS-inspection probe, subprocess for docker/openssl/timedatectl. Nothing here
 # is imported at module load — a missing optional dep degrades one endpoint, it

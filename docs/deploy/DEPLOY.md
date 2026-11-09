@@ -117,7 +117,7 @@ git push
 
 **Required env vars** (Railway dashboard): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `EDUBOTICS_HF_TOKEN_KEY` (per-student Hugging Face token storage, migration 042: 32 random bytes as standard base64, generate with `python -c "import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())"`; absent, empty or malformed → the API refuses to boot (required since 2026-10-04); optional `EDUBOTICS_HF_TOKEN_KEY_PREVIOUS` for rotation; **set it BEFORE the cloud deploy**; losing it makes every stored token unusable and each student pastes theirs again).
 
-**Production-relevant optional:** `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` + `GUI_RELEASE_REPO` (drives student `.exe` auto-update — normally set automatically by `release.yml` W6 on a `vX.Y.Z` tag; `GUI_DOWNLOAD_URL` is optional and derived from `GUI_VERSION` + `GUI_RELEASE_REPO` when unset), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`. (`EDUBOTICS_JETSON_HF_TOKEN`, `SUPABASE_JWT_ALGORITHM` and `SUPABASE_JWT_SECRET` were read only by the retired classroom Jetson's `/jetson/register`; no code reads them since 2026-11-09. Do not just delete them: revoke and rotate first, §4b.)
+**Production-relevant optional:** `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` + `GUI_RELEASE_REPO` (drives student `.exe` auto-update — normally set automatically by `release.yml` W6 on a `vX.Y.Z` tag; `GUI_DOWNLOAD_URL` is optional and derived from `GUI_VERSION` + `GUI_RELEASE_REPO` when unset), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`, `AUTH_VERIFY_MODE` and `TRUSTED_PROXY_HOPS` (§3c; leave both unset unless §3c says otherwise). (`EDUBOTICS_JETSON_HF_TOKEN`, `SUPABASE_JWT_ALGORITHM` and `SUPABASE_JWT_SECRET` were read only by the retired classroom Jetson's `/jetson/register`; no code reads them since 2026-11-09. Do not just delete them: revoke and rotate first, §4b.)
 
 **Never** set `EDUBOTICS_SKIP_SCHEMA_CHECK=1` on Railway.
 
@@ -187,6 +187,82 @@ Railway sometimes ignores the `cloud_training_api/Dockerfile` and falls back to 
 cd physical_ai_tools/physical_ai_manager
 ./scripts/railway-deploy.sh   # railway up --path-as-root .
 ```
+
+## 3c. The cloud API's login check, the admin's second factor and the edge (2026-11-10)
+
+The API verifies every access token LOCALLY against the project's public
+signing keys (`<SUPABASE_URL>/auth/v1/.well-known/jwks.json`, fetched at boot
+and every 10 minutes); admin routes need a two-factor (TOTP) session; new and
+reset passwords need 12 characters (teachers, admins) or 8 (students). No new
+required variable. Two optional Railway variables, both unset by default:
+
+- `AUTH_VERIFY_MODE` — `local` (default) or `remote`: the one-variable
+  rollback to Supabase's own per-request check. Anything else stops the boot.
+- `TRUSTED_PROXY_HOPS` — how many proxies in front of the API append to
+  `X-Forwarded-For` (default 1, Railway's edge; 1–5, anything else stops the
+  boot). Change it only if the check in step 5 below says so.
+
+**Owner steps, in this order:**
+
+1. **Before the deploy: the project's CURRENT signing key must be the ES256
+   key.** Supabase dashboard → Project Settings → JWT Keys. If the ES256 key is
+   only „standby" and the legacy HS256 secret is „current", either rotate
+   (the ES256 key becomes current; tokens issued under HS256 in the last hour
+   are refused once and those users log in again) or set
+   `AUTH_VERIFY_MODE=remote` on Railway with `--skip-deploys` until you have
+   rotated. Symptom of a mismatch after the deploy: every request answers 401
+   and the Railway log says „access token refused: algorithm HS256 …"; set
+   `AUTH_VERIFY_MODE=remote` to recover.
+2. **Supabase dashboard → Authentication → Multi-Factor (MFA):** TOTP enabled
+   (both „enroll" and „verify"). Without it the admin's enrolment screen says
+   „Die Zwei-Faktor-Anmeldung ist für dieses Projekt nicht freigeschaltet".
+3. **Supabase dashboard → Authentication → Sign In / Providers → Email →
+   Password:** minimum length **8** (the students' minimum; nothing in the app
+   changes one's own password, but the Auth API lets every signed-in user do
+   it, and this is the floor there). The API's 12 for teachers and admins
+   applies to every password it sets. **Leaked password protection**
+   (HaveIBeenPwned) needs the Pro plan or above; switch it on if the plan has
+   it — Supabase then refuses a known-leaked password on create and reset too,
+   and the API answers „Dieses Passwort wird nicht akzeptiert …". Optional
+   character requirements (digits, symbols) apply to the API's passwords too.
+4. **After the deploy:** the Railway log shows „JWKS: 1 signing key(s)
+   cached" once per boot; a teacher and a student can log in and load their
+   pages; `curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer x.y.z'
+   https://scintillating-empathy-production-1068.up.railway.app/me` answers 401.
+5. **The client-address check** (from a laptop, not from a school network):
+   ```bash
+   for i in $(seq 1 35); do curl -s -o /dev/null -w '%{http_code}\n' -H "X-Forwarded-For: 10.0.0.$i" https://scintillating-empathy-production-1068.up.railway.app/inference/usage; done
+   ```
+   The first 30 answers are 401 (no token); from the 31st a 429 must appear
+   despite the rotating header (`GET /inference/usage` allows 30 a minute per
+   client address when no token is sent). Then find the line „Rate limit hit
+   on GET /inference/usage from <ip>" in the Railway log: `<ip>` must be the
+   laptop's public address (`curl -s https://ifconfig.me`). No 429, or a
+   10.0.0.x address there, means the API trusts the client's header (stop and
+   report); a Railway-internal address means more than one proxy hop (set
+   `TRUSTED_PROXY_HOPS` accordingly and repeat).
+6. **The first admin login enrols the second factor:** the teacher web shows a
+   QR code (and the secret as text) after the password; scan it with an
+   authenticator app (Microsoft Authenticator, Google Authenticator, 2FAS)
+   and type the 6-digit code. Every later login asks for a code. A fresh
+   admin created with `scripts/bootstrap_admin.py` (12 characters) does the
+   same at its first login.
+7. **Log alert (later, with monitoring):** match `EDUBOTICS_ADMIN_SESSION` in
+   the API log — one WARNING per admin session, naming the user id only.
+
+**Recovery from a lost authenticator** (the admin cannot log in to the admin
+area any more): Supabase dashboard → Authentication → Users → the admin's
+user → remove its MFA factor (or, in the SQL editor,
+`delete from auth.mfa_factors where user_id = '<admin uuid>';`). Then sign the
+admin out everywhere (Users → the user → sign out / revoke sessions) and let
+them log in again: the teacher web asks them to enrol a new factor. Verify who
+asks before removing a factor: removing it is what an attacker with the
+password would need.
+
+**Rollback:** `AUTH_VERIFY_MODE=remote` restores the per-request check (and the
+old hashed-token rate-limit key) without a code rollback. A code rollback to
+the previous API needs nothing else: the teacher web's gate then only adds the
+second factor for admins, and the older API accepts an `aal2` token too.
 
 ---
 

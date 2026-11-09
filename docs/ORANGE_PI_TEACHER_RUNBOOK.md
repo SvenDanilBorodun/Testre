@@ -75,37 +75,60 @@ aktualisiert. Welche Fassung gerade freigegeben ist und wo sie liegt, sagt die
 EduBotics-Cloud unter `/version` (Felder `pi_agent_download_url` und
 `pi_agent_sha256`). Ein Zugang zum Quellcode wird **nicht** gebraucht.
 
-Mit eingesteckten Armen + Kameras, im Terminal des Pi:
+Mit eingesteckten Armen + Kameras, im Terminal des Pi. Den Block **als Ganzes**
+einfügen, von der Zeile `(` bis zur Zeile `)`:
 
 ```bash
-# 1) Ein leeres Arbeitsverzeichnis anlegen (nicht im Home-Verzeichnis selbst
-#    entpacken: das Skript sieht sich neben dem entpackten Ordner um).
-mkdir -p ~/edubotics-install && cd ~/edubotics-install
+(
+  set -euo pipefail
+  abbruch() { echo "ABBRUCH: $*" >&2; exit 1; }
 
-# 2) Die aktuelle Freigabe abfragen: Download-Adresse und SHA-256-Prüfsumme.
-curl -fsS -o version.json \
-  https://scintillating-empathy-production-1068.up.railway.app/version
-URL=$(python3 -c 'import json; print(json.load(open("version.json"))["pi_agent_download_url"] or "")')
-SHA=$(python3 -c 'import json; print(json.load(open("version.json"))["pi_agent_sha256"] or "")')
-echo "Paket:      $URL"
-echo "Prüfsumme:  $SHA"
+  # 1) Ein leeres Arbeitsverzeichnis anlegen (nicht im Home-Verzeichnis selbst
+  #    entpacken: das Skript sieht sich neben dem entpackten Ordner um).
+  mkdir -p ~/edubotics-install || abbruch "Arbeitsverzeichnis nicht angelegt."
+  cd ~/edubotics-install || abbruch "Arbeitsverzeichnis nicht erreichbar."
+  rm -rf version.json edubotics-pi-agent.tar.gz pi_agent
 
-# 3) Herunterladen und die Prüfsumme vergleichen.
-curl -fL -o edubotics-pi-agent.tar.gz "$URL"
-echo "$SHA  edubotics-pi-agent.tar.gz" | sha256sum -c -
+  # 2) Die aktuelle Freigabe abfragen: Download-Adresse und SHA-256-Prüfsumme.
+  curl -fsS -o version.json \
+    https://scintillating-empathy-production-1068.up.railway.app/version \
+    || abbruch "Die EduBotics-Cloud ist nicht erreichbar."
+  URL=$(python3 -c 'import json; print(json.load(open("version.json")).get("pi_agent_download_url") or "")') \
+    || abbruch "Die Antwort der Cloud ist nicht lesbar."
+  SHA=$(python3 -c 'import json; print(json.load(open("version.json")).get("pi_agent_sha256") or "")') \
+    || abbruch "Die Antwort der Cloud ist nicht lesbar."
+  echo "Paket:      $URL"
+  echo "Prüfsumme:  $SHA"
+  if [ -z "$URL" ] || [ -z "$SHA" ]; then
+    abbruch "Gerade gibt es keine geprüfte Freigabe (ein Feld ist leer). Später erneut versuchen."
+  fi
 
-# 4) Nur bei „edubotics-pi-agent.tar.gz: OK": entpacken und als root provisionieren.
-tar xzf edubotics-pi-agent.tar.gz
-sudo ./pi_agent/setup.sh
+  # 3) Herunterladen und die Prüfsumme vergleichen.
+  curl -fL -o edubotics-pi-agent.tar.gz "$URL" \
+    || abbruch "Das Paket konnte nicht heruntergeladen werden."
+  echo "$SHA  edubotics-pi-agent.tar.gz" | sha256sum -c - \
+    || { rm -f edubotics-pi-agent.tar.gz
+         abbruch "Die Prüfsumme stimmt nicht. Die Datei ist gelöscht, nichts wurde entpackt."; }
+
+  # 4) Erst nach „edubotics-pi-agent.tar.gz: OK": entpacken und als root provisionieren.
+  tar xzf edubotics-pi-agent.tar.gz
+  sudo ./pi_agent/setup.sh
+)
 ```
 
+Der Block **hält von selbst an**, bevor etwas entpackt oder als root
+ausgeführt wird, und meldet `ABBRUCH: …`, wenn die Cloud nicht antwortet, ein
+Feld leer ist, der Download scheitert oder die Prüfsumme nicht stimmt. Danach
+**nichts von Hand nachholen** (kein `tar`, kein `sudo …/setup.sh` einzeln
+eintippen):
+
 - **Ist eines der beiden Felder leer**, liegt gerade keine geprüfte Freigabe
-  vor (die Veröffentlichung ist unterwegs oder fehlgeschlagen): **abbrechen**
-  und später erneut versuchen. Nie ein Paket ohne Prüfsumme installieren.
+  vor (die Veröffentlichung ist unterwegs oder fehlgeschlagen): später den
+  ganzen Block erneut einfügen. Nie ein Paket ohne Prüfsumme installieren.
 - **Meldet `sha256sum` „FAILED"**, ist die Datei beschädigt oder unterwegs
   verändert worden (oft eine TLS-Inspektion, siehe
-  [Netzwerk-Anleitung](ORANGE_PI_IT_NETZWERK.md)): **nicht entpacken**, Datei
-  löschen, Ursache klären.
+  [Netzwerk-Anleitung](ORANGE_PI_IT_NETZWERK.md)). Der Block hat sie bereits
+  gelöscht; erst die Ursache klären, dann den Block erneut einfügen.
 - Das Paket bringt seine feste Image-Version mit (`pi_agent/docker/versions.env`)
   und die Lizenztexte (`pi_agent/LICENSE.txt`, `pi_agent/THIRD_PARTY_NOTICES.txt`).
 

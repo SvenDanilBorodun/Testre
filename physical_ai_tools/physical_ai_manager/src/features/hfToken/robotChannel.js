@@ -20,8 +20,8 @@
 // (loopback) a key is used whenever one is advertised, else the plain token.
 // Clearing stays the empty string.
 //
-// ON A PI THE KEY COMES FROM THE AGENT (verification round B, VB-03,
-// 2026-11-15). Every account that may use the robot holds a rosbridge session,
+// ON A REMOTE ROBOT THE KEY COMES FROM THE AGENT (verification round B,
+// VB-03, 2026-11-15). Every account that may use the robot holds a rosbridge session,
 // and rosbridge lets any client publish /edubotics/hf_token_state and
 // advertise /register_hf_user: a classmate could name their own key and read
 // the next student's token. So on a Pi the page encrypts ONLY for the key the
@@ -31,6 +31,18 @@
 // may just have restarted: the file changes first, the topic a moment later)
 // and then says so in German. A forged topic is ignored; a forged service gets
 // a ciphertext for the node's real key, which it cannot open.
+//
+// „On a Pi" is decided FAIL-CLOSED (verification round C, VC-01): the Pi
+// marker fails to non-Pi on a slow or failed fetch, so the robot counts as
+// remote whenever the page's own host is not exactly a loopback host, whatever
+// the marker said (utils/robotLocality.js::robotIsRemote). Only the Windows
+// GUI's own page (`http://localhost/`) takes the loopback path.
+//
+// THE CLEAR IS NEVER HELD BY A PUSH THAT HAS NOT REACHED THE WIRE (VC-03): the
+// service CALLS go through one serial queue (a clear follows a push already on
+// the wire), but a push's preparation (the agent read, every read bounded by
+// AGENT_KEY_TIMEOUT_MS, and the encryption) runs before its call is queued, and
+// a clear asked for meanwhile drops that push instead of waiting for it.
 //
 // Named exports, no hooks: utils/signOut.js imports `clearRobotHfToken` and a
 // util must not import from hooks/ (sessionScope.test.js fences that).
@@ -48,7 +60,7 @@
 import ROSLIB from 'roslib';
 
 import rosConnectionManager, { isLocalRosbridgeUrl } from '../../utils/rosConnectionManager';
-import { getPiModeSync } from '../../utils/piMode';
+import { robotIsRemote } from '../../utils/robotLocality';
 import { noteUnauthorized } from '../piAuth/piAuth';
 import { hfCopy } from './hfTokenCopy';
 import {
@@ -71,6 +83,9 @@ export const AGENT_KEY_URL = '/api/system/robot-key';
 // between two reads (the topic publishes at 1 Hz).
 export const KEY_CHECKS = 3;
 export const KEY_RECHECK_MS = 1000;
+// VC-03: one agent read never takes longer than this (the agent is on the
+// robot's own network; a stalled connection must not hold anything).
+export const AGENT_KEY_TIMEOUT_MS = 4000;
 
 const THROTTLE_MS = 500;
 const FP_SHAPE = /^[0-9a-f]{16}$/;
@@ -133,26 +148,45 @@ export function setRobotKeyForTests(key) {
 
 let agentFetch = (...args) => fetch(...args);
 let recheckMs = KEY_RECHECK_MS;
+let agentTimeoutMs = AGENT_KEY_TIMEOUT_MS;
 
-/** Tests only: the fetch the agent's key is read with, and the pause. */
-export function setAgentKeySourceForTests({ fetch: injected, recheckMs: ms } = {}) {
+/** Tests only: the fetch the agent's key is read with, the pause and the bound. */
+export function setAgentKeySourceForTests({ fetch: injected, recheckMs: ms, timeoutMs } = {}) {
   agentFetch = injected || ((...args) => fetch(...args));
   recheckMs = Number.isFinite(ms) ? ms : KEY_RECHECK_MS;
+  agentTimeoutMs = Number.isFinite(timeoutMs) ? timeoutMs : AGENT_KEY_TIMEOUT_MS;
 }
 
 /**
- * The robot's key as the pi-agent serves it (VB-03). Never rejects.
+ * The robot's key as the pi-agent serves it (VB-03). Never rejects, and
+ * settles within AGENT_KEY_TIMEOUT_MS (VC-03): the request is aborted then,
+ * and a fetch that ignores the abort is left behind, unanswered.
  * @returns {Promise<{status: 'ok', key: {kid: string, pub: string}}
  *   |{status: 'none'|'legacy'|'unreachable'}>}
  *   `none`: the agent has no key file (the robot tier is down or starting, or
  *   an image from before the file); `legacy`: an agent without the route.
  */
-export async function readAgentRobotKey() {
+export function readAgentRobotKey() {
+  const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+  let timer = null;
+  const timedOut = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      if (ctrl) ctrl.abort();
+      resolve({ status: 'unreachable' });
+    }, agentTimeoutMs);
+  });
+  const read = readAgentRobotKeyOnce(ctrl ? ctrl.signal : null)
+    .catch(() => ({ status: 'unreachable' }));
+  return Promise.race([read, timedOut]).finally(() => clearTimeout(timer));
+}
+
+async function readAgentRobotKeyOnce(signal) {
   let res;
   try {
     res = await agentFetch(`${AGENT_KEY_URL}?_=${Date.now()}`, {
       cache: 'no-store',
       credentials: 'same-origin',
+      ...(signal ? { signal } : {}),
     });
   } catch {
     return { status: 'unreachable' };
@@ -208,15 +242,29 @@ export async function subscribeTokenState(rosbridgeUrl, onState) {
   };
 }
 
-// ── the write side: ONE serial queue ──────────────────────────────────────────
-// A clear must always follow a push that is already on its way: two overlapping
-// service calls could land in either order, and „sign out" would then leave the
-// next student's robot holding the previous student's token.
-let tail = Promise.resolve();
+// ── the write side ────────────────────────────────────────────────────────────
+// Every SERVICE CALL goes through one serial queue: a clear must always follow a
+// call that is already on its way (two overlapping calls could land in either
+// order, and „sign out" would then leave the next student's robot holding the
+// previous student's token). A push PREPARES first (the agent's key, the
+// encryption) on a queue of its own, so pushes keep their order, and queues its
+// call only when ready. A clear never waits for a push that is still preparing
+// (VC-03: an agent that never answers would otherwise hold „Abmelden"): it bumps
+// the clear epoch and goes on the call queue at once, and every push prepared
+// under an older epoch is dropped instead of sent.
+let callTail = Promise.resolve();
+let prepTail = Promise.resolve();
+let clearEpoch = 0;
 
-function serial(task) {
-  const result = tail.then(task);
-  tail = result.then(() => undefined, () => undefined);
+function serialCall(task) {
+  const result = callTail.then(task);
+  callTail = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+function serialPrep(task) {
+  const result = prepTail.then(task);
+  prepTail = result.then(() => undefined, () => undefined);
   return result;
 }
 
@@ -275,56 +323,80 @@ function callSetService(value) {
  */
 export function setRobotToken(token) {
   const value = typeof token === 'string' ? token : '';
-  return serial(async () => {
-    if (value === '') return callSetService('');
-    // A Pi is reached over the school network: never the token in the clear,
-    // and only for the key the agent serves (VB-03).
-    if (getPiModeSync()) return pushOnPi(value);
-    const key = robotKey;
-    if (key) return encryptAndSend(value, key);
-    return callSetService(value);
+  if (value === '') {
+    clearEpoch += 1;
+    return serialCall(() => callSetService(''));
+  }
+  const epoch = clearEpoch;
+  return serialPrep(async () => {
+    if (epoch !== clearEpoch) return superseded();
+    // A remote robot (a Pi, or any page not opened at a loopback host) is
+    // reached over a network others share: never the token in the clear, and
+    // only for the key the agent serves (VB-03, VC-01).
+    const prepared = robotIsRemote() ? await prepareRemote(value) : await prepareLocal(value);
+    if (!prepared.ok) return prepared.result;
+    // Checked and queued in one synchronous step: a clear asked for while this
+    // push prepared has gone out already, and this push must not follow it.
+    if (epoch !== clearEpoch) return superseded();
+    return serialCall(() => callSetService(prepared.wire));
   });
 }
 
-async function encryptAndSend(value, key) {
-  let wire;
+function superseded() {
+  return { success: false, message: hfCopy('robot.superseded') };
+}
+
+function refusal(copyKey) {
+  return { ok: false, result: { success: false, message: hfCopy(copyKey) } };
+}
+
+/** `{ok: true, wire}` — the `enc1:` value of `value` for `key` — or `{ok: false, result}`. */
+async function sealFor(value, key) {
   try {
-    wire = await encryptForRobot(value, key);
+    return { ok: true, wire: await encryptForRobot(value, key) };
   } catch (err) {
     const unloaded = Boolean(err) && err.message === SEAL_UNAVAILABLE;
-    return { success: false, message: hfCopy(unloaded ? 'robot.sealUnavailable' : 'robot.encryptFailed') };
+    return refusal(unloaded ? 'robot.sealUnavailable' : 'robot.encryptFailed');
   }
-  return callSetService(wire);
+}
+
+/** The loopback robot (the Windows GUI's own page): the topic's key, else the plain token. */
+async function prepareLocal(value) {
+  const key = robotKey;
+  if (key) return sealFor(value, key);
+  return { ok: true, wire: value };
 }
 
 const pause = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 /**
- * The Pi's push (VB-03): encrypt for the AGENT's key, and only while the topic
- * advertises the same key id. Re-read both up to KEY_CHECKS times, then refuse
- * in German; never the plain token, never the topic's point.
+ * A remote robot's push (VB-03, VC-01): encrypt for the AGENT's key, and only
+ * while the topic advertises the same key id. Re-read both up to KEY_CHECKS
+ * times, then refuse in German; never the plain token, never the topic's point.
  */
-async function pushOnPi(value) {
+async function prepareRemote(value) {
   let served = null;
+  let agentAnswered = false;
   for (let check = 0; check < KEY_CHECKS; check += 1) {
     // eslint-disable-next-line no-await-in-loop
     if (check > 0) await pause(recheckMs);
     // eslint-disable-next-line no-await-in-loop
     served = await readAgentRobotKey();
-    if (served.status === 'legacy') return { success: false, message: hfCopy('robot.needsUpdate') };
+    if (served.status !== 'unreachable') agentAnswered = true;
+    if (served.status === 'legacy') return refusal('robot.needsUpdate');
     const advertised = robotKey;
     if (served.status === 'ok' && advertised && advertised.kid === served.key.kid) {
-      return encryptAndSend(value, served.key);
+      return sealFor(value, served.key);
     }
   }
-  if (served && served.status === 'ok' && robotKey) {
-    return { success: false, message: hfCopy('robot.keyMismatch') };
-  }
+  // The agent could not be asked once: say that, not that the key is missing.
+  if (!agentAnswered) return refusal('robot.agentUnreachable');
+  if (served && served.status === 'ok' && robotKey) return refusal('robot.keyMismatch');
   if (served && served.status === 'none' && !robotKey) {
     // Neither the agent nor the topic names a key: an image without one.
-    return { success: false, message: hfCopy('robot.needsUpdate') };
+    return refusal('robot.needsUpdate');
   }
-  return { success: false, message: hfCopy('robot.keyUnavailable') };
+  return refusal('robot.keyUnavailable');
 }
 
 /**

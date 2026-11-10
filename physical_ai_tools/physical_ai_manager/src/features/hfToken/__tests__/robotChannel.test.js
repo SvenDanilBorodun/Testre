@@ -317,10 +317,10 @@ describe('setRobotToken — the call', () => {
 });
 
 describe('the serial queue', () => {
-  it('runs a clear only after the push before it has answered', async () => {
+  it('runs a clear only after the push on the wire before it has answered', async () => {
     const push = setRobotToken(TOKEN);
-    const clear = setRobotToken('');
     await onTheWire(1);
+    const clear = setRobotToken('');
     // only the push is on the wire; the clear waits behind it
     await new Promise((resolve) => { setTimeout(resolve, 20); });
     expect(mockCalls).toHaveLength(1);
@@ -333,10 +333,24 @@ describe('the serial queue', () => {
     await clear;
   });
 
+  it('drops a push that has not reached the wire when a clear comes (VC-03)', async () => {
+    const push = setRobotToken(TOKEN);
+    const clear = setRobotToken(''); // same tick: the push is still preparing
+    await onTheWire(1);
+    expect(mockCalls[0].request).toEqual({ token: '' });
+    mockCalls[0].ok({ success: true, message: '' });
+    await expect(clear).resolves.toMatchObject({ success: true });
+    const dropped = await push;
+    expect(dropped.success).toBe(false);
+    expect(dropped.message).toMatch(/entfernt/);
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+    expect(mockCalls).toHaveLength(1); // the token never went out after the clear
+  });
+
   it('keeps going after a call that failed', async () => {
     const first = setRobotToken(TOKEN);
-    const second = setRobotToken('');
     await onTheWire(1);
+    const second = setRobotToken('');
     mockCalls[0].fail('x');
     await first;
     await onTheWire(2);
@@ -374,6 +388,8 @@ describe('clearRobotHfToken', () => {
     expect(settled).toBeNull();
     await vi.advanceTimersByTimeAsync(2);
     expect(settled).toBe(false);
+    // The call itself times out later: let it, so the queue (module state) is idle.
+    await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_MS + 10);
   });
 
   it('honours a shorter bound', async () => {
@@ -382,11 +398,14 @@ describe('clearRobotHfToken', () => {
     clearRobotHfToken({ timeoutMs: 300 }).then((v) => { settled = v; });
     await vi.advanceTimersByTimeAsync(301);
     expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_MS + 10);
   });
 
   it('counts the wait behind a pending push inside the bound', async () => {
     vi.useFakeTimers();
-    setRobotToken(TOKEN); // never answered
+    setRobotToken(TOKEN); // on the wire, never answered
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockCalls).toHaveLength(1);
     let settled = null;
     clearRobotHfToken().then((v) => { settled = v; });
     await vi.advanceTimersByTimeAsync(CLEAR_BOUND_MS + 1);

@@ -112,6 +112,13 @@ export const HF_TOKEN_COPY = Object.freeze({
     'Der Roboter hat seinen Schlüssel für das Token noch nicht bereitgestellt, deshalb wird es nicht '
     + 'übertragen. Bitte in ein paar Sekunden erneut versuchen; hilft das nicht, die Umgebung im '
     + 'System-Fenster neu starten.',
+  // 2026-11-15 (verification round C, VC-01/VC-03): the agent that serves the
+  // robot's key did not answer at all, and a push dropped by a clear.
+  'robot.agentUnreachable':
+    'Der Roboter antwortet gerade nicht auf die Frage nach seinem Schlüssel, deshalb wird das Token '
+    + 'nicht übertragen. Bitte die Verbindung zum Roboter prüfen und in ein paar Sekunden erneut versuchen.',
+  'robot.superseded':
+    'Das Token wurde nicht übertragen, weil es gerade vom Roboter entfernt wird.',
 });
 
 /** The sentence for `key`; an unknown key is a programming error, never shown. */

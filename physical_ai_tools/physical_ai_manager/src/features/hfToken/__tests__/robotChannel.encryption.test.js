@@ -303,19 +303,26 @@ describe('VB-03: on a Pi the key comes from the agent, never from the topic alon
 
   it('no key from the agent, an agent that cannot be asked, or a lost session: nothing is sent', async () => {
     setRobotKeyForTests(KEY);
-    for (const answer of [null, new Error('offline'), 500, { enc: 'enc1', kid: 'XYZ', pub: KEY.pub }]) {
+    const cases = [
+      [null, 'robot.keyUnavailable'],
+      [{ enc: 'enc1', kid: 'XYZ', pub: KEY.pub }, 'robot.keyUnavailable'],
+      // VC-01: an agent that never answered is named as such.
+      [new Error('offline'), 'robot.agentUnreachable'],
+      [500, 'robot.agentUnreachable'],
+    ];
+    for (const [answer, copyKey] of cases) {
       mockCalls.length = 0;
       agentReads.length = 0;
       setAgentKeySourceForTests({ fetch: agentServes(answer), recheckMs: 0 });
       // eslint-disable-next-line no-await-in-loop
       const result = await setRobotToken(TOKEN);
-      expect(result).toEqual({ success: false, message: hfCopy('robot.keyUnavailable') });
+      expect(result).toEqual({ success: false, message: hfCopy(copyKey) });
       expect(mockCalls).toHaveLength(0);
       expect(agentReads).toHaveLength(KEY_CHECKS);
     }
     setAgentKeySourceForTests({ fetch: agentServes(401), recheckMs: 0 });
     const result = await setRobotToken(TOKEN);
-    expect(result).toEqual({ success: false, message: hfCopy('robot.keyUnavailable') });
+    expect(result).toEqual({ success: false, message: hfCopy('robot.agentUnreachable') });
     expect(mockAuth.unauthorized).toBe(KEY_CHECKS); // the robot login re-checks its session
   });
 

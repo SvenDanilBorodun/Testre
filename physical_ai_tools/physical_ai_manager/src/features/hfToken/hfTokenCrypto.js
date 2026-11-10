@@ -33,6 +33,14 @@
 export const WIRE_PREFIX = 'enc1:';
 export const ENC_NAME = 'enc1';
 export const CONTEXT = 'edubotics-hf-token:v1';
+// Verification round C (VC-06, 2026-11-15): Cloud-Inferenz's connect token and
+// Modal edge token ride the same envelope to a remote robot, each under its
+// OWN context (the HKDF salt and the head of the AAD), so an envelope made for
+// one kind never opens as another. The robot spells the same three
+// (hf_token_crypto.CONTEXT / CLOUD_SESSION_CONTEXT / CLOUD_EDGE_CONTEXT).
+export const CLOUD_SESSION_CONTEXT = 'edubotics-cloud-session-token:v1';
+export const CLOUD_EDGE_CONTEXT = 'edubotics-cloud-edge-token:v1';
+export const ENVELOPE_CONTEXTS = Object.freeze([CONTEXT, CLOUD_SESSION_CONTEXT, CLOUD_EDGE_CONTEXT]);
 
 const KID_SHAPE = /^[0-9a-f]{16}$/;
 // A 65-byte uncompressed P-256 point is 87 base64url characters.
@@ -118,16 +126,18 @@ export const SEAL_UNAVAILABLE = 'seal_unavailable';
  * German sentence, never into a plain token).
  * @param {string} token
  * @param {{kid: string, pub: string}} key from parseRobotKey
+ * @param {{context?: string}} [opts] one of ENVELOPE_CONTEXTS (the HF token by default)
  * @returns {Promise<string>} the `enc1:` wire value
  */
-export async function encryptForRobot(token, key) {
+export async function encryptForRobot(token, key, { context = CONTEXT } = {}) {
   if (typeof token !== 'string' || !token) throw new Error('bad_token');
   if (!key || !KID_SHAPE.test(key.kid) || !PUB_SHAPE.test(key.pub)) throw new Error('bad_key');
+  if (!ENVELOPE_CONTEXTS.includes(context)) throw new Error('bad_context');
   let seal;
   try {
     seal = await loadTokenSeal();
   } catch {
     throw new Error(SEAL_UNAVAILABLE);
   }
-  return seal.sealToken(token, key);
+  return seal.sealToken(token, key, context);
 }

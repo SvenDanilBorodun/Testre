@@ -83,6 +83,20 @@ export const cloudCopy = {
     robotFailed: 'Der Roboter hat den Start abgelehnt.',
     robotUnreachable: 'Der Roboter antwortet nicht. Ist die Umgebung gestartet?',
     apiUnavailable: 'Die Cloud-Inferenz ist gerade nicht erreichbar. Bitte versuche es gleich noch einmal.',
+    // Verification round C (VC-06): on a remote robot both session tokens go
+    // encrypted for the key the robot's agent serves; without it nothing is sent.
+    robotKeyUnreachable:
+      'Der Roboter antwortet gerade nicht auf die Frage nach seinem Schlüssel, deshalb wird die '
+      + 'Cloud-Sitzung nicht übertragen. Bitte die Verbindung zum Roboter prüfen und erneut starten.',
+    robotKeyMissing:
+      'Der Roboter hat seinen Schlüssel noch nicht bereitgestellt, deshalb wird die Cloud-Sitzung '
+      + 'nicht übertragen. Bitte in ein paar Sekunden erneut starten; hilft das nicht, die Umgebung '
+      + 'im System-Fenster neu starten.',
+    encryptFailed:
+      'Die Cloud-Sitzung konnte in diesem Browser nicht verschlüsselt werden. Bitte einen aktuellen '
+      + 'Browser verwenden.',
+    sealUnavailable:
+      'Die Verschlüsselung für die Cloud-Sitzung konnte nicht geladen werden. Bitte die Seite neu laden.',
   },
 };
 

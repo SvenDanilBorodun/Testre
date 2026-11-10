@@ -14,12 +14,31 @@
 // Only the LOCAL rosbridge is ever called: no other rosbridge is ever sent a
 // student's cloud credentials.
 //
+// ENCRYPTED FOR A REMOTE ROBOT (verification round C, VC-06, 2026-11-15). On a
+// Pi every account that may use the robot holds a rosbridge session, and any
+// of them can advertise /edubotics/cloud_inference/start and take the two
+// tokens (VB-03's root cause). So on a remote page (utils/robotLocality: the
+// marker says Pi, or the page's own host is not exactly a loopback host) both
+// travel in the HF token's `enc1:` envelope, encrypted for the key the pi-agent
+// serves behind the robot login (hfToken/robotChannel::readAgentRobotKey), the
+// connect token under CLOUD_SESSION_CONTEXT and the edge token under
+// CLOUD_EDGE_CONTEXT, so neither opens as the other or as an HF token. Without
+// that key nothing is sent and the page says why in German. The robot opens
+// each value once (VC-05) and validates the tokens as before; an older robot
+// refuses an `enc1:` value as a malformed session (cloud_texts_de.BAD_SESSION_DE).
+// The Windows GUI's loopback page sends the tokens as they are, as before.
+//
 // Named exports, no hooks: controller.js (a module, not a hook) imports these.
 
 import ROSLIB from 'roslib';
 
 import rosConnectionManager, { isLocalRosbridgeUrl } from '../../utils/rosConnectionManager';
+import { robotIsRemote } from '../../utils/robotLocality';
 import { cloudCopy } from '../../components/CloudInference/cloudCopy';
+import { readAgentRobotKey } from '../hfToken/robotChannel';
+import {
+  CLOUD_EDGE_CONTEXT, CLOUD_SESSION_CONTEXT, encryptForRobot, SEAL_UNAVAILABLE,
+} from '../hfToken/hfTokenCrypto';
 import {
   START_SERVICE,
   START_SERVICE_TYPE,
@@ -67,12 +86,51 @@ function withoutSecrets(text, secrets) {
  *     the caller stops it and ends the session);
  *   - any other failure: our sentence, rosbridge's English text dropped.
  *
+ * On a remote robot both tokens are encrypted first (VC-06, module comment); a
+ * key that cannot be had is a refusal with our German sentence and sends nothing.
+ *
  * @param {{task_info: object, session_token: string, edge_token: string}} request
  * @returns {Promise<{success: boolean, message: string, oldImage: boolean, timedOut: boolean}>}
  */
 export function startCloudInference(request) {
+  if (!robotIsRemote()) return callStart(request, request);
+  return sealForRemoteRobot(request).then((sealed) => (
+    sealed.ok ? callStart(sealed.request, request) : refused(sealed.message)
+  ));
+}
+
+function refused(message) {
+  return { success: false, message, oldImage: false, timedOut: false };
+}
+
+/**
+ * Both tokens of `request` encrypted for the key the pi-agent serves (one
+ * bounded read). `{ok: true, request}` or `{ok: false, message}`.
+ */
+async function sealForRemoteRobot(request) {
+  const served = await readAgentRobotKey();
+  if (served.status === 'legacy') return { ok: false, message: cloudCopy.errors.robotOld };
+  if (served.status === 'unreachable') return { ok: false, message: cloudCopy.errors.robotKeyUnreachable };
+  if (served.status !== 'ok') return { ok: false, message: cloudCopy.errors.robotKeyMissing };
+  try {
+    const sessionToken = await encryptForRobot(request?.session_token, served.key, { context: CLOUD_SESSION_CONTEXT });
+    const edgeToken = await encryptForRobot(request?.edge_token, served.key, { context: CLOUD_EDGE_CONTEXT });
+    return { ok: true, request: { ...request, session_token: sessionToken, edge_token: edgeToken } };
+  } catch (err) {
+    const unloaded = Boolean(err) && err.message === SEAL_UNAVAILABLE;
+    return { ok: false, message: unloaded ? cloudCopy.errors.sealUnavailable : cloudCopy.errors.encryptFailed };
+  }
+}
+
+/**
+ * The service call itself. `original` carries the plain tokens, so neither
+ * ever comes back in a message, even inside an envelope's refusal.
+ */
+function callStart(request, original) {
   return new Promise((resolve) => {
-    const secrets = [request?.session_token, request?.edge_token];
+    const secrets = [
+      request?.session_token, request?.edge_token, original?.session_token, original?.edge_token,
+    ];
     const ros = localConnection();
     if (!ros) {
       resolve({ success: false, message: cloudCopy.errors.robotUnreachable, oldImage: false, timedOut: false });

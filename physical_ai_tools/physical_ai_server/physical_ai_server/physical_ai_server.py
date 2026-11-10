@@ -2826,6 +2826,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             response.message = cloud_texts_de.NOT_INFERABLE_DE
             return response
         token, edge = request.session_token, request.edge_token      # D24: connect + Modal edge token
+        # VC-06: a remote page sends both in the robot envelope; open them first.
+        token, edge, refusal = self._cloud_tokens_from_wire(token, edge)
+        if refusal is not None:
+            response.success = False
+            response.message = refusal                                      # neither value echoed
+            return response
         if not (isinstance(token, str) and cloud_protocol.TOKEN_RE.fullmatch(token)
                 and isinstance(edge, str) and cloud_protocol.EDGE_TOKEN_RE.fullmatch(edge)):
             response.success = False
@@ -2884,6 +2890,34 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         response.success = True
         response.message = cloud_texts_de.STARTED_DE
         return response
+
+    def _cloud_tokens_from_wire(self, token, edge):
+        """VC-06 (verification round C): on a remote page (a Pi) the SPA sends the
+        connect token and the Modal edge token in the HF token's `enc1:` envelope,
+        encrypted for this node's key (the one the pi-agent serves), each under its
+        own context, so neither opens as the other or as an HF token. Returns
+        (token, edge, None) with every envelope opened (a plain value passes as it
+        is: the Windows page), or (None, None, german_refusal). Each envelope opens
+        once (VC-05). Never logs a value."""
+        if not (hf_token_crypto.is_wire(token) or hf_token_crypto.is_wire(edge)):
+            return token, edge, None
+        key = getattr(self, '_hf_token_key', None)
+        if key is None:
+            return None, None, cloud_texts_de.ENC_UNSUPPORTED_DE
+        try:
+            if hf_token_crypto.is_wire(token):
+                token = key.decrypt(token, context=hf_token_crypto.CLOUD_SESSION_CONTEXT)
+            if hf_token_crypto.is_wire(edge):
+                edge = key.decrypt(edge, context=hf_token_crypto.CLOUD_EDGE_CONTEXT)
+        except hf_token_crypto.WireError as e:
+            if e.code == 'stale':
+                return None, None, cloud_texts_de.ENC_STALE_DE
+            if e.code == 'replayed':
+                return None, None, cloud_texts_de.ENC_REPLAYED_DE
+            return None, None, cloud_texts_de.ENC_BAD_DE
+        finally:
+            self._rotate_token_key_if_exhausted(key)
+        return token, edge, None
 
     def _cloud_inference_tick(self):
         """The 'inference' timer during a cloud run. Never raises into the executor (main()

@@ -115,6 +115,9 @@ class TheThinDockerfileShipsTheCloudClient(unittest.TestCase):
         self.assertIn("from physical_ai_interfaces.srv import StartCloudInference", script)
         self.assertIn("from std_srvs.srv import Trigger", script)
         self.assertIn('assert cloud_protocol.CLOUD_BASE_URL.startswith("https://")', script)
+        # VC-06: the robot opens a cloud token's envelope under its own context.
+        self.assertIn("context=hc.CLOUD_EDGE_CONTEXT); assert k.decrypt(w, context=hc.CLOUD_EDGE_CONTEXT) == e",
+                      script)
         self.assertNotIn("'", script)          # the argument is single-quoted for bash
 
     def test_a_broken_gate_would_be_caught(self):

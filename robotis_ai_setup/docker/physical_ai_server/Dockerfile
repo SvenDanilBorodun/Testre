@@ -675,7 +675,10 @@ import cryptography; from physical_ai_server.data_processing import hf_token_cry
 assert cryptography.__version__ == \"49.0.0\", cryptography.__version__; \
 k = hc.RobotKey.generate(); t = \"hf_gateprobe_cccccccccccccccccccc\"; \
 assert k.decrypt(hc.encrypt_for_tests(k.public_b64, k.kid, t)) == t; \
-print(\"[HF-CRYPTO] the robot decrypts an encrypted token\", cryptography.__version__)'"
+e = \"cloud-edge-gateprobe-eeeeeeeeeeee\"; w = hc.encrypt_for_tests(k.public_b64, k.kid, e, context=hc.CLOUD_EDGE_CONTEXT); \
+assert k.decrypt(w, context=hc.CLOUD_EDGE_CONTEXT) == e; \
+assert getattr(k, \"exhausted\") is False; \
+print(\"[HF-CRYPTO] the robot decrypts an encrypted token and a cloud token\", cryptography.__version__)'"
 
 # Build-time Daten 2.0 gate: the sidecar, the download worker and the edit/sync modules import, and
 # v3_surgery's layout templates are LeRobot's (R-2: a LeRobot bump that moves the layout fails the

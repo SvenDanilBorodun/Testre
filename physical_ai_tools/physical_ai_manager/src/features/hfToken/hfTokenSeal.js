@@ -68,16 +68,19 @@ export function sharedX(secretKey, peerPoint) {
 /**
  * The `enc1:` wire value of `token` for the robot `key`, from a GIVEN
  * ephemeral secret and iv. Deterministic: the known-answer tests run it; the
- * product calls `sealToken`, which draws both fresh.
+ * product calls `sealToken`, which draws both fresh. `context` is the HKDF
+ * salt and the head of the AAD (hfTokenCrypto's ENVELOPE_CONTEXTS; the HF
+ * token's by default).
  */
-export function sealTokenWith(token, key, ephemeralSecret, iv) {
+export function sealTokenWith(token, key, ephemeralSecret, iv, context = CONTEXT) {
   if (typeof token !== 'string' || !token) throw new Error('bad_token');
   if (!(iv instanceof Uint8Array) || iv.length !== IV_LEN) throw new Error('bad_iv');
+  if (typeof context !== 'string' || !context) throw new Error('bad_context');
   const robotPoint = robotPointOf(key.pub);
   const shared = sharedX(ephemeralSecret, robotPoint);
-  const aesKey = hkdf(sha256, shared, utf8(CONTEXT), utf8(`aes-256-gcm|${key.kid}`), KEY_LEN);
+  const aesKey = hkdf(sha256, shared, utf8(context), utf8(`aes-256-gcm|${key.kid}`), KEY_LEN);
   shared.fill(0);
-  const ciphertext = gcm(aesKey, iv, utf8(`${CONTEXT}|${key.kid}`)).encrypt(utf8(token));
+  const ciphertext = gcm(aesKey, iv, utf8(`${context}|${key.kid}`)).encrypt(utf8(token));
   aesKey.fill(0);
   const clientPoint = clientPointOf(ephemeralSecret);
   return `${WIRE_PREFIX}${key.kid}.${b64url(clientPoint)}.${b64url(iv)}.${b64url(ciphertext)}`;
@@ -85,13 +88,14 @@ export function sealTokenWith(token, key, ephemeralSecret, iv) {
 
 /**
  * Encrypt `token` for the robot `key` with a FRESH ephemeral key pair and iv
- * (one per push: no nonce reuse, no long-lived secret on this side).
+ * (one per push: no nonce reuse, no long-lived secret on this side, and a
+ * value the robot never sees twice: it refuses a repeat, VC-05).
  * Throws when no randomness is available or the key is not a valid point.
  */
-export function sealToken(token, key) {
+export function sealToken(token, key, context = CONTEXT) {
   const secret = p256.utils.randomSecretKey();
   try {
-    return sealTokenWith(token, key, secret, randomBytes(IV_LEN));
+    return sealTokenWith(token, key, secret, randomBytes(IV_LEN), context);
   } finally {
     secret.fill(0);
   }

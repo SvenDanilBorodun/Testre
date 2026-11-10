@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 
 from physical_ai_server import robot_profiles as rp
-from physical_ai_server.data_processing import record_texts_de
+from physical_ai_server.data_processing import hf_token_crypto, record_texts_de
 from physical_ai_server.inference import cloud_client as real_cloud_client
 from physical_ai_server.inference import cloud_contract, cloud_protocol, cloud_schedule, cloud_texts_de
 
@@ -290,12 +290,13 @@ NAMES = ('start_cloud_inference_callback', '_cloud_inference_tick', '_cloud_infe
          'init_robot_control_parameters_from_user_task', '_inference_timer_callback',
          '_cloud_leader_active', '_cloud_missing_source', '_cloud_hello_fields', '_publish_cloud_state',
          '_write_cloud_marker', '_remove_cloud_marker', '_shutdown_cloud_client',
-         '_init_cloud_inference_state', '_assert_no_other_active', '_setup_timer_callbacks')
+         '_init_cloud_inference_state', '_assert_no_other_active', '_setup_timer_callbacks',
+         '_cloud_tokens_from_wire', '_rotate_token_key_if_exhausted')
 
 NS = {
     'cloud_client': types.SimpleNamespace(CloudClient=FakeCloudClient, EndInfo=real_cloud_client.EndInfo),
     'cloud_contract': cloud_contract, 'cloud_protocol': cloud_protocol, 'cloud_schedule': cloud_schedule,
-    'cloud_texts_de': cloud_texts_de,
+    'cloud_texts_de': cloud_texts_de, 'hf_token_crypto': hf_token_crypto,
     'secrets': __import__('secrets'), 'time': CLOCK, 'math': __import__('math'), 'threading': threading, 'np': np, 'os': os,
     'json': json, 'contextlib': contextlib, 'TaskStatus': TaskStatus,
     'SendCommand': types.SimpleNamespace(Request=_Req), 'record_texts_de': record_texts_de,
@@ -350,7 +351,13 @@ class Node:
         self.leader_live = False
         self.log = Log()
         self._record_cb_group = Group()
+        self._hf_token_key = None
+        self._token_key_lock = threading.Lock()
+        self.hf_states_published = 0
         self._setup_timer_callbacks()
+
+    def _publish_hf_token_state(self):
+        self.hf_states_published += 1
 
     def leader_appears_active(self):
         if isinstance(self.leader_live, BaseException):
@@ -525,6 +532,113 @@ def test_start_refuses_a_bad_connect_or_edge_token_without_echo(tok, edge):
     for value in (tok, edge):
         if isinstance(value, str) and value:
             assert value not in r.message and value not in node.log.text()
+
+
+# ── VC-06 (verification round C): the two tokens in the robot envelope ───────
+
+def _keyed():
+    node = Node()
+    node._hf_token_key = hf_token_crypto.RobotKey.generate()
+    return node
+
+
+def _seal(node, value, context, key=None):
+    key = key or node._hf_token_key
+    return hf_token_crypto.encrypt_for_tests(key.public_b64, key.kid, value, context=context)
+
+
+def _sealed_pair(node, key=None):
+    return (_seal(node, TOK, hf_token_crypto.CLOUD_SESSION_CONTEXT, key),
+            _seal(node, EDGE, hf_token_crypto.CLOUD_EDGE_CONTEXT, key))
+
+
+def test_an_encrypted_start_opens_both_tokens_for_the_client():
+    node = _keyed()
+    tok, edge = _sealed_pair(node)
+    r = start(node, tok=tok, edge=edge)
+    assert r.success, r.message
+    assert client().tokens() == (TOK, EDGE)
+
+
+def test_the_plain_tokens_of_the_windows_page_still_start():
+    node = _keyed()
+    assert start(node).success
+    assert client().tokens() == (TOK, EDGE)
+
+
+def test_a_replayed_start_is_refused_without_starting_anything():
+    node = _keyed()
+    tok, edge = _sealed_pair(node)
+    assert start(node, tok=tok, edge=edge).success
+    node._end_inference('', end_reason='robot_stop')
+    FakeCloudClient.instances = []
+    r = start(node, tok=tok, edge=edge)
+    assert (r.success, r.message) == (False, cloud_texts_de.ENC_REPLAYED_DE)
+    assert FakeCloudClient.instances == [] and not node.on_inference
+
+
+def test_an_envelope_for_another_kind_never_opens():
+    node = _keyed()
+    hf = _seal(node, 'hf_' + 'a' * 34, hf_token_crypto.CONTEXT)
+    swapped = (_seal(node, TOK, hf_token_crypto.CLOUD_EDGE_CONTEXT),
+               _seal(node, EDGE, hf_token_crypto.CLOUD_SESSION_CONTEXT))
+    for tok, edge in ((hf, _sealed_pair(node)[1]), swapped):
+        r = start(node, tok=tok, edge=edge)
+        assert (r.success, r.message) == (False, cloud_texts_de.ENC_BAD_DE)
+    assert FakeCloudClient.instances == []
+
+
+def test_an_envelope_for_the_key_before_a_restart_is_stale():
+    node = _keyed()
+    old = hf_token_crypto.RobotKey.generate()
+    tok, edge = _sealed_pair(node, key=old)
+    r = start(node, tok=tok, edge=edge)
+    assert (r.success, r.message) == (False, cloud_texts_de.ENC_STALE_DE)
+
+
+def test_a_node_without_a_key_refuses_an_envelope():
+    node = Node()
+    key = hf_token_crypto.RobotKey.generate()
+    tok, edge = _sealed_pair(node, key=key)
+    r = start(node, tok=tok, edge=edge)
+    assert (r.success, r.message) == (False, cloud_texts_de.ENC_UNSUPPORTED_DE)
+
+
+def test_a_decrypted_token_of_the_wrong_shape_is_the_usual_refusal():
+    node = _keyed()
+    tok = _seal(node, 'short', hf_token_crypto.CLOUD_SESSION_CONTEXT)
+    r = start(node, tok=tok, edge=_sealed_pair(node)[1])
+    assert (r.success, r.message) == (False, cloud_texts_de.BAD_SESSION_DE)
+
+
+def test_no_envelope_or_token_reaches_a_message_or_a_log_line():
+    node = _keyed()
+    tok, edge = _sealed_pair(node)
+    start(node, tok=tok, edge=edge)
+    r = start(node, tok=tok, edge=edge)  # refused: replayed
+    for text in (r.message, node.log.text()):
+        for secret in (tok, edge, TOK, EDGE):
+            assert secret[:24] not in text
+
+
+def test_an_old_robot_refuses_an_envelope_in_german():
+    """A robot from before VC-06 validated the raw strings: an `enc1:` connect
+    token fails TOKEN_RE, so it refused with BAD_SESSION_DE and started nothing."""
+    node = _keyed()
+    tok, edge = _sealed_pair(node)
+    assert not cloud_protocol.TOKEN_RE.fullmatch(tok)
+    assert cloud_texts_de.BAD_SESSION_DE.startswith('Die Cloud-Sitzung ist ungültig')
+
+
+def test_a_full_record_rotates_the_shared_key(monkeypatch):
+    monkeypatch.setattr(hf_token_crypto, 'MAX_SEEN_WIRES', 2)
+    monkeypatch.setattr(hf_token_crypto, 'KEY_FILE_DIR', '/nonexistent-edubotics-key-dir')
+    node = _keyed()
+    old = node._hf_token_key
+    tok, edge = _sealed_pair(node)
+    assert start(node, tok=tok, edge=edge).success  # two values recorded: the record is full
+    assert node._hf_token_key is not old
+    assert node.hf_states_published == 1
 
 
 def test_start_refused_while_leader_active():

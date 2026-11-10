@@ -20,6 +20,13 @@ STOPPED_DE = 'Cloud-Inferenz gestoppt.'
 NOT_RUNNING_DE = 'Gerade läuft keine Cloud-Inferenz.'
 NOT_INFERABLE_DE = 'Dieser Roboter kann keine trainierten Modelle ausführen.'
 BAD_SESSION_DE = 'Die Cloud-Sitzung ist ungültig. Bitte starte die Inferenz neu.'   # connect or edge token malformed
+# Verification round C (VC-06): a remote page sends both tokens in the robot envelope.
+ENC_STALE_DE = 'Der Roboter wurde inzwischen neu gestartet. Bitte starte die Inferenz noch einmal.'
+ENC_BAD_DE = 'Die verschlüsselte Cloud-Sitzung konnte auf dem Roboter nicht gelesen werden. Bitte starte die Inferenz neu.'
+ENC_REPLAYED_DE = ('Diese Cloud-Sitzung wurde schon einmal an den Roboter übertragen und gilt kein zweites Mal. '
+                   'Bitte starte die Inferenz neu.')
+ENC_UNSUPPORTED_DE = ('Dieser Roboter kann die Cloud-Sitzung nicht verschlüsselt annehmen. Bitte die '
+                      'Roboter-Software aktualisieren.')
 LEADER_ACTIVE_DE = ('Die Cloud-Inferenz kann nicht starten, solange der Leader-Arm aktiv ist. Bitte zuerst '
                     'in den Follower-Modus wechseln (Leader-Schalter im Inferenz-Tab) und erneut starten.')
 LEADER_BECAME_ACTIVE_DE = ('Die Cloud-Inferenz wurde beendet, weil der Leader-Arm aktiv geworden ist. Bitte '

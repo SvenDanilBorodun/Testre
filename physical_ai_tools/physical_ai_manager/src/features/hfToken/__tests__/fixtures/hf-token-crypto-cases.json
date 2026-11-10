@@ -1,0 +1,26 @@
+{
+ "_generated_by": "physical_ai_manager/src/features/hfToken/__tests__/hfTokenCrypto.test.js (EDUBOTICS_REGEN_HF_CRYPTO_CASES=1 to regenerate)",
+ "_checked_by": "physical_ai_server/test/test_hf_token_crypto.py (the robot decrypts every case)",
+ "_note": "robot is a TEST key pair made for this file; it never belonged to a robot",
+ "robot": {
+  "d": "KR6UrWbsze6mJ7Kq-Ygj-5ONPKJwbLhcmsh6PRmGkQ4",
+  "x": "g6WvSgt1_uZ_PDTCwNnaOxNW-zeQBCGTKY96tDrw3js",
+  "y": "b6R9awhS-7mk7l26b9a7AmrR4n0npky0oO75X1n7v-Q",
+  "pub": "BIOlr0oLdf7mfzw0wsDZ2jsTVvs3kAQhkymPerQ68N47b6R9awhS-7mk7l26b9a7AmrR4n0npky0oO75X1n7v-Q",
+  "kid": "b9a593a0a3f822e9"
+ },
+ "cases": [
+  {
+   "plain": "hf_test0token0for0the0interop00",
+   "wire": "enc1:b9a593a0a3f822e9.BM1LMZXWW_1fQnpGeXfglE9ixgwbM5_IuneijmnFH8SXf3uAMeallL02972Z76OkrW7HeyCONiqHXlr-cVVePn0.sg1U1mkF75AjDLrh.JmX6YeooOajEhhq4HHDkV7Zi9UB3ZguoiPAv_RUn1fSQ7QDbuZ4NUA6saZsfMYI"
+  },
+  {
+   "plain": "hf_0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789abcdef",
+   "wire": "enc1:b9a593a0a3f822e9.BK6Bs-saNCfu68IHKhOe58hK1MMCyLimKgHd41PjCgdIDzJK2zAo87S6auvKJApZdHed-Q7hr7VwyHfhpY6kr0s.0Fc5iM31DjeZ7Ynt.P4bev7fIbWEh-VQvXNjiJwQFIhiFSZa0TwAT0uKkvQ8sWvhPIKvE3z6YrrAzmYk4ui1TyDdQoYbsqCQxRKjAA4EyhoiniouX-nf2JkE5Ed4nddPKqxiW_7MnW2Xy6FxezKKHn3ithC9fLzS37J29VydbaKhsCw-iByknSr8ndAnxjZ-DeZxNzWQS5OyEwxaribvorWHtLKHfvFrRIZc2yn-ALDLQRWQDVo4SOPGrEm-IIKi1NhHseqb2qTdpey6VoQL7bom3GFSRQq6sHq0kupzQ1nUqXCIwV5FPMHy85ZLBkaPFrC3y_CSzpaNuyc76PocPb655oT4EFoTlH_T27PYIzPtbrYuYC-RulPZmRDDgSoU"
+  },
+  {
+   "plain": "hf_Ab-_0123456789xyz",
+   "wire": "enc1:b9a593a0a3f822e9.BFPzoafl18XvUh1Orlbwd-tsLhA4OY6x5j-V8PduMbWAzNNaMUdyZI9m7HfZL-_lo9y4E9y1FLYHlgLrM5m3ttE.4Fq1Wh0QKI4id-qc.TiMk9PRZ2CHaarE-ZT51zjmZ1P8ltTuu5AHVKN7srVJnLAoG"
+  }
+ ]
+}

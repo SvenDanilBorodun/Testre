@@ -91,6 +91,13 @@ export const HF_TOKEN_COPY = Object.freeze({
   'robot.noLink': 'Keine Verbindung zum Roboter.',
   'robot.timeout': 'Der Roboter hat nicht rechtzeitig geantwortet.',
   'robot.failed': 'Der Roboter hat das Token nicht angenommen.',
+  // 2026-11-13: the token travels encrypted for the robot's key (hfTokenCrypto).
+  'robot.needsUpdate':
+    'Dieser Roboter kann das Token nicht verschlüsselt empfangen, deshalb wird es nicht übertragen. '
+    + 'Bitte die Roboter-Software im System-Fenster aktualisieren („Aktualisieren“).',
+  'robot.encryptFailed':
+    'Das Token konnte in diesem Browser nicht verschlüsselt werden. Bitte einen aktuellen Browser '
+    + 'verwenden.',
 });
 
 /** The sentence for `key`; an unknown key is a programming error, never shown. */

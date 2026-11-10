@@ -221,6 +221,14 @@ RUN set -e && \
 # earlier state that never actually had the package — symptom: at
 # runtime, `import pupil_apriltags` raised ModuleNotFoundError and
 # the AprilTag perception path was permanently disabled.
+#
+# cryptography (2026-11-13): the robot decrypts the student's Hugging Face token,
+# which the SPA encrypts for the robot's ephemeral P-256 key
+# (data_processing/hf_token_crypto.py: ECDH, HKDF-SHA256, AES-256-GCM). Neither
+# base image's pip metadata could be proven to carry it (the amd64 base is pulled
+# from ROBOTIS, and an apt python3-cryptography that sros2 may pull in is not a
+# pin), so it is installed pinned here, the cloud API's version; the [CLOUD]
+# gate below proves a full encrypt/decrypt round trip with the shipped module.
 ENV CMAKE_POLICY_VERSION_MINIMUM=3.5
 RUN python3 -m pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true && \
     python3 -m pip install --no-cache-dir \
@@ -229,8 +237,9 @@ RUN python3 -m pip uninstall -y opencv-python opencv-python-headless 2>/dev/null
         pip-licenses==5.0.0 \
         urdf-parser-py==0.0.4 \
         requests==2.32.3 \
-        aiohttp==3.14.1 && \
-    python3 -c "import cv2, pupil_apriltags, requests, aiohttp; print('runtime deps OK:', cv2.__version__)"
+        aiohttp==3.14.1 \
+        cryptography==49.0.0 && \
+    python3 -c "import cv2, pupil_apriltags, requests, aiohttp, cryptography; assert cryptography.__version__ == '49.0.0', cryptography.__version__; print('runtime deps OK:', cv2.__version__)"
 
 # Runtime ROS message deps (NOT an IK install — IK is closed-form pure NumPy,
 # see the urdf-parser-py block below; there is no TRAC-IK / PyKDL / kdl_parser).
@@ -661,7 +670,12 @@ import aiohttp; assert aiohttp.__version__ == \"3.14.1\", aiohttp.__version__; \
 from physical_ai_server.inference import cloud_contract, cloud_protocol, cloud_schedule, cloud_client, cloud_texts_de; \
 from physical_ai_interfaces.srv import StartCloudInference; from std_srvs.srv import Trigger; \
 assert cloud_protocol.CLOUD_BASE_URL.startswith(\"https://\"); \
-print(\"[CLOUD] client + srv import OK\", aiohttp.__version__)'"
+print(\"[CLOUD] client + srv import OK\", aiohttp.__version__); \
+import cryptography; from physical_ai_server.data_processing import hf_token_crypto as hc; \
+assert cryptography.__version__ == \"49.0.0\", cryptography.__version__; \
+k = hc.RobotKey.generate(); t = \"hf_gateprobe_cccccccccccccccccccc\"; \
+assert k.decrypt(hc.encrypt_for_tests(k.public_b64, k.kid, t)) == t; \
+print(\"[HF-CRYPTO] the robot decrypts an encrypted token\", cryptography.__version__)'"
 
 # Build-time Daten 2.0 gate: the sidecar, the download worker and the edit/sync modules import, and
 # v3_surgery's layout templates are LeRobot's (R-2: a LeRobot bump that moves the layout fails the

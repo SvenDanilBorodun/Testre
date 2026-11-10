@@ -9,6 +9,7 @@
 // WebCrypto (the robot's decryption done here) — the Python side decrypts the
 // pure path's cases in the shared fixture.
 
+/* global BigInt */
 import crypto from 'node:crypto';
 import {
   aes256EncryptBlock, aes256GcmEncrypt, decodePoint, ecdhP256, hkdfSha256, hmacSha256,

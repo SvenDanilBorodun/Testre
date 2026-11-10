@@ -23,6 +23,8 @@
 // the robot's Python `cryptography` (__tests__/hfTokenCryptoPure.test.js,
 // hf-token-crypto-cases.json, physical_ai_server/test/test_hf_token_crypto.py).
 
+/* global BigInt */ // ES2020; the lint env predates it (every target browser has it)
+
 // ── SHA-256 (FIPS 180-4) ─────────────────────────────────────────────────────
 
 const K256 = new Uint32Array([

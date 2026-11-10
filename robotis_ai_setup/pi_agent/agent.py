@@ -43,8 +43,11 @@ is real, so a one-shot probe can land on a 502.
 Security (robot login, 2026-11-10; ``pi_auth``): every route but a handful of
 public ones (``_PUBLIC_GET_PATHS``, the ``/auth/*`` routes) needs a ROBOT
 SESSION — an HttpOnly ``SameSite=Strict`` cookie this agent mints after an
-EduBotics login (the cloud's ``GET /me`` proves the browser's Supabase token)
-— or a loopback peer (a process on the Pi itself). The agent enforces it on
+EduBotics login (the browser hands over a one-time ticket it minted from the
+cloud over HTTPS; the agent redeems it at the cloud, so the Supabase token never
+crosses the LAN) — or a loopback peer (a process on the Pi itself). The
+maintenance routes (``_MAINTENANCE_POST_PATHS``) need a teacher's or an admin's
+session (SA-12). The agent enforces it on
 ``/api/system/*`` ITSELF, because a LAN host can route to the ros_net gateway
 IP and reach this listener without nginx; nginx gates the three robot
 transports (rosbridge, the camera stream, the dataset sidecar) with
@@ -241,6 +244,19 @@ _ARM_FAMILY_MISMATCH_DE = (
 #                         without one; single-flight + cached
 _PUBLIC_GET_PATHS = frozenset({"/", "/health", "/auth/state", "/auth/check",
                                "/update/check", "/netzwerk-check"})
+
+# Maintenance routes (SA-12, 2026-11-13): a STUDENT session may run a lesson
+# (scan, cameras, environment start/stop, the update a stale Pi needs, the
+# leader toggle) but not maintain the Pi. Only a teacher's or an admin's session
+# — or a process on the Pi itself (loopback) — may reset it or change its robot
+# type. The setup code is minted for loopback peers only (/auth/setup-code).
+# The full route table is in docs/CLAUDE-CHANGELOG.md (2026-11-13).
+_MAINTENANCE_POST_PATHS = frozenset({"/factory-reset", "/robot-type"})
+_MAINTENANCE_ROLES = frozenset({"teacher", "admin"})
+_MAINTENANCE_ROLE_DE = (
+    "Das darf nur eine Lehrkraft oder ein Admin: bitte mit einem solchen Konto "
+    "anmelden. Für den Unterricht wird es nicht gebraucht."
+)
 
 # The typed confirmation a factory reset needs on top of the two checkboxes
 # (owner decision 5). Compared case-insensitively; the umlaut is part of it.
@@ -791,6 +807,18 @@ class AgentApp:
     def session_from_cookie(self, cookie_header: str) -> Optional[dict]:
         return self._auth.session(pi_auth.parse_session_cookie(cookie_header))
 
+    def maintenance_refusal(self, path: str, trusted: bool,
+                            session: Optional[dict]) -> Optional["tuple[int, dict]"]:
+        """None when ``path`` may run for this caller, else the German 403 (SA-12).
+        A maintenance route needs a teacher's or an admin's session, or a
+        loopback peer (a root process on the Pi)."""
+        if path not in _MAINTENANCE_POST_PATHS or trusted:
+            return None
+        if session is not None and session.get("role") in _MAINTENANCE_ROLES:
+            return None
+        return 403, {"ok": False, "code": "role_not_allowed",
+                     "message": _MAINTENANCE_ROLE_DE}
+
     def unauthorized_response(self) -> "tuple[int, dict]":
         """The 401 every protected route answers without a session. ``code`` is
         for the current SPA (it has its own wording); ``message`` is for an
@@ -807,7 +835,9 @@ class AgentApp:
         screen needs: whether the Pi is set up, whether THIS browser holds a
         live session (and how long it has left), and the Pi's own name (which
         mDNS announces anyway). ``auth`` names the protocol version, so a new
-        SPA can tell this agent from an old one (an old agent answers 404)."""
+        SPA can tell this agent from an old one (an old agent answers 404).
+        ``pi_id`` is the id a login ticket is minted for (SA-06): public, it
+        only binds a ticket to this Pi."""
         session = self.session_from_cookie(cookie_header)
         payload = {
             "ok": True,
@@ -815,6 +845,7 @@ class AgentApp:
             "claimed": self._auth.claimed,
             "session": session is not None,
             "hostname": socket.gethostname(),
+            "pi_id": self._auth.pi_id(),
         }
         if session is not None:
             payload["role"] = session["role"]
@@ -830,8 +861,9 @@ class AgentApp:
 
     def _cloud_verdict_response(self, verdict: str) -> "tuple[int, dict]":
         if verdict == "rejected":
-            return 401, {"ok": False, "code": "token_rejected",
+            return 401, {"ok": False, "code": "ticket_rejected",
                          "message": "Die Anmeldung wurde nicht angenommen. Bitte "
+                                    "die Seite neu laden; hilft das nicht, "
                                     "abmelden und erneut anmelden."}
         return 503, {"ok": False, "code": "cloud_unreachable",
                      "message": "Die EduBotics-Cloud ist vom Pi aus gerade nicht "
@@ -839,18 +871,23 @@ class AgentApp:
                                 "geprüft werden. Bitte die Internetverbindung des "
                                 "Pis prüfen (Netzwerk-Check) und erneut versuchen."}
 
-    def handle_auth_session(self, authorization: str, cookie_header: str,
-                            client: str) -> "tuple[int, dict, list]":
-        """Exchange the browser's Supabase access token for a robot session.
+    def _ticket_missing(self, claim: bool) -> "tuple[int, dict, list]":
+        message = ("Bitte zuerst mit einem Lehrkräfte- oder Admin-Konto anmelden."
+                   if claim else
+                   "Anmeldung fehlt. Bitte die Seite neu laden und anmelden.")
+        return 401, {"ok": False, "code": "ticket_missing", "message": message}, []
 
-        The token is checked by the cloud (``GET /me`` with exactly that token)
-        once, then dropped: it is never stored, logged or sent anywhere else.
-        A session the browser already holds is replaced (rotation)."""
-        token = pi_auth.bearer_token(authorization)
-        if token is None:
-            return 401, {"ok": False, "code": "token_missing",
-                         "message": "Anmeldung fehlt. Bitte die Seite neu laden "
-                                    "und anmelden."}, []
+    def handle_auth_session(self, body: dict, cookie_header: str,
+                            client: str) -> "tuple[int, dict, list]":
+        """Exchange a one-time login ticket for a robot session (SA-06).
+
+        The browser minted the ticket from the cloud over HTTPS with its
+        Supabase token; the agent redeems it at the cloud for THIS Pi once, then
+        drops it: never stored, logged or sent anywhere else. A session the
+        browser already holds is replaced (rotation)."""
+        ticket = pi_auth.ticket_from(body.get("ticket") if isinstance(body, dict) else None)
+        if ticket is None:
+            return self._ticket_missing(claim=False)
         if not self._auth.claimed:
             code, payload = self.unauthorized_response()
             return code, payload, []
@@ -858,27 +895,27 @@ class AgentApp:
                 and self._session_rate_overall.allow("*")):
             code, payload = self._rate_limited()
             return code, payload, []
-        verdict, role, account = pi_auth.verify_with_cloud(token, UPDATE_API_URL)
+        verdict, role, account, max_s = pi_auth.redeem_with_cloud(
+            ticket, self._auth.pi_id(), UPDATE_API_URL)
         if verdict != "ok":
             code, payload = self._cloud_verdict_response(verdict)
             return code, payload, []
-        ttl = pi_auth.session_ttl(token)
+        ttl = pi_auth.session_ttl(max_s)
         self._auth.revoke(pi_auth.parse_session_cookie(cookie_header))
         sid = self._auth.create_session(role, ttl, account=account)
         return 200, {"ok": True, "role": role, "expires_in": ttl,
                      "message": "Am Roboter angemeldet."}, [
             ("Set-Cookie", pi_auth.session_cookie_header(sid, ttl))]
 
-    def handle_auth_claim(self, authorization: str, body: dict, cookie_header: str,
+    def handle_auth_claim(self, body: dict, cookie_header: str,
                           client: str) -> "tuple[int, dict, list]":
-        """Claim an unclaimed Pi: a teacher/admin login (checked FIRST, by the
-        cloud, so a student cannot even guess) plus the one-time setup code.
-        Success spends the code and answers with a session."""
-        token = pi_auth.bearer_token(authorization)
-        if token is None:
-            return 401, {"ok": False, "code": "token_missing",
-                         "message": "Bitte zuerst mit einem Lehrkräfte- oder "
-                                    "Admin-Konto anmelden."}, []
+        """Claim an unclaimed Pi: a teacher/admin login (a one-time ticket the
+        cloud redeems FIRST, so a student cannot even guess) plus the one-time
+        setup code. Success spends the code and answers with a session."""
+        body = body if isinstance(body, dict) else {}
+        ticket = pi_auth.ticket_from(body.get("ticket"))
+        if ticket is None:
+            return self._ticket_missing(claim=True)
         if self._auth.claimed:
             return 409, {"ok": False, "code": "already_claimed",
                          "message": "Dieser Roboter ist bereits eingerichtet. "
@@ -891,7 +928,8 @@ class AgentApp:
         if not self._claim_rate_client.allow(client):
             code, payload = self._rate_limited()
             return code, payload, []
-        verdict, role, account = pi_auth.verify_with_cloud(token, UPDATE_API_URL)
+        verdict, role, account, max_s = pi_auth.redeem_with_cloud(
+            ticket, self._auth.pi_id(), UPDATE_API_URL)
         if verdict != "ok":
             code, payload = self._cloud_verdict_response(verdict)
             return code, payload, []
@@ -903,7 +941,7 @@ class AgentApp:
         result = self._auth.try_claim(body.get("code"), role)
         if result == "ok":
             self._log("Roboter eingerichtet (Einrichtungscode angenommen).")
-            ttl = pi_auth.session_ttl(token)
+            ttl = pi_auth.session_ttl(max_s)
             self._auth.revoke(pi_auth.parse_session_cookie(cookie_header))
             sid = self._auth.create_session(role, ttl, account=account)
             return 200, {"ok": True, "role": role, "expires_in": ttl,
@@ -958,9 +996,10 @@ class AgentApp:
                      "message": "Neuer Einrichtungscode erzeugt."}
 
     def _announce_code_on_console(self, code: str) -> None:
-        """Best effort: show a code minted at boot on the HDMI text console, the
-        one screen a teacher may have plugged in. Never the journal, never the
-        Protokoll ring. Silent on any failure (no console, a desktop session)."""
+        """Best effort: show a code minted at boot or by a factory reset on the
+        HDMI text console, the one screen a teacher may have plugged in. Never
+        the journal, never the Protokoll ring. Silent on any failure (no
+        console, a desktop session)."""
         tty = os.environ.get("EDUBOTICS_PI_CONSOLE", _CONSOLE_TTY_DEFAULT)
         if not tty:
             return
@@ -2326,9 +2365,13 @@ class AgentApp:
 
         Requires the double confirmation AND the typed word „ZURÜCKSETZEN"
         (owner decision 5) and never ``compose down`` (that would delete ros_net
-        + drop the manager). A successful reset revokes EVERY robot session,
-        forgets the claim and mints a new setup code, which is answered ONCE
-        here (``setup_code``) to whoever reset — it is shown nowhere else."""
+        + drop the manager). Only a teacher's or an admin's session (or a
+        loopback peer) reaches it (SA-12; the router checks). A successful reset
+        revokes EVERY robot session, forgets the claim and mints a new setup
+        code, which is answered ONCE here (``setup_code``) to the teacher or
+        admin who reset AND shown on the HDMI console (best effort, as at boot),
+        so a Pi without a monitor can still be claimed again and one with a
+        monitor even when the answer is lost."""
         if self._update_in_flight():
             return self._busy_updating()
         if not (bool(body.get("confirm")) and bool(body.get("confirm_again"))):
@@ -2361,6 +2404,7 @@ class AgentApp:
                                     "aber nicht gespeichert werden — bitte freien "
                                     "Speicher prüfen und am Pi einen neuen "
                                     f"Einrichtungscode erzeugen ({_SETUP_CODE_CLI_DE})."}
+        self._announce_code_on_console(code)
         self._log("Roboter zurückgesetzt: alle Anmeldungen beendet, ein neuer "
                   "Einrichtungscode wurde erzeugt.")
         return 200, {"ok": True,
@@ -2918,16 +2962,14 @@ class AgentApp:
                     self._send_json(403, {"ok": False, "message": "Origin nicht erlaubt."})
                     return
                 if path == "/auth/session":
-                    self._read_json_body()
+                    body = self._read_json_body()
                     self._send_json(*app.handle_auth_session(
-                        self.headers.get("Authorization", ""), self._cookie(),
-                        self._client()))
+                        body, self._cookie(), self._client()))
                     return
                 if path == "/auth/claim":
                     body = self._read_json_body()
                     self._send_json(*app.handle_auth_claim(
-                        self.headers.get("Authorization", ""), body, self._cookie(),
-                        self._client()))
+                        body, self._cookie(), self._client()))
                     return
                 if path == "/auth/logout":
                     self._read_json_body()
@@ -2945,6 +2987,12 @@ class AgentApp:
                 if not self._authorized():
                     self._read_json_body()
                     self._send_json(*app.unauthorized_response())
+                    return
+                refusal = app.maintenance_refusal(
+                    path, trusted, None if trusted else app.session_from_cookie(self._cookie()))
+                if refusal is not None:
+                    self._read_json_body()
+                    self._send_json(*refusal)
                     return
                 body = self._read_json_body()
                 if path == "/scan-arms":

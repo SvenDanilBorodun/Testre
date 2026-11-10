@@ -7,8 +7,9 @@ is: it reaches the agent through nginx on ros_net. ``_GatewayBase`` therefore
 patches ``AgentApp.peer_is_trusted`` to False to stand in for the gateway
 listener, and ``peer_is_trusted`` itself is tested on real addresses.
 
-No cloud is contacted: ``verify_with_cloud`` runs against a local stub server,
-and the agent routes patch it.
+No cloud is contacted: ``redeem_with_cloud`` runs against a local stub server,
+and the agent routes patch it. Since SA-06 (2026-11-13) the browser sends only a
+one-time TICKET in the body; no request to the Pi carries a Supabase token.
 """
 
 from __future__ import annotations
@@ -46,14 +47,10 @@ from pi_agent import setup_code as setup_code_cli  # noqa: E402
 FAST = 1000  # PBKDF2 iterations for tests (the default is deliberately slow)
 
 
-def _jwt(payload: dict) -> str:
-    def seg(obj):
-        raw = json.dumps(obj).encode()
-        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
-    return f"{seg({'alg': 'ES256', 'typ': 'JWT'})}.{seg(payload)}.c2lnbmF0dXJl"
-
-
-TOKEN = _jwt({"sub": "u-1", "exp": int(time.time()) + 3600})
+# A one-time login ticket's shape (secrets.token_urlsafe(32)); a distinctive
+# value so the no-secret-in-the-log test can look for it.
+TICKET = ("tk-Ticket_" + "0123456789abcdefghijklmnopqrstuvwxyz")[:43]
+GRANT = 900  # the cloud's session_max_s in the patched redeems
 
 
 class _Clock:
@@ -86,34 +83,28 @@ class TestCodeShape(unittest.TestCase):
             self.assertIsNone(pi_auth.normalize_code(raw), raw)
 
 
-class TestTokenHelpers(unittest.TestCase):
-    def test_bearer_token_shape(self):
-        self.assertEqual(pi_auth.bearer_token(f"Bearer {TOKEN}"), TOKEN)
-        self.assertEqual(pi_auth.bearer_token(f"bearer {TOKEN}"), TOKEN)
-        for bad in (None, "", "Bearer", "Bearer x", "Basic abc", "Bearer a.b",
-                    "Bearer " + "a" * 9000 + ".b.c", "Bearer a.b.c d"):
-            self.assertIsNone(pi_auth.bearer_token(bad), bad)
+class TestTicketHelpers(unittest.TestCase):
+    def test_a_ticket_has_the_shape_of_secrets_token_urlsafe_32(self):
+        self.assertEqual(len(TICKET), 43)
+        self.assertEqual(pi_auth.ticket_from(TICKET), TICKET)
+        for bad in (None, "", 7, TICKET[:-1], TICKET + "x", "a.b.c",
+                    "Bearer " + TICKET, TICKET[:-1] + "!", ["x"]):
+            self.assertIsNone(pi_auth.ticket_from(bad), bad)
 
-    def test_jwt_exp_reads_the_claim_and_tolerates_garbage(self):
-        self.assertEqual(pi_auth.jwt_exp(_jwt({"exp": 1234})), 1234)
-        self.assertIsNone(pi_auth.jwt_exp(_jwt({"sub": "x"})))
-        self.assertIsNone(pi_auth.jwt_exp(_jwt({"exp": True})))
-        self.assertIsNone(pi_auth.jwt_exp("a.!!!.c"))
+    def test_a_session_never_outlives_the_window_or_the_login(self):
+        self.assertEqual(pi_auth.session_ttl(3600), pi_auth.SESSION_TTL_S)
+        self.assertEqual(pi_auth.session_ttl(pi_auth.SESSION_TTL_S), pi_auth.SESSION_TTL_S)
+        self.assertEqual(pi_auth.session_ttl(120), 120)
+        # Nearly expired: floored, the cloud just accepted the login.
+        self.assertEqual(pi_auth.session_ttl(3), pi_auth.SESSION_MIN_TTL_S)
 
-    def test_a_session_never_outlives_the_window_or_the_token(self):
-        now = 10_000.0
-        wall = lambda: now  # noqa: E731
-        self.assertEqual(pi_auth.session_ttl(_jwt({"exp": now + 3600}), wall),
-                         pi_auth.SESSION_TTL_S)
-        self.assertEqual(pi_auth.session_ttl(_jwt({"exp": now + 120}), wall), 120)
-        # Nearly expired: floored, the cloud just accepted it.
-        self.assertEqual(pi_auth.session_ttl(_jwt({"exp": now + 3}), wall),
-                         pi_auth.SESSION_MIN_TTL_S)
-        # A skewed Pi clock (exp already "past") keeps the fixed window instead
-        # of locking everybody out.
-        self.assertEqual(pi_auth.session_ttl(_jwt({"exp": now - 5000}), wall),
-                         pi_auth.SESSION_TTL_S)
-        self.assertEqual(pi_auth.session_ttl(_jwt({}), wall), pi_auth.SESSION_TTL_S)
+    def test_the_pi_id_shape(self):
+        pid = pi_auth.generate_pi_id()
+        self.assertTrue(pi_auth.valid_pi_id(pid))
+        self.assertEqual(len(pid), 22)
+        self.assertNotEqual(pid, pi_auth.generate_pi_id())
+        for bad in (None, "", "short", "a" * 65, "x y" * 8, 7):
+            self.assertFalse(pi_auth.valid_pi_id(bad), bad)
 
 
 class TestCookie(unittest.TestCase):
@@ -370,12 +361,16 @@ ACCOUNT_B = "0b3b8e1c-0000-4000-8000-00000000000b"
 
 class _CloudStub(http.server.BaseHTTPRequestHandler):
     status = 200
-    body = b'{"id": "6f1c2a3e-1b2c-4d5e-8f90-123456789abc", "role": "student"}'
+    body = (b'{"user_id": "6f1c2a3e-1b2c-4d5e-8f90-123456789abc", "role": "student", '
+            b'"session_max_s": 600}')
     location = None
-    seen_auth = []
+    seen = []
 
-    def do_GET(self):  # noqa: N802
-        type(self).seen_auth.append((self.path, self.headers.get("Authorization")))
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length") or 0)
+        sent = self.rfile.read(length)
+        type(self).seen.append((self.path, self.headers.get("Authorization"),
+                                self.headers.get("Content-Type"), sent))
         self.send_response(self.status)
         if self.location:
             self.send_header("Location", self.location)
@@ -387,63 +382,86 @@ class _CloudStub(http.server.BaseHTTPRequestHandler):
         pass
 
 
-class TestVerifyWithCloud(unittest.TestCase):
+PI_ID = "q8V0f2Lr3nC1sZtA9xY7wB"
+
+
+class TestRedeemWithCloud(unittest.TestCase):
     def setUp(self):
         _CloudStub.status, _CloudStub.location = 200, None
-        _CloudStub.body = b'{"id": "6f1c2a3e-1b2c-4d5e-8f90-123456789abc", "role": "student"}'
-        _CloudStub.seen_auth = []
+        _CloudStub.body = (b'{"user_id": "6f1c2a3e-1b2c-4d5e-8f90-123456789abc", '
+                           b'"role": "student", "session_max_s": 600}')
+        _CloudStub.seen = []
         self.srv = http.server.HTTPServer(("127.0.0.1", 0), _CloudStub)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.addCleanup(self.srv.server_close)
         self.addCleanup(self.srv.shutdown)
         self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
 
-    def test_ok_names_the_role_and_sends_the_token_to_me_only(self):
-        self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url),
-                         ("ok", "student", "6f1c2a3e-1b2c-4d5e-8f90-123456789abc"))
-        self.assertEqual(_CloudStub.seen_auth, [("/me", f"Bearer {TOKEN}")])
+    def test_ok_names_role_account_and_session_and_sends_only_the_ticket(self):
+        self.assertEqual(pi_auth.redeem_with_cloud(TICKET, PI_ID, self.url),
+                         ("ok", "student", "6f1c2a3e-1b2c-4d5e-8f90-123456789abc", 600))
+        (path, authorization, ctype, sent), = _CloudStub.seen
+        self.assertEqual(path, "/pi/tickets/redeem")
+        self.assertIsNone(authorization)  # nothing but the ticket leaves the Pi
+        self.assertEqual(ctype, "application/json")
+        self.assertEqual(json.loads(sent), {"ticket": TICKET, "pi_id": PI_ID})
 
     def test_the_account_is_what_the_cloud_names_or_nothing(self):
         """VA-09: the per-account session cap keys on the cloud's own answer
-        (``GET /me``'s ``id``), never on anything the browser sends."""
-        for body in (b'{"role": "student"}', b'{"id": "u-1", "role": "student"}',
-                     b'{"id": 7, "role": "student"}', b'{"id": "", "role": "student"}'):
-            with self.subTest(body=body):
-                _CloudStub.body = body
-                self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url), ("ok", "student", None))
-        _CloudStub.body = b'{"id": "6F1C2A3E-1B2C-4D5E-8F90-123456789ABC", "role": "teacher"}'
-        self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url),
-                         ("ok", "teacher", "6f1c2a3e-1b2c-4d5e-8f90-123456789abc"))
+        (the redeem's ``user_id``), never on anything the browser sends."""
+        for uid in (None, "u-1", 7, ""):
+            with self.subTest(uid=uid):
+                _CloudStub.body = json.dumps({"user_id": uid, "role": "student",
+                                              "session_max_s": 600}).encode()
+                self.assertEqual(pi_auth.redeem_with_cloud(TICKET, PI_ID, self.url),
+                                 ("ok", "student", None, 600))
+        _CloudStub.body = (b'{"user_id": "6F1C2A3E-1B2C-4D5E-8F90-123456789ABC", '
+                           b'"role": "teacher", "session_max_s": 900}')
+        self.assertEqual(pi_auth.redeem_with_cloud(TICKET, PI_ID, self.url),
+                         ("ok", "teacher", "6f1c2a3e-1b2c-4d5e-8f90-123456789abc", 900))
 
-    def test_the_cloud_judging_the_token_is_rejected(self):
-        for status in (401, 403, 404):
+    def test_the_cloud_refusing_the_ticket_is_rejected(self):
+        for status in (401, 403):
             _CloudStub.status = status
-            self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url), ("rejected", None, None))
+            self.assertEqual(pi_auth.redeem_with_cloud(TICKET, PI_ID, self.url),
+                             ("rejected", None, None, None))
 
     def test_an_unknown_role_is_rejected(self):
-        _CloudStub.body = b'{"role": "superuser"}'
-        self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url), ("rejected", None, None))
+        _CloudStub.body = b'{"user_id": null, "role": "superuser", "session_max_s": 600}'
+        self.assertEqual(pi_auth.redeem_with_cloud(TICKET, PI_ID, self.url),
+                         ("rejected", None, None, None))
 
     def test_could_not_ask_is_unreachable(self):
-        for status in (500, 502, 503):
+        for status in (404, 429, 500, 502, 503):
             _CloudStub.status = status
-            self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url), ("unreachable", None, None))
-        _CloudStub.status, _CloudStub.body = 200, b"<html>portal</html>"
-        self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url), ("unreachable", None, None))
+            self.assertEqual(pi_auth.redeem_with_cloud(TICKET, PI_ID, self.url),
+                             ("unreachable", None, None, None))
+        _CloudStub.status = 200
+        for body in (b"<html>portal</html>", b"[]",
+                     b'{"role": "student"}',
+                     b'{"role": "student", "session_max_s": 0}',
+                     b'{"role": "student", "session_max_s": true}',
+                     b'{"role": "student", "session_max_s": 999999}'):
+            with self.subTest(body=body):
+                _CloudStub.body = body
+                self.assertEqual(pi_auth.redeem_with_cloud(TICKET, PI_ID, self.url),
+                                 ("unreachable", None, None, None))
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
         closed = s.getsockname()[1]
         s.close()
-        self.assertEqual(pi_auth.verify_with_cloud(TOKEN, f"http://127.0.0.1:{closed}", timeout=2),
-                         ("unreachable", None, None))
+        self.assertEqual(pi_auth.redeem_with_cloud(TICKET, PI_ID, f"http://127.0.0.1:{closed}",
+                                                   timeout=2),
+                         ("unreachable", None, None, None))
 
-    def test_a_redirect_is_never_followed_with_the_token(self):
-        """A captive portal answers with a 3xx; urllib would copy ordinary
-        headers onto the redirected request and hand the token to the portal."""
-        _CloudStub.status = 302
+    def test_a_redirect_is_never_followed_with_the_ticket(self):
+        """A captive portal answers with a 3xx; following it would hand the
+        ticket to the portal."""
+        _CloudStub.status = 307
         _CloudStub.location = self.url + "/portal"
-        self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url), ("unreachable", None, None))
-        self.assertEqual([p for p, _ in _CloudStub.seen_auth], ["/me"])
+        self.assertEqual(pi_auth.redeem_with_cloud(TICKET, PI_ID, self.url),
+                         ("unreachable", None, None, None))
+        self.assertEqual([seen[0] for seen in _CloudStub.seen], ["/pi/tickets/redeem"])
 
 
 # ── the agent routes ─────────────────────────────────────────────────────────
@@ -499,11 +517,19 @@ class _GatewayBase(unittest.TestCase):
 
     def claim(self, role="teacher"):
         code = self.app._auth.mint_code()
-        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=("ok", role, None)):
+        with patch.object(agent.pi_auth, "redeem_with_cloud", return_value=("ok", role, None, GRANT)):
             status, payload, headers = self.req(
-                "POST", "/auth/claim", {"code": pi_auth.format_code(code)},
-                {"Authorization": f"Bearer {TOKEN}"})
+                "POST", "/auth/claim", {"code": pi_auth.format_code(code), "ticket": TICKET})
         return status, payload, headers
+
+    def session_cookie(self, role):
+        """A claimed Pi plus a robot session of ``role``."""
+        if not self.app._auth.claimed:
+            self.claim()
+        with patch.object(agent.pi_auth, "redeem_with_cloud", return_value=("ok", role, None, GRANT)):
+            status, _, headers = self.req("POST", "/auth/session", {"ticket": TICKET})
+        self.assertEqual(status, 200)
+        return self.cookie_of(headers)
 
     @staticmethod
     def cookie_of(headers):
@@ -633,10 +659,9 @@ class TestClaim(_GatewayBase):
 
     def test_a_student_cannot_claim_and_does_not_spend_an_attempt(self):
         code = self.app._auth.mint_code()
-        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=("ok", "student", None)):
+        with patch.object(agent.pi_auth, "redeem_with_cloud", return_value=("ok", "student", None, GRANT)):
             status, payload, _ = self.req(
-                "POST", "/auth/claim", {"code": "ABCD-EFGH"},
-                {"Authorization": f"Bearer {TOKEN}"})
+                "POST", "/auth/claim", {"code": "ABCD-EFGH", "ticket": TICKET})
         self.assertEqual(status, 403)
         self.assertEqual(payload["code"], "role_not_allowed")
         self.assertEqual(self.app._auth._state["code"]["failures"], 0)
@@ -645,9 +670,9 @@ class TestClaim(_GatewayBase):
     def test_a_wrong_code_is_refused_and_counted(self):
         code = self.app._auth.mint_code()
         wrong = "ABCDEFGH" if code != "ABCDEFGH" else "HGFEDCBA"
-        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=("ok", "admin", None)):
+        with patch.object(agent.pi_auth, "redeem_with_cloud", return_value=("ok", "admin", None, GRANT)):
             status, payload, headers = self.req(
-                "POST", "/auth/claim", {"code": wrong}, {"Authorization": f"Bearer {TOKEN}"})
+                "POST", "/auth/claim", {"code": wrong, "ticket": TICKET})
         self.assertEqual(status, 403)
         self.assertEqual(payload["code"], "code_wrong")
         self.assertNotIn("Set-Cookie", headers)
@@ -655,62 +680,58 @@ class TestClaim(_GatewayBase):
 
     def test_without_a_login_nothing_is_asked(self):
         self.app._auth.mint_code()
-        with patch.object(agent.pi_auth, "verify_with_cloud") as cloud:
+        with patch.object(agent.pi_auth, "redeem_with_cloud") as cloud:
             status, payload, _ = self.req("POST", "/auth/claim", {"code": "ABCD-EFGH"})
         self.assertEqual(status, 401)
         cloud.assert_not_called()
 
     def test_a_cloud_that_cannot_be_asked_spends_nothing(self):
         self.app._auth.mint_code()
-        with patch.object(agent.pi_auth, "verify_with_cloud",
-                          return_value=("unreachable", None, None)):
+        with patch.object(agent.pi_auth, "redeem_with_cloud",
+                          return_value=("unreachable", None, None, None)):
             status, payload, _ = self.req(
-                "POST", "/auth/claim", {"code": "ABCD-EFGH"},
-                {"Authorization": f"Bearer {TOKEN}"})
+                "POST", "/auth/claim", {"code": "ABCD-EFGH", "ticket": TICKET})
         self.assertEqual(status, 503)
         self.assertEqual(payload["code"], "cloud_unreachable")
         self.assertEqual(self.app._auth._state["code"]["failures"], 0)
 
     def test_claims_are_rate_limited_per_client(self):
         self.app._auth.mint_code()
-        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=("ok", "student", None)):
-            codes = [self.req("POST", "/auth/claim", {"code": "ABCD-EFGH"},
-                              {"Authorization": f"Bearer {TOKEN}"})[0]
+        with patch.object(agent.pi_auth, "redeem_with_cloud", return_value=("ok", "student", None, GRANT)):
+            codes = [self.req("POST", "/auth/claim", {"code": "ABCD-EFGH", "ticket": TICKET})[0]
                      for _ in range(agent._CLAIM_RATE_PER_CLIENT[0] + 2)]
         self.assertEqual(codes[-1], 429)
 
     def test_no_code_and_a_void_code_name_the_cli(self):
-        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=("ok", "teacher", None)):
-            status, payload, _ = self.req("POST", "/auth/claim", {"code": "ABCD-EFGH"},
-                                          {"Authorization": f"Bearer {TOKEN}"})
+        with patch.object(agent.pi_auth, "redeem_with_cloud", return_value=("ok", "teacher", None, GRANT)):
+            status, payload, _ = self.req("POST", "/auth/claim",
+                                          {"code": "ABCD-EFGH", "ticket": TICKET})
         self.assertEqual(status, 409)
         self.assertIn("pi_agent.setup_code", payload["message"])
 
     def test_a_claimed_pi_refuses_another_claim(self):
         self.claim()
-        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=("ok", "teacher", None)):
-            status, payload, _ = self.req("POST", "/auth/claim", {"code": "ABCD-EFGH"},
-                                          {"Authorization": f"Bearer {TOKEN}"})
+        with patch.object(agent.pi_auth, "redeem_with_cloud", return_value=("ok", "teacher", None, GRANT)):
+            status, payload, _ = self.req("POST", "/auth/claim",
+                                          {"code": "ABCD-EFGH", "ticket": TICKET})
         self.assertEqual(status, 409)
 
 
 class TestExchange(_GatewayBase):
-    def exchange(self, verdict=("ok", "student", None), cookie=None):
-        headers = {"Authorization": f"Bearer {TOKEN}"}
-        if cookie:
-            headers["Cookie"] = cookie
-        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=verdict) as cloud:
-            result = self.req("POST", "/auth/session", {}, headers)
+    def exchange(self, verdict=("ok", "student", None, GRANT), cookie=None):
+        headers = {"Cookie": cookie} if cookie else {}
+        with patch.object(agent.pi_auth, "redeem_with_cloud", return_value=verdict) as cloud:
+            result = self.req("POST", "/auth/session", {"ticket": TICKET}, headers)
         return result, cloud
 
     def test_any_role_gets_a_session_on_a_claimed_pi(self):
         self.claim()
         for role in ("student", "teacher", "admin"):
-            (status, payload, headers), cloud = self.exchange(("ok", role, None))
+            (status, payload, headers), cloud = self.exchange(("ok", role, None, GRANT))
             self.assertEqual(status, 200)
             self.assertEqual(payload["role"], role)
             self.assertLessEqual(payload["expires_in"], pi_auth.SESSION_TTL_S)
-            cloud.assert_called_once_with(TOKEN, agent.UPDATE_API_URL)
+            cloud.assert_called_once_with(TICKET, self.app._auth.pi_id(), agent.UPDATE_API_URL)
             self.assertEqual(self.req("GET", "/auth/check", headers={
                 "Cookie": self.cookie_of(headers)})[0], 204)
 
@@ -722,9 +743,9 @@ class TestExchange(_GatewayBase):
 
     def test_rejected_and_unreachable(self):
         self.claim()
-        (status, payload, _), _ = self.exchange(("rejected", None, None))
-        self.assertEqual((status, payload["code"]), (401, "token_rejected"))
-        (status, payload, _), _ = self.exchange(("unreachable", None, None))
+        (status, payload, _), _ = self.exchange(("rejected", None, None, None))
+        self.assertEqual((status, payload["code"]), (401, "ticket_rejected"))
+        (status, payload, _), _ = self.exchange(("unreachable", None, None, None))
         self.assertEqual((status, payload["code"]), (503, "cloud_unreachable"))
 
     def test_a_new_exchange_rotates_the_old_session_out(self):
@@ -750,9 +771,9 @@ class TestExchange(_GatewayBase):
         the verdict's third element), never from the request."""
         self.claim()
         cap = pi_auth.MAX_SESSIONS_PER_ACCOUNT
-        cookies = [self.cookie_of(self.exchange(("ok", "student", ACCOUNT_A))[0][2])
+        cookies = [self.cookie_of(self.exchange(("ok", "student", ACCOUNT_A, GRANT))[0][2])
                    for _ in range(cap + 3)]
-        (_, _, other), _ = self.exchange(("ok", "student", ACCOUNT_B))
+        (_, _, other), _ = self.exchange(("ok", "student", ACCOUNT_B, GRANT))
         # the claim's session (no account) + A's cap + B's one
         self.assertEqual(self.app._auth.session_count(), 1 + cap + 1)
         checks = [self.req("GET", "/auth/check", headers={"Cookie": c})[0] for c in cookies]
@@ -765,11 +786,25 @@ class TestExchange(_GatewayBase):
                     for _ in range(agent._SESSION_RATE_PER_CLIENT[0] + 1)]
         self.assertEqual(statuses[-1], 429)
 
-    def test_a_missing_token_never_reaches_the_cloud(self):
+    def test_a_missing_ticket_never_reaches_the_cloud(self):
         self.claim()
-        with patch.object(agent.pi_auth, "verify_with_cloud") as cloud:
-            status, payload, _ = self.req("POST", "/auth/session", {})
+        with patch.object(agent.pi_auth, "redeem_with_cloud") as cloud:
+            for body in ({}, {"ticket": "short"}, {"ticket": 7}, [TICKET]):
+                status, payload, _ = self.req("POST", "/auth/session", body)
+                self.assertEqual(status, 401)
+                self.assertEqual(payload["code"], "ticket_missing")
+        cloud.assert_not_called()
+
+    def test_a_bearer_header_opens_nothing_any_more(self):
+        """SA-06: the old exchange (the Supabase token as a Bearer header) is
+        gone; a request that sends one and no ticket gets no session and never
+        reaches the cloud."""
+        self.claim()
+        with patch.object(agent.pi_auth, "redeem_with_cloud") as cloud:
+            status, payload, headers = self.req(
+                "POST", "/auth/session", {}, {"Authorization": "Bearer a.b.c"})
         self.assertEqual(status, 401)
+        self.assertNotIn("Set-Cookie", headers)
         cloud.assert_not_called()
 
     def test_no_secret_reaches_a_log_line(self):
@@ -777,16 +812,15 @@ class TestExchange(_GatewayBase):
         code = self.app._auth.mint_code()
         # Every logger of the process at DEBUG, captured at the root.
         with self.assertLogs(level="DEBUG") as logs:
-            with patch.object(agent.pi_auth, "verify_with_cloud",
-                              return_value=("ok", "teacher", None)):
-                _, _, h = self.req("POST", "/auth/claim", {"code": code},
-                                   {"Authorization": f"Bearer {TOKEN}"})
+            with patch.object(agent.pi_auth, "redeem_with_cloud",
+                              return_value=("ok", "teacher", None, GRANT)):
+                _, _, h = self.req("POST", "/auth/claim", {"code": code, "ticket": TICKET})
             sid = self.cookie_of(h).split("=", 1)[1]
             (_, _, h2), _ = self.exchange()
             sid2 = self.cookie_of(h2).split("=", 1)[1]
         text = "\n".join(logs.output)
         self.assertIn("Roboter eingerichtet", text)  # the capture works
-        for secret in (TOKEN, code, pi_auth.format_code(code), sid, sid2):
+        for secret in (TICKET, code, pi_auth.format_code(code), sid, sid2):
             self.assertNotIn(secret, text)
 
 
@@ -1045,6 +1079,139 @@ class TestLoginGuard(unittest.TestCase):
         stop, pull, recreate = self._tick("open", tier="exited")
         stop.assert_not_called()
         pull.assert_not_called()
+
+
+# ── SA-06: the Pi's id a ticket is bound to ──────────────────────────────────
+
+
+class TestPiId(_StoreBase):
+    def test_minted_once_persisted_and_stable(self):
+        first = self.store.pi_id()
+        self.assertTrue(pi_auth.valid_pi_id(first))
+        self.assertEqual(self.store.pi_id(), first)
+        with open(self.path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["pi_id"], first)
+        again = pi_auth.AuthStore(self.path, iterations=FAST)
+        self.assertEqual(again.pi_id(), first)
+
+    def test_a_factory_reset_forgets_it(self):
+        first = self.store.pi_id()
+        self.store.try_claim(self.store.mint_code(), "teacher")
+        self.store.reset_to_unclaimed()
+        self.assertNotEqual(self.store.pi_id(), first)
+
+    def test_a_malformed_stored_id_is_replaced(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"claimed": False, "pi_id": "x"}, f)
+        store = pi_auth.AuthStore(self.path, iterations=FAST)
+        self.assertTrue(pi_auth.valid_pi_id(store.pi_id()))
+
+
+class TestPiIdOnTheWire(_GatewayBase):
+    def test_auth_state_answers_the_pi_id_publicly(self):
+        status, state, _ = self.req("GET", "/auth/state")
+        self.assertEqual(status, 200)
+        self.assertEqual(state["pi_id"], self.app._auth.pi_id())
+        self.claim()
+        status, state, _ = self.req("GET", "/auth/state")
+        self.assertEqual(state["pi_id"], self.app._auth.pi_id())
+
+    def test_the_redeem_names_this_pi(self):
+        self.claim()
+        with patch.object(agent.pi_auth, "redeem_with_cloud",
+                          return_value=("ok", "student", None, GRANT)) as cloud:
+            self.req("POST", "/auth/session", {"ticket": TICKET})
+        cloud.assert_called_once_with(TICKET, self.app._auth.pi_id(), agent.UPDATE_API_URL)
+
+    def test_the_session_is_bound_by_the_clouds_grant(self):
+        self.claim()
+        with patch.object(agent.pi_auth, "redeem_with_cloud",
+                          return_value=("ok", "student", None, 120)):
+            status, payload, headers = self.req("POST", "/auth/session", {"ticket": TICKET})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["expires_in"], 120)
+        self.assertIn("Max-Age=120", headers.get("Set-Cookie", ""))
+
+
+# ── SA-12: maintenance routes need a teacher's or an admin's session ─────────
+
+
+class TestMaintenanceRoutes(_GatewayBase):
+    RESET = {"confirm": True, "confirm_again": True, "confirm_text": "ZURÜCKSETZEN"}
+
+    def test_the_table(self):
+        self.assertEqual(agent._MAINTENANCE_POST_PATHS, frozenset({"/factory-reset", "/robot-type"}))
+        self.assertEqual(agent._MAINTENANCE_ROLES, frozenset({"teacher", "admin"}))
+
+    def test_a_student_session_cannot_reset_or_change_the_robot_type(self):
+        cookie = self.session_cookie("student")
+        with patch.object(agent.docker_manager, "factory_reset") as wipe, \
+                patch.object(agent.config_generator, "upsert_env_var") as write:
+            for path, body in (("/factory-reset", self.RESET),
+                               ("/robot-type", {"robot_type": "omx_follower"})):
+                with self.subTest(path=path):
+                    status, payload, _ = self.req("POST", path, body, {"Cookie": cookie})
+                    self.assertEqual(status, 403)
+                    self.assertEqual(payload["code"], "role_not_allowed")
+                    self.assertIn("Lehrkraft oder ein Admin", payload["message"])
+        wipe.assert_not_called()
+        write.assert_not_called()
+        self.assertTrue(self.app._auth.claimed)
+
+    def test_a_student_session_still_runs_a_lesson(self):
+        cookie = self.session_cookie("student")
+        with patch.object(agent.docker_manager, "stop_robot_tier", return_value=True) as stop:
+            status, _, _ = self.req("POST", "/environment/stop", {}, {"Cookie": cookie})
+        self.assertEqual(status, 200)
+        stop.assert_called_once()
+        with patch.object(agent.AgentApp, "handle_update_start",
+                          return_value=(202, {"ok": True, "job_id": "j"})) as update:
+            status, _, _ = self.req("POST", "/update", {}, {"Cookie": cookie})
+        self.assertEqual(status, 202)
+        update.assert_called_once()
+        with patch.object(agent.AgentApp, "handle_scan_arms",
+                          return_value=(200, {"ok": True})) as scan:
+            self.assertEqual(self.req("POST", "/scan-arms", {}, {"Cookie": cookie})[0], 200)
+        scan.assert_called_once()
+
+    def test_a_teacher_or_admin_session_resets_and_gets_the_new_code_and_the_console_too(self):
+        for role in ("teacher", "admin"):
+            with self.subTest(role=role):
+                cookie = self.session_cookie(role)
+                console = os.path.join(self.dir, f"tty-{role}")
+                with patch.dict(os.environ, {"EDUBOTICS_PI_CONSOLE": console}), \
+                        patch.object(agent.docker_manager, "factory_reset",
+                                     return_value=(True, "Gelöscht.")):
+                    status, payload, _ = self.req("POST", "/factory-reset", self.RESET,
+                                                  {"Cookie": cookie})
+                self.assertEqual(status, 200, payload)
+                self.assertRegex(payload["setup_code"], r"^[A-Z0-9]{4}-[A-Z0-9]{4}$")
+                shown = Path(console).read_text(encoding="utf-8")
+                self.assertIn(payload["setup_code"], shown)
+                self.assertFalse(self.app._auth.claimed)
+
+    def test_a_teacher_may_change_the_robot_type(self):
+        cookie = self.session_cookie("teacher")
+        with patch.object(agent.AgentApp, "handle_set_robot_type",
+                          return_value=(200, {"ok": True})) as handler:
+            status, _, _ = self.req("POST", "/robot-type", {"robot_type": "omx_full"},
+                                    {"Cookie": cookie})
+        self.assertEqual(status, 200)
+        handler.assert_called_once()
+
+
+class TestMaintenanceOnLoopback(_GatewayBase):
+    """A root process on the Pi (the loopback peer) needs no session at all."""
+
+    trusted = True
+
+    def test_a_loopback_peer_may_maintain(self):
+        with patch.object(agent.AgentApp, "handle_set_robot_type",
+                          return_value=(200, {"ok": True})) as handler:
+            status, _, _ = self.req("POST", "/robot-type", {"robot_type": "omx_full"}, origin=None)
+        self.assertEqual(status, 200)
+        handler.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -10,15 +10,26 @@ stream, the dataset sidecar and the agent's management API (factory reset
 included). Now each of them needs a ROBOT SESSION, an opaque random cookie this
 agent mints after an EduBotics login:
 
-* ``POST /auth/session`` — the browser hands over its Supabase access token
-  ONCE (``Authorization: Bearer …``); the agent asks the cloud API ``GET /me``
-  with exactly that token, which proves the token and names the role, and then
-  forgets it. Never stored, never logged, never forwarded anywhere else.
+* ``POST /auth/session`` — the browser hands over a ONE-TIME TICKET in the
+  body (``{"ticket": …}``, SA-06, 2026-11-13). It minted the ticket from the
+  cloud API over HTTPS with its Supabase access token, so that token never
+  crosses the school network: the agent only ever sees the ticket and redeems
+  it at the cloud (``POST /pi/tickets/redeem`` with this Pi's ``pi_id``), which
+  answers who it belongs to, the role and how long a session may live. A ticket
+  is single-use, bound to this Pi and dies after a minute. Never stored, never
+  logged, never forwarded anywhere else.
 * the cookie (``COOKIE_NAME``) is 256 random bits, ``HttpOnly``,
   ``SameSite=Strict``, ``Path=/``, and short-lived (``SESSION_TTL_S``, capped by
-  the token's own ``exp``); the SPA re-exchanges before it runs out.
+  the access token's own remaining life, which the redeem answers); the SPA
+  re-exchanges before it runs out.
 * sessions live in memory only: an agent restart (a self-update, a reboot) logs
-  everyone out, and the SPA silently exchanges again with its Supabase token.
+  everyone out, and the SPA silently exchanges again with a new ticket.
+* every session keeps its ROLE: the maintenance routes (factory reset, robot
+  type) are for a teacher's or an admin's session only (SA-12).
+* ``pi_id`` — a stable random id of this Pi (``secrets.token_urlsafe(16)``),
+  minted on first use and kept in the state file, answered by the public
+  ``/auth/state``; a ticket is minted for exactly one ``pi_id``. A factory reset
+  and ``setup.sh --prepare-golden`` forget it with the rest of the state.
 
 A Pi that has never been set up is UNCLAIMED: no session can exist and every
 robot route refuses, until a teacher or admin claims it with the one-time
@@ -34,7 +45,6 @@ place a code is shown is the response/terminal of whoever minted it.
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 import json
@@ -71,7 +81,7 @@ MAX_SESSIONS = 512
 # EduBotics account may use a claimed Pi, and with only the global bound one
 # account exchanging 512 times pushed every other session out. A student with a
 # few tabs and devices is far below it. The account is the cloud's own answer
-# (``GET /me``'s ``id``), never something the browser asserts, and it is kept
+# (the ticket redeem's ``user_id``), never something the browser asserts, and it is kept
 # only as a hash. A new session of an account at its cap drops that account's
 # least recently USED session; at the global bound the least recently used
 # session of the account holding the MOST sessions goes, never one of an
@@ -88,21 +98,25 @@ CODE_MAX_FAILURES = 20
 # PBKDF2 so a stolen state file does not hand the 40-bit code over in minutes.
 CODE_PBKDF2_ITERATIONS = 200_000
 
-# Roles the cloud answers in GET /me. Any of them may use a claimed Pi (owner
-# decision 2); only these may claim one (owner decision 3).
+# Roles the cloud answers for a ticket. Any of them may use a claimed Pi (owner
+# decision 2); only these may claim one (owner decision 3) and use the
+# maintenance routes (SA-12, 2026-11-13).
 ROLES = frozenset({"student", "teacher", "admin"})
-# The shape of a Supabase user id, as ``GET /me`` answers it.
+# The shape of a Supabase user id, as the ticket redeem answers it.
 _ACCOUNT_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 CLAIM_ROLES = frozenset({"teacher", "admin"})
 
-# The cloud call made once per exchange/claim.
+# The cloud call made once per exchange/claim (the ticket redeem).
 CLOUD_TIMEOUT_S = 8.0
-# A Supabase access token is a JWT of a few hundred bytes; anything far larger
-# is not one and is refused before any network call.
-TOKEN_MAX_LEN = 8192
-_JWT_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
-# secrets.token_urlsafe(32) → 43 characters of the URL-safe alphabet.
+# secrets.token_urlsafe(32) → 43 characters of the URL-safe alphabet. A session
+# id and a login ticket share the shape.
 _SID_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_TICKET_RE = _SID_RE
+# This Pi's id: secrets.token_urlsafe(16) → 22 characters. The cloud accepts
+# 16-64 characters of the same alphabet (app/services/pi_tickets.py).
+_PI_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+# Upper bound on the session a redeem may grant (the cloud caps it at 15 min).
+_SESSION_MAX_FROM_CLOUD_S = 24 * 3600
 
 STATE_VERSION = 1
 
@@ -148,54 +162,30 @@ def hash_code(code: str, salt: bytes, iterations: int = CODE_PBKDF2_ITERATIONS) 
     return hashlib.pbkdf2_hmac("sha256", code.encode("ascii"), salt, iterations).hex()
 
 
-def bearer_token(header) -> Optional[str]:
-    """The token of an ``Authorization: Bearer <jwt>`` header, or None.
-
-    Shape-checked before any network call; the value itself is never echoed.
-    """
-    if not isinstance(header, str):
-        return None
-    if not header[:7].lower() == "bearer ":
-        return None
-    token = header[7:].strip()
-    if not token or len(token) > TOKEN_MAX_LEN or not _JWT_RE.match(token):
-        return None
-    return token
+def ticket_from(value) -> Optional[str]:
+    """A login ticket from the request body, or None (shape-checked before any
+    network call; the value itself is never echoed)."""
+    if isinstance(value, str) and _TICKET_RE.match(value):
+        return value
+    return None
 
 
-def jwt_exp(token: str) -> Optional[int]:
-    """The ``exp`` claim of a JWT, read WITHOUT verification.
-
-    Only ever consulted after the cloud accepted the very same token, so the
-    claim is the issuer's; it merely shortens a session, it can never lengthen
-    one past SESSION_TTL_S.
-    """
-    try:
-        payload = token.split(".")[1]
-        payload += "=" * (-len(payload) % 4)
-        data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
-        exp = data.get("exp") if isinstance(data, dict) else None
-        if isinstance(exp, bool) or not isinstance(exp, (int, float)):
-            return None
-        return int(exp)
-    except Exception:  # noqa: BLE001 — any malformed payload is just "no exp"
-        return None
+def generate_pi_id() -> str:
+    return secrets.token_urlsafe(16)
 
 
-def session_ttl(token: str, wall: Callable[[], float] = time.time) -> int:
-    """How long a session minted for ``token`` may live (seconds).
+def valid_pi_id(value) -> bool:
+    return isinstance(value, str) and _PI_ID_RE.match(value) is not None
 
-    SESSION_TTL_S, shortened to the token's remaining lifetime when that is
-    plausible. A Pi with a skewed clock (exp already "past", or absurdly far
-    out) keeps the fixed window instead of locking everybody out.
-    """
-    exp = jwt_exp(token)
-    if exp is None:
-        return SESSION_TTL_S
-    remaining = exp - wall()
-    if 0 < remaining < SESSION_TTL_S:
-        return max(SESSION_MIN_TTL_S, int(remaining))
-    return SESSION_TTL_S
+
+def session_ttl(session_max_s: int) -> int:
+    """How long a session for a redeemed ticket may live (seconds):
+    ``min(SESSION_TTL_S, session_max_s)``, where ``session_max_s`` is the
+    browser's access token's remaining life as the CLOUD measured it at redeem
+    (the Pi's own clock plays no part). Floored at SESSION_MIN_TTL_S: the cloud
+    just accepted the login, and a shorter session would make the SPA
+    re-exchange in a tight loop while supabase-js refreshes the token."""
+    return min(SESSION_TTL_S, max(SESSION_MIN_TTL_S, int(session_max_s)))
 
 
 def parse_session_cookie(header) -> Optional[str]:
@@ -238,8 +228,7 @@ def _account_key(account: Optional[str]) -> Optional[str]:
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Refuse every redirect. A captive portal or a hijacked DNS name answers
-    the /me call with a 3xx; following it would hand the student's token to
-    that host (urllib copies ordinary headers onto the redirected request)."""
+    the redeem with a 3xx; following it would hand the ticket to that host."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
         return None
@@ -248,57 +237,68 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_NoRedirect)
 
 
-def verify_with_cloud(token: str, api_url: str, timeout: float = CLOUD_TIMEOUT_S,
-                      opener=None) -> "tuple[str, Optional[str], Optional[str]]":
-    """Ask the cloud API who ``token`` belongs to: ``("ok", role, account)``,
-    ``("rejected", None, None)`` when the cloud judged the token, or
-    ``("unreachable", None, None)`` when it could not be asked.
+def redeem_with_cloud(ticket: str, pi_id: str, api_url: str,
+                      timeout: float = CLOUD_TIMEOUT_S, opener=None
+                      ) -> "tuple[str, Optional[str], Optional[str], Optional[int]]":
+    """Spend ``ticket`` at the cloud for THIS Pi (``pi_id``):
+    ``("ok", role, account, session_max_s)``, ``("rejected", None, None, None)``
+    when the cloud refused the ticket (unknown, spent, expired, another Pi's),
+    or ``("unreachable", None, None, None)`` when it could not be asked.
 
-    ``account`` is the user id ``GET /me`` answers (lower-case UUID), or None
-    when the answer carries none of that shape; it keys the per-account
-    session cap (``MAX_SESSIONS_PER_ACCOUNT``) and is never logged.
+    ``account`` is the user id the cloud answers (lower-case UUID), or None
+    when the answer carries none of that shape; it keys the per-account session
+    cap (``MAX_SESSIONS_PER_ACCOUNT``, VA-09) and is never logged.
 
-    One ``GET {api_url}/me`` with the token as a NON-redirected header. Nothing
-    of the token, the URL's answer body or an exception text is logged or
-    returned — the caller gets one of three words, a role and an account.
+    One ``POST {api_url}/pi/tickets/redeem`` with ``{"ticket", "pi_id"}`` as its
+    JSON body, through an opener that follows no redirect, with the same
+    timeout and outcome classes the old ``GET /me`` check had. Nothing of the
+    ticket, the answer body or an exception text is logged or returned.
     """
     open_ = opener.open if opener is not None else _OPENER.open
-    req = urllib.request.Request(f"{api_url.rstrip('/')}/me", method="GET")
-    req.add_unredirected_header("Authorization", f"Bearer {token}")
+    body = json.dumps({"ticket": ticket, "pi_id": pi_id}).encode("utf-8")
+    req = urllib.request.Request(f"{api_url.rstrip('/')}/pi/tickets/redeem",
+                                 data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "application/json")
     try:
         with open_(req, timeout=timeout) as resp:
             status = getattr(resp, "status", 200)
-            raw = resp.read(256 * 1024)
+            raw = resp.read(64 * 1024)
     except urllib.error.HTTPError as e:
         code = getattr(e, "code", 0) or 0
         try:
             e.close()
         except Exception:  # noqa: BLE001
             pass
-        # 401/403: the cloud judged the token. 404: a valid login without a
-        # profile row — not an EduBotics account the Pi can serve.
-        if code in (401, 403, 404):
-            return "rejected", None, None
-        return "unreachable", None, None
+        # 401/403: the cloud judged the ticket. Anything else (a 404 from a
+        # cloud API older than the tickets, a 429, a 5xx) is "could not ask".
+        if code in (401, 403):
+            return "rejected", None, None, None
+        return "unreachable", None, None, None
     except Exception:  # noqa: BLE001 — URLError, timeout, TLS, reset: "could not ask"
-        return "unreachable", None, None
+        return "unreachable", None, None, None
     if status != 200:
-        return "unreachable", None, None
+        return "unreachable", None, None, None
     try:
         data = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
         # A 200 that is not our JSON (a portal page) is not an answer.
-        return "unreachable", None, None
-    role = data.get("role") if isinstance(data, dict) else None
+        return "unreachable", None, None, None
+    if not isinstance(data, dict):
+        return "unreachable", None, None, None
+    role = data.get("role")
     if not isinstance(role, str) or role not in ROLES:
-        return "rejected", None, None
-    account = data.get("id")
+        return "rejected", None, None, None
+    max_s = data.get("session_max_s")
+    if (isinstance(max_s, bool) or not isinstance(max_s, (int, float))
+            or not 0 < max_s <= _SESSION_MAX_FROM_CLOUD_S):
+        return "unreachable", None, None, None
+    account = data.get("user_id")
     if isinstance(account, str) and _ACCOUNT_ID_RE.fullmatch(account.lower()):
         account = account.lower()
     else:
         account = None
-    return "ok", role, account
+    return "ok", role, account, int(max_s)
 
 
 # ── rate limiting ────────────────────────────────────────────────────────────
@@ -367,7 +367,7 @@ class AuthStore:
     @staticmethod
     def _empty_state() -> dict:
         return {"v": STATE_VERSION, "claimed": False, "claimed_at": None,
-                "claimed_role": None, "code": None}
+                "claimed_role": None, "code": None, "pi_id": None}
 
     def load(self) -> None:
         state = self._empty_state()
@@ -386,6 +386,8 @@ class AuthStore:
                 state["claimed_at"] = data["claimed_at"]
             if data.get("claimed_role") in CLAIM_ROLES:
                 state["claimed_role"] = data["claimed_role"]
+            if valid_pi_id(data.get("pi_id")):
+                state["pi_id"] = data["pi_id"]
             code = data.get("code")
             if (not state["claimed"] and isinstance(code, dict)
                     and isinstance(code.get("salt"), str)
@@ -436,6 +438,21 @@ class AuthStore:
             pass
 
     # ── claim state ──────────────────────────────────────────────────────
+
+    def pi_id(self) -> str:
+        """This Pi's stable id (SA-06), minted on first use and persisted. A
+        write failure keeps the minted id for this process (it is not a secret;
+        a restart then mints another, and the SPA simply asks again)."""
+        with self._lock:
+            current = self._state.get("pi_id")
+            if valid_pi_id(current):
+                return current
+            self._state["pi_id"] = generate_pi_id()
+            try:
+                self._persist_locked()
+            except OSError:
+                pass
+            return self._state["pi_id"]
 
     @property
     def claimed(self) -> bool:
@@ -531,9 +548,11 @@ class AuthStore:
             return "ok"
 
     def reset_to_unclaimed(self) -> str:
-        """Factory reset: revoke EVERY session, forget the claim, mint a new
-        code and return it. Raises OSError when the new state cannot be written
-        (the sessions are revoked regardless)."""
+        """Factory reset: revoke EVERY session, forget the claim and the Pi's
+        id (a new one is minted on first use, so a ticket minted before the
+        reset opens nothing), mint a new code and return it. Raises OSError
+        when the new state cannot be written (the sessions are revoked
+        regardless)."""
         with self._lock:
             self._sessions.clear()
             previous = dict(self._state)
@@ -548,9 +567,10 @@ class AuthStore:
     # ── sessions ─────────────────────────────────────────────────────────
 
     def create_session(self, role: str, ttl_s: int, account: Optional[str] = None) -> str:
-        """A new session. ``account`` is the cloud's user id for the token
-        (``verify_with_cloud``); None (an answer without one) makes the session
-        an account of its own for the caps (VA-09)."""
+        """A new session. ``account`` is the cloud's user id for the ticket
+        (``redeem_with_cloud``); None (an answer without one) makes the session
+        an account of its own for the caps (VA-09). ``role`` is the cloud's
+        answer too; the maintenance routes read it (SA-12)."""
         sid = secrets.token_urlsafe(32)
         now = self._now()
         acct = _account_key(account)

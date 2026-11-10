@@ -10,7 +10,9 @@
 import React from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import SystemPage, { factoryResetWordMatches, FACTORY_RESET_WORD } from '../SystemPage';
+import SystemPage, {
+  factoryResetWordMatches, FACTORY_RESET_WORD, maintenanceLockedFor, MAINTENANCE_ONLY_DE,
+} from '../SystemPage';
 
 const refreshAgentStatus = vi.fn(() => Promise.resolve(null));
 vi.mock('../../utils/piMode', () => ({
@@ -35,8 +37,12 @@ vi.mock('../../utils/piMode', () => ({
 
 const setPiResetCode = vi.fn();
 const noteUnauthorized = vi.fn();
+// The robot session the page sees (SA-12): a teacher by default.
+const mockPiAuth = vi.hoisted(() => ({ current: { phase: 'session', role: 'teacher' } }));
 vi.mock('../../features/piAuth/piAuth', () => ({
   __esModule: true,
+  PI_AUTH_PHASE: { SESSION: 'session' },
+  usePiAuth: () => mockPiAuth.current,
   setPiResetCode: (...a) => setPiResetCode(...a),
   noteUnauthorized: (...a) => noteUnauthorized(...a),
 }));
@@ -56,6 +62,7 @@ function jsonRes(body, ok = true, status = 200) {
 let resetBody = null;
 beforeEach(() => {
   resetBody = null;
+  mockPiAuth.current = { phase: 'session', role: 'teacher' };
   setPiResetCode.mockClear();
   noteUnauthorized.mockClear();
   global.fetch = vi.fn((url, opts = {}) => {
@@ -115,5 +122,30 @@ describe('a refused agent call', () => {
     render(<SystemPage />);
     await userEvent.click(screen.getByRole('button', { name: "Netzwerk prüfen" }));
     await waitFor(() => expect(noteUnauthorized).toHaveBeenCalled());
+  });
+});
+
+describe('maintenance is for teachers and admins (SA-12)', () => {
+  it('the predicate: only a live session of another role is locked', () => {
+    expect(maintenanceLockedFor({ phase: 'session', role: 'student' })).toBe(true);
+    expect(maintenanceLockedFor({ phase: 'session', role: 'teacher' })).toBe(false);
+    expect(maintenanceLockedFor({ phase: 'session', role: 'admin' })).toBe(false);
+    expect(maintenanceLockedFor({ phase: 'session', role: null })).toBe(true);
+    expect(maintenanceLockedFor({ phase: 'locked', role: null })).toBe(false);
+    expect(maintenanceLockedFor(null)).toBe(false);
+  });
+
+  it('a student session sees no reset key, but the reason', () => {
+    mockPiAuth.current = { phase: 'session', role: 'student' };
+    render(<SystemPage />);
+    expect(screen.queryByRole('button', { name: /Daten zurücksetzen/ })).toBeNull();
+    expect(screen.getByTestId('maintenance-only-reset')).toHaveTextContent(MAINTENANCE_ONLY_DE);
+    expect(MAINTENANCE_ONLY_DE).toMatch(/Lehrkraft oder ein Admin/);
+  });
+
+  it('a teacher session keeps the reset', () => {
+    render(<SystemPage />);
+    expect(screen.getByRole('button', { name: /Daten zurücksetzen/ })).toBeInTheDocument();
+    expect(screen.queryByTestId('maintenance-only-reset')).toBeNull();
   });
 });

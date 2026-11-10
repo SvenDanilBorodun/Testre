@@ -21,7 +21,10 @@
 import React from 'react';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import SystemPage from '../SystemPage';
+import SystemPage, { MAINTENANCE_ONLY_DE } from '../SystemPage';
+import {
+  resetPiAuthForTests, setPiAccessToken, startPiAuth,
+} from '../../features/piAuth/piAuth';
 
 const refreshAgentStatus = vi.fn(() => Promise.resolve(null));
 let mockPi;
@@ -190,6 +193,27 @@ describe('SystemPage — Robotertyp selector', () => {
       'title',
       'Zum Wechseln zuerst die Roboter-Umgebung stoppen.'
     );
+  });
+
+  it('is frozen for a student robot session, and says why (SA-12)', async () => {
+    // The real robot-login store, driven into a STUDENT session by a fake agent.
+    const agent = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, auth: 1, claimed: true, session: true, role: 'student',
+        expires_in: 900, pi_id: 'q8V0f2Lr3nC1sZtA9xY7wB' }),
+    }));
+    setPiAccessToken('jwt-s');
+    startPiAuth({ fetch: agent, cloudApiUrl: 'https://cloud.test' });
+    try {
+      renderWith(statusFixture());
+      await waitFor(() => expect(screen.getByLabelText('Robotertyp')).toBeDisabled());
+      expect(screen.getByLabelText('Robotertyp')).toHaveAttribute('title', MAINTENANCE_ONLY_DE);
+      expect(screen.getByTestId('maintenance-only-type')).toHaveTextContent(MAINTENANCE_ONLY_DE);
+    } finally {
+      cleanup();
+      resetPiAuthForTests();
+    }
   });
 
   it('is frozen in Cloud-Modus (no robot → the type is irrelevant)', async () => {

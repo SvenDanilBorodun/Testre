@@ -1116,6 +1116,13 @@ jobs:
             headers=$(curl -fsS -D - -o /dev/null http://127.0.0.1:18080/ | tr 'A-Z' 'a-z')
             report=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/csp-report' \
               --data '{"csp-report":{"violated-directive":"ci-probe"}}' http://127.0.0.1:18080/csp-report)
+            # VB-06: refused requests (another method, a body over 16 KB) log no line.
+            refused_get=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/csp-report)
+            refused_big=$(head -c 20000 /dev/zero | tr '\0' a | curl -sS -o /dev/null -w '%{http_code}' -X POST \
+              -H 'Content-Type: application/csp-report' --data-binary @- http://127.0.0.1:18080/csp-report)
+            [ "$refused_get" = 403 ]
+            [ "$refused_big" = 413 ]
+            sleep 1
             logs=$(docker logs "$cid" 2>&1)
             docker rm -f "$cid" >/dev/null
             echo "$headers" | grep -F "connect-src 'self' https://ci_validate.api.example https://ci_validate.supabase.co wss://ci_validate.supabase.co;"
@@ -1129,6 +1136,8 @@ jobs:
             if echo "$headers" | grep -q -F "$other"; then echo "FAIL: both CSP headers"; exit 1; fi
             [ "$report" = 204 ]
             echo "$logs" | grep -F 'csp-report {\"csp-report\":{\"violated-directive\":\"ci-probe\"}}'
+            if echo "$logs" | grep -Eq ' csp-report ?$'; then echo "FAIL: an empty csp-report line"; exit 1; fi
+            [ "$(echo "$logs" | grep -cE '^[0-9][0-9T:+.-]* csp-report ')" = 1 ]
           done
           if docker run --rm --entrypoint sh edubotics-teacher-web-validate -c \
                "grep -r -l -E 'fonts\.(googleapis|gstatic)\.com' /usr/share/nginx/html"; then

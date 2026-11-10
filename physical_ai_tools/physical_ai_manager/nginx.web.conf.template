@@ -103,15 +103,18 @@ server {
 
     # CSP violation reports (the policy's report-uri; POST only, sent by the
     # browser without credentials). Logged with the edubotics_csp_report format
-    # at the top of this file instead of the ordinary access log line. No
-    # add_header here, so the server-level headers apply.
+    # at the top of this file instead of the ordinary access log line, and
+    # ONLY when nginx read a body (`if=$request_body`, VB-06 2026-11-15): a
+    # refused request (403 for another method, 413 too large, 429 over the
+    # rate) and an empty POST log nothing, never an empty „csp-report" line.
+    # No add_header here, so the server-level headers apply.
     location = /csp-report {
         limit_except POST { deny all; }
         limit_req zone=edubotics_csp_report burst=30 nodelay;
         limit_req_status 429;
         client_max_body_size 16k;
         client_body_buffer_size 16k;
-        access_log /var/log/nginx/access.log edubotics_csp_report;
+        access_log /var/log/nginx/access.log edubotics_csp_report if=$request_body;
         proxy_pass http://unix:/tmp/edubotics-csp-report.sock:/;
     }
 

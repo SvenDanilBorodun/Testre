@@ -20,6 +20,52 @@ Curated 2026-07-03; Orange-Pi entries appended 2026-08-02; the rest not re-curat
 
 ---
 
+## Launch to-do: everything left before the public launch (2026-11-15)
+
+The one list. Each item points to where its steps are written; the entries further down hold the detail and the reasons. When an item is done, mark it DONE with the date, or delete it.
+
+**Where things are documented.** `docs/deploy/MERGE-CHECKLIST.md` is the procedure for merging the launch branch (owner pre-steps, order, live checks, rollback). `docs/deploy/DEPLOY.md` holds the per-service steps (§0 approval gate, §1 migrations, §3c login check and admin second factor, §3d legal links and CSP, §4b the retired Jetson). `docs/deploy/PRIVATE-REPOSITORY.md` covers the release channel and the switch to a private repository. `docs/deploy/PIPELINE.md` describes the workflows. `docs/CLAUDE-CHANGELOG.md` holds what was done and why (2026-11-05 … 2026-11-15). This file holds what is open, accepted or unproven.
+
+**A. Before the merge (owner).**
+1. Open the pull request for the launch branch `claude/dazzling-noether-nfk2tt` (it contains #49 unchanged) and close #49 as superseded.
+2. `MERGE-CHECKLIST.md` §1, steps 1–11: the ES256 signing key, TOTP on, the password minimum 8, sign-up off, the self-registered-accounts review, the `releases` storage closed, `postgres` reads `auth.users`, the legal-link variables decided, the update channel's shape, the `production` environment, the admin ready to enrol.
+3. The release channel (`PRIVATE-REPOSITORY.md`): the fine-grained token `RELEASES_REPO_TOKEN` (Contents read/write on the public release repository only) and the Railway `GUI_RELEASE_REPO` / `GUI_DOWNLOAD_URL`.
+4. Delete the GitHub secrets no workflow reads any more (`R2_*`, `MODAL_TOKEN_*`) and revoke those keys at Cloudflare and Modal (`DEPLOY.md`).
+
+**B. The merge (owner).** `MERGE-CHECKLIST.md` §2–§4: merge (W2 and W3 deploy), `/health` shows the new commit and `schema_ok`, enrol the admin's second factor right after W3, run W1 („supabase-migrate" → Run workflow, target `production`; it applies 053–059), then the live checks.
+
+**C. The release (owner, after A and B).**
+1. Bump the four version sites in one commit (`CLAUDE.md` „Deploy"). Suggested: 2.38.0; the camera-station draft #47 then becomes 2.39.0.
+2. Prove the installer still compiles: `release-installer.yml` by hand, with `version_tag` set to the previous release.
+3. The installer changed (German wizard, licence files), so install the built `.exe` twice on a test PC.
+4. No Modal deploy is needed: `training_handler.py`, the training lock and `modal_app.py` are unchanged, and the inference app's two shared files changed only their licence headers.
+5. Tag `vX.Y.Z`. W1 is then a no-op (053–059 already applied in B).
+
+**D. After the release (owner).**
+1. Revoke the retired Jetson's Hugging Face token and delete its three Railway variables (`DEPLOY.md` §4b; the Jetson entry below).
+2. After a quiet week of CSP reports, set `EDUBOTICS_CSP_ENFORCE=1` (`DEPLOY.md` §3d).
+3. Confirm `TRUSTED_PROXY_HOPS` with the curl check (`DEPLOY.md` §3c).
+4. Switch on Dependabot alerts and security updates (the Dependabot entry below).
+5. Choose the GitHub plan, review third-party apps with access, then make the repository private (`PRIVATE-REPOSITORY.md`).
+
+**E. Before the public launch: development work still open.**
+1. **Hash-locked dependencies.** The GUI's `gui/requirements.txt` (only PyInstaller is pinned exactly) and the cloud API's `requirements.txt` (every package pinned `==`, `PyJWT[crypto]` among them, but without `--require-hashes`) install without hash checks. A compromised package index or a re-uploaded file would not be noticed.
+2. **Signed Pi updates.** A Pi installs the tarball `/version` names (`pi_agent_download_url`), checked only against the SHA-256 that `/version` also publishes (`PI_AGENT_SHA256`, written by W6). Whoever controls the Railway variables or the release repository's token can ship code to every Pi. The fix is a signature from an offline key the owner holds, verified by the agent before it installs. It needs the owner's signing key.
+3. **Code-signed Windows installer.** The `.exe` is not signed (supply-chain entry below), and the GUI's updater has the same single trust root as the Pi. It needs a code-signing certificate (owner).
+4. **Rig gates on real hardware.** This branch's Pi login, firewall and key-file gates (SA05-R1, PL-R2, RB-1 below) and the Windows ones need a real Pi and a real Windows PC; every gate further down stays OPEN until someone records a result.
+5. Optional, by owner decision: verification round D's VD-03 … VD-07 (the entry right below).
+
+**F. Before the public launch: owner (legal and accounts).**
+1. Fill the licence placeholders (provider, address, contact) in `LICENSE`, `NOTICE`, the EULA, `THIRD_PARTY_NOTICES.txt` and the installer's `AppCopyright` (the licence entry below).
+2. Write the Impressum, the privacy policy and the terms, then set the three `LEGAL_*_URL` (F-20, the legal-links entry below).
+3. Have a lawyer review the EULA.
+4. Two-factor login and spending limits on every provider account that can change production or spend money: GitHub, Supabase, Railway, RunPod (spend limit about $15/h, `DEPLOY.md` §3b), Modal (alert and limit), Cloudflare, Hugging Face.
+5. Leaked-password protection in Supabase Auth (`DEPLOY.md` §3c).
+
+**G. Open owner decisions.**
+1. Should students get their own buttons to file a deletion request and to download their data export? Today both exist only as API routes (the deletion-request entry below).
+2. Should a confirmed deletion also erase the recordings in the student's OWN Hugging Face namespace, using the student's stored token? Today it does not (same entry).
+
 - **Verification round D (2026-11-15, on `8e8a86bf`) — two findings fixed, five left open by owner decision (option 2: fix only the replay bypass and the checklist wording, record the rest).** The invariants are in `CLAUDE.md` (the account-token bullet; Rule §6's W1 and `release.yml` bullets); the story in `docs/CLAUDE-CHANGELOG.md` 2026-11-15 „verification round D". Fixed: **VD-01** (a captured `enc1:` value replayed once more with the client point negated, `(x, p − y)`; the replay record now keys on the x-coordinate only, `hf_token_crypto.py::RobotKey.decrypt`, `test_hf_token_crypto.py::TestReplay::test_a_negated_client_point_is_the_same_value`) and **VD-02** (`docs/deploy/MERGE-CHECKLIST.md` step 5 called an account invited from the Supabase dashboard „SIGNED ITSELF UP" and „proof: delete it"; it is now listed as `INVITED from the dashboard` for review, proven on a 052 replay with the round-D seed). OPEN, each with its trigger:
   - **VD-03 — `tests/test_deploy_approval_gate.py::MigrationsAreManual` misses four plausible workflow edits** (measured by the round-D verifier's mutations): `needs: [validate, refuse-unsupported-target]` on apply-production (every release would SKIP W1 and report success: `refuse-unsupported-target` is skipped on the good path, and a job whose `needs` was skipped is skipped too), W2 tolerating a failed W1 in `release.yml`, `continue-on-error` on the refuse job's step, and a step-level `if:` on the push step; and an explicit, correct `target: production` passed by `release.yml` fails the test's own negative control. None of these edits exists today. **Trigger:** any edit to `supabase-migrate.yml`'s job graph or to `release.yml`'s `supabase`/`cloud-api` jobs — then extend the test to evaluate `needs` (a skipped need skips the job) and the step-level `if:`s, and accept an explicit `target: production`.
   - **VD-04 — two sentences claim slightly more than is true.** (1) „A release cannot skip W1" holds for every input but one: `release.yml`'s `workflow_dispatch` input `skip_supabase` skips W1 ON PURPOSE (its own description: „use only if no schema change“); it is the owner's lever, not a hole, and is named in `CLAUDE.md`'s `release.yml` bullet. (2) A refused `/csp-report` request whose client sends a Referer containing `csp-report {` makes nginx write an ERROR-log line that also matches a plain search for `csp-report {` (nginx appends the Referer to every error line, measured in the real `nginx:1.27.5-alpine`); a real report line STARTS with the time and `csp-report {` in the access log, so the one-week check reads the access-log lines (`docs/deploy/DEPLOY.md`).

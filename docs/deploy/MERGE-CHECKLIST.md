@@ -90,7 +90,11 @@ both schemas serves, so there is neither a crash window for the old API nor a
 
    (If the editor answers `permission denied` for `audit_log_entries`, write
    `false` in place of each `EXISTS (SELECT 1 FROM auth.audit_log_entries …)`
-   below: the queries then judge as for an empty audit log.)
+   below: the queries then judge as for an empty audit log.) **Measured
+   read-only on production on 2026-11-15: the audit log holds 0 entries.** Both
+   queries then judge as for an empty audit log: (a) shows „not in the audit
+   log" for every admin and teacher, so recognise each one BY NAME, and (b)
+   lists only the hints that do not need the log.
 
    Then (a) every admin and every teacher — recognise each one by name; anyone
    you do not know, or `origin` = `SIGNED ITSELF UP`, is deleted:

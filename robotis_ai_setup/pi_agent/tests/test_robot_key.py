@@ -144,6 +144,107 @@ class TestReadKey(_DirBase):
         self.assertIsNone(robot_key.read_key())
 
 
+class TestReadKeyNeverBlocks(_DirBase):
+    """VC-04 (verification round C): ``read_key`` runs on the agent's request
+    thread, so nothing at the key path may block it. A FIFO hung it forever
+    (``open`` before ``fstat``, no ``O_NONBLOCK``), one leaked thread per
+    ``GET /robot-key``."""
+
+    def path(self):
+        os.makedirs(self.dir, exist_ok=True)
+        return os.path.join(self.dir, "hf_token_key.json")
+
+    def read_bounded(self, seconds=3.0):
+        """``read_key`` on a thread; (finished, result)."""
+        box = {}
+        t = threading.Thread(target=lambda: box.setdefault("r", robot_key.read_key()), daemon=True)
+        t.start()
+        t.join(seconds)
+        return (not t.is_alive()), box.get("r", "unset")
+
+    def test_a_fifo_at_the_key_path_answers_none_at_once(self):
+        fifo = self.path()
+        os.mkfifo(fifo)
+
+        def release():
+            # A read_key that hangs in open() waits for a writer: give it one,
+            # so a failing run does not leave the thread blocked behind.
+            try:
+                fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+                os.close(fd)
+            except OSError:
+                pass
+        self.addCleanup(release)
+        finished, result = self.read_bounded()
+        self.assertTrue(finished, "read_key blocked on a FIFO")
+        self.assertIsNone(result)
+
+    def test_a_fifo_with_a_writer_holding_it_open_answers_none(self):
+        fifo = self.path()
+        os.mkfifo(fifo)
+        reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+        writer = os.open(fifo, os.O_WRONLY)  # a writer that never writes
+        self.addCleanup(os.close, reader)
+        self.addCleanup(os.close, writer)
+        finished, result = self.read_bounded()
+        self.assertTrue(finished, "read_key blocked reading a FIFO")
+        self.assertIsNone(result)
+
+    def test_a_directory_at_the_key_path_answers_none(self):
+        os.makedirs(self.path())
+        finished, result = self.read_bounded()
+        self.assertTrue(finished)
+        self.assertIsNone(result)
+
+    def test_a_symlink_to_a_fifo_answers_none_without_blocking(self):
+        os.makedirs(self.dir, exist_ok=True)
+        fifo = os.path.join(self.root, "fifo")
+        os.mkfifo(fifo)
+        os.symlink(fifo, self.path())
+        self.addCleanup(lambda: os.path.exists(fifo) and os.unlink(fifo))
+        finished, result = self.read_bounded()
+        self.assertTrue(finished)
+        self.assertIsNone(result)
+
+    def test_an_oversized_file_is_refused_before_reading_it(self):
+        # A sparse file of 1 GB: a reader that did not check the size first
+        # would allocate for it.
+        with open(self.path(), "wb") as f:
+            f.truncate(1 << 30)
+        finished, result = self.read_bounded()
+        self.assertTrue(finished)
+        self.assertIsNone(result)
+
+    def test_valid_json_padded_past_the_bound_is_refused(self):
+        raw = json.dumps(_payload()).encode("ascii") + b" " * (robot_key.MAX_FILE_BYTES + 1)
+        self.write(None, raw=raw)
+        self.assertIsNone(robot_key.read_key())
+
+    def test_the_key_is_opened_nonblocking_without_following_links(self):
+        self.write(_payload())
+        seen = []
+        real_open = os.open
+
+        def spy(path, flags, *args):
+            if str(path).endswith("hf_token_key.json"):
+                seen.append(flags)
+            return real_open(path, flags, *args)
+        with patch.object(robot_key.os, "open", spy):
+            self.assertEqual(robot_key.read_key()["kid"], KID)
+        self.assertEqual(len(seen), 1)
+        for name in ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC"):
+            with self.subTest(flag=name):
+                self.assertTrue(seen[0] & getattr(os, name), name)
+
+    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "mknod needs root")
+    def test_a_character_device_at_the_key_path_answers_none(self):
+        import stat as _stat
+        os.mknod(self.path(), 0o600 | _stat.S_IFCHR, os.makedev(1, 3))  # /dev/null's numbers
+        finished, result = self.read_bounded()
+        self.assertTrue(finished)
+        self.assertIsNone(result)
+
+
 class TestEnsureDir(_DirBase):
     def test_creates_the_missing_directory_0755(self):
         self.assertTrue(robot_key.ensure_dir())

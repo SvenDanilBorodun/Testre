@@ -24,9 +24,10 @@ a ciphertext for the node's real key.
 ``ensure_dir`` creates the directory before every robot-tier ``up``
 (``docker_manager._compose_up``): the host's ``/run`` is a tmpfs, so a reboot
 empties it, and a fielded Pi that self-updated has no such directory until the
-new agent makes it. ``read_key`` never trusts the file blindly: a regular file
-(no symlink), at most ``MAX_FILE_BYTES``, the exact schema, and a key id that is
-the SHA-256 of the point it names. Stdlib only; nothing here logs a key.
+new agent makes it. ``read_key`` never trusts the file blindly and never
+blocks: opened without following a link and non-blocking, a regular file only,
+at most ``MAX_FILE_BYTES`` read with a bound, the exact schema, and a key id that
+is the SHA-256 of the point it names. Stdlib only; nothing here logs a key.
 """
 
 from __future__ import annotations
@@ -118,20 +119,48 @@ def parse_key(raw: bytes) -> Optional[dict]:
     return {"enc": ENC_NAME, "kid": kid, "pub": pub}
 
 
+def _open_flags() -> int:
+    """``O_RDONLY`` plus every guard the platform has: never follow a link
+    (``O_NOFOLLOW``), never wait for a writer or a device (``O_NONBLOCK``: a
+    FIFO at the key path once hung the request thread in ``open``, VC-04), and
+    never leak the descriptor into a child (``O_CLOEXEC``)."""
+    flags = os.O_RDONLY
+    for name in ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC"):
+        flags |= getattr(os, name, 0)
+    return flags
+
+
+def _read_bounded(fd: int, limit: int) -> bytes:
+    """At most ``limit`` bytes from ``fd``, looping over short reads."""
+    chunks = []
+    total = 0
+    while total < limit:
+        chunk = os.read(fd, limit - total)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
 def read_key() -> Optional[dict]:
     """The node's current public key, or None (no file yet: the robot tier is
-    down or the node is still starting; or a file that fails ``parse_key``)."""
+    down or the node is still starting; or a file that fails ``parse_key``).
+
+    Never blocks (verification round C, VC-04): the path is opened without
+    following a link and non-blocking, and only a REGULAR file of at most
+    ``MAX_FILE_BYTES`` is read, with a bound. A FIFO, a device, a socket or a
+    directory answers None at once."""
     path = key_file()
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, flags)
+        fd = os.open(path, _open_flags())
     except OSError:
         return None
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_FILE_BYTES:
             return None
-        raw = os.read(fd, MAX_FILE_BYTES + 1)
+        raw = _read_bounded(fd, MAX_FILE_BYTES + 1)
     except OSError:
         return None
     finally:

@@ -229,7 +229,8 @@ class FilesAndOrder(unittest.TestCase):
                                                               "20261110120000_054_advisor_cleanup.sql",
                                                               "20261111120000_055_users_identity_guard.sql",
                                                               "20261113120000_057_request_role_default_deny.sql",
-                                                              "20261113130000_058_refuse_self_signup.sql"])
+                                                              "20261113130000_058_refuse_self_signup.sql",
+                                                              "20261113140000_059_hf_reserved_namespaces.sql"])
 
     def test_one_transaction_each(self):
         for p in (M052, R052):

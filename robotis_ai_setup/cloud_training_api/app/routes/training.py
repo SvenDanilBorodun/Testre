@@ -30,6 +30,7 @@ from app.services.modal_client import (
     cancel_training_job,
     get_job_status,
 )
+from app.services.hf_identity import HF_ORG
 from app.services.policy_profile import apply_training_tuning, get_policy_profile
 from app.services.supabase_client import get_supabase
 from app.services.workgroups import resolve_visible_workgroup_ids
@@ -274,7 +275,7 @@ def _generate_model_name(
     if output_folder_name:
         parts.append(_sanitize_name(output_folder_name))
     parts.extend([model_type_safe, dataset_base, suffix])
-    return "EduBotics-Solutions/" + "-".join(parts)
+    return f"{HF_ORG}/" + "-".join(parts)
 
 
 def cap_hours() -> int:

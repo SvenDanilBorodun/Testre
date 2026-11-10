@@ -26,6 +26,7 @@ from app.services import credit_texts_de as credit_texts
 from app.services import deletion_requests
 from app.services import passwords
 from app.services import provisioning
+from app.services.hf_identity import is_org_repo, namespace_of, proven_hf_username
 from app.services.supabase_client import get_supabase
 from app.services.usernames import synthetic_email, validate_username
 from app.validators.workflow import validate_blockly_json
@@ -808,36 +809,61 @@ def patch_student(
     return _student_summary(row)
 
 
+# SA-08 (2026-11-13): why a repo the student's rows name is NOT erased. Each is
+# reported to the teacher (never silently dropped): the endpoint must not claim
+# an erasure it did not perform.
+_KEEP_OWN_NAMESPACE_DE = (
+    "Nicht gelöscht: liegt im eigenen Hugging-Face-Konto der Schülerin bzw. des "
+    "Schülers. Die Plattform löscht dort nichts – bitte dort löschen lassen."
+)
+_KEEP_NOT_PROVEN_DE = "Nicht gelöscht: gehört nicht nachweislich zu diesem Konto."
+_KEEP_ORG_DATASET_DE = (
+    "Nicht gelöscht: Datensätze der EduBotics-Organisation werden nie "
+    "automatisch gelöscht."
+)
+_KEEP_SHARED_MODEL_DE = (
+    "Nicht gelöscht: dieses Modell gehört auch zu einem anderen Training oder "
+    "Datensatz."
+)
+
+
 def _enumerate_student_hf_artifacts(
     student_id: str,
-) -> tuple[list[tuple[str, str]], bool]:
-    """READ-ONLY: which HF repos would an erasure delete, and can we tell?
+) -> tuple[list[tuple[str, str, str | None]], bool]:
+    """READ-ONLY: which HF repos an erasure deletes, which it keeps, and can we tell?
 
     Split out of ``_delete_student_hf_artifacts`` on 2026-08-31 so that
     ``delete_student`` can ask the question BEFORE it deletes the auth user.
-    This touches ``trainings`` and ``datasets`` and nothing else — no
-    HuggingFace call, no write — so running it first is free, and running it
-    on a student who then turns out not to be deletable costs nothing.
+    It reads ``user_hf_credentials``, ``trainings`` and ``datasets`` and nothing
+    else — no HuggingFace call, no write — so running it first is free.
 
-    Returns ``(candidates, registry_readable)``.
+    SA-08 (2026-11-13): erasure reaches only what is PROVABLY the student's, and
+    the platform ``HF_TOKEN`` acts only inside the platform's organisation:
 
-    ``candidates`` are deduplicated ``(repo_id, repo_type)`` pairs in erasure
-    order — registry datasets FIRST, because those are the ones the old
-    trainings-only enumeration could never see (a recording never used for
-    training has no ``trainings`` row at all, which is the whole point of a
-    GDPR erasure on a student who only ever recorded). Workgroup-shared
-    datasets are already removed (migration 011: siblings still depend on
-    them, and the teacher can delete those by hand from HF Hub).
+      * DELETED (the only repos ever handed to ``delete_repo``): model repos in
+        the organisation (``hf_identity.HF_ORG``) that the platform published
+        for THIS student's own trainings — the ``model_name`` of a ``trainings``
+        row of the student without a ``workgroup_id`` — unless any OTHER user's
+        ``trainings`` row or any ``datasets`` row names the same repo;
+      * KEPT and reported with ``_KEEP_OWN_NAMESPACE_DE``: repos in the student's
+        own PROVEN namespace (the account Hugging Face reported for their stored
+        token). The platform token may not act on a student's namespace, and
+        does not own it anyway;
+      * KEPT and reported: a dataset in the organisation (never deleted), a
+        shared organisation model, and every repo in any other namespace —
+        among them everything a self-asserted or forged ``users.hf_username``
+        (``EduBotics-Solutions`` included) could have pulled into the registry.
 
-    ``registry_readable`` is False when the ``datasets`` query failed. That is
-    not merely "we enumerated less" — the registry is the ONLY source of the
-    shared-repo skip list, so with it unreadable every dataset named by a
-    surviving ``trainings`` row looks unshared. Measured 2026-08-08: answering
-    that query 503 made a group-shared repo observably reach ``delete_repo``.
-    Both callers fail closed on it — ``delete_student`` refuses the whole
-    request with 503 while the student still exists, and
-    ``_delete_student_hf_artifacts`` refuses the dataset half and names each
-    repo it refused.
+    Returns ``(entries, registry_readable)``. ``entries`` are deduplicated
+    ``(repo_id, repo_type, keep_reason)`` triples in erasure order (registry
+    datasets first, then trainings-derived repos); ``keep_reason`` is None for a
+    repo to delete. Workgroup-shared datasets are left out entirely (migration
+    011: siblings still depend on them).
+
+    ``registry_readable`` is False when any of the reads failed — the
+    ``datasets`` registry is the only source of the shared-repo skip list, the
+    proven name decides what is the student's, and the cross-references decide
+    whether a model is the student's alone. Both callers fail closed on it.
     """
     supabase = get_supabase()
     rows = (
@@ -847,11 +873,10 @@ def _enumerate_student_hf_artifacts(
         .execute()
     ).data or []
 
-    # Build the set of HF repos that are shared with a group. We must
-    # NOT delete these because group siblings still need them.
     shared_dataset_repos: set[str] = set()
     registry_repos: list[str] = []
     registry_readable = True
+    proven: str | None = None
     try:
         ds_rows = (
             supabase.table("datasets")
@@ -867,13 +892,12 @@ def _enumerate_student_hf_artifacts(
                 shared_dataset_repos.add(repo)
             else:
                 registry_repos.append(repo)
+        proven = proven_hf_username(supabase, student_id)
     except Exception as e:
         registry_readable = False
-        logger.warning("Dataset registry query failed during HF cleanup: %s", e)
+        logger.warning("Dataset registry query failed during HF cleanup: %s", type(e).__name__)
 
-    ordered: list[tuple[str, str]] = [
-        (repo, "dataset") for repo in registry_repos
-    ]
+    ordered: list[tuple[str, str]] = [(repo, "dataset") for repo in registry_repos]
     for row in rows:
         # Skip trainings that are part of a shared workgroup pool.
         if row.get("workgroup_id"):
@@ -881,7 +905,33 @@ def _enumerate_student_hf_artifacts(
         ordered.append((row.get("model_name"), "model"))
         ordered.append((row.get("dataset_name"), "dataset"))
 
-    candidates: list[tuple[str, str]] = []
+    # The organisation models this student's own trainings name: deletable only
+    # when nobody else's training and no datasets row names them too.
+    org_models = sorted({r for r, t in ordered if t == "model" and r and is_org_repo(r)})
+    shared_models: set[str] = set()
+    if org_models:
+        try:
+            others = (
+                supabase.table("trainings")
+                .select("user_id, model_name")
+                .in_("model_name", org_models)
+                .execute()
+            ).data or []
+            shared_models |= {o.get("model_name") for o in others
+                              if str(o.get("user_id")) != str(student_id)}
+            named = (
+                supabase.table("datasets")
+                .select("hf_repo_id")
+                .in_("hf_repo_id", org_models)
+                .execute()
+            ).data or []
+            shared_models |= {n.get("hf_repo_id") for n in named}
+        except Exception as e:
+            registry_readable = False
+            logger.warning("Model cross-reference query failed during HF cleanup: %s", type(e).__name__)
+
+    proven_l = proven.lower() if proven else None
+    entries: list[tuple[str, str, str | None]] = []
     seen: set[tuple[str, str]] = set()
     for repo_id, repo_type in ordered:
         if not repo_id or (repo_id, repo_type) in seen:
@@ -893,15 +943,34 @@ def _enumerate_student_hf_artifacts(
                 repo_id,
             )
             continue
-        candidates.append((repo_id, repo_type))
-    return candidates, registry_readable
+        owner = (namespace_of(repo_id) or "").lower()
+        if is_org_repo(repo_id):
+            if repo_type != "model":
+                keep = _KEEP_ORG_DATASET_DE
+            elif repo_id in shared_models or not registry_readable:
+                keep = _KEEP_SHARED_MODEL_DE
+            else:
+                keep = None
+        elif proven_l and owner == proven_l:
+            keep = _KEEP_OWN_NAMESPACE_DE
+        else:
+            keep = _KEEP_NOT_PROVEN_DE
+        entries.append((repo_id, repo_type, keep))
+    return entries, registry_readable
 
 
 def _delete_student_hf_artifacts(
     student_id: str,
-    enumeration: tuple[list[tuple[str, str]], bool] | None = None,
+    enumeration: tuple[list[tuple[str, str, str | None]], bool] | None = None,
 ) -> tuple[list[dict], int]:
     """Best-effort deletion of HuggingFace repos owned by the student.
+
+    SA-08 (2026-11-13): only an organisation MODEL the platform published for
+    this student's own trainings is ever handed to ``delete_repo`` (the
+    enumeration decides; a belt below refuses anything else). Every other repo
+    the student's rows name — their own namespace, the organisation's datasets,
+    any other namespace — is reported in ``failures`` with its German reason and
+    no Hub call. The text below is the history of this function.
 
     GDPR Art. 17: when a student account is deleted, the personal data
     they generated must be erased. The Modal worker uploads trained
@@ -984,6 +1053,13 @@ def _delete_student_hf_artifacts(
             ),
         })
 
+    # SA-08: every repo the enumeration KEEPS is reported, without any Hub call
+    # (the platform token never acts outside the organisation).
+    for repo_id, repo_type, keep in candidates:
+        if keep is not None:
+            failures.append({"repo_id": repo_id, "repo_type": repo_type, "reason": keep})
+    candidates = [(r, t, k) for r, t, k in candidates if k is None]
+
     if not candidates:
         # Nothing enumerable. That is HONEST only when the student genuinely
         # registered nothing: a recording is discoverable here only if it
@@ -1001,26 +1077,11 @@ def _delete_student_hf_artifacts(
 
     api = HfApi(token=hf_token)
     attempted = 0
-    for repo_id, repo_type in candidates:
-        if repo_type == "dataset" and not registry_readable:
-            # Fail CLOSED, and NAME the repo. The generic "?" entry above says
-            # why; without this per-repo entry the teacher is warned in a way
-            # that never mentions the datasets, so a sibling group's data would
-            # go missing invisibly. Models are unaffected: a pooled training is
-            # already skipped by its own row's workgroup_id, which does not come
-            # from the datasets query.
-            logger.warning(
-                "Refusing to delete HF dataset %s — shared-repo skip list "
-                "unavailable (datasets registry unreadable)",
-                repo_id,
-            )
-            failures.append({
-                "repo_id": repo_id, "repo_type": repo_type,
-                "reason": (
-                    "Nicht gelöscht: unbekannt, ob dieser Datensatz mit einer "
-                    "Arbeitsgruppe geteilt ist."
-                ),
-            })
+    for repo_id, repo_type, _keep in candidates:
+        if repo_type != "model" or not is_org_repo(repo_id):
+            # Belt to the enumeration: the platform token deletes only an
+            # organisation MODEL (SA-08). Never reached through the enumerator.
+            failures.append({"repo_id": repo_id, "repo_type": repo_type, "reason": _KEEP_NOT_PROVEN_DE})
             continue
         # Counted BEFORE the call: a repo that was already gone
         # (RepositoryNotFoundError) and a repo that 403s were both genuinely
@@ -1411,7 +1472,10 @@ def list_training_checkpoints(
         steps = cached[1]
     else:
         try:
-            files = HfApi(token=os.environ.get("HF_TOKEN") or None).list_repo_files(
+            # SA-08: the platform token only on an organisation repo; any other
+            # model name (a legacy row) is read anonymously.
+            platform = (os.environ.get("HF_TOKEN") or None) if is_org_repo(model_name) else False
+            files = HfApi(token=platform).list_repo_files(
                 model_name, repo_type="model")
         except Exception:
             raise HTTPException(

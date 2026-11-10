@@ -28,7 +28,9 @@ Conventions that are easy to undo by accident (see CLAUDE.md, Cloud stack):
 
 from __future__ import annotations
 
+import hmac
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -129,12 +131,22 @@ def _decrypt_own(uid: str, row: dict) -> str:
     return token
 
 
+# An upstream example account, the platform's organisation or the platform
+# token's own account (SA-08): never a student's.
+_RESERVED_ACCOUNT_DE = "Dieses Konto ist nicht zulässig (System- oder Beispielkonto)."
+
+
 def _hub_checks(token: str, profile, *, stored: bool = False):
     """Ask the Hub who owns `token` and apply the account rules.
 
     Returns (name, role, account_changed). `stored` only picks the sentence for
     a Hub refusal (a token saved earlier vs. one just pasted).
     """
+    # SA-08: the platform's own token is never a student's, whether or not its
+    # account name is known to this process yet (platform_identity).
+    platform = (os.environ.get("HF_TOKEN") or "").strip()
+    if platform and hmac.compare_digest(token.encode("utf-8"), platform.encode("utf-8")):
+        raise HTTPException(status_code=422, detail=_RESERVED_ACCOUNT_DE)
     try:
         info = hf_credentials.validate_with_hub(token)
     except hf_credentials.HfCredentialError as exc:
@@ -163,10 +175,7 @@ def _hub_checks(token: str, profile, *, stored: bool = False):
     if name is None:
         raise HTTPException(status_code=422, detail="Der Kontoname dieses Tokens ist ungültig.")
     if is_denied_author(name):
-        raise HTTPException(
-            status_code=422,
-            detail="Dieses Konto ist nicht zulässig (System- oder Beispielkonto).",
-        )
+        raise HTTPException(status_code=422, detail=_RESERVED_ACCOUNT_DE)
     # Deny-only: every role other than "read" (an unknown one included) passes,
     # except a fine-grained token whose scopes PROVABLY grant no write to the
     # student's own repositories (hf_credentials.fine_grained_repo_write: an
@@ -245,6 +254,10 @@ def _store(
     except Exception as exc:  # noqa: BLE001 - classified below; never log str(exc)
         if "P0045" in str(exc):
             raise _changed_meanwhile() from None
+        if "P0059" in str(exc):
+            # Migration 059's floor: a reserved namespace this process did not
+            # know yet (the platform account recorded by another boot).
+            raise HTTPException(status_code=422, detail=_RESERVED_ACCOUNT_DE) from None
         if "P0002" in str(exc) or "Benutzer nicht gefunden" in str(exc):
             raise HTTPException(status_code=404, detail="Benutzerkonto nicht gefunden.") from None
         logger.error("hf-token store failed user=%s: %s", uid, type(exc).__name__)

@@ -91,6 +91,7 @@ class Migration055(unittest.TestCase):
         self.assertEqual(names[names.index(M055.name) + 1:], [
             '20261113120000_057_request_role_default_deny.sql',
             '20261113130000_058_refuse_self_signup.sql',
+            '20261113140000_059_hf_reserved_namespaces.sql',
         ])
 
     def test_the_changes_in_one_transaction(self):

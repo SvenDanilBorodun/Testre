@@ -210,6 +210,7 @@ class TeacherConfirm(unittest.TestCase):
         db = _db()
         db.tables["datasets"] = []
         db.tables["trainings"] = []
+        db.tables["user_hf_credentials"] = []  # SA-08: the proven name is read too
         with _Patched(db), patch.dict("os.environ", {"HF_TOKEN": ""}):
             res = teacherroute.confirm_deletion_request("anna", teacher={"id": T1})
         self.assertEqual(db.deleted_users, ["anna"])

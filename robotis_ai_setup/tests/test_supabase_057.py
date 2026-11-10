@@ -104,7 +104,8 @@ class Files(unittest.TestCase):
         self.assertGreater(M057.name, '20261111120000_055_users_identity_guard.sql')
         # 056 (admin aal2) is written in parallel and sorts between 055 and 057.
         self.assertEqual([n for n in names[names.index(M057.name) + 1:]],
-                         ['20261113130000_058_refuse_self_signup.sql'])
+                         ['20261113130000_058_refuse_self_signup.sql',
+                          '20261113140000_059_hf_reserved_namespaces.sql'])
 
     def test_one_transaction_each(self):
         for path in (M057, R057):

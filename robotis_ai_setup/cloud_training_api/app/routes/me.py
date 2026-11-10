@@ -2,14 +2,14 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from app.auth import get_current_profile, get_user_profile
-from app.services import deletion_requests, hf_credentials
-from app.services.hf_identity import is_denied_author, normalize_hf_username
+from app.auth import get_current_profile
+from app.services import deletion_requests
 from app.services.modal_client import cancel_training_job
 from app.services.supabase_client import get_supabase
 from app.services.workgroups import resolve_visible_workgroup_ids
@@ -76,9 +76,10 @@ class MyProfile(BaseModel):
     username: str | None
     full_name: str | None
     # Migration 030: the student's linked HuggingFace username (Benutzer-ID).
-    # The anchor for dataset discovery. Since migration 042 it is set from the
-    # stored token's whoami (PROVEN) when the student saves a token; PATCH /me
-    # stays as the self-asserted path for an account without a stored token.
+    # Since migration 042 it is set from the stored token's whoami (PROVEN)
+    # when the student saves a token, and since SA-08 (2026-11-13) only then:
+    # PATCH /me refuses every body, and discovery and deletion act only on the
+    # proven name (user_hf_credentials.hf_username).
     hf_username: str | None = None
     classroom_id: str | None
     workgroup_id: str | None = None
@@ -164,96 +165,37 @@ def read_me(profile=Depends(get_current_profile)):
     return _build_my_profile(profile)
 
 
-class HfUsernameUpdate(BaseModel):
-    hf_username: str = Field(..., min_length=1, max_length=96)
+# SA-08 (2026-11-13): the Hugging Face account name is set ONLY by proof — the
+# token save (PUT /me/hf-token: the Hub's whoami of the student's own token,
+# store_user_hf_credential). The sentence every refusal of PATCH /me answers.
+HF_USERNAME_BY_TOKEN_ONLY_DE = (
+    "Deine Hugging-Face-Benutzer-ID wird nur über dein Hugging-Face-Token "
+    "festgelegt. Speichere dein Token auf der Startseite – die Benutzer-ID "
+    "übernimmt EduBotics dann von Hugging Face."
+)
 
 
-def _proven_name_conflict() -> HTTPException:
-    return HTTPException(
-        status_code=409,
-        detail=(
-            "Dein Hugging-Face-Konto ist über dein gespeichertes Token "
-            "festgelegt. Entferne zuerst das Token auf der Startseite, wenn "
-            "du ein anderes Konto verwenden möchtest."
-        ),
-    )
+@router.patch("")
+def update_me(body: Any = Body(default=None), profile=Depends(get_current_profile)):
+    """Refused: ``users.hf_username`` is written only by proof (SA-08).
 
-
-@router.patch("", response_model=MyProfile)
-def update_me(
-    body: HfUsernameUpdate, profile=Depends(get_current_profile)
-):
-    """Link (or update) the caller's HuggingFace username (Benutzer-ID).
-
-    Self-only: the row is keyed to the JWT-verified profile id, never to a
-    body field (Rule §4). Since migration 042 the React app no longer calls
-    this automatically: the account name comes from the stored token's
-    whoami (routes/hf_token.py). This route remains for old clients and for an
-    account WITHOUT a stored token, and answers 409 once one exists (the name
-    is proven then and must not drift from the token the robot uploads with).
-    The `has_credential` check below is the friendly early answer; the
-    guarantee is the database's (migration 044's users trigger raises P0044
-    for any hf_username change that differs from a stored credential's name),
-    so a token saved between the check and the UPDATE still ends in the 409.
-    The value is the SOLE anchor the dataset_sweep + POST /datasets/sync
-    use to discover this student's datasets, so it is format-validated and
-    deny-listed against upstream/system namespaces.
+    Until 2026-11-13 this route let a student SELF-ASSERT a Hugging Face
+    username when no token was stored, and that name drove POST /datasets/sync,
+    the dataset sweep and a teacher's deletion of the student's repos with the
+    platform token — so ``hf_username = "EduBotics-Solutions"`` listed the
+    organisation's private datasets and a later deletion could have erased them.
+    The only writer is now the token save (PUT /me/hf-token), which sets the name
+    Hugging Face reports for the student's own token in the same transaction
+    (store_user_hf_credential); the service role's administrative paths keep
+    theirs. Every body is refused with one German 400, a change and a clearing
+    alike: no shipped client sends this request (the SPA's patchMyHfUsername is
+    deprecated and unused, the teacher web, the Orange Pi agent and the Windows
+    GUI never call it), discovery and deletion act only on the PROVEN name, so a
+    name no credential backs drives nothing and leaving it costs nothing, and a
+    route that never writes cannot be raced or mis-validated. The body is read
+    untyped so FastAPI never answers its English 422 with the input echoed.
     """
-    cleaned = normalize_hf_username(body.hf_username)
-    if cleaned is None:
-        raise HTTPException(
-            status_code=400, detail="Ungültige HuggingFace-Benutzer-ID."
-        )
-    if is_denied_author(cleaned):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Diese Benutzer-ID ist nicht zulässig (System- oder "
-                "Beispielkonto)."
-            ),
-        )
-    supabase = get_supabase()
-    # Migration 042: once a stored token has PROVEN the account name, the
-    # self-asserted PATCH must not overwrite it (the name and the token the
-    # robot uploads with would drift apart). The student removes the token
-    # first. `has_credential` reads only through `.select().eq().execute()`.
-    try:
-        has_token = hf_credentials.has_credential(supabase, profile["id"])
-    except Exception as exc:
-        logger.error(
-            "hf credential lookup failed in PATCH /me for user=%s: %s",
-            profile["id"], type(exc).__name__,
-        )
-        raise HTTPException(
-            status_code=500,
-            detail="Benutzer-ID konnte nicht gespeichert werden.",
-        ) from None
-    if has_token:
-        raise _proven_name_conflict()
-    try:
-        result = (
-            supabase.table("users")
-            .update({"hf_username": cleaned})
-            .eq("id", profile["id"])
-            .execute()
-        )
-        if not result.data:
-            raise RuntimeError("update returned no rows")
-    except Exception as exc:
-        if "P0044" in str(exc):
-            # A token was stored between the check above and this UPDATE.
-            raise _proven_name_conflict() from None
-        logger.error(
-            "hf_username update failed for user=%s: %s", profile["id"], exc
-        )
-        raise HTTPException(
-            status_code=500,
-            detail="Benutzer-ID konnte nicht gespeichert werden.",
-        ) from exc
-    # Re-fetch so the response reflects the persisted value alongside the rest
-    # of the profile (group name, credits, quota).
-    fresh = get_user_profile(str(profile["id"]))
-    return _build_my_profile(fresh)
+    raise HTTPException(status_code=400, detail=HF_USERNAME_BY_TOKEN_ONLY_DE)
 
 
 @router.get("/export")

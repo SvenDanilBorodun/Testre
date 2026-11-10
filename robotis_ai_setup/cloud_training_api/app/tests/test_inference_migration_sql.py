@@ -114,6 +114,7 @@ class TestMigration048Shape(unittest.TestCase):
             "20261111120000_055_users_identity_guard.sql",
             "20261113120000_057_request_role_default_deny.sql",
             "20261113130000_058_refuse_self_signup.sql",
+            "20261113140000_059_hf_reserved_namespaces.sql",
         ])
         self.assertTrue(os.path.isfile(ROLLBACK))
         self.assertTrue(os.path.isfile(ASSERTIONS))

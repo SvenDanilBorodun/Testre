@@ -377,7 +377,8 @@ def validate_with_hub(token: str) -> dict:
 
 
 def has_credential(supabase, user_id: str) -> bool:
-    """True when `user_id` has a stored credential. Only `.select().eq().execute()`
-    so the PATCH /me test doubles (which implement exactly those) keep working."""
+    """True when `user_id` has a stored credential. Only `.select().eq().execute()`,
+    so the simplest table doubles work. (PATCH /me, its first caller, refuses
+    every body since SA-08, 2026-11-13.)"""
     res = supabase.table("user_hf_credentials").select("user_id").eq("user_id", str(user_id)).execute()
     return bool(getattr(res, "data", None))

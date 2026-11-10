@@ -69,7 +69,7 @@ def build_app(user, *, limiter=None):
                        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
                        allow_headers=["Content-Type", "Authorization"])
     app.add_middleware(edge.AnyOriginBearerCorsMiddleware,
-                       paths=_main_literal("_ANY_ORIGIN_BEARER_PATHS"))
+                       routes=_main_literal("_ANY_ORIGIN_BEARER_ROUTES"), listed_origins=[ALLOWED])
     return app
 
 
@@ -196,9 +196,13 @@ class Cors(Base):
         self.assertEqual(r.headers.get("access-control-allow-origin"), "*")
 
     def test_a_preflight_for_another_method_is_refused(self):
+        # Not on the list: it falls through to CORSMiddleware, which refuses an
+        # unlisted origin (and no credentials header reaches that origin).
         pre = self.client.options("/pi/tickets", headers={
             "Origin": PI_ORIGIN, "Access-Control-Request-Method": "DELETE"})
-        self.assertEqual(pre.status_code, 405)
+        self.assertEqual(pre.status_code, 400)
+        self.assertIsNone(pre.headers.get("access-control-allow-origin"))
+        self.assertIsNone(pre.headers.get("access-control-allow-credentials"))
 
     def test_the_redeem_and_every_other_path_keep_the_normal_cors(self):
         pre = self.client.options("/pi/tickets/redeem", headers={
@@ -212,8 +216,10 @@ class Cors(Base):
     def test_main_mounts_it_outermost(self):
         with open(os.path.join(APP, "main.py"), encoding="utf-8") as fh:
             src = fh.read()
-        self.assertEqual(_main_literal("_ANY_ORIGIN_BEARER_PATHS"), ("/pi/tickets",))
-        mount = src.index("app.add_middleware(_edge.AnyOriginBearerCorsMiddleware, paths=_ANY_ORIGIN_BEARER_PATHS)")
+        routes = _main_literal("_ANY_ORIGIN_BEARER_ROUTES")
+        self.assertIn(("POST", "/pi/tickets"), routes)
+        self.assertNotIn(("POST", "/pi/tickets/redeem"), routes)  # the Pi agent's call, not a browser's
+        mount = src.index("    _edge.AnyOriginBearerCorsMiddleware,\n    routes=_ANY_ORIGIN_BEARER_ROUTES,")
         self.assertGreater(mount, src.index("    CORSMiddleware,"))
         self.assertIn("app.include_router(pi_tickets_router)", src)
 

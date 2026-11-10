@@ -896,11 +896,66 @@ _PER_USER_RATE_LIMIT_PREFIXES = (
 # /version carries the legal links, and a Pi's SPA runs at a LAN address
 # ALLOWED_ORIGINS cannot list. Only public, token-free GET routes belong here.
 _PUBLIC_READ_PATHS = ("/version",)
-# Bearer-authenticated paths ANY browser origin may call, without credentials
-# (SA-06, 2026-11-13): a Pi's SPA mints its login ticket from its LAN origin.
-# Only a route authenticated by an Authorization header that reads no cookie
-# belongs here (app/edge.py::AnyOriginBearerCorsMiddleware).
-_ANY_ORIGIN_BEARER_PATHS = ("/pi/tickets",)
+# Bearer-authenticated routes ANY browser origin may call, without credentials
+# (app/edge.py::AnyOriginBearerCorsMiddleware): exactly the cloud calls the
+# student SPA makes, because a Pi serves that SPA at a LAN origin
+# (http://192.168.x.y, http://edubotics.local) ALLOWED_ORIGINS cannot list
+# (SA-06, 2026-11-13: the login ticket; 2026-11-14: every student route — before,
+# each of them failed its CORS preflight on a Pi). (method, FastAPI path
+# template) pairs, each matched WHOLE, never a prefix. Only a route
+# authenticated by an Authorization header belongs here (the API reads no
+# cookie anywhere); never a /teacher, /admin or /trainings/worker route (the
+# middleware refuses to construct with one). /version is public and has its own
+# rule above. robotis_ai_setup/tests/test_pi_cloud_cors_lockstep.py holds this
+# list equal to the student build's calls and to the declared routes.
+_ANY_ORIGIN_BEARER_ROUTES = (
+    # The account (routes/me.py, routes/hf_token.py)
+    ("GET", "/me"),
+    ("GET", "/me/group-members"),
+    ("POST", "/me/delete/withdraw"),
+    ("GET", "/me/tutorial-progress"),
+    ("PATCH", "/me/tutorial-progress/{tutorial_id}"),
+    ("GET", "/me/hf-token"),
+    ("PUT", "/me/hf-token"),
+    ("DELETE", "/me/hf-token"),
+    ("POST", "/me/hf-token/reveal"),
+    ("POST", "/me/hf-token/verify"),
+    # The Orange Pi's one-time login ticket (routes/pi_tickets.py, SA-06)
+    ("POST", "/pi/tickets"),
+    # Training (routes/training.py, routes/policies.py)
+    ("GET", "/policies"),
+    ("GET", "/trainings/quota"),
+    ("GET", "/trainings/list"),
+    ("POST", "/trainings/start"),
+    ("POST", "/trainings/cancel"),
+    ("POST", "/trainings/continue"),
+    ("GET", "/trainings/{training_id}/stop-preview"),
+    # Datasets (routes/datasets.py)
+    ("GET", "/datasets"),
+    ("POST", "/datasets"),
+    ("POST", "/datasets/sync"),
+    # Roboter Studio (routes/workflows.py)
+    ("GET", "/workflows"),
+    ("POST", "/workflows"),
+    ("GET", "/workflows/{workflow_id}"),
+    ("PATCH", "/workflows/{workflow_id}"),
+    ("POST", "/workflows/{workflow_id}/clone"),
+    ("POST", "/workflows/{workflow_id}/submit"),
+    ("GET", "/workflows/{workflow_id}/versions"),
+    ("POST", "/workflows/{workflow_id}/versions/{version_id}/restore"),
+    ("GET", "/workflows/{workflow_id}/trajectories"),
+    ("POST", "/workflows/{workflow_id}/trajectories"),
+    ("GET", "/workflows/{workflow_id}/trajectories/by-name/{name}"),
+    ("GET", "/workflows/{workflow_id}/trajectories/{trajectory_id}"),
+    ("PATCH", "/workflows/{workflow_id}/trajectories/{trajectory_id}"),
+    ("DELETE", "/workflows/{workflow_id}/trajectories/{trajectory_id}"),
+    # Cloud-Inferenz (routes/inference.py)
+    ("POST", "/inference/sessions"),
+    ("POST", "/inference/sessions/{session_id}/arm"),
+    ("POST", "/inference/sessions/{session_id}/heartbeat"),
+    ("POST", "/inference/sessions/{session_id}/end"),
+    ("GET", "/inference/usage"),
+)
 
 _MAX_WRITE_BODY_BYTES = 384 * 1024
 _BODY_SIZE_LIMITED_PREFIXES: tuple[tuple[str, str], ...] = (
@@ -913,8 +968,9 @@ _BODY_SIZE_LIMITED_PREFIXES: tuple[tuple[str, str], ...] = (
 
 
 # Middleware ordering: Starlette wraps in reverse of add_middleware calls
-# (last-added becomes outermost): CORS → failed-authentication cap → body
-# limits → rate limits → public-read CORS → the app. CORS outermost so a
+# (last-added becomes outermost): any-origin bearer CORS → CORS →
+# failed-authentication cap → body limits → rate limits → public-read CORS →
+# the app. CORS outermost so a
 # 429/411/413 still carries Access-Control-* headers (the browser would
 # otherwise see a generic CORS failure); the failed-authentication cap next, so
 # an address over its budget is refused before anything else runs — every
@@ -943,8 +999,14 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
-# Outermost: CORSMiddleware refuses an unlisted origin's preflight itself.
-app.add_middleware(_edge.AnyOriginBearerCorsMiddleware, paths=_ANY_ORIGIN_BEARER_PATHS)
+# Outermost: CORSMiddleware refuses an unlisted origin's preflight itself. A
+# listed origin (and a request without Origin) passes through untouched; no
+# answer to an unlisted origin carries Access-Control-Allow-Credentials.
+app.add_middleware(
+    _edge.AnyOriginBearerCorsMiddleware,
+    routes=_ANY_ORIGIN_BEARER_ROUTES,
+    listed_origins=allowed_origins,
+)
 
 
 # An auth refusal the client must tell apart by more than its status (the

@@ -37,9 +37,13 @@ tests read them from its source — and passes them in.
   of ``/version`` (2026-11-11): its legal links are read by every SPA, a Pi's
   at a LAN address ``ALLOWED_ORIGINS`` cannot list. An allowed origin still
   gets its own echo from ``CORSMiddleware``.
-* ``AnyOriginBearerCorsMiddleware`` — any origin may call ``POST /pi/tickets``
-  without credentials (SA-06, 2026-11-13): a Pi's SPA mints its one-time login
-  ticket from its LAN origin. Mounted OUTSIDE ``CORSMiddleware``.
+* ``AnyOriginBearerCorsMiddleware`` — any origin may call the student routes
+  of ``main.py::_ANY_ORIGIN_BEARER_ROUTES`` without credentials (SA-06,
+  2026-11-13: ``POST /pi/tickets``; 2026-11-14: every bearer route a Pi's SPA
+  calls from its LAN origin): an exact (method, path template) list, never a
+  prefix, teacher, admin and worker routes refused at construction; and no
+  answer to an origin ``ALLOWED_ORIGINS`` does not list carries
+  ``Access-Control-Allow-Credentials``. Mounted OUTSIDE ``CORSMiddleware``.
 * ``client_ip_from`` — the ``TRUSTED_PROXY_HOPS``-th address from the RIGHT of
   ``X-Forwarded-For`` (default 1: the address Railway's edge added), never the
   left-most, which the client writes itself. Fewer entries than hops → the
@@ -302,60 +306,149 @@ class PublicReadCorsMiddleware:
         await self.app(scope, receive, send_with_star)
 
 
+# ------------------------------------------------------------------ any-origin bearer CORS
+
+# The methods a route of the any-origin list may carry, and the only request
+# headers its preflight admits (the SPA sends exactly these two).
+ANY_ORIGIN_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
+ANY_ORIGIN_REQUEST_HEADERS = frozenset({"authorization", "content-type"})
+# Never on the any-origin list, whatever main.py says: the teacher web and the
+# admin dashboard run at an origin ALLOWED_ORIGINS lists, and a managed
+# worker's routes are called by a GPU host, never by a browser.
+ANY_ORIGIN_FORBIDDEN_PREFIXES = ("/teacher", "/admin", "/trainings/worker")
+
+_ROUTE_PARAM_RE = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def compile_route_template(template: str) -> re.Pattern:
+    """A FastAPI path template (``/workflows/{workflow_id}/clone``) as a regex
+    that matches exactly that route's paths: every literal segment verbatim,
+    every ``{param}`` exactly ONE non-empty segment (Starlette's default
+    ``str`` convertor, which is what every route here declares)."""
+    if not isinstance(template, str) or not template.startswith("/") or "//" in template:
+        raise ValueError(f"not a path template: {template!r}")
+    if template != "/" and template.endswith("/"):
+        raise ValueError(f"a trailing slash never matches a route here: {template!r}")
+    pieces = _ROUTE_PARAM_RE.split(template)
+    if any("{" in p or "}" in p for p in pieces):
+        raise ValueError(f"malformed path parameter in {template!r}")
+    params = _ROUTE_PARAM_RE.findall(template)
+    pattern = "".join(re.escape(lit) + ("[^/]+" if i < len(params) else "") for i, lit in enumerate(pieces))
+    return re.compile(pattern)
+
+
+def _is_forbidden_any_origin(template: str) -> bool:
+    return any(template == p or template.startswith(p + "/") for p in ANY_ORIGIN_FORBIDDEN_PREFIXES)
+
+
 class AnyOriginBearerCorsMiddleware:
-    """CORS for a few BEARER-authenticated paths any origin may call (SA-06,
-    2026-11-13; today exactly ``POST /pi/tickets``).
+    """CORS for the BEARER-authenticated routes a Pi's SPA calls (SA-06,
+    2026-11-13: ``POST /pi/tickets``; 2026-11-14: every student route of
+    ``main.py::_ANY_ORIGIN_BEARER_ROUTES``), and no credentials for any origin
+    ``ALLOWED_ORIGINS`` does not list.
 
-    A Pi's SPA runs at whatever LAN address the school gave the Pi, which
-    ``ALLOWED_ORIGINS`` cannot list, and it must mint its login ticket here over
-    HTTPS so the Supabase token never crosses the LAN. The route is
-    authenticated by an ``Authorization`` header — which a browser never sends
-    on its own, so a foreign page holds nothing to send — and reads no cookie,
-    so any origin may call it WITHOUT credentials: ``Access-Control-Allow-Origin:
-    *`` and no ``Access-Control-Allow-Credentials``.
+    A Pi's SPA runs at whatever LAN address the school gave the Pi
+    (``http://192.168.x.y``, ``http://edubotics.local``), which
+    ``ALLOWED_ORIGINS`` cannot list, and calls the cloud API from there. The
+    listed routes are authenticated by an ``Authorization`` header — which a
+    browser never sends on its own, so a foreign page holds nothing to send —
+    and the API reads no cookie anywhere, so any origin may call them WITHOUT
+    credentials: ``Access-Control-Allow-Origin: *`` and no
+    ``Access-Control-Allow-Credentials``.
 
-    Mounted OUTSIDE ``CORSMiddleware`` (added after it): that middleware answers
-    every preflight itself and refuses an unlisted origin with a 400 before any
-    inner layer runs. A plain ASGI middleware. A preflight of a listed path is
-    answered here; a real request passes through every layer (rate limits, the
-    failed-authentication cap, the route) and only its response gains the star
-    when nothing set an origin yet."""
+    The list is EXACT: ``(method, path template)`` pairs, each template matched
+    whole (``compile_route_template``), never a prefix that could swallow a
+    teacher route; a template under ``ANY_ORIGIN_FORBIDDEN_PREFIXES`` refuses to
+    construct.
+
+    * A request WITHOUT ``Origin`` (not a browser's CORS request) and a request
+      from a LISTED origin pass through untouched: ``CORSMiddleware``'s rules
+      (the echo and its credentials header) apply as before.
+    * For any other origin, a preflight of a listed (method, path) whose
+      requested headers are at most ``Authorization`` and ``Content-Type`` is
+      answered HERE with the star (``CORSMiddleware`` would refuse it with a
+      400 before any inner layer ran); every other preflight falls through to
+      ``CORSMiddleware``, which refuses an unlisted origin.
+    * A real request passes through every layer (the failed-authentication cap,
+      the body and rate limits, the route); a listed (method, path) gains the
+      star on its response when nothing set an origin yet, and NO response to
+      an unlisted origin carries ``Access-Control-Allow-Credentials``
+      (``CORSMiddleware`` adds it to every answer, its 400 included).
+
+    Mounted OUTSIDE ``CORSMiddleware`` (added after it). A plain ASGI
+    middleware (no task per request)."""
 
     MAX_AGE_S = "600"
+    ALLOW_HEADERS = "Authorization, Content-Type"
 
-    def __init__(self, app, *, paths, methods=("POST",)):
+    def __init__(self, app, *, routes, listed_origins=()):
         self.app = app
-        self.paths = frozenset(paths)
-        self.methods = tuple(m.upper() for m in methods)
+        compiled = []
+        for method, template in routes:
+            verb = str(method).upper()
+            if verb not in ANY_ORIGIN_METHODS:
+                raise ValueError(f"method {method!r} cannot be on the any-origin list")
+            if _is_forbidden_any_origin(template):
+                raise ValueError(f"{template!r} must keep the strict ALLOWED_ORIGINS rule")
+            compiled.append((verb, compile_route_template(template)))
+        if not compiled:
+            raise ValueError("the any-origin list is empty")
+        self.routes = tuple(compiled)
+        self.listed_origins = frozenset(listed_origins)
+
+    def methods_for(self, path: str) -> tuple[str, ...]:
+        """The listed methods of ``path``, in a stable order."""
+        found = {verb for verb, rx in self.routes if rx.fullmatch(path)}
+        return tuple(sorted(found))
+
+    def allows(self, method: str, path: str) -> bool:
+        return str(method).upper() in self.methods_for(path)
 
     async def __call__(self, scope, receive, send):
-        if scope.get("type") != "http" or scope.get("path") not in self.paths:
+        if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
         request_headers = {
             k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []
         }
-        if scope.get("method") == "OPTIONS" and "access-control-request-method" in request_headers:
-            allowed = request_headers["access-control-request-method"].strip().upper() in self.methods
-            preflight = Response(
-                status_code=204 if allowed else 405,
-                headers={
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Methods": ", ".join(self.methods + ("OPTIONS",)),
-                    "Access-Control-Allow-Headers": "Authorization, Content-Type",
-                    "Access-Control-Max-Age": self.MAX_AGE_S,
-                },
-            )
-            await preflight(scope, receive, send)
+        origin = request_headers.get("origin")
+        if origin is None or origin in self.listed_origins:
+            await self.app(scope, receive, send)
             return
+        path = scope.get("path") or ""
+        methods = self.methods_for(path)
+        if scope.get("method") == "OPTIONS" and "access-control-request-method" in request_headers:
+            requested = request_headers["access-control-request-method"].strip().upper()
+            asked = {
+                h.strip().lower()
+                for h in request_headers.get("access-control-request-headers", "").split(",")
+                if h.strip()
+            }
+            if requested in methods and asked <= ANY_ORIGIN_REQUEST_HEADERS:
+                preflight = Response(
+                    status_code=204,
+                    headers={
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Methods": ", ".join(methods + ("OPTIONS",)),
+                        "Access-Control-Allow-Headers": self.ALLOW_HEADERS,
+                        "Access-Control-Max-Age": self.MAX_AGE_S,
+                        "Vary": "Origin",
+                    },
+                )
+                await preflight(scope, receive, send)
+                return
+            listed = False  # a refused preflight: CORSMiddleware answers it
+        else:
+            listed = scope.get("method") in methods
 
-        async def send_with_star(message):
+        async def send_for_unlisted_origin(message):
             if message.get("type") == "http.response.start":
                 headers = MutableHeaders(scope=message)
-                if "access-control-allow-origin" not in headers:
+                if "access-control-allow-credentials" in headers:
+                    del headers["Access-Control-Allow-Credentials"]
+                if listed and "access-control-allow-origin" not in headers:
                     headers["Access-Control-Allow-Origin"] = "*"
-                    if "access-control-allow-credentials" in headers:
-                        del headers["Access-Control-Allow-Credentials"]
+                    headers.add_vary_header("Origin")
             await send(message)
 
-        await self.app(scope, receive, send_with_star)
+        await self.app(scope, receive, send_for_unlisted_origin)

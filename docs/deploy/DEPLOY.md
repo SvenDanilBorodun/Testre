@@ -1,6 +1,8 @@
 # EduBotics — Deploy
 
-> ⚠️ **DEPRECATED / HISTORICAL (pre-GHCR, pre-golden-order).** This runbook predates the GHCR-primary migration and the release.yml W1→W6 golden order. Some steps here (e.g. manual `docker push nettername/*:latest`) **contradict CLAUDE.md Rule §6** — CI owns the student-facing images; they are never pushed from a workstation. For the current, authoritative process see **CLAUDE.md → "Six non-negotiable rules → §6 CI/CD deploys"** + `.github/workflows/`. Kept for historical context only.
+> ⚠️ **PARTLY HISTORICAL.** The undated sections of this runbook (the golden-order list below, §1's generic steps, §2, §3's manual push, §4's Docker Hub pushes, §5 and the closing checklists) predate the GHCR-primary migration and the release.yml W1→W6 golden order, and some of their steps (e.g. manual `docker push nettername/*:latest`) **contradict CLAUDE.md Rule §6** — CI owns the student-facing images; they are never pushed from a workstation. For the authoritative process see **CLAUDE.md → "Six non-negotiable rules → §6 CI/CD deploys"** + `.github/workflows/`.
+>
+> **Current and binding (owner steps):** the DATED sections — §1's notes on migrations 053, 055 and 056, §3b (managed training), §3c (the login check, the admin's second factor, the edge) and §3d (legal links, CSP) — and **[`MERGE-CHECKLIST.md`](MERGE-CHECKLIST.md): merging to `main` is a production deploy** (W1, W2 and W3 fire by path, without a tag); its steps come BEFORE the merge, not before a release.
 
 One-page reference. Pair with `APPLY_MIGRATIONS.sql` / `ROLLBACK_MIGRATIONS.sql` in this folder.
 
@@ -93,6 +95,25 @@ unchanged). It changes no API-visible shape and touches no row.
   „Löschanfragen" button lists their students' requests; the GDPR deadline is one
   month from the request; „Löschung ausführen" deletes the account for good;
   recordings in a student's own Hugging Face account must be deleted there.
+
+### Migration 056 — an admin's RLS reads need a two-factor session (2026-11-12, wave-A fix VA-04)
+
+`20261112120000_056_admin_requires_aal2.sql` makes `public.rls_is_admin()`
+require the JWT claim `aal = aal2` and routes the nine inline admin branches of
+the RLS read policies through it (`ALTER POLICY`, every other branch unchanged).
+An admin with only a password then reads nothing but their own row through
+PostgREST, as the API already refused them. No API-visible shape, no row touched.
+
+- **Deploy order:** W1, either side of W2/W3. The API runs as the service role
+  (RLS dormant) and the teacher web reads nothing from the database directly, so
+  no page changes. See `MERGE-CHECKLIST.md` for the merge that carries it.
+- **After W1:** the W1 log shows „056 self-check passed";
+  `SELECT pg_get_functiondef('public.rls_is_admin()'::regprocedure)` names `aal2`.
+- **Rollback:** `rollback/20261112120000_056_admin_requires_aal2_rollback.sql`
+  (031's helper and the nine predicates verbatim). No API rollback is needed. It
+  re-opens the password-only admin read.
+- Hand-run assertions: `supabase/tests/056_admin_requires_aal2_assertions.sql`
+  (36 PASS on a local stack; 20 at 055; never against the linked project).
 
 ---
 
@@ -235,7 +256,9 @@ required variable. Two optional Railway variables, both unset by default:
   `X-Forwarded-For` (default 1, Railway's edge; 1–5, anything else stops the
   boot). Change it only if the check in step 5 below says so.
 
-**Owner steps, in this order:**
+**Owner steps, in this order.** „Before the deploy" means BEFORE THE MERGE to
+`main`: W2 deploys the API on the push that merges (see `MERGE-CHECKLIST.md`, which also covers the W2 → W3
+window and the first-use TOTP enrolment).
 
 1. **Before the deploy: the project's CURRENT signing key must be the ES256
    key.** Supabase dashboard → Project Settings → JWT Keys. If the ES256 key is

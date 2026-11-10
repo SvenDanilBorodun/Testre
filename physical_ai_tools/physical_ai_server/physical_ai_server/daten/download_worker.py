@@ -29,7 +29,9 @@ that died (a node respawn — this process runs in its own session and would
 outlive it with the previous student's token), prints its result and exits
 (``token_changed`` / ``orphaned``); its tmp is removed by a small cleaner process
 once this one has ended (``_remove_after_exit``: the download's own threads write
-into the tmp until the exit, so an rmtree from inside raced them). The watch
+into the tmp until the exit, so an rmtree from inside raced them), under the
+dataset's stage lock and only while the tmp is still the one this worker left
+(VA-06: the next download of the same dataset writes into the same path). The watch
 never cuts a swap in half: the swap holds the exit guard, and a watch that fires
 then waits for it and exits without a result of its own once the swap's result
 is out.
@@ -54,13 +56,26 @@ _exit_guard = threading.Lock()          # held by the swap, by the result line a
 _finished = threading.Event()
 _held = {'swap': False}
 CLEANUP_WAIT_S = 30.0                   # the cleaner's bound on waiting for this process to end
+CLEANUP_LOCK_WAIT_S = 1.0               # = hub_sync.STAGE_LOCK_WAIT_S (lockstep-tested)
+_TMP_SUFFIXES = ('.tmp_sync', '.tmp_keep', '.tmp_base')   # = hub_sync.tmp_path_of's suffixes
 
-# The cleaner (_remove_after_exit), run as `python -I -S -c _CLEANER <pid> <tmp> <wait>`:
-# it waits until process <pid> has ended (gone, or a zombie: no thread of it runs any
-# more), then removes <tmp>. Stdlib only; it never reads the token.
+# The cleaner (_remove_after_exit), run as
+# `python -I -S -c _CLEANER <pid> <tmp> <wait> <lock> <lock_wait>`: it waits until
+# process <pid> has ended (gone, or a zombie: no thread of it runs any more), notes
+# which directory <tmp> is (device, inode, ctime), then takes the dataset's stage
+# lock <lock> the way hub_sync.stage_lock does (flock, bounded wait, the file still
+# at the path) and removes <tmp> under it — only if <tmp> is still that directory
+# (VA-06, 2026-11-12). The worker's own lock went with its exit; a NEXT download of
+# the same dataset may start right then and writes into the same deterministic
+# path: while it holds the lock the cleaner waits and then leaves, and a tmp it
+# re-created (a „Beide behalten" copy outlives its stage lock-free) is another
+# directory, which the cleaner leaves alone. What it leaves, the next download of
+# the dataset and boot recovery (hub_sync.recover) remove. Stdlib only; it never
+# reads the token.
 _CLEANER = r"""
-import os, shutil, sys, time
+import fcntl, os, shutil, sys, time
 pid, tmp, wait_s = int(sys.argv[1]), sys.argv[2], float(sys.argv[3])
+lock_path, lock_wait_s = sys.argv[4], float(sys.argv[5])
 
 def running():
     try:
@@ -79,10 +94,48 @@ def running():
         pass
     return True
 
+def identity():
+    try:
+        st = os.lstat(tmp)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_ctime_ns)
+
+def stage_lock():
+    deadline = time.monotonic() + lock_wait_s
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        except OSError:
+            return None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.02)
+            continue
+        try:
+            own, at = os.fstat(fd), os.stat(lock_path)
+            if (own.st_dev, own.st_ino) == (at.st_dev, at.st_ino):
+                return fd
+        except OSError:
+            pass
+        os.close(fd)
+
 deadline = time.monotonic() + wait_s
 while running() and time.monotonic() < deadline:
     time.sleep(0.005)
-shutil.rmtree(tmp, ignore_errors=True)
+left = identity()
+if left is not None:
+    fd = stage_lock()
+    if fd is not None:
+        try:
+            if identity() == left:
+                shutil.rmtree(tmp, ignore_errors=True)
+        finally:
+            os.close(fd)
 """
 
 
@@ -155,6 +208,18 @@ def _watch(req, tmp, parent, store, poll_s=POLL_S):
                 os._exit(3)
 
 
+def _lock_path_of_tmp(tmp):
+    """The stage lock of the dataset a download tmp belongs to
+    (``dataset_sync.lock_path`` of ``<target>`` for ``<target>.tmp_*``)."""
+    tmp = Path(tmp)
+    name = tmp.name
+    for suffix in _TMP_SUFFIXES:
+        if name.endswith(suffix):
+            name = name[:-len(suffix)]
+            break
+    return _sibling('data_processing', 'dataset_sync').lock_path(tmp.parent / name)
+
+
 def _remove_after_exit(tmp):
     """Have the tmp removed once nothing can write into it any more. Until this
     process exits, the download's own threads keep writing into the tmp
@@ -163,11 +228,14 @@ def _remove_after_exit(tmp):
     (the dead-parent test, 1 of 30 runs beside four CPU burners; with eight
     writers in a loop, 200 of 200 rmtrees, and still 182 of 200 when repeated
     until the tmp was gone). So a cleaner process of its own session waits until
-    this one has ended, then removes the tmp. If it cannot be started, the
-    in-process rmtree is the fallback; the next download of the dataset and boot
-    recovery (hub_sync.recover) remove whatever is left."""
+    this one has ended, then removes the tmp under the dataset's stage lock, and
+    only while it is still the directory this worker left (VA-06). If it cannot
+    be started, the in-process rmtree is the fallback; the next download of the
+    dataset and boot recovery (hub_sync.recover) remove whatever is left."""
     try:
-        subprocess.Popen([sys.executable, '-I', '-S', '-c', _CLEANER, str(os.getpid()), str(tmp), str(CLEANUP_WAIT_S)],
+        lock = _lock_path_of_tmp(tmp)
+        subprocess.Popen([sys.executable, '-I', '-S', '-c', _CLEANER, str(os.getpid()), str(tmp),
+                          str(CLEANUP_WAIT_S), str(lock), str(CLEANUP_LOCK_WAIT_S)],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True, close_fds=True)
     except Exception:  # noqa: BLE001 — the fallback, never a reason not to exit

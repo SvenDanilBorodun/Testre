@@ -52,6 +52,7 @@ pytest.importorskip('pyarrow')
 from daten_timeout import per_test_time_limit  # noqa: E402,F401 — V1-3: a hang fails within the limit
 
 from physical_ai_server.daten import node_service as NS  # noqa: E402
+from physical_ai_server.daten import download_worker as W  # noqa: E402
 from physical_ai_server.data_processing import dataset_sync as S  # noqa: E402
 from physical_ai_server.data_processing import hf_token_store  # noqa: E402
 from physical_ai_server.data_processing import hub_sync as HS  # noqa: E402
@@ -457,6 +458,112 @@ def test_the_tmp_goes_although_the_writers_run_until_the_exit(tmp_path):
             time.sleep(0.02)
         assert not tmp.exists(), f'trial {n}: the tmp survived the writers'
 
+
+
+# ── VA-06 (2026-11-12): the cleaner never removes the NEXT download's tmp ─────
+
+def _dead_pid():
+    """The pid of a process that has ended and been reaped."""
+    p = subprocess.Popen([sys.executable, '-c', 'pass'])
+    p.wait()
+    return p.pid
+
+
+def _fill(tmp, marker):
+    shutil.rmtree(tmp, ignore_errors=True)
+    (tmp / 'data').mkdir(parents=True)
+    (tmp / 'data' / marker).write_bytes(b'x' * 1024)
+
+
+def _cleaner(pid, tmp, lock_wait_s=W.CLEANUP_LOCK_WAIT_S):
+    lock = S.lock_path(Path(str(tmp)[:-len('.tmp_sync')]))
+    return subprocess.Popen([sys.executable, '-I', '-S', '-c', W._CLEANER, str(pid), str(tmp), '30',
+                             str(lock), str(lock_wait_s)])
+
+
+def test_the_cleaner_waits_for_the_stage_lock_and_leaves_a_download_that_holds_it(tmp_path):
+    target = tmp_path / 'lena-schmidt' / 'omx_f_a'
+    target.parent.mkdir(parents=True)
+    tmp = HS.tmp_path_of(target, 'sync')
+    _fill(tmp, 'a-left-this')
+    fd = HS.stage_lock(target, wait_s=0)                    # download B started right after A ended ...
+    try:
+        _fill(tmp, 'b-is-writing')                          # ... and writes into the same path
+        t0 = time.monotonic()
+        assert _cleaner(_dead_pid(), tmp).wait(timeout=30) == 0
+        assert time.monotonic() - t0 >= W.CLEANUP_LOCK_WAIT_S * 0.9   # it waited, then left
+    finally:
+        HS.release_lock(fd)
+    assert (tmp / 'data' / 'b-is-writing').exists()
+
+
+def test_the_cleaner_leaves_a_tmp_that_was_made_anew_while_it_waited(tmp_path):
+    """A „Beide behalten" copy outlives its download stage WITHOUT the lock: a B
+    that re-created the tmp and released the lock inside the cleaner's wait must
+    not lose it."""
+    target = tmp_path / 'lena-schmidt' / 'omx_f_a'
+    target.parent.mkdir(parents=True)
+    tmp = HS.tmp_path_of(target, 'sync')
+    _fill(tmp, 'a-left-this')
+    fd = HS.stage_lock(target, wait_s=0)
+    try:
+        proc = _cleaner(_dead_pid(), tmp, lock_wait_s=10)
+        time.sleep(0.5)                                     # the cleaner has seen A's tmp, waits for the lock
+        _fill(tmp, 'b-made-this')                           # B removes A's leftover and writes its own
+    finally:
+        HS.release_lock(fd)                                 # B's stage ends, its tmp stays (keep/base)
+    assert proc.wait(timeout=30) == 0
+    assert (tmp / 'data' / 'b-made-this').exists()
+
+
+def test_the_cleaner_removes_the_leftover_when_the_lock_is_free(tmp_path):
+    target = tmp_path / 'lena-schmidt' / 'omx_f_a'
+    target.parent.mkdir(parents=True)
+    tmp = HS.tmp_path_of(target, 'sync')
+    _fill(tmp, 'a-left-this')
+    assert _cleaner(_dead_pid(), tmp).wait(timeout=30) == 0
+    assert not tmp.exists()
+
+
+A_THEN_EXIT = textwrap.dedent('''
+    """TEST-ONLY: download A's exit path exactly as the watch calls it."""
+    import os, sys
+    from pathlib import Path
+    from physical_ai_server.daten import download_worker as W
+    W._remove_after_exit(Path(sys.argv[1]))
+    os._exit(3)
+''')
+
+
+def test_a_cleaner_from_download_a_never_removes_download_bs_tmp(tmp_path):
+    """End to end through _remove_after_exit: A ends, B already holds the
+    dataset's stage lock and writes into the same deterministic tmp. Before
+    VA-06 the cleaner removed B's tmp the moment A had ended."""
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(PKG_PARENT), os.environ.get('PYTHONPATH', '')]))
+    for mode in ('new', 'keep', 'base'):
+        target = tmp_path / mode / 'lena-schmidt' / 'omx_f_a'
+        target.parent.mkdir(parents=True)
+        tmp = HS.tmp_path_of(target, mode)
+        _fill(tmp, 'a-left-this')
+        fd = HS.stage_lock(target, wait_s=0)
+        try:
+            _fill(tmp, 'b-is-writing')
+            r = subprocess.run([sys.executable, '-c', A_THEN_EXIT, str(tmp)], env=env, capture_output=True,
+                               text=True, timeout=60)
+            assert r.returncode == 3, r.stderr[-2000:]
+            time.sleep(W.CLEANUP_LOCK_WAIT_S + 1.0)         # the cleaner gave up on the lock
+        finally:
+            HS.release_lock(fd)
+        time.sleep(0.5)
+        assert (tmp / 'data' / 'b-is-writing').exists(), mode
+
+
+def test_the_cleaners_lock_is_the_stage_lock():
+    assert W.CLEANUP_LOCK_WAIT_S == HS.STAGE_LOCK_WAIT_S
+    for mode in HS.DOWNLOAD_MODES:
+        target = Path('/data/lena-schmidt/omx_f_a')
+        assert W._lock_path_of_tmp(HS.tmp_path_of(target, mode)) == S.lock_path(target), mode
+    assert set(W._TMP_SUFFIXES) == {HS.tmp_path_of(Path('x'), m).name[1:] for m in HS.DOWNLOAD_MODES}
 
 # ── the supervisor (DatenService's DownloadProcess) ──────────────────────────
 

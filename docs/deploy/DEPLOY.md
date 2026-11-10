@@ -2,7 +2,7 @@
 
 > ⚠️ **PARTLY HISTORICAL.** The undated sections of this runbook (the golden-order list below, §1's generic steps, §2, §3's manual push, §4's Docker Hub pushes, §5 and the closing checklists) predate the GHCR-primary migration and the release.yml W1→W6 golden order, and some of their steps (e.g. manual `docker push nettername/*:latest`) **contradict CLAUDE.md Rule §6** — CI owns the student-facing images; they are never pushed from a workstation. For the authoritative process see **CLAUDE.md → "Six non-negotiable rules → §6 CI/CD deploys"** + `.github/workflows/`.
 >
-> **Current and binding (owner steps):** the DATED sections — §1's notes on migrations 053, 055 and 056, §3b (managed training), §3c (the login check, the admin's second factor, the edge) and §3d (legal links, CSP) — and **[`MERGE-CHECKLIST.md`](MERGE-CHECKLIST.md): merging to `main` is a production deploy** (W1, W2 and W3 fire by path, without a tag); its steps come BEFORE the merge, not before a release.
+> **Current and binding (owner steps):** the DATED sections — §1's notes on migrations 053, 055 and 056, §3b (managed training), §3c (the login check, the admin's second factor, the edge) and §3d (legal links, CSP) — and **[`MERGE-CHECKLIST.md`](MERGE-CHECKLIST.md): merging to `main` is a production deploy** (W2 and W3 fire by path, without a tag; W1, the migrations, never runs on a merge and is run by hand after W2's `/health`, owner decision 2026-11-15); its steps come BEFORE the merge, not before a release.
 
 One-page reference. Pair with `APPLY_MIGRATIONS.sql` / `ROLLBACK_MIGRATIONS.sql` in this folder.
 
@@ -24,18 +24,20 @@ Skip step 1 → Railway boot fails. Skip step 2 → student training spawns fail
 
 ---
 
-## 0. The production approval gate (security audit SA-13, 2026-11-13)
+## 0. The production approval gate (security audit SA-13, 2026-11-13) — and why W1 is manual (2026-11-15)
 
-Six jobs that change production run only after a person approves them: `supabase-migrate.yml` **apply-production** and **rollback** (W1), `railway-deploy-cloud-api.yml` **deploy** (W2), `railway-deploy-teacher-web.yml` **deploy** (W3), and in `release.yml` **trainer-image-var** (W2b) and **publish-gui-version** (W6). Each names `environment: production`; the gate is the environment's protection rule, which the workflow cannot create.
+Six jobs that change production name `environment: production`: `supabase-migrate.yml` **apply-production** and **rollback** (W1), `railway-deploy-cloud-api.yml` **deploy** (W2), `railway-deploy-teacher-web.yml` **deploy** (W3), and in `release.yml` **trainer-image-var** (W2b) and **publish-gui-version** (W6). The gate is the environment's protection rule (required reviewers), which the workflow cannot create.
 
-**Owner, once, before the next push to `main` that touches a migration or the cloud API** (GitHub → the repository → Settings → Environments):
+**The gate exists only on a public repository or with GitHub Enterprise.** GitHub's documentation („Deployments and environments"): on the Free, Pro and Team plans, required reviewers are only available for PUBLIC repositories. On a private repository under those plans the environment is created anyway and approves nothing: every job above runs at once (verification round B, VB-02). Therefore, by owner decision (2026-11-15), **W1 has no push trigger**: a merge to `main` deploys W2 and W3 and never touches the database; the migrations run only from a release tag (`release.yml` calls W1 first) or the manual „Run workflow" button (`workflow_dispatch`, apply or `rollback_to`). `robotis_ai_setup/tests/test_deploy_approval_gate.py::MigrationsAreManual` fails if a push trigger comes back, and apply-production accepts the event `push` only for a `refs/tags/v…` ref. W2 and W3 on a merge stay ungated on such a plan (accepted).
+
+**Owner, once** (GitHub → the repository → Settings → Environments) — useful on a public repository or with Enterprise, harmless otherwise:
 
 1. **New environment** named exactly `production` (if a run created it already, open it: GitHub creates a missing environment on first use, WITHOUT any protection — that is the state in which the gate approves nothing).
-2. **Required reviewers**: add yourself (and a second maintainer if there is one); tick **Prevent self-review** only when a second reviewer exists, or every run waits forever.
+2. **Required reviewers**: add yourself (and a second maintainer if there is one); tick **Prevent self-review** only when a second reviewer exists, or every run waits forever. (Not offered on a private repository under Free, Pro or Team.)
 3. **Deployment branches and tags**: *Selected branches and tags* → add `main` and the tag pattern `v*` (W1 also runs on a `workflow_dispatch` from `main`).
 4. Leave the repository secrets where they are: the jobs still read `SUPABASE_*`, `RAILWAY_TOKEN` from the repository. (Moving them into the environment is a later, optional hardening: then no job without the gate can read them.)
 
-What it costs: a tagged release now stops five times for approval (W1, W2b, W2, W3, W6), and a plain push to `main` stops once per deploy workflow it triggers (W1 for a migration, W2 for the cloud API, W3 for the teacher web); a waiting job fails after 30 days. A run nobody approves deploys nothing; reject it to end it. The health gates and the build jobs need no approval.
+What it costs where the gate exists: a tagged release stops five times for approval (W1, W2b, W2, W3, W6), and a plain push to `main` stops once per deploy workflow it triggers (W2 for the cloud API, W3 for the teacher web); a waiting job fails after 30 days. A run nobody approves deploys nothing; reject it to end it. The health gates and the build jobs need no approval. Without the gate, a merge's migrations still wait for a person: the owner presses „Run workflow" (`MERGE-CHECKLIST.md`).
 
 ---
 
@@ -67,12 +69,14 @@ and `public.inference_runs.jetson_id` (the table, its rows — old
 `jetsons` row and every `jetson_id` value is lost; the rollback restores the
 schema, not the data.
 
-- **Deploy order (W1 → W2, unchanged).** The API of the same release probes no
-  Jetson object, so it boots with or without 053. The OLDER API still serving
-  between W1 and W2 does not: a restart in that window fails its schema probe
-  until W2 deploys; it logs a failed `sweep_jetson_locks` every minute; and a
-  Cloud-Inferenz run that ends in that window gets no teacher history row (the
-  old session sweep still sends `jetson_id`). Keep the window short.
+- **Deploy order: W2 FIRST, then W1 by hand** (this release, verification
+  round B; `MERGE-CHECKLIST.md`). The API of the same release probes no Jetson
+  object, so it boots with or without 053 (measured on a 052 database:
+  `schema_ok: true`). The OLDER API does not: on a 053 database it exits at
+  start-up (measured), it would log a failed `sweep_jetson_locks` every minute,
+  and a Cloud-Inferenz run ending meanwhile would get no teacher history row.
+  W1 before W2 therefore risks a full API outage whenever Railway restarts the
+  old pod; a merge no longer runs W1 at all (section 0).
 - **Rollback, in THIS order** (the reverse of the general rule above):
   `rollback/20261109120000_053_retire_jetson_rollback.sql` FIRST (the API of
   this release boots on either schema), THEN Railway back to the older release
@@ -88,7 +92,8 @@ TRUNCATE, REFERENCES and TRIGGER on `public.users` from `anon` and
 own profile" and keeps 044's guard (rule 1 on the whole row, rule 2 P0044
 unchanged). It changes no API-visible shape and touches no row.
 
-- **Deploy order (W1 → W2, either order is safe).** 055 lands with W1; the API
+- **Deploy order (either order is safe for 055 itself; this release runs W2
+  first for 053's and 058's sake).** 055 lands with W1; the API
   of the same release (the deletion-request routes, the complete export,
   `/me/delete/withdraw`) with W2, the teacher web with W3, the student SPA with
   W4. The API writes `users` only with the service role, so an OLDER API works on
@@ -145,14 +150,17 @@ namespace. None changes an API-visible shape.
   upload to releases" and the bucket `releases` (or make it private) and review
   its objects. 057 does it itself when the migrating role may; when it may not,
   057 stops and changes nothing, naming this step. Switch off sign-up
-  (Authentication → Sign In / Providers) and create the `production`
-  environment with required reviewers (section 0).
-- **Deploy order:** W1 (057, 058, 059) → W2 (the API of the same release:
-  the provisioning marker, PATCH /me refuses, anonymous discovery, the reserved
-  namespaces, the pinned `/version`). **058 needs the new API**: an older API's
-  `create_user` sends no marker, so between W1 and W2 a teacher's „Schüler
-  anlegen" (and an admin's new teacher) answers 500 and is simply repeated after
-  W2 — release outside lessons, or deploy the API first. For the same reason an
+  (Authentication → Sign In / Providers), delete the accounts that registered
+  themselves, check that `postgres` may read `auth.users` (058's self-check
+  needs it) and create the `production` environment (section 0; it approves
+  nothing on a private repository under Free, Pro or Team). The queries are in
+  `MERGE-CHECKLIST.md` section 1.
+- **Deploy order: W2 (the API of the same release: the provisioning marker,
+  PATCH /me refuses, anonymous discovery, the reserved namespaces, the pinned
+  `/version`) → W1 (057, 058, 059) by hand.** **058 needs the new API**: an
+  older API's `create_user` sends no marker, so with 058 applied before W2 a
+  teacher's „Schüler anlegen" (and an admin's new teacher) answers 500 until W2.
+  W2 first removes that window. For the same reason an
   API ROLLBACK below this release needs the 058 rollback first. Otherwise an
   OLDER API on the new database works (it is service-role only), except its
   PATCH /me with an organisation name (the database refuses it, P0059 → a 500)
@@ -168,7 +176,9 @@ namespace. None changes an API-visible shape.
   (`rollback/20261113140000_059_hf_reserved_namespaces_rollback.sql`,
   `…_058_refuse_self_signup_rollback.sql`, `…_057_request_role_default_deny_rollback.sql`).
   Each RE-OPENS what it closed; 057's restores neither the storage policy nor
-  `pg_stat_statements`. No API rollback is needed for any of them.
+  `pg_stat_statements`. No API rollback is needed for any of them. An API
+  rollback BELOW this release needs every rollback down to 053's first
+  (059 → 053, newest first): the older API cannot boot on a database with 053.
 - Hand-run assertions: `supabase/tests/057_…` (50 PASS), `058_…` (14 PASS + one
   expected ERROR), `059_…` (13 PASS), on a local stack only. 057 breaks 049's
   T3, 052's T2h and 055's T5a by design.
@@ -375,7 +385,10 @@ password would need.
 
 **Rollback:** `AUTH_VERIFY_MODE=remote` restores the per-request check (and the
 old hashed-token rate-limit key) without a code rollback. A code rollback to
-the previous API needs nothing else: the teacher web's gate then only adds the
+the previous API of THIS branch's merge (v2.37.0) needs the database first: the
+rollbacks 059 → 053, newest first, because that API exits at start-up on a
+database with 053 and its account creation fails under 058
+(`MERGE-CHECKLIST.md` section 5). The teacher web's gate then only adds the
 second factor for admins, and the older API accepts an `aal2` token too.
 
 ## 3d. Legal links and the teacher web's Content Security Policy (2026-11-11)

@@ -55,8 +55,11 @@ name: release
 #
 # Fires on tag pushes (v*.*.*) for full coordinated releases. For
 # everyday merges to main, each surface workflow fires INDEPENDENTLY
-# via its own path-filter (only what changed redeploys). This file is
-# the coordinator for whole-stack releases.
+# via its own path-filter (only what changed redeploys) — EXCEPT W1:
+# supabase-migrate.yml has no push trigger (owner decision 2026-11-15), so a
+# merge never applies a migration; this file and that workflow's manual
+# „Run workflow" button are its only ways in. This file is the coordinator
+# for whole-stack releases.
 
 on:
   push:

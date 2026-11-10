@@ -22,7 +22,7 @@ The four CI-driven workflows in `.github/workflows/`:
 
 | Workflow | Triggers on changes to | What it does |
 |----------|------------------------|--------------|
-| `supabase-migrate.yml` | `supabase/migrations/**` | Applies migrations to production (or PR-branch for PRs) |
+| `supabase-migrate.yml` | `supabase/migrations/**` (PRs only) | PR: applies to an ephemeral branch. Production: only from `release.yml` (a tag) or the manual „Run workflow" button — never on a push to `main` (owner decision 2026-11-15) |
 | `railway-deploy-cloud-api.yml` | `cloud_training_api/**` | Schema-probe → `railway up` → `/health` gate |
 | `railway-deploy-teacher-web.yml` | `physical_ai_manager/**` | Validate → `railway up` teacher-web → `/version.json` gate |
 | `docker-publish.yml` | `docker/**`, `open_manipulator/**`, `physical_ai_tools/**` | Native amd64 + opi (arm64) builds → push → smoke-test |
@@ -132,7 +132,7 @@ Same flow. On merge to main, all path-filter-matching workflows fire in
 parallel. Sequencing matters here:
 
 ```
-Schema change       → supabase-migrate fires
+Schema change       → nothing on the merge: run supabase-migrate by hand (2026-11-15)
 FastAPI change      → railway-deploy-cloud-api fires
 React change        → railway-deploy-teacher-web fires
 Image source change → docker-publish fires
@@ -381,7 +381,7 @@ Railway dashboard, then re-run W1, then re-run W3.
 
 | Event | Workflows fired |
 |---|---|
-| `push` to main, paths match `supabase/migrations/**` | `supabase-migrate.yml::apply-production` |
+| `push` to main, paths match `supabase/migrations/**` | _(none since 2026-11-15 — run `supabase-migrate.yml` by hand, „Run workflow")_ |
 | `push` to main, paths match `modal_training/**` | _(none — operator deploys Modal manually)_ |
 | `push` to main, paths match `cloud_training_api/**` | `railway-deploy-cloud-api.yml` |
 | `push` to main, paths match `physical_ai_manager/**` | `railway-deploy-teacher-web.yml` |

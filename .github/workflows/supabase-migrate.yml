@@ -3,28 +3,36 @@ name: supabase-migrate
 # Applies Supabase migrations from robotis_ai_setup/supabase/migrations/
 # to the production project (fnnbysrjkfugsqzwcksd, "edubotics").
 #
-# Three triggers:
-#   - push to main + path-filter           → apply to production
+# A MERGE TO main DOES NOT APPLY MIGRATIONS (owner decision 2026-11-15): there
+# is no `push` trigger. The production database changes only through
+#   - a release tag: release.yml calls this file (`workflow_call`), and
+#   - the manual „Run workflow" button (`workflow_dispatch`): apply OR
+#     rollback (`rollback_to`).
+# Why: GitHub offers an environment's required reviewers on a PRIVATE
+# repository only with GitHub Enterprise (Free, Pro and Team: public
+# repositories only), so `environment: production` below cannot hold a merge's
+# migration for a person on such a plan, and a merge fired W1, W2 and W3 at
+# once, in no order (verification round B, VB-02). W2 and W3 still deploy on a
+# merge; the owner runs W1 by hand once the new API's /health answers
+# (docs/deploy/MERGE-CHECKLIST.md). robotis_ai_setup/tests/
+# test_deploy_approval_gate.py fails if a push trigger comes back, and
+# apply-production refuses a push that is not a release tag anyway.
+#
+# The other triggers:
 #   - PR opened/synchronize + path-filter  → apply to an ephemeral
 #                                            Supabase Branch and probe
 #                                            the schema fingerprint
 #   - PR closed                            → tear down the ephemeral branch
-#   - workflow_dispatch                    → manual apply OR rollback
 #
-# This is W1 in docs/deploy/PIPELINE.md (or CLAUDE.md §pipeline). It is
-# the first link in the golden order:
+# This is W1 in docs/deploy/PIPELINE.md (or CLAUDE.md §pipeline). In a
+# release it is the first link in the golden order:
 #     W1 supabase-migrate ──► W2 railway-deploy-cloud-api
 #                          ──► W3 railway-deploy-teacher-web
 #                          ──► W4 docker-publish
 # Modal apps deploy manually — see CLAUDE.md Rule §6.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "robotis_ai_setup/supabase/migrations/**"
-      - "robotis_ai_setup/supabase/config.toml"
-      - ".github/workflows/supabase-migrate.yml"
+  # NO `push` trigger: a merge to main never applies a migration (header).
   pull_request:
     types: [opened, synchronize, reopened, closed]
     paths:
@@ -59,9 +67,9 @@ on:
         type: string
 
 concurrency:
-  # Project-scoped (NOT ref-scoped) so parallel calls from main pushes
-  # and release.yml invocations against the same DB serialise. Never
-  # abort an in-flight migration.
+  # Project-scoped (NOT ref-scoped) so a manual dispatch and a release.yml
+  # invocation against the same DB serialise. Never abort an in-flight
+  # migration.
   group: supabase-migrate-production
   cancel-in-progress: false
 
@@ -244,13 +252,23 @@ jobs:
 
   apply-production:
     name: Apply to production
-    if: |
-      github.event_name == 'push' ||
-      github.event_name == 'workflow_call' ||
-      (github.event_name == 'workflow_dispatch' && inputs.target == 'production' && (inputs.rollback_to == '' || inputs.rollback_to == null))
+    # Inside a reusable workflow `github.event_name` and `github.ref` are the
+    # CALLER's: release.yml's tag push arrives here as event `push` with ref
+    # refs/tags/v…, and a dispatched release.yml as `workflow_dispatch`
+    # (`inputs.target` then defaults to production). So the `push` branch
+    # below is the release tag ONLY: a push to main, should a push trigger
+    # ever come back, never applies (owner decision 2026-11-15).
+    if: >-
+      ${{
+        (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+        (github.event_name == 'workflow_dispatch' && inputs.target == 'production' && (inputs.rollback_to == '' || inputs.rollback_to == null))
+      }}
     needs: [validate]
-    # SA-13 (2026-11-13): the production environment's required reviewers
-    # approve this job before it runs (docs/deploy/DEPLOY.md, section 0).
+    # SA-13 (2026-11-13): on a public repository or GitHub Enterprise the
+    # production environment's required reviewers approve this job before it
+    # runs (docs/deploy/DEPLOY.md, section 0). A private repository on Free,
+    # Pro or Team gets no such gate; the missing push trigger is what keeps a
+    # merge from applying migrations there.
     environment: production
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -323,8 +341,9 @@ jobs:
   rollback:
     name: Rollback (manual dispatch)
     if: github.event_name == 'workflow_dispatch' && inputs.rollback_to != ''
-    # SA-13 (2026-11-13): the production environment's required reviewers
-    # approve this job before it runs (docs/deploy/DEPLOY.md, section 0).
+    # SA-13 (2026-11-13): on a public repository or GitHub Enterprise the
+    # production environment's required reviewers approve this job before it
+    # runs (docs/deploy/DEPLOY.md, section 0).
     environment: production
     runs-on: ubuntu-latest
     timeout-minutes: 15

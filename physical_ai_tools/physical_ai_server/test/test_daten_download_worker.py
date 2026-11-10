@@ -559,6 +559,8 @@ def test_a_cleaner_from_download_a_never_removes_download_bs_tmp(tmp_path):
 
 
 def test_the_cleaners_lock_is_the_stage_lock():
+    assert W.CLEANUP_LOCK_WAIT_S == 1.0
+    assert HS.STAGE_LOCK_WAIT_S == 1.0
     assert W.CLEANUP_LOCK_WAIT_S == HS.STAGE_LOCK_WAIT_S
     for mode in HS.DOWNLOAD_MODES:
         target = Path('/data/lena-schmidt/omx_f_a')

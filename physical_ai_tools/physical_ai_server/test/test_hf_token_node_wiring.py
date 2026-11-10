@@ -24,6 +24,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from physical_ai_server.data_processing import hf_token_crypto as crypto
 from physical_ai_server.data_processing import hf_token_store as store
 from physical_ai_server.data_processing import record_texts_de as texts
 
@@ -89,7 +90,8 @@ def _load(name, store_module=store):
     ns = {
         'os': os, 'time': _Clock, 'threading': threading,
         'String': _String, 'MutuallyExclusiveCallbackGroup': _Group, 'QoSProfile': _qos,
-        'hf_token_store': store_module, 'record_texts_de': texts, 'DataManager': _DataManager,
+        'hf_token_store': store_module, 'hf_token_crypto': crypto,
+        'record_texts_de': texts, 'DataManager': _DataManager,
         **_ENUMS,
     }
     exec(compile(src, str(_SERVER_PY), 'exec'), ns)  # noqa: S102
@@ -99,7 +101,7 @@ def _load(name, store_module=store):
 _METHODS = {n: _load(n) for n in (
     '_init_hf_token_state', '_hf_token_busy', '_publish_hf_token_state',
     '_hf_token_state_tick', '_apply_pending_hf_token_clear', '_apply_hf_token_request',
-    'set_hf_user_callback')}
+    '_hf_token_from_wire', 'set_hf_user_callback')}
 
 
 class _Worker:
@@ -139,6 +141,7 @@ class _Node:
         self._hf_token_state_pub = None
         self._hf_token_last_error_log = None
         self._hf_token_clear_pending = False
+        self._hf_token_key = None
         self.log = _Logger()
         self.publishers = []
         self.timers = []
@@ -643,6 +646,124 @@ def _logger_calls(fn):
             yield node
 
 
+class TestEncryptedToken(_Base):
+    """2026-11-13: on a Pi the token crosses the LAN, so the SPA encrypts it
+    for the robot's ephemeral key (hf_token_crypto.py) and sends `enc1:…` in
+    the SAME string field of the SAME srv."""
+
+    def keyed_node(self, **kw):
+        node = self.node(**kw)
+        node._hf_token_key = crypto.RobotKey.generate()
+        return node
+
+    def wire_for(self, node, token, key=None):
+        key = key or node._hf_token_key
+        return crypto.encrypt_for_tests(key.public_b64, key.kid, token)
+
+    def test_an_encrypted_token_is_decrypted_and_stored(self):
+        node = self.keyed_node()
+        response = node.request(self.wire_for(node, TOK))
+        self.assertTrue(response.success, response.message)
+        self.assertEqual(response.message, texts.HF_TOKEN_SET_OK_DE)
+        self.assertEqual(self.stored(), TOK)
+
+    def test_the_state_advertises_the_key_additively(self):
+        node = self.keyed_node()
+        node._publish_hf_token_state()
+        (state,) = node.states()
+        self.assertEqual(list(state)[:6], ['v', 'seq', 'accepts', 'present', 'fp', 'busy'])
+        self.assertEqual(state['enc'], 'enc1')
+        self.assertEqual(state['kid'], node._hf_token_key.kid)
+        self.assertEqual(state['pub'], node._hf_token_key.public_b64)
+
+    def test_an_image_without_a_slot_advertises_no_key(self):
+        os.environ.pop(store.PATH_ENV)
+        node = self.keyed_node()
+        node._publish_hf_token_state()
+        (state,) = node.states()
+        self.assertNotIn('pub', state)
+
+    def test_another_key_id_is_refused_in_german_and_writes_nothing(self):
+        node = self.keyed_node()
+        old = crypto.RobotKey.generate()  # the key before a restart
+        response = node.request(self.wire_for(node, TOK, key=old))
+        self.assertFalse(response.success)
+        self.assertEqual(response.message, texts.HF_TOKEN_ENC_STALE_DE)
+        self.assertIsNone(self.stored())
+
+    def test_a_tampered_ciphertext_is_refused(self):
+        node = self.keyed_node()
+        wire = self.wire_for(node, TOK)
+        head, tail = wire.rsplit('.', 1)
+        flipped = head + '.' + ('A' if tail[0] != 'A' else 'B') + tail[1:]
+        for bad in (flipped, wire[:-4], 'enc1:' + node._hf_token_key.kid + '.x.y.z', 'enc1:'):
+            with self.subTest(bad=bad[:20]):
+                response = node.request(bad)
+                self.assertFalse(response.success)
+                self.assertEqual(response.message, texts.HF_TOKEN_ENC_BAD_DE)
+        self.assertIsNone(self.stored())
+
+    def test_a_decrypted_bad_shape_is_refused_by_the_normal_rule(self):
+        node = self.keyed_node()
+        response = node.request(self.wire_for(node, 'not-a-token'))
+        self.assertFalse(response.success)
+        self.assertEqual(response.message, texts.HF_TOKEN_SHAPE_DE)
+
+    def test_the_same_token_while_busy_is_still_a_no_op_success(self):
+        node = self.keyed_node()
+        node.request(self.wire_for(node, TOK))
+        node.on_recording = True
+        response = node.request(self.wire_for(node, TOK))
+        self.assertTrue(response.success)
+        self.assertEqual(self.stored(), TOK)
+
+    def test_a_node_without_a_key_refuses_an_encrypted_value(self):
+        node = self.node()
+        key = crypto.RobotKey.generate()
+        response = node.request(crypto.encrypt_for_tests(key.public_b64, key.kid, TOK))
+        self.assertFalse(response.success)
+        self.assertEqual(response.message, texts.HF_TOKEN_ENC_UNSUPPORTED_DE)
+        self.assertIsNone(self.stored())
+
+    def test_clearing_stays_the_empty_string_and_a_plain_token_still_works(self):
+        node = self.keyed_node()
+        self.assertTrue(node.request(TOK).success)  # a Windows SPA without a key
+        self.assertTrue(node.request('').success)
+        self.assertIsNone(self.stored())
+
+    def test_an_old_robot_refuses_an_encrypted_value_as_a_malformed_token(self):
+        """The robot before 2026-11-13 ran `_apply_hf_token_request` on the raw
+        string: the `enc1:` value is not `hf_…`, so it is refused and nothing is
+        written (the SPA never sends one to such a robot: it advertises no key)."""
+        node = self.node()
+        key = crypto.RobotKey.generate()
+        wire = crypto.encrypt_for_tests(key.public_b64, key.kid, TOK)
+        self.assertFalse(store.valid_shape(wire))
+        with node._hf_token_lock:
+            success, message = node._apply_hf_token_request(wire)
+        self.assertFalse(success)
+        self.assertEqual(message, texts.HF_TOKEN_SHAPE_DE)
+        self.assertIsNone(self.stored())
+
+    def test_the_init_makes_a_fresh_key_each_start(self):
+        first, second = self.node(), self.node()
+        for n in (first, second):
+            n._init_hf_token_state()
+        self.assertIsNotNone(first._hf_token_key)
+        self.assertNotEqual(first._hf_token_key.kid, second._hf_token_key.kid)
+
+    def test_the_wire_value_never_reaches_a_log_line(self):
+        node = self.keyed_node()
+        old = crypto.RobotKey.generate()
+        wire = self.wire_for(node, TOK, key=old)
+        node.request(wire)
+        node.request('enc1:garbage')
+        text = '\n'.join(node.log.lines)
+        self.assertNotIn(wire, text)
+        self.assertNotIn('enc1:', text)
+        self.assertNotIn(TOK, text)
+
+
 class TestAstFences(unittest.TestCase):
     def test_the_old_login_path_is_gone_from_the_callback_and_its_helper(self):
         for name in ('set_hf_user_callback', '_apply_hf_token_request'):
@@ -685,7 +806,7 @@ class TestAstFences(unittest.TestCase):
         checked = 0
         for name in ('set_hf_user_callback', '_apply_hf_token_request',
                      '_publish_hf_token_state', '_init_hf_token_state',
-                     '_apply_pending_hf_token_clear'):
+                     '_apply_pending_hf_token_clear', '_hf_token_from_wire'):
             for call in _logger_calls(_function_node(name)):
                 checked += 1
                 for arg in call.args:

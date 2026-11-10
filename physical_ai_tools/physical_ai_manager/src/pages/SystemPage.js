@@ -18,7 +18,9 @@ import '../components/sucher-pages/system.css';
 import { usePiMode } from '../utils/piMode';
 import { useAgentUpdate } from '../hooks/useAgentUpdate';
 import { toastIcon } from '../components/icons/toast';
-import { noteUnauthorized, setPiResetCode } from '../features/piAuth/piAuth';
+import {
+  noteUnauthorized, PI_AUTH_PHASE, setPiResetCode, usePiAuth,
+} from '../features/piAuth/piAuth';
 import LegalLinks from '../components/LegalLinks';
 
 // The typed confirmation a factory reset needs (owner decision 5, the agent's
@@ -27,6 +29,19 @@ export const FACTORY_RESET_WORD = 'ZURÜCKSETZEN';
 export function factoryResetWordMatches(typed) {
   return typeof typed === 'string'
     && typed.trim().toLocaleLowerCase('de-DE') === FACTORY_RESET_WORD.toLocaleLowerCase('de-DE');
+}
+
+// SA-12 (2026-11-13): the agent refuses its maintenance routes (the factory
+// reset, the robot type: agent.py::_MAINTENANCE_POST_PATHS) to a STUDENT robot
+// session with a German 403. The page does not offer them to such a session
+// and says why; everything a lesson needs stays.
+export const MAINTENANCE_ROLES = Object.freeze(['teacher', 'admin']);
+export const MAINTENANCE_ONLY_DE =
+  'Das kann nur eine Lehrkraft oder ein Admin ändern. Für den Unterricht wird es nicht gebraucht.';
+export function maintenanceLockedFor(piAuth) {
+  return Boolean(piAuth)
+    && piAuth.phase === PI_AUTH_PHASE.SESSION
+    && !MAINTENANCE_ROLES.includes(piAuth.role);
 }
 
 // ── same-origin agent fetch helper ───────────────────────────────────────────
@@ -104,6 +119,7 @@ function StatusChip({ tone, led, children }) {
 
 export default function SystemPage() {
   const { agentStatus, agentReachable, refreshAgentStatus } = usePiMode();
+  const maintenanceLocked = maintenanceLockedFor(usePiAuth());
 
   // ── local UI state ─────────────────────────────────────────────────────────
   const [cloudOnly, setCloudOnly] = useState(false);
@@ -642,14 +658,16 @@ export default function SystemPage() {
               <select
                 id="eb-robot-type"
                 value={selectedRobotType}
-                disabled={robotTierUp || cloudOnly || savingRobotType}
+                disabled={maintenanceLocked || robotTierUp || cloudOnly || savingRobotType}
                 onChange={(e) => handleRobotTypeChange(e.target.value)}
                 // Every disabled reason gets its own sentence. The help text
                 // below explains the tier case only, so in Cloud-Modus the
                 // control was grey while the one explanation on screen named a
                 // condition that was already satisfied — a contradiction.
                 title={
-                  robotTierUp
+                  maintenanceLocked
+                    ? MAINTENANCE_ONLY_DE
+                    : robotTierUp
                     ? 'Zum Wechseln zuerst die Roboter-Umgebung stoppen.'
                     : cloudOnly
                     ? 'Im Cloud-Modus wird kein Roboter verwendet — der Robotertyp spielt keine Rolle.'
@@ -691,6 +709,11 @@ export default function SystemPage() {
                 Der Typ lässt sich nur ändern, solange die Roboter-Umgebung
                 gestoppt ist.
               </p>
+              {maintenanceLocked && (
+                <p className="mt-1 text-[13px] text-[var(--ink-2)]" data-testid="maintenance-only-type">
+                  {MAINTENANCE_ONLY_DE}
+                </p>
+              )}
             </div>
           )}
           <label className="su-sys-cloud flex items-start gap-4 cursor-pointer">
@@ -1060,7 +1083,12 @@ export default function SystemPage() {
             Löscht Datensätze, den Hugging-Face-Zwischenspeicher und die
             Roboter-Studio-Kalibrierung. Das kann nicht rückgängig gemacht werden.
           </p>
-          {resetStep === 0 && (
+          {maintenanceLocked && (
+            <p className="text-sm text-[var(--ink-2)]" data-testid="maintenance-only-reset">
+              {MAINTENANCE_ONLY_DE}
+            </p>
+          )}
+          {!maintenanceLocked && resetStep === 0 && (
             <div className="su-sys-hazard">
               <Btn variant="ghost" className="su-sys-hazard__btn" onClick={() => setResetStep(1)}>
                 <Icon name="trash" size={16} />
@@ -1068,7 +1096,7 @@ export default function SystemPage() {
               </Btn>
             </div>
           )}
-          {resetStep === 1 && (
+          {!maintenanceLocked && resetStep === 1 && (
             <div className="rounded-[14px] bg-[var(--danger-wash)] p-3">
               <p className="text-sm text-[color:var(--danger)] mb-2">
                 Wirklich alle Daten löschen? Datensätze und Kalibrierung gehen verloren.
@@ -1079,7 +1107,7 @@ export default function SystemPage() {
               </div>
             </div>
           )}
-          {resetStep === 2 && (
+          {!maintenanceLocked && resetStep === 2 && (
             <div className="rounded-[14px] bg-[var(--danger-wash)] p-3 shadow-[inset_0_0_0_1px_#F1C4C4]">
               <p className="text-sm font-medium text-[color:var(--danger)] mb-2">
                 Letzte Bestätigung: Dies löscht endgültig alle lokalen Daten. Danach

@@ -227,6 +227,15 @@ HF_TOKEN_SHAPE_DE = ('Das ist kein gültiges Hugging-Face-Token. Es beginnt mit 
                      'keine Leerzeichen.')
 HF_TOKEN_UNSUPPORTED_DE = 'Dieser Roboter verwendet ein eigenes Token und nimmt kein persönliches an.'
 HF_TOKEN_WRITE_FAILED_DE = 'Das Token konnte nicht auf dem Roboter gespeichert werden.'
+# 2026-11-13: the token arrives ENCRYPTED for the robot's ephemeral key
+# (data_processing/hf_token_crypto.py). The robot restarted since the page read
+# its key (another key id), the ciphertext does not decrypt, or this node has no
+# key at all. The SPA sends again with the key the next state message carries.
+HF_TOKEN_ENC_STALE_DE = ('Der Roboter wurde inzwischen neu gestartet. Das Token wird gleich noch '
+                         'einmal übertragen.')
+HF_TOKEN_ENC_BAD_DE = 'Das verschlüsselte Token konnte auf dem Roboter nicht gelesen werden.'
+HF_TOKEN_ENC_UNSUPPORTED_DE = ('Dieser Roboter kann kein verschlüsseltes Token annehmen. Bitte die '
+                               'Roboter-Software aktualisieren.')
 
 RESUME_FPS_DE = ('Der Datensatz „{name}“ wurde mit {d} Bildern pro Sekunde aufgenommen. '
                  'Stell unter „Erweitert“ {d} Bilder pro Sekunde ein oder wähle einen neuen '

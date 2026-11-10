@@ -38,6 +38,7 @@ REQUEST_PATH_MODULES = (
     "routes/hf_token.py",
     "routes/inference.py",
     "routes/me.py",
+    "routes/pi_tickets.py",
     "routes/policies.py",
     "routes/teacher.py",
     "routes/training.py",

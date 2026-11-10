@@ -39,9 +39,19 @@ function datenBlock(text) {
   return m ? m[1] : null;
 }
 
+// The MAIN server: the last `server {` of the file. nginx.conf also carries a
+// catch-all default server in front of it (the DNS-rebinding guard, SA-11,
+// 2026-11-13), which answers 444 and has no locations.
 function serverBlock(text) {
-  const m = /\nserver \{\n([\s\S]*)\n\}\s*$/.exec(text);
+  const start = text.lastIndexOf('\nserver {\n');
+  if (start < 0) return null;
+  const m = /\nserver \{\n([\s\S]*)\n\}\s*$/.exec(text.slice(start));
   return m ? m[1] : null;
+}
+
+// Every top-level server block's own text (a server's body is indented).
+function serverBlocks(text) {
+  return text.split(/\nserver \{\n/).slice(1).map((chunk) => chunk.split(/\n\}\n/)[0]);
 }
 
 function mapBlock(text, variable) {
@@ -145,6 +155,17 @@ describe.each(CONFIGS)('%s: the server logs in a token-free format', (name) => {
     expect(own.filter((l) => l !== 'access_log off;')).toEqual([
       'access_log /var/log/nginx/access.log edubotics_tokenless;',
     ]);
+  });
+
+  it('every server block, the default one included, logs only in the token-free format', () => {
+    for (const block of serverBlocks(text)) {
+      const logs = directives(block).filter((l) => l.startsWith('access_log'));
+      for (const line of logs) {
+        expect(['access_log off;', 'access_log /var/log/nginx/access.log edubotics_tokenless;'])
+          .toContain(line);
+      }
+      expect(logs.length).toBeGreaterThan(0);
+    }
   });
 
   it('the format prints the redacted request line and Referer, never the raw ones', () => {

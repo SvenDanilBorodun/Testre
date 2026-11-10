@@ -16,6 +16,7 @@ from app.routes.health import router as health_router
 from app.routes.hf_token import router as hf_token_router
 from app.routes.inference import router as inference_router
 from app.routes.me import router as me_router
+from app.routes.pi_tickets import router as pi_tickets_router
 from app.routes.policies import router as policies_router
 from app.routes.teacher import router as teacher_router
 from app.routes.training import router as training_router
@@ -816,6 +817,15 @@ _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     # Daten 2.0 (spec §E6): the SPA asks once per session; per-user keyed
     # (_PER_USER_RATE_LIMIT_PREFIXES) because a classroom shares one NAT IP.
     ("GET", "/me/group-members", 30, 60.0),
+    # The Orange Pi's one-time login tickets (SA-06, 2026-11-13). Minting is
+    # per user (_PER_USER_RATE_LIMIT_PREFIXES): the SPA mints at each exchange
+    # (≈ every 9 min, on a token refresh, after a 401). Redeeming is per client
+    # address — the Pi agents of a whole school share ONE NAT address towards
+    # the cloud, so it is generous; a ticket is 256 random bits and cannot be
+    # guessed at any rate. Inserted before the 048 rules (test_inference_routes
+    # pins them as the table's last two).
+    ("POST", "/pi/tickets", 30, 60.0),
+    ("POST", "/pi/tickets/redeem", 600, 60.0),
     # Cloud-Inferenz (048). Reserve, arm, the 15 s heartbeat and end share the
     # POST budget: ≤ 6/min in normal use, and a student clicking through ten
     # models in a minute stays under 30 (R-16). Per-user keyed
@@ -868,7 +878,7 @@ _RATE_LIMIT_RULES.sort(key=lambda rule: len(rule[1]), reverse=True)
 # per teacher, which is what those limits meant anyway.
 _PER_USER_RATE_LIMIT_PREFIXES = (
     "/trainings/", "/workflows", "/me/hf-token", "/me/group-members", "/inference/",
-    "/teacher/", "/admin/",
+    "/teacher/", "/admin/", "/pi/tickets",
 )
 
 
@@ -886,6 +896,11 @@ _PER_USER_RATE_LIMIT_PREFIXES = (
 # /version carries the legal links, and a Pi's SPA runs at a LAN address
 # ALLOWED_ORIGINS cannot list. Only public, token-free GET routes belong here.
 _PUBLIC_READ_PATHS = ("/version",)
+# Bearer-authenticated paths ANY browser origin may call, without credentials
+# (SA-06, 2026-11-13): a Pi's SPA mints its login ticket from its LAN origin.
+# Only a route authenticated by an Authorization header that reads no cookie
+# belongs here (app/edge.py::AnyOriginBearerCorsMiddleware).
+_ANY_ORIGIN_BEARER_PATHS = ("/pi/tickets",)
 
 _MAX_WRITE_BODY_BYTES = 384 * 1024
 _BODY_SIZE_LIMITED_PREFIXES: tuple[tuple[str, str], ...] = (
@@ -928,6 +943,8 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
+# Outermost: CORSMiddleware refuses an unlisted origin's preflight itself.
+app.add_middleware(_edge.AnyOriginBearerCorsMiddleware, paths=_ANY_ORIGIN_BEARER_PATHS)
 
 
 # An auth refusal the client must tell apart by more than its status (the
@@ -949,6 +966,7 @@ app.include_router(policies_router)
 app.include_router(admin_router)
 app.include_router(workflows_router)
 app.include_router(inference_router)
+app.include_router(pi_tickets_router)
 
 
 # ─── Background tasks ───────────────────────────────────────────────────

@@ -216,12 +216,14 @@ ALL_IMAGES = [image_ref(n) for n in IMAGE_NAMES]
 # --- Network ports (all native; no usbipd, no WSL localhost forwarder) ---
 PORT_WEB_UI = 80            # physical_ai_manager (nginx, serves the SPA)
 # :8080 and :9090 are the CONTAINER-side ports of web_video_server and
-# rosbridge. Since 4d1b046 the opi compose publishes them as
-# `127.0.0.1:8080:8080` / `127.0.0.1:9090:9090` — LOOPBACK-PINNED, reachable
-# only through `ssh -L 9090:127.0.0.1:9090 <pi>`, not from the LAN.
+# rosbridge. The opi compose publishes NEITHER on the host (SA-05,
+# 2026-11-13): the loopback debug publishes 4d1b046 had pinned were removed,
+# because Docker before 28.0 (the Pi pins 27.5.1) accepts a routed LAN packet
+# for a published container port whatever host address it is bound to. Debugging is `docker exec` into
+# the container; firewall.py drops routed LAN packets to ros_net on top.
 #
-# The old comment here called this port LAN-open "by decision" — true until
-# that commit, and now the opposite of the truth. It mattered: rosbridge is
+# An older comment here called this port LAN-open "by decision". It mattered:
+# rosbridge is
 # UNAUTHENTICATED and rosbridge_server 2.7.0's `check_origin` is literally
 # `return True`, so while the publish was LAN-bound the manager's /rosbridge
 # Origin gate was skippable rather than defeatable — a handshake straight at

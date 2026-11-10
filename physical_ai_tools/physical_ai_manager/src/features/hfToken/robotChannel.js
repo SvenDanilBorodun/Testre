@@ -11,6 +11,14 @@
 //   WRITE /register_hf_user          (physical_ai_interfaces/srv/SetHFUser)
 //         request.token: a token, or '' to clear the slot.
 //
+// ENCRYPTED when the robot advertises a key (2026-11-13, hfTokenCrypto.js): the
+// state's additive `enc`/`kid`/`pub` name the robot's ephemeral P-256 key, and
+// the token goes out as `enc1:…` in the same field. On an Orange Pi (a plain
+// LAN websocket) a token is NEVER sent in the clear: a robot that advertises no
+// key gets nothing and the student a German sentence to update it. On Windows
+// (loopback) a key is used whenever one is advertised, else the plain token.
+// Clearing stays the empty string.
+//
 // Named exports, no hooks: utils/signOut.js imports `clearRobotHfToken` and a
 // util must not import from hooks/ (sessionScope.test.js fences that).
 //
@@ -27,7 +35,9 @@
 import ROSLIB from 'roslib';
 
 import rosConnectionManager, { isLocalRosbridgeUrl } from '../../utils/rosConnectionManager';
+import { getPiModeSync } from '../../utils/piMode';
 import { hfCopy } from './hfTokenCopy';
+import { encryptForRobot, parseRobotKey } from './hfTokenCrypto';
 
 export const STATE_TOPIC = '/edubotics/hf_token_state';
 export const SET_SERVICE = '/register_hf_user';
@@ -85,6 +95,20 @@ export function parseTokenState(data) {
   };
 }
 
+// The robot's advertised key from the newest VALID state message (null: none).
+// Not a secret; replaced by every message, so a robot restart's new key wins.
+let robotKey = null;
+
+/** The key the next push encrypts for (tests and the sync's diagnostics). */
+export function getRobotKey() {
+  return robotKey;
+}
+
+/** Tests only. */
+export function setRobotKeyForTests(key) {
+  robotKey = key || null;
+}
+
 /**
  * Subscribe to the robot's token state. Like useRobotActivation: the singleton
  * connection, a throttled depth-1 topic. Resolves to an unsubscribe function;
@@ -107,7 +131,10 @@ export async function subscribeTokenState(rosbridgeUrl, onState) {
   topic.subscribe((msg) => {
     if (!live) return;
     const parsed = parseTokenState(msg?.data);
-    if (parsed) onState(parsed);
+    if (parsed) {
+      robotKey = parseRobotKey(msg?.data);
+      onState(parsed);
+    }
   });
   return () => {
     live = false;
@@ -182,7 +209,22 @@ function callSetService(value) {
  */
 export function setRobotToken(token) {
   const value = typeof token === 'string' ? token : '';
-  return serial(() => callSetService(value));
+  return serial(async () => {
+    if (value === '') return callSetService('');
+    const key = robotKey;
+    if (key) {
+      let wire;
+      try {
+        wire = await encryptForRobot(value, key);
+      } catch {
+        return { success: false, message: hfCopy('robot.encryptFailed') };
+      }
+      return callSetService(wire);
+    }
+    // A Pi is reached over the school network: never the token in the clear.
+    if (getPiModeSync()) return { success: false, message: hfCopy('robot.needsUpdate') };
+    return callSetService(value);
+  });
 }
 
 /**

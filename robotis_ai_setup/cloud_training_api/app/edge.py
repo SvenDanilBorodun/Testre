@@ -37,6 +37,9 @@ tests read them from its source — and passes them in.
   of ``/version`` (2026-11-11): its legal links are read by every SPA, a Pi's
   at a LAN address ``ALLOWED_ORIGINS`` cannot list. An allowed origin still
   gets its own echo from ``CORSMiddleware``.
+* ``AnyOriginBearerCorsMiddleware`` — any origin may call ``POST /pi/tickets``
+  without credentials (SA-06, 2026-11-13): a Pi's SPA mints its one-time login
+  ticket from its LAN origin. Mounted OUTSIDE ``CORSMiddleware``.
 * ``client_ip_from`` — the ``TRUSTED_PROXY_HOPS``-th address from the RIGHT of
   ``X-Forwarded-For`` (default 1: the address Railway's edge added), never the
   left-most, which the client writes itself. Fewer entries than hops → the
@@ -53,7 +56,7 @@ import os
 import re
 
 from fastapi import Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from starlette.datastructures import MutableHeaders
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -294,6 +297,65 @@ class PublicReadCorsMiddleware:
                 headers = MutableHeaders(scope=message)
                 if "access-control-allow-origin" not in headers:
                     headers["Access-Control-Allow-Origin"] = "*"
+            await send(message)
+
+        await self.app(scope, receive, send_with_star)
+
+
+class AnyOriginBearerCorsMiddleware:
+    """CORS for a few BEARER-authenticated paths any origin may call (SA-06,
+    2026-11-13; today exactly ``POST /pi/tickets``).
+
+    A Pi's SPA runs at whatever LAN address the school gave the Pi, which
+    ``ALLOWED_ORIGINS`` cannot list, and it must mint its login ticket here over
+    HTTPS so the Supabase token never crosses the LAN. The route is
+    authenticated by an ``Authorization`` header — which a browser never sends
+    on its own, so a foreign page holds nothing to send — and reads no cookie,
+    so any origin may call it WITHOUT credentials: ``Access-Control-Allow-Origin:
+    *`` and no ``Access-Control-Allow-Credentials``.
+
+    Mounted OUTSIDE ``CORSMiddleware`` (added after it): that middleware answers
+    every preflight itself and refuses an unlisted origin with a 400 before any
+    inner layer runs. A plain ASGI middleware. A preflight of a listed path is
+    answered here; a real request passes through every layer (rate limits, the
+    failed-authentication cap, the route) and only its response gains the star
+    when nothing set an origin yet."""
+
+    MAX_AGE_S = "600"
+
+    def __init__(self, app, *, paths, methods=("POST",)):
+        self.app = app
+        self.paths = frozenset(paths)
+        self.methods = tuple(m.upper() for m in methods)
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or scope.get("path") not in self.paths:
+            await self.app(scope, receive, send)
+            return
+        request_headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []
+        }
+        if scope.get("method") == "OPTIONS" and "access-control-request-method" in request_headers:
+            allowed = request_headers["access-control-request-method"].strip().upper() in self.methods
+            preflight = Response(
+                status_code=204 if allowed else 405,
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": ", ".join(self.methods + ("OPTIONS",)),
+                    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+                    "Access-Control-Max-Age": self.MAX_AGE_S,
+                },
+            )
+            await preflight(scope, receive, send)
+            return
+
+        async def send_with_star(message):
+            if message.get("type") == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                if "access-control-allow-origin" not in headers:
+                    headers["Access-Control-Allow-Origin"] = "*"
+                    if "access-control-allow-credentials" in headers:
+                        del headers["Access-Control-Allow-Credentials"]
             await send(message)
 
         await self.app(scope, receive, send_with_star)

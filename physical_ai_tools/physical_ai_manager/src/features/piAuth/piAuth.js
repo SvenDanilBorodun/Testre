@@ -11,15 +11,22 @@
 // (pi_agent/pi_auth.py). This module gets and keeps one:
 //
 //   * probe   GET  /api/system/auth/state  (public): is the Pi set up, does
-//             THIS browser hold a live session? A 404 is an agent from before
-//             the login (`legacy`: version skew, see piLoginOf);
-//   * exchange POST /api/system/auth/session with the Supabase access token
-//             (Authorization header). The agent asks the cloud's GET /me with
-//             it once and forgets it; the cookie comes back. Again at 60 % of
-//             the session's life, on every Supabase token refresh
-//             (setPiAccessToken) and after any 401 (noteUnauthorized);
+//             THIS browser hold a live session, and the Pi's id (`pi_id`)? A
+//             404 is an agent from before the login (`legacy`: version skew,
+//             see piLoginOf);
+//   * exchange (SA-06, 2026-11-13) — the Supabase access token NEVER goes to
+//             the Pi, which is reached over plain HTTP on the school network:
+//             1. POST <cloud API>/pi/tickets over HTTPS with the token
+//                (Authorization header) and the Pi's id → a one-time ticket
+//                (60 s, single-use, valid at this Pi only);
+//             2. POST /api/system/auth/session with ONLY that ticket in the
+//                body. The agent redeems it at the cloud; the cookie comes
+//                back. Again at 60 % of the session's life, on every Supabase
+//                token refresh (setPiAccessToken) and after any 401
+//                (noteUnauthorized);
 //   * claim   POST /api/system/auth/claim — a teacher/admin + the one-time
-//             setup code set an UNCLAIMED Pi up (PiClaimScreen);
+//             setup code set an UNCLAIMED Pi up (PiClaimScreen), with a
+//             ticket minted the same way;
 //   * end     POST /api/system/auth/logout (keepalive) — signOutStudent.
 //
 // A module-level store (useSyncExternalStore), deliberately NOT Redux and NOT
@@ -28,6 +35,8 @@
 // by accident: everything stays in `off` until StudentApp calls startPiAuth().
 
 import { useSyncExternalStore } from 'react';
+
+import { CLOUD_API_URL } from '../../services/cloudConfig';
 
 export const PI_AUTH_PHASE = Object.freeze({
   OFF: 'off', // not a Pi (or not started): no gate at all
@@ -45,6 +54,8 @@ const STATE_URL = '/api/system/auth/state';
 const SESSION_URL = '/api/system/auth/session';
 const CLAIM_URL = '/api/system/auth/claim';
 const LOGOUT_URL = '/api/system/auth/logout';
+// The cloud route that mints a one-time login ticket (SA-06).
+export const TICKET_PATH = '/pi/tickets';
 
 const PROBE_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000];
 // Re-exchange at this fraction of the session's life, never sooner than this.
@@ -55,20 +66,34 @@ const MIN_REFRESH_MS = 20000;
 const VERIFY_FRESH_MS = 10000;
 const ERROR_RETRY_MS = 15000;
 const UNAUTHORIZED_DEBOUNCE_MS = 500;
-// VA-03 (2026-11-12): every exchange costs the cloud a GET /me (or the Pi's
-// login budget), and on a school network every browser shares ONE address
-// towards the cloud. After one of these answers the gate (the rosbridge
-// reconnect loop asks every ≤ 2 s), a 401 and a probe wait out ERROR_RETRY_MS
-// before they exchange again; only a new token or the scheduled retry ends the
-// wait. `network` (the agent itself did not answer) costs the cloud nothing and
-// keeps the fast retry.
+// VA-03 (2026-11-12): every exchange costs the cloud a ticket mint and a
+// redeem (or the Pi's login budget), and on a school network every browser
+// shares ONE address towards the cloud. After one of these answers the gate
+// (the rosbridge reconnect loop asks every ≤ 2 s), a 401 and a probe wait out
+// ERROR_RETRY_MS before they exchange again; only a new token or the scheduled
+// retry ends the wait. `network` (the agent itself did not answer) costs the
+// cloud nothing and keeps the fast retry.
 const BACKOFF_CODES = new Set(['rate_limited', 'cloud_unreachable']);
+// Refusals the next attempt with the SAME Supabase token cannot fix: the cloud
+// refused the token at the mint (`token_rejected`), or refused a ticket twice
+// in a row (`ticket_rejected`, see exchange). Not sent again until supabase-js
+// delivers another token (VA-03, adapted to the tickets).
+const REJECTED_CODES = new Set(['token_rejected', 'ticket_rejected']);
 
 // German sentences for the codes the agent answers (its own `message` wins).
 export const PI_AUTH_TEXT_DE = Object.freeze({
   token_rejected:
-    'Der Roboter hat die Anmeldung nicht angenommen. Bitte abmelden und erneut anmelden.',
-  token_missing: 'Die Anmeldung fehlt. Bitte die Seite neu laden und anmelden.',
+    'Die EduBotics-Cloud hat die Anmeldung nicht angenommen. Bitte abmelden und erneut anmelden.',
+  ticket_rejected:
+    'Der Roboter hat die Anmeldung nicht angenommen. Bitte die Seite neu laden; hilft das nicht, '
+    + 'abmelden und erneut anmelden.',
+  ticket_missing: 'Die Anmeldung fehlt. Bitte die Seite neu laden und anmelden.',
+  cloud_from_browser:
+    'Die EduBotics-Cloud ist von diesem Gerät aus gerade nicht erreichbar, deshalb kann die '
+    + 'Anmeldung am Roboter nicht vorbereitet werden. Bitte die Internetverbindung prüfen.',
+  pi_id_missing:
+    'Der Roboter hat keine Kennung gemeldet, die Anmeldung ist deshalb nicht möglich. Bitte die '
+    + 'Pi-Software im System-Fenster aktualisieren („Aktualisieren“).',
   cloud_unreachable:
     'Der Roboter erreicht die EduBotics-Cloud gerade nicht und kann die Anmeldung deshalb '
     + 'nicht prüfen. Bitte die Internetverbindung des Pis prüfen (System → Netzwerk-Check).',
@@ -87,6 +112,7 @@ function initialState() {
     role: null,
     expiresAt: 0,
     setupCode: null, // 'none' | 'active' | 'void' (unclaimed only)
+    piId: null, // the Pi's id a login ticket is minted for (/auth/state)
     error: null, // { code, message }
     resetCode: null, // a code a factory reset just answered (memory only)
   };
@@ -96,6 +122,7 @@ let state = initialState();
 const listeners = new Set();
 let started = false;
 let fetchImpl = (...args) => fetch(...args);
+let cloudApiUrl = CLOUD_API_URL || '';
 let accessToken = null;
 let authResolved = false;
 let hygieneDone = false;
@@ -107,9 +134,9 @@ let errorTimer = null;
 let suspectTimer = null;
 let probeInFlight = null;
 let exchangeInFlight = null;
-// The access token an exchange was refused for with `token_rejected`. Never
-// sent again: only a different token (setPiAccessToken) is tried. Memory
-// only, never browser storage (VA-03).
+// The access token an exchange was refused for with `token_rejected` or a
+// second `ticket_rejected`. Never used again: only a different token
+// (setPiAccessToken) is tried. Memory only, never browser storage (VA-03).
 let rejectedToken = null;
 let lastRefusedAt = 0;
 
@@ -266,6 +293,8 @@ export function probe() {
     }
     probeAttempt = 0;
     const hostname = typeof json.hostname === 'string' ? json.hostname : '';
+    const piId = typeof json.pi_id === 'string' && json.pi_id ? json.pi_id : null;
+    if (piId !== state.piId) setState({ piId });
     if (!json.claimed) {
       refreshTimer = clearTimer(refreshTimer);
       setState({
@@ -309,10 +338,85 @@ export function probe() {
 }
 
 /**
- * Trade the Supabase access token for a robot session (single-flight).
- * A token the cloud rejected is never sent again (only a new one is), and
- * after a refusal in BACKOFF_CODES nothing is sent for ERROR_RETRY_MS unless
- * the token changed or the scheduled retry asks (VA-03).
+ * Mint a one-time login ticket for THIS Pi from the cloud (SA-06): the only
+ * request that carries the Supabase token, and it goes over HTTPS to the cloud
+ * API, never to the Pi. No cookie (credentials: 'omit'); the cloud answers this
+ * one path to any origin, since a Pi's LAN address cannot be listed.
+ * @returns {Promise<{ok: true, ticket: string}|{ok: false, code: string, message: string}>}
+ */
+async function mintTicket(token) {
+  const piId = state.piId;
+  if (!piId) return { ok: false, code: 'pi_id_missing', message: PI_AUTH_TEXT_DE.pi_id_missing };
+  if (!cloudApiUrl) {
+    return { ok: false, code: 'cloud_unreachable', message: PI_AUTH_TEXT_DE.cloud_from_browser };
+  }
+  let res;
+  try {
+    res = await fetchImpl(`${cloudApiUrl}${TICKET_PATH}`, {
+      method: 'POST',
+      cache: 'no-store',
+      credentials: 'omit',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pi_id: piId }),
+    });
+  } catch {
+    res = null;
+  }
+  if (!res) return { ok: false, code: 'cloud_unreachable', message: PI_AUTH_TEXT_DE.cloud_from_browser };
+  const json = res.ok ? await readJson(res) : null;
+  if (res.ok && json && typeof json.ticket === 'string' && json.ticket) {
+    return { ok: true, ticket: json.ticket };
+  }
+  if (res.status === 401 || res.status === 403) {
+    return { ok: false, code: 'token_rejected', message: PI_AUTH_TEXT_DE.token_rejected };
+  }
+  if (res.status === 429) {
+    return { ok: false, code: 'rate_limited', message: PI_AUTH_TEXT_DE.rate_limited };
+  }
+  if (res.status === 400) probe(); // the Pi's id may have changed (a factory reset)
+  return { ok: false, code: 'cloud_unreachable', message: PI_AUTH_TEXT_DE.cloud_from_browser };
+}
+
+/** Post a body to the agent; null when the agent could not be asked. */
+async function postToAgent(url, body) {
+  try {
+    return await fetchImpl(url, {
+      method: 'POST',
+      cache: 'no-store',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function refuse(code, message, token) {
+  refreshTimer = clearTimer(refreshTimer);
+  lastRefusedAt = now();
+  setState({ phase: PI_AUTH_PHASE.ERROR, error: { code, message }, expiresAt: 0 });
+  if (REJECTED_CODES.has(code)) {
+    // The same token can only be refused again: wait for supabase-js to
+    // deliver another one (VA-03).
+    if (accessToken === token) rejectedToken = token;
+    errorTimer = clearTimer(errorTimer);
+  } else if (code !== 'pi_id_missing') {
+    scheduleErrorRetry();
+  }
+  return state;
+}
+
+/**
+ * Trade the Supabase access token for a robot session (single-flight), through
+ * a one-time ticket (SA-06): the token goes to the cloud, the ticket to the Pi.
+ * A ticket the Pi's redeem refused (`ticket_rejected`: during a blue-green
+ * deploy of the cloud API a ticket minted on the old instance is unknown to the
+ * new one) is replaced by a freshly minted one ONCE; refused again, it is
+ * handled like a rejected token. A token the cloud rejected is never sent
+ * again (only a new one is), and after a refusal in BACKOFF_CODES nothing is
+ * sent for ERROR_RETRY_MS unless the token changed or the scheduled retry asks
+ * (VA-03).
  * @param {object} [opts]
  * @param {boolean} [opts.retry] the error retry or a new token: skip the back-off
  */
@@ -324,53 +428,40 @@ export function exchange({ retry = false } = {}) {
   const token = accessToken;
   if (state.phase !== PI_AUTH_PHASE.SESSION) setState({ phase: PI_AUTH_PHASE.EXCHANGING });
   exchangeInFlight = (async () => {
-    let res;
-    try {
-      res = await fetchImpl(SESSION_URL, {
-        method: 'POST',
-        cache: 'no-store',
-        credentials: 'same-origin',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: '{}',
-      });
-    } catch {
-      res = null;
-    }
-    if (!res) {
-      setState({
-        phase: PI_AUTH_PHASE.ERROR,
-        error: { code: 'network', message: PI_AUTH_TEXT_DE.network },
-      });
-      scheduleErrorRetry();
-      return state;
-    }
-    const json = (await readJson(res)) || {};
-    if (res.ok && json.ok) {
-      applySession(Number(json.expires_in), json.role);
-      return state;
-    }
-    if (res.status === 404) {
-      setState({ phase: PI_AUTH_PHASE.LEGACY, error: null });
-      return state;
-    }
-    if (json.code === 'unclaimed') {
-      exchangeInFlight = null;
-      return probe();
-    }
-    const code = typeof json.code === 'string' ? json.code : 'network';
-    const message = typeof json.message === 'string' && json.message
-      ? json.message
-      : PI_AUTH_TEXT_DE[code] || PI_AUTH_TEXT_DE.network;
-    refreshTimer = clearTimer(refreshTimer);
-    lastRefusedAt = now();
-    setState({ phase: PI_AUTH_PHASE.ERROR, error: { code, message }, expiresAt: 0 });
-    if (code === 'token_rejected') {
-      // The cloud judged THIS token: asking again with it can only be refused
-      // again. Wait for supabase-js to deliver another one (VA-03).
-      if (accessToken === token) rejectedToken = token;
-      errorTimer = clearTimer(errorTimer);
-    } else {
-      scheduleErrorRetry();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const minted = await mintTicket(token);
+      if (!minted.ok) return refuse(minted.code, minted.message, token);
+      // eslint-disable-next-line no-await-in-loop
+      const res = await postToAgent(SESSION_URL, { ticket: minted.ticket });
+      if (!res) {
+        setState({
+          phase: PI_AUTH_PHASE.ERROR,
+          error: { code: 'network', message: PI_AUTH_TEXT_DE.network },
+        });
+        scheduleErrorRetry();
+        return state;
+      }
+      // eslint-disable-next-line no-await-in-loop
+      const json = (await readJson(res)) || {};
+      if (res.ok && json.ok) {
+        applySession(Number(json.expires_in), json.role);
+        return state;
+      }
+      if (res.status === 404) {
+        setState({ phase: PI_AUTH_PHASE.LEGACY, error: null });
+        return state;
+      }
+      if (json.code === 'unclaimed') {
+        exchangeInFlight = null;
+        return probe();
+      }
+      const code = typeof json.code === 'string' ? json.code : 'network';
+      if (code === 'ticket_rejected' && attempt === 0) continue;
+      const message = typeof json.message === 'string' && json.message
+        ? json.message
+        : PI_AUTH_TEXT_DE[code] || PI_AUTH_TEXT_DE.network;
+      return refuse(code, message, token);
     }
     return state;
   })().finally(() => {
@@ -383,9 +474,11 @@ export function exchange({ retry = false } = {}) {
  * Start the robot login (Pi mode only; StudentApp). Idempotent.
  * @param {object} [opts]
  * @param {Function} [opts.fetch] injected fetch (tests)
+ * @param {string} [opts.cloudApiUrl] injected cloud API base (tests)
  */
-export function startPiAuth({ fetch: injected } = {}) {
+export function startPiAuth({ fetch: injected, cloudApiUrl: injectedCloud } = {}) {
   if (injected) fetchImpl = injected;
+  if (typeof injectedCloud === 'string') cloudApiUrl = injectedCloud;
   if (started) return;
   started = true;
   setState({ phase: PI_AUTH_PHASE.PROBING });
@@ -400,6 +493,7 @@ export function resetPiAuthForTests() {
   suspectTimer = clearTimer(suspectTimer);
   started = false;
   fetchImpl = (...args) => fetch(...args);
+  cloudApiUrl = CLOUD_API_URL || '';
   accessToken = null;
   authResolved = false;
   hygieneDone = false;
@@ -505,38 +599,41 @@ export async function ensurePiSession() {
 }
 
 /**
- * Claim an unclaimed Pi with the setup code (a teacher/admin login).
+ * Claim an unclaimed Pi with the setup code (a teacher/admin login). The login
+ * travels as a one-time ticket (SA-06), minted from the cloud like an exchange's;
+ * a ticket the Pi's redeem refused is replaced once by a fresh one.
  * @returns {Promise<{ok: boolean, code?: string, message?: string}>}
  */
 export async function claimPi(code) {
-  if (!accessToken) {
-    return { ok: false, code: 'token_missing', message: 'Bitte zuerst anmelden.' };
+  const token = accessToken;
+  if (!token) {
+    return { ok: false, code: 'ticket_missing', message: 'Bitte zuerst anmelden.' };
   }
-  let res;
-  try {
-    res = await fetchImpl(CLAIM_URL, {
-      method: 'POST',
-      cache: 'no-store',
-      credentials: 'same-origin',
-      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: String(code || '') }),
-    });
-  } catch {
-    return { ok: false, code: 'network', message: PI_AUTH_TEXT_DE.network };
+  if (!state.piId) await probe();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const minted = await mintTicket(token);
+    if (!minted.ok) return { ok: false, code: minted.code, message: minted.message };
+    // eslint-disable-next-line no-await-in-loop
+    const res = await postToAgent(CLAIM_URL, { code: String(code || ''), ticket: minted.ticket });
+    if (!res) return { ok: false, code: 'network', message: PI_AUTH_TEXT_DE.network };
+    // eslint-disable-next-line no-await-in-loop
+    const json = (await readJson(res)) || {};
+    if (res.ok && json.ok) {
+      applySession(Number(json.expires_in), json.role);
+      return { ok: true, message: json.message || '' };
+    }
+    if (json.code === 'ticket_rejected' && attempt === 0) continue;
+    if (json.code === 'already_claimed') probe();
+    return {
+      ok: false,
+      code: typeof json.code === 'string' ? json.code : 'network',
+      message: typeof json.message === 'string' && json.message
+        ? json.message
+        : PI_AUTH_TEXT_DE.network,
+    };
   }
-  const json = (await readJson(res)) || {};
-  if (res.ok && json.ok) {
-    applySession(Number(json.expires_in), json.role);
-    return { ok: true, message: json.message || '' };
-  }
-  if (json.code === 'already_claimed') probe();
-  return {
-    ok: false,
-    code: typeof json.code === 'string' ? json.code : 'network',
-    message: typeof json.message === 'string' && json.message
-      ? json.message
-      : PI_AUTH_TEXT_DE.network,
-  };
+  return { ok: false, code: 'ticket_rejected', message: PI_AUTH_TEXT_DE.ticket_rejected };
 }
 
 /**

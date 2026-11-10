@@ -298,9 +298,18 @@ def test_042_token_slot_sentences():
         'Während der Roboter aufnimmt, etwas hoch- oder herunterlädt oder eine Liste bei '
         'Hugging Face abfragt, kann das Token nicht entfernt werden. Der Roboter entfernt es von '
         'selbst, sobald er damit fertig ist.')
+    # 2026-11-13: the token arrives encrypted for the robot's ephemeral key
+    assert t.HF_TOKEN_ENC_STALE_DE == (
+        'Der Roboter wurde inzwischen neu gestartet. Das Token wird gleich noch einmal übertragen.')
+    assert t.HF_TOKEN_ENC_BAD_DE == (
+        'Das verschlüsselte Token konnte auf dem Roboter nicht gelesen werden.')
+    assert t.HF_TOKEN_ENC_UNSUPPORTED_DE == (
+        'Dieser Roboter kann kein verschlüsseltes Token annehmen. Bitte die Roboter-Software '
+        'aktualisieren.')
     names = ['HF_TOKEN_SET_OK_DE', 'HF_TOKEN_CLEARED_DE', 'HF_TOKEN_NONE_DE', 'HF_TOKEN_BUSY_DE',
              'HF_TOKEN_SHAPE_DE', 'HF_TOKEN_UNSUPPORTED_DE', 'HF_TOKEN_WRITE_FAILED_DE',
-             'HF_TOKEN_CLEAR_QUEUED_DE']
+             'HF_TOKEN_CLEAR_QUEUED_DE', 'HF_TOKEN_ENC_STALE_DE', 'HF_TOKEN_ENC_BAD_DE',
+             'HF_TOKEN_ENC_UNSUPPORTED_DE']
     assert len({getattr(t, n) for n in names}) == len(names)
     # none of them can carry a token, a fingerprint or an exception text
     for n in names:

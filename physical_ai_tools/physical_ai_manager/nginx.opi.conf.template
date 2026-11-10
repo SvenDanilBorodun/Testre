@@ -46,10 +46,10 @@
 # school networks routinely filter non-standard ports (9090/8080), and
 # port 80 is the one port guaranteed reachable if the wizard loads at
 # all. The React app routes rosbridge + MJPEG same-origin in Pi mode
-# (utils/piMode.js localRosbridgeUrl/videoStreamBase); the direct host
-# ports stay published in docker-compose.opi.yml as a LOOPBACK-PINNED
-# DEBUG path only — `127.0.0.1:9090:9090` / `127.0.0.1:8080:8080`,
-# reached with `ssh -L 9090:127.0.0.1:9090 <pi>`. The un-tunnelled LAN
+# (utils/piMode.js localRosbridgeUrl/videoStreamBase); docker-compose.opi.yml
+# publishes neither port on the host any more (SA-05, 2026-11-13: Docker before
+# 28.0 accepts a LAN host routing straight to a published container port even
+# when it is bound to 127.0.0.1); debugging is `docker exec`. The un-tunnelled LAN
 # ROLLBACK half is gone (4d1b046): while those publishes were LAN-bound,
 # rosbridge_server 2.7.0's `check_origin` — literally `return True` —
 # made the /rosbridge Origin gate below SKIPPABLE rather than defeatable,
@@ -86,11 +86,19 @@ map $http_upgrade $connection_upgrade {
 #   * anything under `.local` — mDNS, which is link-local by definition.
 # All with an optional :port.
 #
+# SINCE SA-11 (2026-11-13) THE WHOLE SERVER answers 421 to a Host that is not
+# one of these (the server-level `if` below), not /rosbridge alone: /video/stream
+# and /daten-api/ were already safe by the robot login's cookie (a rebound host
+# name carries none), but the SPA, the public /api/system routes (/auth/state,
+# /netzwerk-check, /update/check) and every future location now follow the
+# same rule without depending on that.
+#
 # WHAT THIS REFUSES, and it is the one availability risk worth knowing: a
 # multi-label name that is not `.local`, e.g. a school-managed
-# `pi.schule.intern`. Such a rig answers 421 on /rosbridge only — the wizard,
-# /api/system/ and the SPA are untouched, so the Pi is still reachable and
-# repairable. Add the school's suffix as another entry here if that happens.
+# `pi.schule.intern`. Such a rig answers 421 on EVERY path when reached by that
+# name; by its IP address, its `.local` mDNS name or a single-label name it
+# works as before. Add the school's suffix as another entry here if that
+# happens.
 #
 # Case-insensitive (~*) because $http_host preserves the case the client sent.
 map $http_host $edubotics_host_is_own {
@@ -139,6 +147,14 @@ server {
     # Replaces the http-level `main` log for this server (the token-free format
     # above); a second `access_log` at http level would log every line twice.
     access_log /var/log/nginx/access.log edubotics_tokenless;
+
+    # DNS-rebinding guard for EVERY location (SA-11, 2026-11-13; the map
+    # $edubotics_host_is_own above says which names are ours). A server-level
+    # `if` + `return` runs in the server rewrite phase, before any location is
+    # chosen. /rosbridge keeps its own copy of the check after its Origin sets.
+    if ($edubotics_host_is_own = 0) {
+        return 421;
+    }
 
     # ── Security headers ─────────────────────────────────────────────────────
     # The opi manager is the ONLY one of the three manager builds published on

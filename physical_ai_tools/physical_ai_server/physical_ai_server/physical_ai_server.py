@@ -78,6 +78,9 @@ for _log_name in ('urllib3', 'urllib3.connectionpool', 'requests', 'http.client'
 # active before any logging below.
 from physical_ai_server.data_processing import hf_token_store  # noqa: E402
 hf_token_store.install_log_scrubber()
+# 2026-11-13: the token arrives encrypted for the robot's ephemeral key (a Pi
+# relays it over a plain LAN websocket). Imports `cryptography` lazily.
+from physical_ai_server.data_processing import hf_token_crypto  # noqa: E402
 
 from physical_ai_interfaces.msg import (
     Detection,
@@ -502,6 +505,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self._hf_token_seq = 0
         self._hf_token_state_pub = None
         self._hf_token_last_error_log = None
+        # The ephemeral key the SPA encrypts the token for (2026-11-13,
+        # hf_token_crypto.py): made in _init_hf_token_state, memory only.
+        self._hf_token_key = None
         # A clear refused while busy (recording / HF transfer) is remembered and
         # applied by the 1 Hz state tick once the robot is idle, unless a newer
         # set arrived meanwhile (_apply_pending_hf_token_clear). Guarded by
@@ -1708,6 +1714,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self._hf_token_state_tick,
             callback_group=self._hf_state_group,
         )
+        # The ephemeral key pair the SPA encrypts the student's token for (a Pi
+        # relays it over a plain LAN websocket). Fresh at every start, memory
+        # only; its public half rides on the state topic.
+        self._hf_token_key = hf_token_crypto.generate_or_none()
+        if self._hf_token_key is None and hf_token_store.accepts():
+            self.get_logger().warning(
+                'The cryptography package is missing: the robot advertises no key, so an '
+                'Orange Pi page will not send the Hugging Face token at all.')
         removed = hf_token_store.purge_legacy()
         if removed:
             self.get_logger().info(
@@ -1744,7 +1758,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             if publisher is None:
                 return
             self._hf_token_seq += 1
-            payload = hf_token_store.state_payload(self._hf_token_seq, self._hf_token_busy())
+            payload = hf_token_store.state_payload(
+                self._hf_token_seq, self._hf_token_busy(),
+                key=getattr(self, '_hf_token_key', None))
             msg = String()
             msg.data = hf_token_store.encode_payload(payload)
             publisher.publish(msg)
@@ -1858,14 +1874,37 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self.get_logger().error(f'hf token slot update failed: {type(e).__name__}')
             return False, record_texts_de.HF_TOKEN_WRITE_FAILED_DE
 
+    def _hf_token_from_wire(self, wire):
+        """(token, None) for an encrypted /register_hf_user value
+        (hf_token_crypto's `enc1:` form), or (None, german_refusal). Never logs
+        the value; a failure is named by its class only."""
+        key = getattr(self, '_hf_token_key', None)
+        if key is None:
+            return None, record_texts_de.HF_TOKEN_ENC_UNSUPPORTED_DE
+        try:
+            return key.decrypt(wire), None
+        except hf_token_crypto.WireError as e:
+            if e.code == 'stale':
+                return None, record_texts_de.HF_TOKEN_ENC_STALE_DE
+            return None, record_texts_de.HF_TOKEN_ENC_BAD_DE
+
     def set_hf_user_callback(self, request, response):
         """/register_hf_user — since 042 it sets, replaces or clears the robot's
         per-student token slot. `user_id_list` is always empty (the SPA reads the
-        Benutzer-ID list with /get_registered_hf_user); the .srv is unchanged."""
+        Benutzer-ID list with /get_registered_hf_user); the .srv is unchanged.
+        Since 2026-11-13 the token may arrive encrypted for the robot's key (an
+        `enc1:` value in the same string field, hf_token_crypto.py); it is
+        decrypted first and then decided exactly like a plain one."""
         response.user_id_list = []
         try:
             # request.token is only ever handed to the decision helper below.
             token = request.token
+            if hf_token_crypto.is_wire(token):
+                token, refusal = self._hf_token_from_wire(token)
+                if refusal is not None:
+                    response.success = False
+                    response.message = refusal
+                    return response
             with self._hf_token_lock:
                 response.success, response.message = self._apply_hf_token_request(token)
         except Exception as e:  # noqa: BLE001

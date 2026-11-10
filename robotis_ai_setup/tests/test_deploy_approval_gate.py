@@ -16,12 +16,17 @@ That gate exists only on a public repository or with GitHub Enterprise: on a
 private repository under Free, Pro or Team an environment has no required
 reviewers (verification round B, VB-02). So, by owner decision (2026-11-15),
 the migrations (W1) never run on a push: `MigrationsAreManual` holds
-supabase-migrate.yml free of a push trigger and evaluates the two gated
-`if:` expressions (a small evaluator of GitHub's expression subset) for a
-push to main, a release tag, a dispatched release and the „Run workflow"
-button.
+supabase-migrate.yml free of a push trigger and evaluates the gated `if:`
+expressions (a small evaluator of GitHub's expression subset) for a push to
+main, a release tag, a dispatched release and the „Run workflow" button.
+Verification round C (VC-07, VC-11): it also proves that release.yml's call
+applies to production for both ways a release arrives (no input of the
+caller can make it skip), and that every target other than production, a
+rollback included, fails the run loudly instead of skipping or acting on
+production.
 """
 
+import json
 import pathlib
 import re
 import unittest
@@ -180,30 +185,34 @@ def evaluate(expr: str, context: dict):
                 if value == 'startsWith':
                     hay, needle = (str(a if a is not None else '') for a in args)
                     return hay.lower().startswith(needle.lower())
+                if value == 'fromJSON':
+                    return json.loads(args[0])
                 raise ValueError(f'unknown function {value}')
             return context.get(value)
         raise ValueError(f'unexpected token {peek()}')
 
-    def comparison():
-        left = primary()
-        if peek() in (('op', '=='), ('op', '!=')):
-            op = take()[1]
-            right = primary()
-            same = _loose_eq(left, right)
-            return same if op == '==' else not same
-        return left
-
+    # GitHub's precedence, tightest first: ( ), !, == and !=, &&, || (VC-11:
+    # `!` binds to its operand, so `!a == b` is `(!a) == b`).
     def unary():
         if peek() == ('op', '!'):
             take()
             return not _truthy(unary())
-        return comparison()
+        return primary()
+
+    def comparison():
+        left = unary()
+        if peek() in (('op', '=='), ('op', '!=')):
+            op = take()[1]
+            right = unary()
+            same = _loose_eq(left, right)
+            return same if op == '==' else not same
+        return left
 
     def and_():
-        result = unary()
+        result = comparison()
         while peek() == ('op', '&&'):
             take()
-            right = unary()
+            right = comparison()
             result = right if _truthy(result) else result
         return result
 
@@ -250,6 +259,76 @@ def _on_block(text: str) -> str:
 
 _MIGRATE = _WF / 'supabase-migrate.yml'
 
+
+def _call_input_defaults(migrate_text: str) -> dict:
+    """`on.workflow_call.inputs.<name>.default` of the callee, as strings."""
+    on = _on_block(migrate_text)
+    m = re.search(r'(?m)^  workflow_call:\n((?:(?:    .*|\s*#.*)?\n)+)', on)
+    if not m:
+        return {}
+    defaults, name = {}, None
+    for line in m.group(1).splitlines():
+        named = re.match(r'^      ([A-Za-z0-9_-]+):\s*$', line)
+        if named:
+            name = named.group(1)
+            continue
+        default = re.match(r'^        default:\s*(.+?)\s*$', line)
+        if default and name:
+            defaults[name] = default.group(1).strip().strip('"').strip("'")
+    return defaults
+
+
+def release_call_problems(release_text: str, migrate_text: str) -> list:
+    """Why a release would NOT apply its migrations to production, or [].
+
+    The release's `supabase` job must call supabase-migrate.yml, must run on a
+    release tag and on a dispatched release, and may pass no input that makes
+    the callee skip apply-production (VC-07): its `with:` is merged over the
+    callee's workflow_call defaults and apply-production's `if` is evaluated
+    for both ways a release arrives."""
+    problems = []
+    jobs = _jobs(release_text)
+    callers = [name for name, block in jobs.items() if '    uses: ./.github/workflows/supabase-migrate.yml\n' in block]
+    if callers != ['supabase']:
+        return [f'release.yml calls supabase-migrate.yml from {callers!r}, not exactly the `supabase` job']
+    block = jobs['supabase']
+    passed = {}
+    m = re.search(r'(?m)^    with:\n((?:      .*\n)+)', block)
+    if m:
+        for line in m.group(1).splitlines():
+            kv = re.match(r'^      ([A-Za-z0-9_-]+):\s*(.*?)\s*$', line)
+            if not kv:
+                problems.append(f'cannot read the `with:` line {line!r}')
+                continue
+            value = kv.group(2).strip('"').strip("'")
+            if '${{' in value:
+                problems.append(f'input {kv.group(1)!r} is an expression: a release must pass a literal')
+            passed[kv.group(1)] = value
+    defaults = _call_input_defaults(migrate_text)
+    if 'target' not in defaults:
+        problems.append('supabase-migrate.yml declares no workflow_call `target` default')
+    unknown = sorted(set(passed) - set(defaults))
+    if unknown:
+        problems.append(f'release.yml passes inputs the callee does not declare: {unknown}')
+    inputs = {**defaults, **passed}
+    migrate_jobs = _jobs(migrate_text)
+    apply_if = _job_if(migrate_jobs['apply-production'])
+    refuse_if = _job_if(migrate_jobs['refuse-unsupported-target'])
+    release_if = _job_if(block)
+    arrivals = {
+        'a release tag': {'github.event_name': 'push', 'github.ref': 'refs/tags/v2.99.0'},
+        'a dispatched release': {'github.event_name': 'workflow_dispatch', 'github.ref': 'refs/heads/main'},
+    }
+    for label, github in arrivals.items():
+        if not evaluate(release_if, dict(github)):  # release.yml's own inputs: skip_supabase unset
+            problems.append(f'{label}: release.yml skips its `supabase` job')
+        callee = {**github, **{f'inputs.{k}': v for k, v in inputs.items()}}
+        if not evaluate(apply_if, callee):
+            problems.append(f'{label}: apply-production would be skipped')
+        if evaluate(refuse_if, callee):
+            problems.append(f'{label}: the call would be refused')
+    return problems
+
 # (what happens, the github/inputs context, does apply-production run?, does rollback run?)
 _CASES = [
     ('a push to main (should a push trigger ever come back)',
@@ -275,6 +354,18 @@ _CASES = [
     ('the „Run workflow" button: target branch',
      {'github.event_name': 'workflow_dispatch', 'github.ref': 'refs/heads/main',
       'inputs.target': 'branch', 'inputs.rollback_to': '', 'inputs.reason': 'x'}, False, False),
+    # VC-11: a rollback with target branch rolled back PRODUCTION.
+    ('the „Run workflow" button: target branch with a rollback',
+     {'github.event_name': 'workflow_dispatch', 'github.ref': 'refs/heads/main',
+      'inputs.target': 'branch', 'inputs.reason': 'x',
+      'inputs.rollback_to': '20261113140000_059_hf_reserved_namespaces_rollback'}, False, False),
+    # VC-07: a release that passed any other target skipped its migrations.
+    ('a release tag whose call names another target',
+     {'github.event_name': 'push', 'github.ref': 'refs/tags/v2.38.0',
+      'inputs.target': 'branch'}, False, False),
+    ('a dispatched release whose call names another target',
+     {'github.event_name': 'workflow_dispatch', 'github.ref': 'refs/heads/main',
+      'inputs.target': 'branch'}, False, False),
     ('a pull request',
      {'github.event_name': 'pull_request', 'github.ref': 'refs/pull/7/merge'}, False, False),
 ]
@@ -300,6 +391,47 @@ class MigrationsAreManual(unittest.TestCase):
         release = _jobs((_WF / 'release.yml').read_text(encoding='utf-8'))
         self.assertIn('    uses: ./.github/workflows/supabase-migrate.yml\n', release['supabase'])
 
+    # ── VC-07: a release can never skip its migrations in silence ──────────
+    def test_the_release_call_applies_to_production(self):
+        release = (_WF / 'release.yml').read_text(encoding='utf-8')
+        self.assertEqual(release_call_problems(release, self.text), [])
+
+    def test_the_check_has_teeth(self):
+        """Negative controls: each mutation that would make a release skip
+        its production apply is caught."""
+        release = (_WF / 'release.yml').read_text(encoding='utf-8')
+        uses = '    uses: ./.github/workflows/supabase-migrate.yml\n'
+        mutations = {
+            'passes target branch': release.replace(uses, uses + '    with:\n      target: branch\n'),
+            'passes target as an expression': release.replace(
+                uses, uses + '    with:\n      target: ${{ inputs.where }}\n'),
+            'passes an input the callee does not know': release.replace(
+                uses, uses + '    with:\n      skip: true\n'),
+            'stops calling it': release.replace(uses, uses.replace('supabase-migrate', 'trainer-image')),
+            'skips the job on a tag': release.replace(
+                "github.event_name != 'workflow_dispatch' ||", "github.event_name == 'never' &&", 1),
+        }
+        for label, text in mutations.items():
+            with self.subTest(label):
+                self.assertNotEqual(text, release, label)
+                self.assertNotEqual(release_call_problems(text, self.text), [], label)
+        # ...and on the callee's side: a default other than production.
+        callee = self.text.replace('        default: "production"\n        type: string',
+                                   '        default: "branch"\n        type: string', 1)
+        self.assertNotEqual(callee, self.text)
+        self.assertNotEqual(release_call_problems(release, callee), [])
+
+    def test_any_other_target_fails_the_run_loudly(self):
+        expr = _job_if(self.jobs['refuse-unsupported-target'])
+        self.assertIn('exit 1', self.jobs['refuse-unsupported-target'])
+        for label, context, apply_expected, rollback_expected in _CASES:
+            target = context.get('inputs.target')
+            loud = context['github.event_name'] != 'pull_request' and target != 'production'
+            with self.subTest(label):
+                self.assertIs(evaluate(expr, context), loud, label)
+                if loud:
+                    self.assertFalse(apply_expected or rollback_expected, label)
+
     def test_the_evaluator_reads_github_semantics(self):
         # null and '' compare equal, strings case-insensitively, startsWith too.
         self.assertTrue(evaluate("inputs.x == ''", {}))
@@ -309,6 +441,12 @@ class MigrationsAreManual(unittest.TestCase):
         self.assertTrue(evaluate("startsWith(r, 'refs/tags/v')", {'r': 'refs/tags/v1.2.3'}))
         self.assertFalse(evaluate("!(a == 'x') && true", {'a': 'x'}))
         self.assertTrue(evaluate("(a == 'x' && false) || b == 'y'", {'a': 'x', 'b': 'y'}))
+        # VC-11: `!` binds tighter than `==` (GitHub's precedence table).
+        self.assertFalse(evaluate("!a == b", {'a': 'x', 'b': 'y'}))
+        self.assertTrue(evaluate("!a == false", {'a': 'x'}))
+        self.assertTrue(evaluate("!(a == b)", {'a': 'x', 'b': 'y'}))
+        self.assertTrue(evaluate("!fromJSON(s || 'false')", {}))
+        self.assertFalse(evaluate("!fromJSON(s || 'false')", {'s': 'true'}))
 
     def test_apply_production_runs_only_for_a_release_tag_or_the_button(self):
         expr = _job_if(self.jobs['apply-production'])

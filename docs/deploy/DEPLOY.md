@@ -428,11 +428,17 @@ variable decides how:
 - `EDUBOTICS_CSP_ENFORCE` unset (the default), or anything but `1`:
   `Content-Security-Policy-Report-Only`. Nothing is blocked; every violation a
   browser sees is POSTed to `/csp-report` and logged by nginx as one line
-  starting `csp-report` in the teacher-web service's Railway logs.
+  `<time> csp-report {…}` in the teacher-web service's Railway logs. A REFUSED
+  request to `/csp-report` (another method, a body over 16 KB, over the rate)
+  writes no such line, but nginx still writes its usual error line for it —
+  `access forbidden by rule`, `client intended to send too large body` or
+  `limiting requests`, with `request: "POST /csp-report HTTP/1.1"` and the
+  client address, never a body. That line is not a report.
 - `EDUBOTICS_CSP_ENFORCE=1`: `Content-Security-Policy`. Violations are blocked
   (and still reported).
 - **The one-week rule:** after the first deploy with the policy, watch the
-  teacher-web logs for `csp-report` for one week of normal teacher and admin
+  teacher-web logs for `csp-report {` (the report lines; a refused request's
+  error line does not match) for one week of normal teacher and admin
   use (a template edited, a student's program opened, the admin's two-factor
   login). No line in that week → set `EDUBOTICS_CSP_ENFORCE=1`. A line → read
   its `violated-directive` and `blocked-uri`; a legitimate source is a code

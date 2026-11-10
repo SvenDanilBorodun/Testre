@@ -109,10 +109,14 @@ describe('nginx.web.conf.template carries the CSP', () => {
     expect(loc).toMatch(/limit_except POST \{ deny all; \}/);
     expect(loc).toMatch(/limit_req zone=edubotics_csp_report burst=\d+ nodelay;/);
     expect(loc).toMatch(/client_max_body_size 16k;/);
-    // VB-06 (2026-11-15): only a request whose body nginx read is logged; a
-    // refused one (403 GET, 413 too large, 429) has none and logs no line.
+    // VB-06 (2026-11-15): only a request whose body nginx read gets a report
+    // line; a refused one (403 GET, 413 too large, 429) has none and writes no
+    // ACCESS-log line. Its nginx ERROR-log line (naming the path, never the
+    // body) stays on purpose: no error_log here, so a broken sink stays
+    // visible too (verification round C, VC-09).
     expect(loc).toMatch(/access_log \/var\/log\/nginx\/access\.log edubotics_csp_report if=\$request_body;/);
     expect(loc.match(/access_log/g)).toHaveLength(1);
+    expect(loc).not.toMatch(/error_log/);
     expect(loc).toMatch(/proxy_pass http:\/\/unix:\/tmp\/edubotics-csp-report\.sock:\/;/);
     expect(loc).not.toMatch(/add_header/); // the server-level headers apply
     expect(TEMPLATE).toMatch(/log_format edubotics_csp_report escape=json '[^']*\$request_body';/);

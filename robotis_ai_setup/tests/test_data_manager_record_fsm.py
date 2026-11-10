@@ -1724,10 +1724,28 @@ class ShutdownFinalizeTest(_FsmTestCase):
     def test_without_a_dataset_the_start_is_ended_like_stop(self):
         dm, up = make()
         dm._lerobot_dataset = None
+        dm._session_marker_enabled = True
+        tick(dm)                                          # the first tick writes the marker
+        self.assertTrue(dm._session_marker_path().exists())
         self.assertEqual(dm.end_for_shutdown(), DataManager.SHUTDOWN_NO_DATASET)
         self.assertEqual(dm.get_status(), 'stop')
         self.assertTrue(dm._upload_enqueued)
         self.assertEqual(up, [])
+        # VA-05 (2026-11-12): nothing was recorded, so no crashed session may
+        # be reported at the next boot — the marker goes, as STOP clears it.
+        self.assertFalse(dm._session_marker_path().exists())
+
+    def test_without_a_dataset_stop_and_shutdown_leave_the_same_marker_state(self):
+        answers = {}
+        for name, end in (('stop', lambda dm: (dm.record_stop(), ticks(dm, 4))),
+                          ('shutdown', lambda dm: dm.end_for_shutdown())):
+            dm, _ = make()
+            dm._lerobot_dataset = None
+            dm._session_marker_enabled = True
+            tick(dm)
+            end(dm)
+            answers[name] = dm._session_marker_path().exists()
+        self.assertEqual(answers, {'stop': False, 'shutdown': False})
 
     def test_it_waits_for_a_record_step_in_flight(self):
         import threading

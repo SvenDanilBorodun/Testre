@@ -1199,8 +1199,8 @@ class DataManager:
         is uploaded (the stack is going away; the student uploads from the Daten
         tab), and the crash marker is cleared ONLY by a successful finalize
         (F3). Without a dataset a Start that still waits (for an upload of this
-        dataset, its sync download) ends the way STOP ends it, and no dataset is
-        made for the session afterwards. A session that already finalized its
+        dataset, its sync download) ends the way STOP ends it, its crash marker
+        removed, and no dataset is made for the session afterwards. A session that already finalized its
         dataset (it ended normally; its upload may still run) is left alone, so
         a second call is harmless. Waits for a record step in flight (the
         recorder lock), so a save in progress completes first. Returns one of
@@ -1209,6 +1209,11 @@ class DataManager:
         if getattr(self, '_lerobot_dataset', None) is None:
             if self._status not in ('finish', 'stop'):
                 self._status = 'stop'
+            # Nothing was recorded, so the crash marker the first record tick
+            # wrote must go, exactly as STOP clears it (_finalize_dataset's
+            # no-dataset branch); else every later boot reports a crashed
+            # session that never existed (VA-05, 2026-11-12).
+            self._clear_session_marker()
             return self.SHUTDOWN_NO_DATASET
         if getattr(self, '_dataset_finalized', False):
             return self.SHUTDOWN_ALREADY_FINAL

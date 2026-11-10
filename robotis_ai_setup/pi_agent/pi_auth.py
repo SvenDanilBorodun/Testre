@@ -65,8 +65,18 @@ SESSION_TTL_S = 15 * 60
 # re-exchange in a tight loop.
 SESSION_MIN_TTL_S = 30
 # Upper bound on live sessions (a class of 30 with a few tabs each is far
-# below it); the oldest is dropped when it is reached, never an error.
+# below it); reaching it drops a session, never an error.
 MAX_SESSIONS = 512
+# Upper bound on live sessions of ONE account (VA-09, 2026-11-12): any
+# EduBotics account may use a claimed Pi, and with only the global bound one
+# account exchanging 512 times pushed every other session out. A student with a
+# few tabs and devices is far below it. The account is the cloud's own answer
+# (``GET /me``'s ``id``), never something the browser asserts, and it is kept
+# only as a hash. A new session of an account at its cap drops that account's
+# least recently USED session; at the global bound the least recently used
+# session of the account holding the MOST sessions goes, never one of an
+# account with fewer.
+MAX_SESSIONS_PER_ACCOUNT = 8
 
 # The setup code: 8 characters from an alphabet without 0/O, 1/I/L, shown as
 # XXXX-XXXX (31^8 ≈ 2^39.6). Brute force is bounded three times over: a claim
@@ -81,6 +91,8 @@ CODE_PBKDF2_ITERATIONS = 200_000
 # Roles the cloud answers in GET /me. Any of them may use a claimed Pi (owner
 # decision 2); only these may claim one (owner decision 3).
 ROLES = frozenset({"student", "teacher", "admin"})
+# The shape of a Supabase user id, as ``GET /me`` answers it.
+_ACCOUNT_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 CLAIM_ROLES = frozenset({"teacher", "admin"})
 
 # The cloud call made once per exchange/claim.
@@ -213,6 +225,14 @@ def _sid_key(sid: str) -> str:
     return hashlib.sha256(sid.encode("ascii")).hexdigest()
 
 
+def _account_key(account: Optional[str]) -> Optional[str]:
+    """The per-account caps group sessions by a HASH of the cloud's user id
+    (VA-09): the store never holds who a session belongs to in the clear."""
+    if not isinstance(account, str) or not account:
+        return None
+    return hashlib.sha256(("edubotics-pi-account:" + account).encode("utf-8")).hexdigest()
+
+
 # ── the cloud check ──────────────────────────────────────────────────────────
 
 
@@ -229,14 +249,18 @@ _OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 def verify_with_cloud(token: str, api_url: str, timeout: float = CLOUD_TIMEOUT_S,
-                      opener=None) -> "tuple[str, Optional[str]]":
-    """Ask the cloud API who ``token`` belongs to: ``("ok", role)``,
-    ``("rejected", None)`` when the cloud judged the token, or
-    ``("unreachable", None)`` when it could not be asked.
+                      opener=None) -> "tuple[str, Optional[str], Optional[str]]":
+    """Ask the cloud API who ``token`` belongs to: ``("ok", role, account)``,
+    ``("rejected", None, None)`` when the cloud judged the token, or
+    ``("unreachable", None, None)`` when it could not be asked.
+
+    ``account`` is the user id ``GET /me`` answers (lower-case UUID), or None
+    when the answer carries none of that shape; it keys the per-account
+    session cap (``MAX_SESSIONS_PER_ACCOUNT``) and is never logged.
 
     One ``GET {api_url}/me`` with the token as a NON-redirected header. Nothing
     of the token, the URL's answer body or an exception text is logged or
-    returned — the caller gets one of three words and a role.
+    returned — the caller gets one of three words, a role and an account.
     """
     open_ = opener.open if opener is not None else _OPENER.open
     req = urllib.request.Request(f"{api_url.rstrip('/')}/me", method="GET")
@@ -255,21 +279,26 @@ def verify_with_cloud(token: str, api_url: str, timeout: float = CLOUD_TIMEOUT_S
         # 401/403: the cloud judged the token. 404: a valid login without a
         # profile row — not an EduBotics account the Pi can serve.
         if code in (401, 403, 404):
-            return "rejected", None
-        return "unreachable", None
+            return "rejected", None, None
+        return "unreachable", None, None
     except Exception:  # noqa: BLE001 — URLError, timeout, TLS, reset: "could not ask"
-        return "unreachable", None
+        return "unreachable", None, None
     if status != 200:
-        return "unreachable", None
+        return "unreachable", None, None
     try:
         data = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
         # A 200 that is not our JSON (a portal page) is not an answer.
-        return "unreachable", None
+        return "unreachable", None, None
     role = data.get("role") if isinstance(data, dict) else None
     if not isinstance(role, str) or role not in ROLES:
-        return "rejected", None
-    return "ok", role
+        return "rejected", None, None
+    account = data.get("id")
+    if isinstance(account, str) and _ACCOUNT_ID_RE.fullmatch(account.lower()):
+        account = account.lower()
+    else:
+        account = None
+    return "ok", role, account
 
 
 # ── rate limiting ────────────────────────────────────────────────────────────
@@ -518,18 +547,44 @@ class AuthStore:
 
     # ── sessions ─────────────────────────────────────────────────────────
 
-    def create_session(self, role: str, ttl_s: int) -> str:
+    def create_session(self, role: str, ttl_s: int, account: Optional[str] = None) -> str:
+        """A new session. ``account`` is the cloud's user id for the token
+        (``verify_with_cloud``); None (an answer without one) makes the session
+        an account of its own for the caps (VA-09)."""
         sid = secrets.token_urlsafe(32)
         now = self._now()
+        acct = _account_key(account)
         with self._lock:
             self._prune_locked(now)
-            while len(self._sessions) >= MAX_SESSIONS:
-                oldest = min(self._sessions, key=lambda k: self._sessions[k]["created"])
-                del self._sessions[oldest]
+            if acct is not None:
+                own = [k for k, v in self._sessions.items() if v["account"] == acct]
+                while own and len(own) >= MAX_SESSIONS_PER_ACCOUNT:
+                    victim = min(own, key=lambda k: self._sessions[k]["used"])
+                    del self._sessions[victim]
+                    own.remove(victim)
+            while self._sessions and len(self._sessions) >= MAX_SESSIONS:
+                del self._sessions[self._busiest_lru_locked()]
             self._sessions[_sid_key(sid)] = {
-                "role": role, "created": now, "expires": now + max(1, int(ttl_s)),
+                "role": role, "created": now, "used": now,
+                "expires": now + max(1, int(ttl_s)), "account": acct,
             }
         return sid
+
+    def _busiest_lru_locked(self) -> str:
+        """The least recently used session of the account holding the most
+        sessions (a session without an account counts as its own)."""
+        counts: dict = {}
+        for key, rec in self._sessions.items():
+            owner = rec["account"] if rec["account"] is not None else ("session", key)
+            counts[owner] = counts.get(owner, 0) + 1
+        top = max(counts.values())
+
+        def owner_of(key):
+            rec = self._sessions[key]
+            return rec["account"] if rec["account"] is not None else ("session", key)
+
+        candidates = [k for k in self._sessions if counts[owner_of(k)] == top]
+        return min(candidates, key=lambda k: self._sessions[k]["used"])
 
     def session(self, sid: Optional[str]) -> Optional[dict]:
         """The live session for ``sid`` (a copy with ``expires_in``), or None.
@@ -546,6 +601,7 @@ class AuthStore:
                 return None
             if not self._state["claimed"]:
                 return None
+            rec["used"] = now                     # the per-account cap drops the least recently used
             return {"role": rec["role"], "expires_in": int(rec["expires"] - now)}
 
     def revoke(self, sid: Optional[str]) -> None:

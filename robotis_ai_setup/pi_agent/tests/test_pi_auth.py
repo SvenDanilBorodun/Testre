@@ -283,6 +283,72 @@ class TestSessions(_StoreBase):
         sid = self.store.create_session("student", 600)
         self.assertNotIn(sid, self.store._sessions)
 
+    def test_one_account_holds_at_most_its_cap_and_loses_its_own_least_recently_used(self):
+        """VA-09 (2026-11-12): any signed-in account may use a claimed Pi, and
+        before this cap 512 exchanges of ONE account pushed every other
+        session out. A new session of an account at its cap now evicts that
+        account's own least recently USED session."""
+        self._claimed()
+        cap = pi_auth.MAX_SESSIONS_PER_ACCOUNT
+        sids = []
+        for _ in range(cap):
+            self.clock.t += 1
+            sids.append(self.store.create_session("student", 600, account=ACCOUNT_A))
+        self.clock.t += 1
+        self.assertIsNotNone(self.store.session(sids[0]))     # the oldest is still in use
+        self.clock.t += 1
+        newest = self.store.create_session("student", 600, account=ACCOUNT_A)
+        self.assertEqual(self.store.session_count(), cap)
+        self.assertIsNone(self.store.session(sids[1]), "the least recently used goes")
+        self.assertIsNotNone(self.store.session(sids[0]))
+        self.assertIsNotNone(self.store.session(newest))
+
+    def test_one_account_cannot_evict_a_class(self):
+        """The verifier's scenario: a class of 30, then one account exchanging
+        far beyond the global cap. Every student keeps their session."""
+        self._claimed()
+        students = []
+        for i in range(30):
+            self.clock.t += 1
+            students.append(self.store.create_session("student", 600, account=f"acct-{i}"))
+        for _ in range(pi_auth.MAX_SESSIONS + 50):
+            self.clock.t += 0.01
+            self.store.create_session("student", 600, account=ACCOUNT_A)
+        self.assertEqual(self.store.session_count(), 30 + pi_auth.MAX_SESSIONS_PER_ACCOUNT)
+        for sid in students:
+            self.assertIsNotNone(self.store.session(sid))
+
+    def test_at_the_global_cap_the_busiest_account_pays(self):
+        self._claimed()
+        with patch.object(pi_auth, "MAX_SESSIONS", 6), patch.object(pi_auth, "MAX_SESSIONS_PER_ACCOUNT", 4):
+            a = []
+            for _ in range(4):
+                self.clock.t += 1
+                a.append(self.store.create_session("student", 600, account=ACCOUNT_A))
+            self.clock.t += 1
+            b = [self.store.create_session("student", 600, account=ACCOUNT_B) for _ in range(2)]
+            self.clock.t += 1
+            c = self.store.create_session("student", 600, account="account-c")   # at the cap: A has the most
+            self.assertEqual(self.store.session_count(), 6)
+            self.assertIsNone(self.store.session(a[0]))
+            self.clock.t += 1
+            b.append(self.store.create_session("student", 600, account=ACCOUNT_B))   # A (3) still has the most
+            self.assertIsNone(self.store.session(a[1]))
+            for sid in b + [c, a[2], a[3]]:
+                self.assertIsNotNone(self.store.session(sid))
+            # never a session of an account with fewer: A and B now hold 2 and 3
+            self.clock.t += 1
+            self.store.create_session("student", 600, account="account-d")
+            self.assertEqual(sum(self.store.session(s) is not None for s in b), 2)
+            self.assertIsNotNone(self.store.session(a[2]))
+            self.assertIsNotNone(self.store.session(a[3]))
+            self.assertIsNotNone(self.store.session(c))
+
+    def test_the_account_is_kept_as_a_hash_only(self):
+        self._claimed()
+        self.store.create_session("student", 600, account=ACCOUNT_A)
+        self.assertNotIn(ACCOUNT_A, repr(self.store._sessions))
+
     def test_the_number_of_sessions_is_bounded(self):
         self._claimed()
         with patch.object(pi_auth, "MAX_SESSIONS", 5):
@@ -298,9 +364,13 @@ class TestSessions(_StoreBase):
 # ── the cloud check (a local stub stands in for the cloud API) ───────────────
 
 
+ACCOUNT_A = "0b3b8e1c-0000-4000-8000-00000000000a"
+ACCOUNT_B = "0b3b8e1c-0000-4000-8000-00000000000b"
+
+
 class _CloudStub(http.server.BaseHTTPRequestHandler):
     status = 200
-    body = b'{"id": "u-1", "role": "student"}'
+    body = b'{"id": "6f1c2a3e-1b2c-4d5e-8f90-123456789abc", "role": "student"}'
     location = None
     seen_auth = []
 
@@ -320,7 +390,7 @@ class _CloudStub(http.server.BaseHTTPRequestHandler):
 class TestVerifyWithCloud(unittest.TestCase):
     def setUp(self):
         _CloudStub.status, _CloudStub.location = 200, None
-        _CloudStub.body = b'{"id": "u-1", "role": "student"}'
+        _CloudStub.body = b'{"id": "6f1c2a3e-1b2c-4d5e-8f90-123456789abc", "role": "student"}'
         _CloudStub.seen_auth = []
         self.srv = http.server.HTTPServer(("127.0.0.1", 0), _CloudStub)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
@@ -329,37 +399,50 @@ class TestVerifyWithCloud(unittest.TestCase):
         self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
 
     def test_ok_names_the_role_and_sends_the_token_to_me_only(self):
-        self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url), ("ok", "student"))
+        self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url),
+                         ("ok", "student", "6f1c2a3e-1b2c-4d5e-8f90-123456789abc"))
         self.assertEqual(_CloudStub.seen_auth, [("/me", f"Bearer {TOKEN}")])
+
+    def test_the_account_is_what_the_cloud_names_or_nothing(self):
+        """VA-09: the per-account session cap keys on the cloud's own answer
+        (``GET /me``'s ``id``), never on anything the browser sends."""
+        for body in (b'{"role": "student"}', b'{"id": "u-1", "role": "student"}',
+                     b'{"id": 7, "role": "student"}', b'{"id": "", "role": "student"}'):
+            with self.subTest(body=body):
+                _CloudStub.body = body
+                self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url), ("ok", "student", None))
+        _CloudStub.body = b'{"id": "6F1C2A3E-1B2C-4D5E-8F90-123456789ABC", "role": "teacher"}'
+        self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url),
+                         ("ok", "teacher", "6f1c2a3e-1b2c-4d5e-8f90-123456789abc"))
 
     def test_the_cloud_judging_the_token_is_rejected(self):
         for status in (401, 403, 404):
             _CloudStub.status = status
-            self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url), ("rejected", None))
+            self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url), ("rejected", None, None))
 
     def test_an_unknown_role_is_rejected(self):
         _CloudStub.body = b'{"role": "superuser"}'
-        self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url), ("rejected", None))
+        self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url), ("rejected", None, None))
 
     def test_could_not_ask_is_unreachable(self):
         for status in (500, 502, 503):
             _CloudStub.status = status
-            self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url), ("unreachable", None))
+            self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url), ("unreachable", None, None))
         _CloudStub.status, _CloudStub.body = 200, b"<html>portal</html>"
-        self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url), ("unreachable", None))
+        self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url), ("unreachable", None, None))
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
         closed = s.getsockname()[1]
         s.close()
         self.assertEqual(pi_auth.verify_with_cloud(TOKEN, f"http://127.0.0.1:{closed}", timeout=2),
-                         ("unreachable", None))
+                         ("unreachable", None, None))
 
     def test_a_redirect_is_never_followed_with_the_token(self):
         """A captive portal answers with a 3xx; urllib would copy ordinary
         headers onto the redirected request and hand the token to the portal."""
         _CloudStub.status = 302
         _CloudStub.location = self.url + "/portal"
-        self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url), ("unreachable", None))
+        self.assertEqual(pi_auth.verify_with_cloud(TOKEN, self.url), ("unreachable", None, None))
         self.assertEqual([p for p, _ in _CloudStub.seen_auth], ["/me"])
 
 
@@ -416,7 +499,7 @@ class _GatewayBase(unittest.TestCase):
 
     def claim(self, role="teacher"):
         code = self.app._auth.mint_code()
-        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=("ok", role)):
+        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=("ok", role, None)):
             status, payload, headers = self.req(
                 "POST", "/auth/claim", {"code": pi_auth.format_code(code)},
                 {"Authorization": f"Bearer {TOKEN}"})
@@ -550,7 +633,7 @@ class TestClaim(_GatewayBase):
 
     def test_a_student_cannot_claim_and_does_not_spend_an_attempt(self):
         code = self.app._auth.mint_code()
-        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=("ok", "student")):
+        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=("ok", "student", None)):
             status, payload, _ = self.req(
                 "POST", "/auth/claim", {"code": "ABCD-EFGH"},
                 {"Authorization": f"Bearer {TOKEN}"})
@@ -562,7 +645,7 @@ class TestClaim(_GatewayBase):
     def test_a_wrong_code_is_refused_and_counted(self):
         code = self.app._auth.mint_code()
         wrong = "ABCDEFGH" if code != "ABCDEFGH" else "HGFEDCBA"
-        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=("ok", "admin")):
+        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=("ok", "admin", None)):
             status, payload, headers = self.req(
                 "POST", "/auth/claim", {"code": wrong}, {"Authorization": f"Bearer {TOKEN}"})
         self.assertEqual(status, 403)
@@ -580,7 +663,7 @@ class TestClaim(_GatewayBase):
     def test_a_cloud_that_cannot_be_asked_spends_nothing(self):
         self.app._auth.mint_code()
         with patch.object(agent.pi_auth, "verify_with_cloud",
-                          return_value=("unreachable", None)):
+                          return_value=("unreachable", None, None)):
             status, payload, _ = self.req(
                 "POST", "/auth/claim", {"code": "ABCD-EFGH"},
                 {"Authorization": f"Bearer {TOKEN}"})
@@ -590,14 +673,14 @@ class TestClaim(_GatewayBase):
 
     def test_claims_are_rate_limited_per_client(self):
         self.app._auth.mint_code()
-        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=("ok", "student")):
+        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=("ok", "student", None)):
             codes = [self.req("POST", "/auth/claim", {"code": "ABCD-EFGH"},
                               {"Authorization": f"Bearer {TOKEN}"})[0]
                      for _ in range(agent._CLAIM_RATE_PER_CLIENT[0] + 2)]
         self.assertEqual(codes[-1], 429)
 
     def test_no_code_and_a_void_code_name_the_cli(self):
-        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=("ok", "teacher")):
+        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=("ok", "teacher", None)):
             status, payload, _ = self.req("POST", "/auth/claim", {"code": "ABCD-EFGH"},
                                           {"Authorization": f"Bearer {TOKEN}"})
         self.assertEqual(status, 409)
@@ -605,14 +688,14 @@ class TestClaim(_GatewayBase):
 
     def test_a_claimed_pi_refuses_another_claim(self):
         self.claim()
-        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=("ok", "teacher")):
+        with patch.object(agent.pi_auth, "verify_with_cloud", return_value=("ok", "teacher", None)):
             status, payload, _ = self.req("POST", "/auth/claim", {"code": "ABCD-EFGH"},
                                           {"Authorization": f"Bearer {TOKEN}"})
         self.assertEqual(status, 409)
 
 
 class TestExchange(_GatewayBase):
-    def exchange(self, verdict=("ok", "student"), cookie=None):
+    def exchange(self, verdict=("ok", "student", None), cookie=None):
         headers = {"Authorization": f"Bearer {TOKEN}"}
         if cookie:
             headers["Cookie"] = cookie
@@ -623,7 +706,7 @@ class TestExchange(_GatewayBase):
     def test_any_role_gets_a_session_on_a_claimed_pi(self):
         self.claim()
         for role in ("student", "teacher", "admin"):
-            (status, payload, headers), cloud = self.exchange(("ok", role))
+            (status, payload, headers), cloud = self.exchange(("ok", role, None))
             self.assertEqual(status, 200)
             self.assertEqual(payload["role"], role)
             self.assertLessEqual(payload["expires_in"], pi_auth.SESSION_TTL_S)
@@ -639,9 +722,9 @@ class TestExchange(_GatewayBase):
 
     def test_rejected_and_unreachable(self):
         self.claim()
-        (status, payload, _), _ = self.exchange(("rejected", None))
+        (status, payload, _), _ = self.exchange(("rejected", None, None))
         self.assertEqual((status, payload["code"]), (401, "token_rejected"))
-        (status, payload, _), _ = self.exchange(("unreachable", None))
+        (status, payload, _), _ = self.exchange(("unreachable", None, None))
         self.assertEqual((status, payload["code"]), (503, "cloud_unreachable"))
 
     def test_a_new_exchange_rotates_the_old_session_out(self):
@@ -662,6 +745,20 @@ class TestExchange(_GatewayBase):
         self.assertIn("Max-Age=0", headers.get("Set-Cookie", ""))
         self.assertEqual(self.req("GET", "/auth/check", headers={"Cookie": cookie})[0], 401)
 
+    def test_one_account_holds_at_most_its_cap_of_sessions(self):
+        """VA-09: the account comes from the cloud's answer (patched here as
+        the verdict's third element), never from the request."""
+        self.claim()
+        cap = pi_auth.MAX_SESSIONS_PER_ACCOUNT
+        cookies = [self.cookie_of(self.exchange(("ok", "student", ACCOUNT_A))[0][2])
+                   for _ in range(cap + 3)]
+        (_, _, other), _ = self.exchange(("ok", "student", ACCOUNT_B))
+        # the claim's session (no account) + A's cap + B's one
+        self.assertEqual(self.app._auth.session_count(), 1 + cap + 1)
+        checks = [self.req("GET", "/auth/check", headers={"Cookie": c})[0] for c in cookies]
+        self.assertEqual(checks, [401] * 3 + [204] * cap)
+        self.assertEqual(self.req("GET", "/auth/check", headers={"Cookie": self.cookie_of(other)})[0], 204)
+
     def test_exchanges_are_rate_limited(self):
         self.claim()
         statuses = [self.exchange()[0][0]
@@ -681,7 +778,7 @@ class TestExchange(_GatewayBase):
         # Every logger of the process at DEBUG, captured at the root.
         with self.assertLogs(level="DEBUG") as logs:
             with patch.object(agent.pi_auth, "verify_with_cloud",
-                              return_value=("ok", "teacher")):
+                              return_value=("ok", "teacher", None)):
                 _, _, h = self.req("POST", "/auth/claim", {"code": code},
                                    {"Authorization": f"Bearer {TOKEN}"})
             sid = self.cookie_of(h).split("=", 1)[1]

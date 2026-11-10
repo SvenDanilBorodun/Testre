@@ -858,13 +858,13 @@ class AgentApp:
                 and self._session_rate_overall.allow("*")):
             code, payload = self._rate_limited()
             return code, payload, []
-        verdict, role = pi_auth.verify_with_cloud(token, UPDATE_API_URL)
+        verdict, role, account = pi_auth.verify_with_cloud(token, UPDATE_API_URL)
         if verdict != "ok":
             code, payload = self._cloud_verdict_response(verdict)
             return code, payload, []
         ttl = pi_auth.session_ttl(token)
         self._auth.revoke(pi_auth.parse_session_cookie(cookie_header))
-        sid = self._auth.create_session(role, ttl)
+        sid = self._auth.create_session(role, ttl, account=account)
         return 200, {"ok": True, "role": role, "expires_in": ttl,
                      "message": "Am Roboter angemeldet."}, [
             ("Set-Cookie", pi_auth.session_cookie_header(sid, ttl))]
@@ -891,7 +891,7 @@ class AgentApp:
         if not self._claim_rate_client.allow(client):
             code, payload = self._rate_limited()
             return code, payload, []
-        verdict, role = pi_auth.verify_with_cloud(token, UPDATE_API_URL)
+        verdict, role, account = pi_auth.verify_with_cloud(token, UPDATE_API_URL)
         if verdict != "ok":
             code, payload = self._cloud_verdict_response(verdict)
             return code, payload, []
@@ -905,7 +905,7 @@ class AgentApp:
             self._log("Roboter eingerichtet (Einrichtungscode angenommen).")
             ttl = pi_auth.session_ttl(token)
             self._auth.revoke(pi_auth.parse_session_cookie(cookie_header))
-            sid = self._auth.create_session(role, ttl)
+            sid = self._auth.create_session(role, ttl, account=account)
             return 200, {"ok": True, "role": role, "expires_in": ttl,
                          "message": "Roboter eingerichtet. Ab jetzt kann sich "
                                     "jedes EduBotics-Konto hier anmelden."}, [

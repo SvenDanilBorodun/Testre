@@ -206,6 +206,8 @@ class TestKeyFile(unittest.TestCase):
         self.path = Path(self.dir) / crypto.KEY_FILE_NAME
 
     def test_it_holds_exactly_the_advertisement_and_its_schema(self):
+        # The schema the pi-agent accepts (pi_agent/robot_key.py::KEY_SCHEMA).
+        assert crypto.KEY_FILE_SCHEMA == 1
         key = crypto.RobotKey.generate()
         self.assertTrue(crypto.write_key_file(key, self.dir))
         self.assertEqual(json.loads(self.path.read_text(encoding='ascii')),

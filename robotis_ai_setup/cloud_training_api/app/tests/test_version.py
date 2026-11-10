@@ -84,6 +84,9 @@ _VERSION_ENV_KEYS = (
     "PI_AGENT_SHA256",
     "RAILWAY_GIT_COMMIT_SHA",
     "BUILD_COMMIT",
+    "LEGAL_IMPRESSUM_URL",
+    "LEGAL_DATENSCHUTZ_URL",
+    "LEGAL_NUTZUNGSBEDINGUNGEN_URL",
 )
 
 _GOOD_SHA = "a" * 64
@@ -198,6 +201,44 @@ class TestVersionPiAgentFields(unittest.TestCase):
         self.assertEqual(body["installer_sha256"], _GOOD_SHA)
         self.assertEqual(body["pi_agent_sha256"], _OTHER_SHA)
         self.assertEqual(body["commit"], "cafe1234")
+
+
+_LEGAL_KEYS = ("legal_impressum_url", "legal_datenschutz_url", "legal_nutzungsbedingungen_url")
+
+
+class TestVersionLegalLinks(unittest.TestCase):
+    """Launch plan step 4 (2026-11-11): the three legal links, additive keys
+    every surface reads (app/services/legal_links.py)."""
+
+    def test_keys_are_always_present_and_null_when_unset(self):
+        body = _call()
+        for key in _LEGAL_KEYS:
+            self.assertIn(key, body)
+            self.assertIsNone(body[key])
+        self.assertTrue(all(body[k] is None for k in _LEGAL_KEYS))
+
+    def test_each_set_address_is_served_on_its_own_key(self):
+        body = _call(
+            LEGAL_IMPRESSUM_URL="https://edubotics.example/impressum",
+            LEGAL_NUTZUNGSBEDINGUNGEN_URL=" https://edubotics.example/agb#schule ",
+        )
+        self.assertEqual(body["legal_impressum_url"], "https://edubotics.example/impressum")
+        self.assertIsNone(body["legal_datenschutz_url"])
+        self.assertEqual(body["legal_nutzungsbedingungen_url"], "https://edubotics.example/agb#schule")
+
+    def test_an_address_the_boot_would_refuse_is_never_served(self):
+        body = _call(LEGAL_DATENSCHUTZ_URL="http://edubotics.example/datenschutz")
+        self.assertIsNone(body["legal_datenschutz_url"])
+        body = _call(LEGAL_DATENSCHUTZ_URL="javascript:alert(1)")
+        self.assertIsNone(body["legal_datenschutz_url"])
+
+    def test_the_older_keys_are_unchanged(self):
+        body = _call()
+        self.assertEqual(
+            set(body),
+            {"version", "download_url", "installer_sha256", "commit", "pi_agent_download_url", "pi_agent_sha256",
+             *_LEGAL_KEYS},
+        )
 
 
 if __name__ == "__main__":

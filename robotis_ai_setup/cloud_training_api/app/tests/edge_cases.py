@@ -268,6 +268,80 @@ class FailedAuthenticationCap(unittest.TestCase):
         self.assertLess(order[-1], src.index("    CORSMiddleware,"))
 
 
+class PublicReadCors(unittest.TestCase):
+    """/version answers `Access-Control-Allow-Origin: *` (launch plan step 4,
+    2026-11-11): its legal links are read by every SPA, a Pi's at a LAN address
+    ALLOWED_ORIGINS cannot list. Mounted like main.py: inside CORSMiddleware."""
+
+    ALLOWED = "http://localhost"
+
+    def setUp(self):
+        from fastapi.middleware.cors import CORSMiddleware
+
+        app = FastAPI()
+        app.add_middleware(edge.PublicReadCorsMiddleware, paths=_main_literal("_PUBLIC_READ_PATHS"))
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=[self.ALLOWED],
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=["Content-Type", "Authorization"],
+        )
+
+        @app.get("/version")
+        async def version():
+            return {"legal_impressum_url": "https://example.org/impressum"}
+
+        @app.post("/version")
+        async def version_post():
+            return {}
+
+        @app.get("/me")
+        async def me():
+            return {"private": True}
+
+        @app.get("/already")
+        async def already():
+            return JSONResponse({}, headers={"Access-Control-Allow-Origin": "https://own.example"})
+
+        self.client = TestClient(app)
+
+    def acao(self, path, origin, method="GET"):
+        headers = {"Origin": origin} if origin else {}
+        r = self.client.request(method, path, headers=headers)
+        return r.status_code, r.headers.get("access-control-allow-origin")
+
+    def test_only_version_is_public(self):
+        self.assertEqual(_main_literal("_PUBLIC_READ_PATHS"), ("/version",))
+
+    def test_any_origin_may_read_version_without_credentials(self):
+        for origin in ("http://192.168.1.23", "http://edubotics-pi.local", "https://evil.example", None):
+            with self.subTest(origin=origin):
+                self.assertEqual(self.acao("/version", origin), (200, "*"))
+        status, acao = self.acao("/version", "http://192.168.1.23", method="HEAD")
+        self.assertEqual(acao, "*")
+
+    def test_an_allowed_origin_still_gets_its_own_echo(self):
+        r = self.client.get("/version", headers={"Origin": self.ALLOWED})
+        self.assertEqual(r.headers.get("access-control-allow-origin"), self.ALLOWED)
+        self.assertEqual(r.headers.get("access-control-allow-credentials"), "true")
+
+    def test_nothing_else_changes(self):
+        self.assertEqual(self.acao("/me", "http://192.168.1.23"), (200, None))
+        self.assertEqual(self.acao("/version", "http://192.168.1.23", method="POST")[1], None)
+        self.assertEqual(self.acao("/already", "http://192.168.1.23"), (200, "https://own.example"))
+        self.assertEqual(self.acao("/version/x", "http://192.168.1.23")[1], None)
+
+    def test_main_mounts_it_inside_cors_and_validates_the_links_at_import(self):
+        with open(os.path.join(APP, "main.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        mount = src.index("app.add_middleware(_edge.PublicReadCorsMiddleware, paths=_PUBLIC_READ_PATHS)")
+        self.assertLess(mount, src.index("    _edge.RateLimitMiddleware,"))
+        self.assertLess(mount, src.index("    CORSMiddleware,"))
+        self.assertIn("\n_validate_legal_links()\n", src)
+        self.assertIn("legal_links.validate_boot()", src)
+
+
 class FailureCounterBounds(unittest.TestCase):
     def test_counts_slide_and_keys_are_capped(self):
         c = FailureCounter()

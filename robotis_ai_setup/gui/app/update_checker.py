@@ -13,8 +13,9 @@ import re
 import socket
 import tempfile
 import time
-import urllib.request
 import urllib.error
+import urllib.parse
+import urllib.request
 
 
 _NUM_RE = re.compile(r"\d+")
@@ -88,6 +89,70 @@ def check_for_update(current_version: str, api_url: str) -> dict | None:
     except Exception:
         return None
     return None
+
+
+# The three legal links (launch plan step 4, 2026-11-11): (the /version key,
+# the German link text), in display order. The cloud API serves each as an
+# https URL or null from a Railway variable (cloud_training_api/app/services/
+# legal_links.py); tests/test_legal_links_lockstep.py holds this table equal to
+# the API's and the React app's.
+LEGAL_LINKS = (
+    ("legal_impressum_url", "Impressum"),
+    ("legal_datenschutz_url", "Datenschutz"),
+    ("legal_nutzungsbedingungen_url", "Nutzungsbedingungen"),
+)
+LEGAL_URL_MAX_CHARS = 2048
+_LEGAL_URL_RE = re.compile(r"^https://[\x21-\x7e]+$")
+_LEGAL_URL_FORBIDDEN_RE = re.compile(r"[\"'<>\\`]")
+
+
+def safe_legal_url(value) -> str | None:
+    """An address /version served, re-checked: an https URL with a host, no
+    credentials, printable ASCII without quotes or angle brackets. Anything
+    else is None, so nothing but such a URL ever reaches webbrowser.open."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or len(value) > LEGAL_URL_MAX_CHARS:
+        return None
+    if not _LEGAL_URL_RE.match(value) or _LEGAL_URL_FORBIDDEN_RE.search(value):
+        return None
+    try:
+        parts = urllib.parse.urlsplit(value)
+        port_ok = parts.port is None or parts.port > 0
+    except ValueError:
+        return None
+    if not parts.hostname or parts.username is not None or parts.password is not None or not port_ok:
+        return None
+    return value
+
+
+def parse_legal_links(data) -> list[tuple[str, str]]:
+    """[(German link text, url)] for every legal link a /version body names."""
+    if not isinstance(data, dict):
+        return []
+    links = []
+    for key, label in LEGAL_LINKS:
+        url = safe_legal_url(data.get(key))
+        if url:
+            links.append((label, url))
+    return links
+
+
+def fetch_legal_links(api_url: str, timeout: float = 5) -> list[tuple[str, str]]:
+    """GET /version and return its legal links. Never raises: an offline PC,
+    an error status, a malformed body or an API without the keys are [] (the
+    GUI then shows no links and says nothing)."""
+    if not api_url:
+        return []
+    url = f"{api_url.rstrip('/')}/version"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read(64 * 1024).decode("utf-8"))
+    except Exception:
+        return []
+    return parse_legal_links(data)
 
 
 def cleanup_stale_installers(max_age_hours: int = 24) -> int:

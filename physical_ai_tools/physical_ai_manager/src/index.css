@@ -1,7 +1,7 @@
 /* EduBotics design tokens. No CDN font: the student app self-hosts its three
  * „Sucher" faces (public/fonts, OFL, @font-face below) and never contacts
- * Google; the teacher web build adds its Inter Tight / JetBrains Mono
- * stylesheet at runtime (WebApp.js). */
+ * Google; the teacher web build links its self-hosted Inter Tight / JetBrains
+ * Mono stylesheet (public/fonts/web-fonts.css) at runtime (WebApp.js). */
 
 /* ── Self-hosted fonts (fontsource 5.3.0: latin + latin-ext, D18) ─────────── */
 @font-face {

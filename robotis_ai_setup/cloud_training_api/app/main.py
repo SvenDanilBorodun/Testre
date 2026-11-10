@@ -139,6 +139,21 @@ def _validate_edge_settings() -> int:
 
 _TRUSTED_PROXY_HOPS = _validate_edge_settings()
 
+
+def _validate_legal_links() -> None:
+    """Launch plan step 4 (2026-11-11): LEGAL_IMPRESSUM_URL,
+    LEGAL_DATENSCHUTZ_URL and LEGAL_NUTZUNGSBEDINGUNGEN_URL are each empty
+    (no link) or an absolute https:// URL; anything else stops the boot, so a
+    typo fails the /health gate instead of silently dropping a legally required
+    link (app/services/legal_links.py). The message names the variable, never
+    the value."""
+    from app.services import legal_links
+
+    legal_links.validate_boot()
+
+
+_validate_legal_links()
+
 # One id per process start, the publish/mirror lease owner (FR-4): uvicorn is
 # PID 1 in every Railway container, so a process id would make two instances
 # one owner. Defined in training_dispatch (its user), named here.
@@ -865,6 +880,11 @@ _PER_USER_RATE_LIMIT_PREFIXES = (
 # the generic middleware 413. Every OTHER route is capped at
 # app/edge.py::MAX_BODY_BYTES (1 MB, 2026-11-10), and a chunked body is refused
 # on every body method.
+# Paths ANY browser origin may read without credentials (launch plan step 4):
+# /version carries the legal links, and a Pi's SPA runs at a LAN address
+# ALLOWED_ORIGINS cannot list. Only public, token-free GET routes belong here.
+_PUBLIC_READ_PATHS = ("/version",)
+
 _MAX_WRITE_BODY_BYTES = 384 * 1024
 _BODY_SIZE_LIMITED_PREFIXES: tuple[tuple[str, str], ...] = (
     ("POST", "/workflows"),
@@ -877,10 +897,13 @@ _BODY_SIZE_LIMITED_PREFIXES: tuple[tuple[str, str], ...] = (
 
 # Middleware ordering: Starlette wraps in reverse of add_middleware calls
 # (last-added becomes outermost): CORS → failed-authentication cap → body
-# limits → rate limits → the app. CORS outermost so a 429/411/413 still carries
-# Access-Control-* headers (the browser would otherwise see a generic CORS
-# failure); the failed-authentication cap next, so an address over its budget
-# is refused before anything else runs.
+# limits → rate limits → public-read CORS → the app. CORS outermost so a
+# 429/411/413 still carries Access-Control-* headers (the browser would
+# otherwise see a generic CORS failure); the failed-authentication cap next, so
+# an address over its budget is refused before anything else runs. The
+# public-read star (/version only, 2026-11-11) sits INSIDE CORSMiddleware so an
+# allowed origin still gets its own echo; any other origin keeps the star.
+app.add_middleware(_edge.PublicReadCorsMiddleware, paths=_PUBLIC_READ_PATHS)
 app.add_middleware(
     _edge.RateLimitMiddleware,
     rules=_RATE_LIMIT_RULES,

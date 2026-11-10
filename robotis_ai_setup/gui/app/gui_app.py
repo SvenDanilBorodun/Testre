@@ -982,6 +982,12 @@ class EduBoticsApp:
         ttk.Label(main, text=f"Version {APP_VERSION}",
                   style="Hint.TLabel").pack(pady=(0, 6))
 
+        # „Impressum · Datenschutz · Nutzungsbedingungen" (launch plan step 4,
+        # 2026-11-11): empty, and so invisible, until the cloud API's /version
+        # names an address; `_show_legal_links` fills it from a daemon thread.
+        self.legal_frame = ttk.Frame(main)
+        self.legal_frame.pack()
+
         # Status bar
         self.status_var = tk.StringVar(value="System wird geprüft...")
         status_label = ttk.Label(main, textvariable=self.status_var,
@@ -1606,6 +1612,9 @@ class EduBoticsApp:
         # Fire the informational system preflight once per launch, off on its own
         # daemon thread so it never blocks or gates the startup checks below.
         threading.Thread(target=self._run_preflight_diagnostics, daemon=True).start()
+        # The legal links, likewise off the startup path: offline they simply
+        # never appear.
+        threading.Thread(target=self._load_legal_links, daemon=True).start()
 
         def _check():
             self.root.after(0, lambda: self.progress.start(10))
@@ -1634,6 +1643,44 @@ class EduBoticsApp:
             self._run_prerequisite_checks()
 
         threading.Thread(target=_check, daemon=True).start()
+
+    # ── Legal links (launch plan step 4) ─────────────────────────────
+
+    def _load_legal_links(self):
+        """Worker thread: ask the cloud API's /version for the legal links and
+        hand them to the Tk thread. Never raises and never logs: no address set,
+        an older API or an offline PC all mean no links."""
+        try:
+            links = update_checker.fetch_legal_links(UPDATE_API_URL)
+        except Exception:
+            links = []
+        if links:
+            self.root.after(0, lambda: self._show_legal_links(links))
+
+    def _show_legal_links(self, links):
+        """Tk thread: one underlined, clickable, keyboard-reachable label per
+        link under the version line. Only an https address the checker
+        re-validated is ever opened."""
+        for child in self.legal_frame.winfo_children():
+            child.destroy()
+        shown = 0
+        for label_text, url in links:
+            if update_checker.safe_legal_url(url) != url:
+                continue
+            if shown:
+                ttk.Label(self.legal_frame, text="·", style="Hint.TLabel").pack(side=tk.LEFT, padx=4)
+            link = ttk.Label(self.legal_frame, text=label_text, style=theme_mod.LINK_LABEL,
+                             cursor="hand2", takefocus=True)
+            link.pack(side=tk.LEFT)
+
+            def _open(_event=None, target=url):
+                webbrowser.open(target)
+
+            for sequence in ("<Button-1>", "<Return>", "<space>"):
+                link.bind(sequence, _open)
+            shown += 1
+        if shown:
+            self.legal_frame.pack_configure(pady=(0, 6))
 
     def _run_prerequisite_checks(self):
         """Re-entrancy guard around the prerequisite scan.

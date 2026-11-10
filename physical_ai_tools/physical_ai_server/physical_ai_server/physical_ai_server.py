@@ -1722,6 +1722,16 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self.get_logger().warning(
                 'The cryptography package is missing: the robot advertises no key, so an '
                 'Orange Pi page will not send the Hugging Face token at all.')
+        # VB-03 (2026-11-15): on an Orange Pi the public half also goes to the
+        # key file the pi-agent serves behind the robot login; the Pi's page
+        # encrypts only for that key (a rosbridge session can forge the topic).
+        # BEFORE the first state publish, so the file is never older than the
+        # topic. Elsewhere the directory is absent and nothing is written.
+        try:
+            if hf_token_crypto.write_key_file(self._hf_token_key):
+                self.get_logger().info('Wrote the token key file for the Pi agent')
+        except Exception as e:  # noqa: BLE001 — a key file never stops the node
+            self.get_logger().warning(f'Could not write the token key file: {type(e).__name__}')
         removed = hf_token_store.purge_legacy()
         if removed:
             self.get_logger().info(

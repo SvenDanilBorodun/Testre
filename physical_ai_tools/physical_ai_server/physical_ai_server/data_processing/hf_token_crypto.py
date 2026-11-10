@@ -36,9 +36,24 @@ An older robot reads such a string as a malformed token and writes nothing
 the SPA sends again with the key the next state message carries. Clearing the
 slot stays the empty string, in the clear.
 
+THE KEY FILE (verification round B, VB-03, 2026-11-15). On an Orange Pi every
+account that may use the robot holds a rosbridge session, and rosbridge lets
+any client PUBLISH on any topic and advertise any service: a classmate could
+publish a forged /edubotics/hf_token_state naming their own key, and advertise
+their own /register_hf_user, and so read the next student's token. So the node
+also writes its public key to ``KEY_FILE_DIR/KEY_FILE_NAME``
+(``write_key_file``), a directory the Orange Pi compose bind-mounts from the
+host, where the pi-agent serves it behind the robot login
+(``GET /api/system/robot-key``). The Pi's SPA encrypts ONLY for the key the
+agent serves, and sends nothing while the topic advertises another key id. A
+forged topic is then ignored, and a forged /register_hf_user receives only a
+ciphertext for this node's key, which it cannot open. On Windows (loopback)
+the directory does not exist and nothing is written.
+
 What this does NOT stop (accepted, docs/KNOWN-ISSUES.md): an ACTIVE attacker
-on the LAN who rewrites the page the Pi serves can make the browser encrypt for
-the attacker's key. It stops the passive listener.
+on the LAN who rewrites the page the Pi serves (no HTTPS) can make the browser
+encrypt for the attacker's key. It stops the passive listener and a session
+holder's forged topic or service.
 
 `cryptography` is pinned in the server image (docker/physical_ai_server/
 Dockerfile) and imported lazily: a node without it advertises no key and keeps
@@ -50,7 +65,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+import os
 import re
+import tempfile
 from typing import Optional
 
 WIRE_PREFIX = 'enc1:'
@@ -64,6 +82,14 @@ _B64URL_RE = re.compile(r'[A-Za-z0-9_-]+')
 POINT_LEN = 65
 IV_LEN = 12
 TAG_LEN = 16
+
+# The key file the pi-agent serves (VB-03, module docstring). The SAME path is
+# the Orange Pi compose's bind mount (host and container alike) and
+# pi_agent/constants.py's ROBOT_KEY_DIR / ROBOT_KEY_FILE_NAME;
+# robotis_ai_setup/tests/test_robot_key_file_lockstep.py holds them equal.
+KEY_FILE_DIR = '/run/edubotics-robot-key'
+KEY_FILE_NAME = 'hf_token_key.json'
+KEY_FILE_SCHEMA = 1
 
 
 class WireError(Exception):
@@ -168,6 +194,59 @@ class RobotKey:
             return plain.decode('utf-8')
         except UnicodeDecodeError:
             raise WireError('bad') from None
+
+
+def key_file_payload(key: RobotKey) -> dict:
+    """What the key file holds: the schema version and the advertisement."""
+    return {'v': KEY_FILE_SCHEMA, **key.advertisement()}
+
+
+def write_key_file(key: Optional[RobotKey], directory: Optional[str] = None) -> bool:
+    """Publish ``key``'s PUBLIC half for the pi-agent (VB-03). True when the
+    file was written.
+
+    Nothing happens where ``directory`` does not exist (every compose but the
+    Orange Pi's: Windows keeps the topic's key). With no key (no
+    `cryptography`), a file a previous node left behind is removed, so the
+    agent serves no key rather than a stale one. The write is atomic (temp,
+    fsync, 0644, rename); an OSError is the caller's to log, never a token.
+    """
+    directory = KEY_FILE_DIR if directory is None else directory  # read at call time
+    if not os.path.isdir(directory):
+        return False
+    path = os.path.join(directory, KEY_FILE_NAME)
+    if key is None:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return False
+    data = (json.dumps(key_file_payload(key), separators=(',', ':')) + '\n').encode('ascii')
+    fd, tmp = tempfile.mkstemp(prefix='.' + KEY_FILE_NAME + '.', dir=directory)
+    try:
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return True
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+    return True
 
 
 def generate_or_none() -> Optional[RobotKey]:

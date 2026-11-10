@@ -193,3 +193,50 @@ class TestScrubber(unittest.TestCase):
         plain = store.state_payload(1, False, path='/nonexistent/token',
                                     environ={store.PATH_ENV: '/nonexistent/token'})
         self.assertEqual(list(plain), ['v', 'seq', 'accepts', 'present', 'fp', 'busy'])
+
+
+class TestKeyFile(unittest.TestCase):
+    """VB-03: the public half for the pi-agent (``write_key_file``)."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.path = Path(self.dir) / crypto.KEY_FILE_NAME
+
+    def test_it_holds_exactly_the_advertisement_and_its_schema(self):
+        key = crypto.RobotKey.generate()
+        self.assertTrue(crypto.write_key_file(key, self.dir))
+        self.assertEqual(json.loads(self.path.read_text(encoding='ascii')),
+                         {'v': crypto.KEY_FILE_SCHEMA, **key.advertisement()})
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o644)
+        # The kid is the public point's hash, as the agent and the SPA check.
+        self.assertEqual(key.kid, crypto.kid_of(_b64url(key.public_b64)))
+
+    def test_a_missing_directory_writes_nothing(self):
+        missing = str(Path(self.dir) / 'absent')
+        self.assertFalse(crypto.write_key_file(crypto.RobotKey.generate(), missing))
+        self.assertFalse(Path(missing).exists())
+
+    def test_no_key_removes_a_file_a_previous_node_left(self):
+        self.assertTrue(crypto.write_key_file(crypto.RobotKey.generate(), self.dir))
+        self.assertFalse(crypto.write_key_file(None, self.dir))
+        self.assertFalse(self.path.exists())
+        self.assertFalse(crypto.write_key_file(None, self.dir))  # and again: no error
+
+    def test_the_default_directory_is_read_at_call_time(self):
+        from unittest.mock import patch
+        key = crypto.RobotKey.generate()
+        with patch.object(crypto, 'KEY_FILE_DIR', self.dir):
+            self.assertTrue(crypto.write_key_file(key))
+        self.assertTrue(self.path.is_file())
+
+    def test_no_private_material_in_the_file(self):
+        key = crypto.RobotKey.generate()
+        crypto.write_key_file(key, self.dir)
+        text = self.path.read_text(encoding='ascii')
+        private = key._private.private_numbers().private_value.to_bytes(32, 'big')
+        self.assertNotIn(crypto.b64url(private), text)
+        self.assertNotIn(private.hex(), text)
+        self.assertEqual(set(json.loads(text)), {'v', 'enc', 'kid', 'pub'})

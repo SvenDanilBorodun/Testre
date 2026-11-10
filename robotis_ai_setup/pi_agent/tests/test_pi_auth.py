@@ -540,7 +540,7 @@ class _GatewayBase(unittest.TestCase):
 class TestTheGateOnTheAgent(_GatewayBase):
     PROTECTED_GETS = ("/status", "/cameras/scan", "/protokoll",
                       "/roboter-studio/status", "/cameras/preview?device=/dev/video0",
-                      "/does-not-exist")
+                      "/robot-key", "/does-not-exist")
     PROTECTED_POSTS = ("/scan-arms", "/cameras/roles", "/cameras/preview/stop",
                        "/phone/toggle", "/robot-type", "/environment/start",
                        "/environment/stop", "/update", "/factory-reset",

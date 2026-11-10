@@ -9,13 +9,22 @@
 // and never the token; an Orange Pi page sends NOTHING to a robot without a
 // key; a Windows page (loopback) still sends the plain token to such a robot;
 // clearing stays the empty string.
+//
+// VB-03 (2026-11-15): on a Pi the key the token is encrypted for comes from
+// the pi-agent (`GET /api/system/robot-key`), never from the topic alone: a
+// forged topic gets nothing, and a forged /register_hf_user receives only a
+// ciphertext for the agent's (the node's) key.
 
 import ROSLIB from 'roslib';
-import { webcrypto } from 'crypto';
+import {
+  createDecipheriv, createECDH, createHash, hkdfSync, webcrypto,
+} from 'crypto';
 import rosConnectionManager from '../../../utils/rosConnectionManager';
 import {
-  getRobotKey, setRobotKeyForTests, setRobotToken, subscribeTokenState,
+  AGENT_KEY_URL, getRobotKey, KEY_CHECKS, readAgentRobotKey, setAgentKeySourceForTests,
+  setRobotKeyForTests, setRobotToken, subscribeTokenState,
 } from '../robotChannel';
+import { CONTEXT, WIRE_PREFIX } from '../hfTokenCrypto';
 import { hfCopy } from '../hfTokenCopy';
 import fixture from './fixtures/hf-token-crypto-cases.json';
 
@@ -29,6 +38,53 @@ vi.mock('../../../utils/piMode', () => ({
   __esModule: true,
   getPiModeSync: () => mockPi.on,
 }));
+
+const mockAuth = vi.hoisted(() => ({ unauthorized: 0 }));
+vi.mock('../../piAuth/piAuth', () => ({
+  __esModule: true,
+  noteUnauthorized: () => { mockAuth.unauthorized += 1; },
+}));
+
+// The pi-agent's GET /robot-key, as agent.py answers it.
+const agentReads = [];
+function agentServes(answer) {
+  return async (url, init) => {
+    agentReads.push({ url, init });
+    const value = typeof answer === 'function' ? answer(agentReads.length) : answer;
+    if (value instanceof Error) throw value;
+    if (typeof value === 'number') return { ok: false, status: value, json: async () => ({ ok: false }) };
+    return { ok: true, status: 200, json: async () => ({ ok: true, key: value }) };
+  };
+}
+const served = (key) => (key ? { enc: 'enc1', ...key } : null);
+
+/** A fresh P-256 key, as an attacker would make one (node:crypto). */
+function newKey() {
+  const ecdh = createECDH('prime256v1');
+  ecdh.generateKeys();
+  const point = ecdh.getPublicKey(null, 'uncompressed');
+  return {
+    d: ecdh.getPrivateKey(),
+    pub: point.toString('base64url'),
+    kid: createHash('sha256').update(point).digest('hex').slice(0, 16),
+  };
+}
+
+/** The robot's half in node:crypto (OpenSSL): what hf_token_crypto.RobotKey.decrypt does. */
+function decryptWith(wire, privateKey) {
+  const [kid, point, iv, ct] = wire.slice(WIRE_PREFIX.length).split('.');
+  const ecdh = createECDH('prime256v1');
+  ecdh.setPrivateKey(privateKey);
+  const shared = ecdh.computeSecret(Buffer.from(point, 'base64url'));
+  const key = Buffer.from(hkdfSync('sha256', shared, CONTEXT, `aes-256-gcm|${kid}`, 32));
+  const raw = Buffer.from(ct, 'base64url');
+  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'base64url'));
+  decipher.setAAD(Buffer.from(`${CONTEXT}|${kid}`, 'utf8'));
+  decipher.setAuthTag(raw.subarray(raw.length - 16));
+  return Buffer.concat([decipher.update(raw.subarray(0, raw.length - 16)), decipher.final()]).toString('utf8');
+}
+
+const ROBOT_D = Buffer.from(fixture.robot.d, 'base64url');
 
 const mockTopics = [];
 const mockCalls = [];
@@ -55,7 +111,10 @@ vi.mock('roslib', () => ({
 beforeEach(() => {
   mockTopics.length = 0;
   mockCalls.length = 0;
+  agentReads.length = 0;
+  mockAuth.unauthorized = 0;
   mockPi.on = false;
+  setAgentKeySourceForTests({ fetch: agentServes(null), recheckMs: 0 });
   setRobotKeyForTests(null);
   rosConnectionManager.url = 'ws://localhost/rosbridge';
   vi.spyOn(rosConnectionManager, 'getCurrentConnection').mockReturnValue({ isConnected: true });
@@ -63,6 +122,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  setAgentKeySourceForTests();
   setRobotKeyForTests(null);
   rosConnectionManager.url = '';
 });
@@ -96,16 +156,24 @@ describe('setRobotToken', () => {
 
   it('on a Pi sends nothing to a robot without a key and says why', async () => {
     mockPi.on = true;
-    const result = await setRobotToken(TOKEN);
+    // an agent and a node with no key at all: an image from before the key
+    let result = await setRobotToken(TOKEN);
+    expect(result).toEqual({ success: false, message: hfCopy('robot.needsUpdate') });
+    // an agent from before GET /robot-key (404), even with a key on the topic
+    setAgentKeySourceForTests({ fetch: agentServes(404), recheckMs: 0 });
+    setRobotKeyForTests(KEY);
+    result = await setRobotToken(TOKEN);
     expect(result).toEqual({ success: false, message: hfCopy('robot.needsUpdate') });
     expect(mockCalls).toHaveLength(0);
   });
 
-  it('on a Pi sends the enc1 value when a key is advertised', async () => {
+  it('on a Pi sends the enc1 value when the agent and the topic name the same key', async () => {
     mockPi.on = true;
+    setAgentKeySourceForTests({ fetch: agentServes(served(KEY)), recheckMs: 0 });
     setRobotKeyForTests(KEY);
     await setRobotToken(TOKEN);
-    expect(mockCalls[0].request.token.startsWith('enc1:')).toBe(true);
+    expect(mockCalls[0].request.token.startsWith(`enc1:${KEY.kid}.`)).toBe(true);
+    expect(decryptWith(mockCalls[0].request.token, ROBOT_D)).toBe(TOKEN);
   });
 
   it('on Windows a robot without a key still gets the plain token (loopback)', async () => {
@@ -123,6 +191,7 @@ describe('setRobotToken', () => {
 
   it('a Pi page without crypto.subtle (plain HTTP is no secure context) still encrypts', async () => {
     mockPi.on = true;
+    setAgentKeySourceForTests({ fetch: agentServes(served(KEY)), recheckMs: 0 });
     setRobotKeyForTests(KEY);
     const saved = globalThis.crypto;
     const noSubtle = { getRandomValues: (a) => webcrypto.getRandomValues(a) };
@@ -182,5 +251,97 @@ describe('setRobotToken', () => {
     expect(hfCopy('robot.encryptFailed')).toMatch(/verschlüsselt/);
     expect(hfCopy('robot.sealUnavailable')).toMatch(/Seite neu laden/);
     expect(ROSLIB).toBeTruthy();
+  });
+});
+
+describe('VB-03: on a Pi the key comes from the agent, never from the topic alone', () => {
+  beforeEach(() => {
+    mockPi.on = true;
+  });
+
+  it('a forged topic naming an attacker key gets nothing, and the page says why', async () => {
+    const attacker = newKey();
+    setAgentKeySourceForTests({ fetch: agentServes(served(KEY)), recheckMs: 0 });
+    setRobotKeyForTests({ kid: attacker.kid, pub: attacker.pub });
+    const result = await setRobotToken(TOKEN);
+    expect(result).toEqual({ success: false, message: hfCopy('robot.keyMismatch') });
+    expect(mockCalls).toHaveLength(0); // nothing reached /register_hf_user, forged or real
+    expect(agentReads).toHaveLength(KEY_CHECKS); // re-read before giving up
+  });
+
+  it('a forged topic with the real key id but the attacker point: the ciphertext is for the agent key', async () => {
+    const attacker = newKey();
+    setAgentKeySourceForTests({ fetch: agentServes(served(KEY)), recheckMs: 0 });
+    setRobotKeyForTests({ kid: KEY.kid, pub: attacker.pub });
+    const result = await setRobotToken(TOKEN);
+    expect(result.success).toBe(true);
+    const wire = mockCalls[0].request.token;
+    // A forged /register_hf_user receives exactly this: only the node opens it.
+    expect(decryptWith(wire, ROBOT_D)).toBe(TOKEN);
+    expect(() => decryptWith(wire, attacker.d)).toThrow();
+    // ...not relabelled with the attacker's own key id either.
+    const relabelled = `${WIRE_PREFIX}${attacker.kid}${wire.slice(WIRE_PREFIX.length + 16)}`;
+    expect(() => decryptWith(relabelled, attacker.d)).toThrow();
+    expect(wire).not.toContain(TOKEN);
+  });
+
+  it('a restarted node: the file is new before the topic is, so the page waits and then sends', async () => {
+    const before = newKey(); // the key the page saw before the restart
+    setRobotKeyForTests({ kid: before.kid, pub: before.pub });
+    setAgentKeySourceForTests({
+      fetch: agentServes((n) => {
+        if (n === 2) setRobotKeyForTests(KEY); // the topic catches up between two reads
+        return served(KEY);
+      }),
+      recheckMs: 0,
+    });
+    const result = await setRobotToken(TOKEN);
+    expect(result.success).toBe(true);
+    expect(agentReads).toHaveLength(2);
+    expect(decryptWith(mockCalls[0].request.token, ROBOT_D)).toBe(TOKEN);
+  });
+
+  it('no key from the agent, an agent that cannot be asked, or a lost session: nothing is sent', async () => {
+    setRobotKeyForTests(KEY);
+    for (const answer of [null, new Error('offline'), 500, { enc: 'enc1', kid: 'XYZ', pub: KEY.pub }]) {
+      mockCalls.length = 0;
+      agentReads.length = 0;
+      setAgentKeySourceForTests({ fetch: agentServes(answer), recheckMs: 0 });
+      // eslint-disable-next-line no-await-in-loop
+      const result = await setRobotToken(TOKEN);
+      expect(result).toEqual({ success: false, message: hfCopy('robot.keyUnavailable') });
+      expect(mockCalls).toHaveLength(0);
+      expect(agentReads).toHaveLength(KEY_CHECKS);
+    }
+    setAgentKeySourceForTests({ fetch: agentServes(401), recheckMs: 0 });
+    const result = await setRobotToken(TOKEN);
+    expect(result).toEqual({ success: false, message: hfCopy('robot.keyUnavailable') });
+    expect(mockAuth.unauthorized).toBe(KEY_CHECKS); // the robot login re-checks its session
+  });
+
+  it('reads the agent same-origin, with the session cookie and no Authorization header', async () => {
+    setAgentKeySourceForTests({ fetch: agentServes(served(KEY)), recheckMs: 0 });
+    expect(await readAgentRobotKey()).toEqual({ status: 'ok', key: KEY });
+    const [{ url, init }] = agentReads;
+    expect(url.split('?')[0]).toBe(AGENT_KEY_URL);
+    expect(AGENT_KEY_URL).toBe('/api/system/robot-key');
+    expect(init.credentials).toBe('same-origin');
+    expect(init.headers).toBeUndefined();
+  });
+
+  it('clearing needs no key; Windows never asks the agent', async () => {
+    let result = await setRobotToken('');
+    expect(result.success).toBe(true);
+    expect(mockCalls[0].request.token).toBe('');
+    mockPi.on = false;
+    setRobotKeyForTests(KEY);
+    result = await setRobotToken(TOKEN);
+    expect(result.success).toBe(true);
+    expect(agentReads).toHaveLength(0);
+  });
+
+  it('the copy is German', () => {
+    expect(hfCopy('robot.keyMismatch')).toMatch(/verschiedene Schlüssel/);
+    expect(hfCopy('robot.keyUnavailable')).toMatch(/Schlüssel/);
   });
 });

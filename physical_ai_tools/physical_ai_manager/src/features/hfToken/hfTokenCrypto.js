@@ -69,10 +69,26 @@ export function parseRobotKey(data) {
     return null;
   }
   if (!raw || typeof raw !== 'object' || raw.accepts !== true) return null;
+  return keyFields(raw);
+}
+
+function keyFields(raw) {
   if (raw.enc !== ENC_NAME) return null;
   if (typeof raw.kid !== 'string' || !KID_SHAPE.test(raw.kid)) return null;
   if (typeof raw.pub !== 'string' || !PUB_SHAPE.test(raw.pub)) return null;
   return { kid: raw.kid, pub: raw.pub };
+}
+
+/**
+ * The robot's key as the pi-agent serves it (`GET /api/system/robot-key`'s
+ * `key`, VB-03): the same three fields and shapes as the topic's
+ * advertisement, or null.
+ * @param {unknown} value
+ * @returns {null|{kid: string, pub: string}}
+ */
+export function parseServedKey(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return keyFields(value);
 }
 
 let sealModule = null;

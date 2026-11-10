@@ -594,6 +594,20 @@ services:
       # runner.sock (0600). No depends_on on the runner: without it every
       # code run is refused in German and Blockly is untouched.
       - code_runner_ipc:/run/edubotics/code
+      # The robot's PUBLIC token key for the pi-agent (verification round B,
+      # VB-03, 2026-11-15). The node writes /run/edubotics-robot-key/
+      # hf_token_key.json at its start (hf_token_crypto.write_key_file); the
+      # agent serves it behind the robot login (GET /api/system/robot-key), and
+      # the Pi's page encrypts the student's Hugging Face token ONLY for that
+      # key — a rosbridge session can forge /edubotics/hf_token_state, but not
+      # this file. A host path under /run (tmpfs: gone after a reboot, like the
+      # node's key). The agent creates the directory before every robot-tier
+      # `up` (docker_manager._compose_up → robot_key.ensure_dir), so a fielded
+      # Pi gets it with its next self-update; were it missing anyway, Docker
+      # creates it root-owned, which the agent (root) reads too. The student
+      # (Windows) compose has no such mount: there the page keeps the topic's
+      # key on loopback. tests/test_robot_key_file_lockstep.py holds the path.
+      - /run/edubotics-robot-key:/run/edubotics-robot-key
     tmpfs:
       # The per-student Hugging Face token slot ($HF_TOKEN_PATH above). A tmpfs
       # survives a node respawn (same container) but vanishes with the container,

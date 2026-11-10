@@ -763,6 +763,75 @@ class TestEncryptedToken(_Base):
         self.assertNotIn('enc1:', text)
         self.assertNotIn(TOK, text)
 
+    # ── VB-03 (2026-11-15): the key file the pi-agent serves ────────────────
+
+    def test_the_init_writes_the_key_file_before_any_publish(self):
+        keydir = os.path.join(self._tmp.name, 'robot-key')
+        os.makedirs(keydir)
+        node = self.node()
+        with patch.object(crypto, 'KEY_FILE_DIR', keydir):
+            node._init_hf_token_state()
+        self.assertEqual(node._hf_token_state_pub.sent, [])  # nothing published yet
+        path = os.path.join(keydir, crypto.KEY_FILE_NAME)
+        written = json.loads(open(path, encoding='ascii').read())
+        self.assertEqual(written, {'v': 1, 'enc': 'enc1', 'kid': node._hf_token_key.kid,
+                                   'pub': node._hf_token_key.public_b64})
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o644)
+        self.assertIn('Wrote the token key file', '\n'.join(node.log.lines))
+        # A restarted node replaces it with its own, fresh key.
+        again = self.node()
+        with patch.object(crypto, 'KEY_FILE_DIR', keydir):
+            again._init_hf_token_state()
+        self.assertEqual(json.loads(open(path, encoding='ascii').read())['kid'],
+                         again._hf_token_key.kid)
+        self.assertNotEqual(again._hf_token_key.kid, node._hf_token_key.kid)
+        self.assertEqual([n for n in os.listdir(keydir) if n.startswith('.')], [])  # no temp left
+
+    def test_without_the_directory_nothing_is_written_and_nothing_logged(self):
+        missing = os.path.join(self._tmp.name, 'no-such-dir')
+        node = self.node()
+        with patch.object(crypto, 'KEY_FILE_DIR', missing):
+            node._init_hf_token_state()
+        self.assertFalse(os.path.exists(missing))
+        self.assertNotIn('key file', '\n'.join(node.log.lines))
+
+    def test_a_failing_write_logs_its_class_only_and_the_node_lives_on(self):
+        node = self.node()
+        with patch.object(crypto, 'write_key_file', side_effect=PermissionError('/secret/path')):
+            node._init_hf_token_state()
+        text = '\n'.join(node.log.lines)
+        self.assertIn('Could not write the token key file: PermissionError', text)
+        self.assertNotIn('/secret/path', text)
+        self.assertEqual(len(node.timers), 1)
+
+    def test_a_forged_register_hf_user_gains_nothing_from_what_the_pi_page_sends(self):
+        """A classmate who advertises their own /register_hf_user (ROS 2 hands a
+        request to every server of the name) receives only what the Pi page sends:
+        a ciphertext for the key the AGENT serves, this node's key. Their own key
+        cannot open it, not as sent and not relabelled with their own key id."""
+        node = self.keyed_node()
+        attacker = crypto.RobotKey.generate()
+        # What the page sends: encrypted for the served key, whatever the topic said.
+        wire = crypto.encrypt_for_tests(node._hf_token_key.public_b64, node._hf_token_key.kid, TOK)
+        with self.assertRaises(crypto.WireError) as stale:
+            attacker.decrypt(wire)
+        self.assertEqual(stale.exception.code, 'stale')
+        relabelled = crypto.WIRE_PREFIX + attacker.kid + wire[len(crypto.WIRE_PREFIX) + 16:]
+        with self.assertRaises(crypto.WireError) as bad:
+            attacker.decrypt(relabelled)
+        self.assertEqual(bad.exception.code, 'bad')
+        # Forged topic with the REAL key id but the attacker's point: the page
+        # still encrypts for the served point, so the attacker reads nothing...
+        forged_topic = {'kid': node._hf_token_key.kid, 'pub': attacker.public_b64}
+        self.assertNotEqual(forged_topic['pub'], node._hf_token_key.public_b64)
+        with self.assertRaises(crypto.WireError) as bad_again:
+            attacker.decrypt(crypto.WIRE_PREFIX + attacker.kid + wire[len(crypto.WIRE_PREFIX) + 16:])
+        self.assertEqual(bad_again.exception.code, 'bad')
+        # ...while the real node opens it and stores the token.
+        response = node.request(wire)
+        self.assertTrue(response.success)
+        self.assertEqual(self.stored(), TOK)
+
 
 class TestAstFences(unittest.TestCase):
     def test_the_old_login_path_is_gone_from_the_callback_and_its_helper(self):

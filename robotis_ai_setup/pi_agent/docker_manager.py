@@ -37,7 +37,7 @@ import subprocess
 import time
 from typing import Optional
 
-from . import config_generator
+from . import config_generator, robot_key
 from .constants import (
     ALL_IMAGES,
     COMPOSE_FILE,
@@ -914,8 +914,14 @@ def _compose_up(*services: str, log=None, timeout: int = 180) -> bool:
     ``--no-deps`` keeps compose's dependency resolution away from services we
     aren't naming (so recreating the robot tier never touches the running
     manager, and vice-versa). The health-gated ``depends_on`` BETWEEN the two
-    robot-tier services still applies when both are named."""
+    robot-tier services still applies when both are named.
+
+    Before physical_ai_server comes up, the host directory its compose
+    bind-mounts for the token key is created (VB-03, ``robot_key.ensure_dir``):
+    /run is a tmpfs, and a fielded Pi that self-updated has none yet."""
     log = log or (lambda _m: None)
+    if "physical_ai_server" in services:
+        robot_key.ensure_dir(log=log)
     cmd = _compose("up", "-d", "--force-recreate", "--no-deps", *services)
     try:
         result = subprocess.run(

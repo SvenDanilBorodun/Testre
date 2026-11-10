@@ -102,6 +102,16 @@ export const HF_TOKEN_COPY = Object.freeze({
   // chunk did not load needs a reload, not another browser.
   'robot.sealUnavailable':
     'Die Verschlüsselung für das Token konnte nicht geladen werden. Bitte die Seite neu laden.',
+  // 2026-11-15 (VB-03): on a Pi the key comes from the agent, and the topic
+  // must name the same one.
+  'robot.keyMismatch':
+    'Der Roboter meldet zwei verschiedene Schlüssel für das Token, deshalb wird es nicht übertragen. '
+    + 'Bitte in ein paar Sekunden erneut versuchen. Bleibt es dabei, bitte die Lehrkraft informieren: '
+    + 'Jemand im Netzwerk könnte die Verbindung zum Roboter stören.',
+  'robot.keyUnavailable':
+    'Der Roboter hat seinen Schlüssel für das Token noch nicht bereitgestellt, deshalb wird es nicht '
+    + 'übertragen. Bitte in ein paar Sekunden erneut versuchen; hilft das nicht, die Umgebung im '
+    + 'System-Fenster neu starten.',
 });
 
 /** The sentence for `key`; an unknown key is a programming error, never shown. */

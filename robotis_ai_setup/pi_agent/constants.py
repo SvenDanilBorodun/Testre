@@ -546,6 +546,16 @@ ROS_DOMAIN_FILE = os.environ.get(
     "EDUBOTICS_ROS_DOMAIN_FILE", "/var/lib/edubotics/.ros_domain_id"
 )
 
+# The robot's PUBLIC token key (VB-03, 2026-11-15, robot_key.py): the ROS node
+# writes ROBOT_KEY_DIR/ROBOT_KEY_FILE_NAME through the opi compose's bind mount
+# of this host directory (the same path inside the container), and the agent
+# serves it on GET /robot-key behind the robot login. /run is a tmpfs: the
+# agent re-creates the directory before every robot-tier `up`. Equal to
+# hf_token_crypto.KEY_FILE_DIR / KEY_FILE_NAME and the compose's mount line
+# (robotis_ai_setup/tests/test_robot_key_file_lockstep.py).
+ROBOT_KEY_DIR = "/run/edubotics-robot-key"
+ROBOT_KEY_FILE_NAME = "hf_token_key.json"
+
 # Source of the stable machine identifier for the ROS_DOMAIN_ID derivation
 # (hash mod 233), the retired Jetson setup.sh's convention. uuid.getnode() is
 # the fallback when this is unreadable.

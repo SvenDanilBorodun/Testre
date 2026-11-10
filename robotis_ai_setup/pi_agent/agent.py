@@ -98,6 +98,7 @@ from . import (
     identify_arm,
     phone_camera,
     pi_auth,
+    robot_key,
     update_checker,
 )
 from .config_generator import ArmDevice, CameraDevice, HardwareConfig
@@ -2654,6 +2655,15 @@ class AgentApp:
 
     # ── Roboter Studio leader toggle (ported RS contract + busy lock) ────────
 
+    def handle_robot_key(self) -> "tuple[int, dict]":
+        """GET /robot-key — the ROS node's PUBLIC token key (VB-03, 2026-11-15;
+        robot_key.py), behind the robot login like every lesson route. The Pi's
+        page encrypts the student's Hugging Face token only for this key: a
+        rosbridge session can forge /edubotics/hf_token_state, not this file.
+        ``key`` is null while the node has written none (the robot tier is down
+        or still starting, or an image from before the file)."""
+        return 200, {"ok": True, "key": robot_key.read_key()}
+
     def handle_rs_status(self) -> "tuple[int, dict]":
         """GET /roboter-studio/status → the exact ``roboter_studio_control`` JSON
         contract, plus ``ready`` (arm container running) like the GUI badge and
@@ -3031,6 +3041,8 @@ class AgentApp:
                     app.stream_protokoll(self)
                 elif path == "/roboter-studio/status":
                     self._send_json(*app.handle_rs_status())
+                elif path == "/robot-key":
+                    self._send_json(*app.handle_robot_key())
                 else:
                     self._send_json(404, {"ok": False, "message": "Nicht gefunden."})
 

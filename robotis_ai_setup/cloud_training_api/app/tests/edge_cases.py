@@ -91,7 +91,9 @@ def build_app(rules=None, *, limit=60):
     async def anything(path: str, request: Request):
         body = await request.body()
         auth = request.headers.get("authorization", "")
-        if auth and not auth.endswith("good"):
+        # "…good" stands for a token the remote check accepts; a real access
+        # token signed with the cached key is accepted like the API would.
+        if auth and not auth.endswith("good") and J.verified_subject(auth[len("Bearer "):]) is None:
             return JSONResponse(status_code=401, content={"detail": "Ungültige oder abgelaufene Sitzung."})
         return {"path": path, "bytes": len(body)}
 
@@ -246,7 +248,8 @@ class FailedAuthenticationCap(unittest.TestCase):
         self.assertEqual([self.get("Bearer bad").status_code for _ in range(5)], [401] * 5)
         resp = self.get("Bearer bad")
         self.assertEqual((resp.status_code, resp.json()["detail"]), (429, edge.AUTH_FAILURES_DE))
-        # the address is cut off for every request that carries a token ...
+        # the address is cut off for every request whose token does not verify
+        # against the cached keys (none are cached in this class) ...
         self.assertEqual(self.get("Bearer good").status_code, 429)
         # ... but /health, /version and the preflights carry none and pass
         self.assertEqual(self.get(None, path="/version").status_code, 200)
@@ -266,6 +269,116 @@ class FailedAuthenticationCap(unittest.TestCase):
                  ("RateLimitMiddleware", "BodySizeLimitMiddleware", "AuthFailureLimitMiddleware")]
         self.assertEqual(order, sorted(order), "added in this order = outermost last (Starlette)")
         self.assertLess(order[-1], src.index("    CORSMiddleware,"))
+
+
+class FailedAuthenticationCapSparesVerifiedCallers(unittest.TestCase):
+    """VA-02 (2026-11-12): a school is ONE address behind its NAT. Once that
+    address is over the cap, a request whose bearer verifies against the cached
+    keys (``jwt_auth.verified_subject``: no fetch) still passes; only bearers
+    that cannot be verified get the 429. Before, one device sending junk
+    bearers locked every student, teacher and Pi of the school out for as long
+    as it kept sending."""
+
+    NAT = "203.0.113.7"
+
+    def setUp(self):
+        J.KEYS.clear()
+        J.KEYS.replace(J.parse_jwks({"keys": [JWK]}))
+        self.addCleanup(J.KEYS.clear)
+        env = patch.dict(os.environ, {"SUPABASE_URL": BASE, "AUTH_VERIFY_MODE": "local"})
+        env.start()
+        self.addCleanup(env.stop)
+        self.app, self.seen = build_app()            # main.py's numbers: 60 failures a minute
+        self.client = TestClient(self.app)
+
+    def call(self, token, path="/me", ip=NAT, method="GET"):
+        return self.client.request(method, path, headers={"Authorization": f"Bearer {token}",
+                                                          "X-Forwarded-For": ip})
+
+    def junk(self):
+        return f"{uuid.uuid4().hex}.{uuid.uuid4().hex}.{uuid.uuid4().hex}"
+
+    def flood(self, n=edge.AUTH_FAILURE_LIMIT):
+        self.assertEqual({self.call(self.junk()).status_code for _ in range(n)}, {401})
+
+    def test_the_verifiers_scenario_a_valid_user_behind_the_same_nat_still_works(self):
+        student = user_token(str(uuid.uuid4()))
+        self.assertEqual(self.call(student).status_code, 200)
+        self.flood()
+        for path in ("/me", "/teacher/classrooms", "/trainings/list"):
+            with self.subTest(path=path):
+                self.assertEqual(self.call(student, path=path).status_code, 200)
+        # every other signed-in user of the school as well
+        self.assertEqual(self.call(user_token(str(uuid.uuid4()))).status_code, 200)
+
+    def test_junk_from_that_address_is_still_refused(self):
+        self.flood()
+        for token in (self.junk(), "bad", "a.b.c"):
+            with self.subTest(token=token):
+                resp = self.call(token)
+                self.assertEqual((resp.status_code, resp.json()["detail"]), (429, edge.AUTH_FAILURES_DE))
+
+    def test_a_token_signed_with_another_key_is_junk(self):
+        self.flood()
+        forger = ec.generate_private_key(ec.SECP256R1())
+        now = int(time.time())
+        forged = jwt.encode({"sub": str(uuid.uuid4()), "aud": "authenticated", "iss": BASE + "/auth/v1",
+                             "role": "authenticated", "exp": now + 60, "iat": now},
+                            forger, algorithm="ES256", headers={"kid": "k1"})
+        self.assertEqual(self.call(forged).status_code, 429)
+
+    def test_an_expired_or_wrong_audience_token_is_junk(self):
+        self.flood()
+        now = int(time.time())
+        expired = user_token(str(uuid.uuid4()), iat=now - 7200, exp=now - 3600)
+        wrong_aud = user_token(str(uuid.uuid4()), aud="service")
+        self.assertEqual(self.call(expired).status_code, 429)
+        self.assertEqual(self.call(wrong_aud).status_code, 429)
+
+    def test_the_check_never_fetches_keys(self):
+        self.flood()
+        unknown_kid = jwt.encode({"sub": str(uuid.uuid4()), "aud": "authenticated",
+                                  "iss": BASE + "/auth/v1", "role": "authenticated",
+                                  "exp": int(time.time()) + 60, "iat": int(time.time())},
+                                 KEY, algorithm="ES256", headers={"kid": "k-unknown"})
+        with patch.object(J, "fetch_jwks_blocking", side_effect=AssertionError("fetched")):
+            self.assertEqual(self.call(unknown_kid).status_code, 429)
+            self.assertEqual(self.call(user_token(str(uuid.uuid4()))).status_code, 200)
+
+    def test_another_address_is_untouched(self):
+        self.flood()
+        self.assertEqual(self.call(self.junk(), ip="198.51.100.4").status_code, 401)
+
+    def test_a_verified_callers_own_401_still_counts(self):
+        # e.g. a deleted account: its token verifies, the API answers 401.
+        app = FastAPI()
+        counter = FailureCounter()
+        app.add_middleware(edge.AuthFailureLimitMiddleware, counter=counter, hops=1, limit=3)
+
+        @app.get("/me")
+        async def me():
+            return JSONResponse(status_code=401, content={"detail": "Konto gelöscht."})
+
+        client = TestClient(app)
+        tok = user_token(str(uuid.uuid4()))
+        for _ in range(5):
+            client.get("/me", headers={"Authorization": f"Bearer {tok}", "X-Forwarded-For": self.NAT})
+        self.assertEqual(counter.count(self.NAT, edge.AUTH_FAILURE_WINDOW_S), 5)
+
+    def test_verified_callers_still_meet_their_per_user_rate_limit(self):
+        self.flood()
+        student = user_token(str(uuid.uuid4()))
+        statuses = [self.call(student, path="/trainings/start", method="POST").status_code for _ in range(4)]
+        self.assertEqual(statuses, [200, 200, 200, 429])
+        resp = self.call(student, path="/trainings/start", method="POST")
+        self.assertEqual(resp.json()["detail"], edge.RATE_LIMITED_DE)
+
+    def test_the_remote_rollback_keeps_the_whole_address_refused(self):
+        """Under AUTH_VERIFY_MODE=remote nothing is verified locally (no keys
+        are cached), so the over-cap address is refused as before."""
+        self.flood()
+        with patch.dict(os.environ, {"AUTH_VERIFY_MODE": "remote"}):
+            self.assertEqual(self.call(user_token(str(uuid.uuid4()))).status_code, 429)
 
 
 class PublicReadCors(unittest.TestCase):

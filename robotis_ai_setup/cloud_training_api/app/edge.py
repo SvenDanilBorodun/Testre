@@ -25,11 +25,14 @@ tests read them from its source — and passes them in.
   key comes back (no keys are cached then).
 * ``AuthFailureLimitMiddleware`` — every 401 answered to a request that carried
   ``Authorization`` counts against its client address; at ``AUTH_FAILURE_LIMIT``
-  in ``AUTH_FAILURE_WINDOW_S`` every further request of that address that
-  carries ``Authorization`` is a German 429 before anything else runs.
-  Requests without the header (``/health``, ``/version``, preflights) pass. A
-  school behind one NAT address shares the budget: 60 failures a minute is far
-  above what signed-in students produce (supabase-js refreshes before expiry).
+  in ``AUTH_FAILURE_WINDOW_S`` every further request of that address whose
+  bearer does NOT verify against the cached keys is a German 429 before
+  anything else runs. A bearer that verifies (``jwt_auth.verified_subject``,
+  no fetch) still passes, so one device sending junk from behind a school's
+  NAT cannot lock out the school's signed-in users (VA-02, 2026-11-12); they
+  still meet their per-user rate limits. Requests without the header
+  (``/health``, ``/version``, preflights) pass. Under ``AUTH_VERIFY_MODE=remote``
+  nothing verifies locally, so an address over its budget is refused whole.
 * ``PublicReadCorsMiddleware`` — ``Access-Control-Allow-Origin: *`` on GET/HEAD
   of ``/version`` (2026-11-11): its legal links are read by every SPA, a Pi's
   at a LAN address ``ALLOWED_ORIGINS`` cannot list. An allowed origin still
@@ -125,6 +128,20 @@ def _bearer(request: Request) -> str | None:
         return None
     token = auth[len("Bearer "):].strip()
     return token or None
+
+
+def _verifies_locally(request: Request) -> bool:
+    """True when the request's bearer is an access token that verifies against
+    the CACHED keys (``jwt_auth.verified_subject``: pure CPU, never a fetch).
+    The failed-authentication cap lets such a request through an address that
+    is over its budget, so one device behind a school's NAT cannot lock out
+    every signed-in user of the school (VA-02, 2026-11-12). Under
+    ``AUTH_VERIFY_MODE=remote`` no key is cached and nothing verifies here:
+    the whole address stays refused, as before."""
+    if jwt_auth.verify_mode() == "remote":
+        return False
+    token = _bearer(request)
+    return bool(token) and jwt_auth.verified_subject(token) is not None
 
 
 def _hashed(prefix: str, token: str) -> str:
@@ -232,7 +249,7 @@ class AuthFailureLimitMiddleware(BaseHTTPMiddleware):
         if request.headers.get("authorization") is None:
             return await call_next(request)
         ip = client_ip(request, self.hops)
-        if self.counter.count(ip, self.window_s) >= self.limit:
+        if self.counter.count(ip, self.window_s) >= self.limit and not _verifies_locally(request):
             return JSONResponse(status_code=429, content={"detail": AUTH_FAILURES_DE})
         response = await call_next(request)
         if response.status_code == 401:

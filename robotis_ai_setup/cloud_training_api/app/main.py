@@ -900,7 +900,9 @@ _BODY_SIZE_LIMITED_PREFIXES: tuple[tuple[str, str], ...] = (
 # limits → rate limits → public-read CORS → the app. CORS outermost so a
 # 429/411/413 still carries Access-Control-* headers (the browser would
 # otherwise see a generic CORS failure); the failed-authentication cap next, so
-# an address over its budget is refused before anything else runs. The
+# an address over its budget is refused before anything else runs — every
+# bearer of it that does not verify against the cached keys; a verified one
+# passes (VA-02: one school NAT is one address). The
 # public-read star (/version only, 2026-11-11) sits INSIDE CORSMiddleware so an
 # allowed origin still gets its own echo; any other origin keeps the star.
 app.add_middleware(_edge.PublicReadCorsMiddleware, paths=_PUBLIC_READ_PATHS)

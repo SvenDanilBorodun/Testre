@@ -21,8 +21,12 @@ the published (DNATed) port, the container→agent path nginx uses and the
 container's own outbound connection still work, and a second apply changes
 nothing.
 
-Needs root, ``ip`` and ``iptables`` (skipped otherwise, e.g. on GitHub's
-unprivileged runners). Stdlib only.
+Needs root, ``ip`` and ``iptables``: skipped otherwise (a developer's
+machine), unless ``EDUBOTICS_REQUIRE_NETNS=1`` turns the skip into a failure.
+CI sets it (verification round B, VB-05): ``ci.yml::python-tests`` runs this
+file a second time through the runner's passwordless ``sudo``, so SA-05's only
+behavioural proof runs on every push and cannot skip silently — the same rule
+``EDUBOTICS_REQUIRE_JAVAC`` gives the JDK. Stdlib only.
 """
 
 from __future__ import annotations
@@ -85,6 +89,8 @@ def _usable() -> str:
 
 
 _SKIP = _usable()
+# CI's root step sets this: an unusable environment is then a FAILURE (VB-05).
+_REQUIRE = os.environ.get("EDUBOTICS_REQUIRE_NETNS") == "1"
 
 
 def sh(*cmd, ns=None, check=True):
@@ -95,11 +101,14 @@ def sh(*cmd, ns=None, check=True):
     return proc
 
 
-@unittest.skipIf(_SKIP, _SKIP or "")
+@unittest.skipIf(_SKIP and not _REQUIRE,
+                 (_SKIP or "") + " (set EDUBOTICS_REQUIRE_NETNS=1 to fail instead)")
 class FirewallInARealKernel(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.servers = []
+        if _SKIP:
+            raise AssertionError(f"EDUBOTICS_REQUIRE_NETNS=1 but this environment cannot run it: {_SKIP}")
         try:
             cls._build()
         except Exception:
@@ -211,6 +220,26 @@ class FirewallInARealKernel(unittest.TestCase):
         self.assertEqual(firewall.apply(rules, run=self.run_in_pi), (True, True, ""))
         self.assertFalse(self.reach(LAN, CONTAINER, 9090))
         time.sleep(0)  # keep the order of the probes explicit
+
+
+class CiRunsThisAsRoot(unittest.TestCase):
+    """VB-05: ci.yml::python-tests runs this file again through sudo, with
+    EDUBOTICS_REQUIRE_NETNS=1, and fails on a skip. Text-only, never skipped."""
+
+    def test_the_root_step_exists_and_cannot_skip(self):
+        ci = (SETUP_DIR.parent / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        start = ci.index("  python-tests:\n")
+        end = ci.index("\n  shell-lint:\n", start)
+        job = ci[start:end]
+        self.assertIn("- name: The Pi firewall in a real kernel (as root, SA-05)", job)
+        step = job[job.index("The Pi firewall in a real kernel"):]
+        self.assertIn('sudo -E env "PATH=$PATH" EDUBOTICS_REQUIRE_NETNS=1', step)
+        self.assertIn("-p test_pi_firewall_netns.py", step)
+        self.assertIn("grep -Eq 'skipped( |=)'", step)
+        self.assertIn("ran no test", step)
+        # The root step is the job's LAST step (it must not leave root-owned
+        # files under the checkout for a later step).
+        self.assertNotIn("\n      - name:", step[len("The Pi firewall"):])
 
 
 if __name__ == "__main__":

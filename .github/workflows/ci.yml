@@ -179,6 +179,32 @@ jobs:
           cd physical_ai_tools/physical_ai_server
           python -m pytest test/ -q
 
+      - name: The Pi firewall in a real kernel (as root, SA-05)
+        # VB-05 (2026-11-15): tests/test_pi_firewall_netns.py builds three
+        # network namespaces and runs pi_agent/firewall.py's rules in netfilter
+        # itself — SA-05's only behavioural proof. It needs root, so the
+        # unprivileged "Unit tests" step above skips it; GitHub's runners give
+        # passwordless sudo, so it runs here a second time as root. LAST in the
+        # job (a root process must not leave files the later steps would trip
+        # over; no bytecode is written). EDUBOTICS_REQUIRE_NETNS=1 turns a skip
+        # into a failure, the way EDUBOTICS_REQUIRE_JAVAC treats a lost JDK, and
+        # the output is checked for a skip and for a test that actually ran.
+        run: |
+          set -euo pipefail
+          cd robotis_ai_setup
+          if ! out=$(sudo -E env "PATH=$PATH" EDUBOTICS_REQUIRE_NETNS=1 PYTHONDONTWRITEBYTECODE=1 \
+                python -m unittest discover -s tests -p test_pi_firewall_netns.py -v 2>&1); then
+            echo "$out"
+            exit 1
+          fi
+          echo "$out"
+          if printf '%s\n' "$out" | grep -Eq 'skipped( |=)'; then
+            echo "::error::test_pi_firewall_netns.py skipped as root"
+            exit 1
+          fi
+          printf '%s\n' "$out" | grep -Eq '^Ran [1-9][0-9]* tests? in ' \
+            || { echo "::error::test_pi_firewall_netns.py ran no test"; exit 1; }
+
   shell-lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10

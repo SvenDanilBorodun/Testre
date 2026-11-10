@@ -46,10 +46,10 @@
 # school networks routinely filter non-standard ports (9090/8080), and
 # port 80 is the one port guaranteed reachable if the wizard loads at
 # all. The React app routes rosbridge + MJPEG same-origin in Pi mode
-# (utils/piMode.js localRosbridgeUrl/videoStreamBase); the direct host
-# ports stay published in docker-compose.opi.yml as a LOOPBACK-PINNED
-# DEBUG path only — `127.0.0.1:9090:9090` / `127.0.0.1:8080:8080`,
-# reached with `ssh -L 9090:127.0.0.1:9090 <pi>`. The un-tunnelled LAN
+# (utils/piMode.js localRosbridgeUrl/videoStreamBase); docker-compose.opi.yml
+# publishes neither port on the host any more (SA-05, 2026-11-13: Docker before
+# 28.0 accepts a LAN host routing straight to a published container port even
+# when it is bound to 127.0.0.1); debugging is `docker exec`. The un-tunnelled LAN
 # ROLLBACK half is gone (4d1b046): while those publishes were LAN-bound,
 # rosbridge_server 2.7.0's `check_origin` — literally `return True` —
 # made the /rosbridge Origin gate below SKIPPABLE rather than defeatable,

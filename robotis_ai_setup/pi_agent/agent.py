@@ -94,6 +94,7 @@ from . import (
     camera_enum,
     config_generator,
     docker_manager,
+    firewall,
     identify_arm,
     phone_camera,
     pi_auth,
@@ -287,6 +288,15 @@ _MANAGER_PROBE_TIMEOUT_S = 3.0
 # subrequest to /auth/check) and an OLD nginx proxies straight to
 # physical_ai_server (502 while the tier is down, 400/200 while it is up).
 _MANAGER_PROBE_PATHS = ("/rosbridge", "/video/stream", "/daten-api/v1/health")
+
+# The firewall step against routing past nginx (SA-05, pi_agent/firewall.py):
+# first run once Docker is up at boot, then re-checked, because a Docker
+# restart recreates DOCKER-USER and re-inserts its own jumps.
+_FIREWALL_INTERVAL_S = 60.0
+_ROS_NET_SUBNET_DEFAULT = "172.28.0.0/24"
+_ROS_NET_GATEWAY_DEFAULT = "172.28.0.1"
+# The compose label Docker puts on the ros_net network (any project name).
+_ROS_NET_LABEL = "com.docker.compose.network=ros_net"
 
 # Where a freshly minted setup code is shown when nobody asked for it (the
 # boot-time mint of an unclaimed Pi): the first HDMI text console. Best effort —
@@ -576,6 +586,8 @@ class AgentApp:
         # Public /netzwerk-check: single-flight + a short cache.
         self._netcheck_lock = threading.Lock()
         self._netcheck_cache: Optional[tuple] = None
+        # The firewall step's last outcome per family (logs only on a change).
+        self._firewall_last: dict = {}
 
         # Scanned hardware — rehydrated from the .env at start() so a reboot
         # keeps the arms/cameras identified without a rescan.
@@ -1139,6 +1151,79 @@ class AgentApp:
             except Exception as e:  # noqa: BLE001 — the guard never dies
                 self._log(f"Anmeldeprüfung fehlgeschlagen: {e}")
             if self._shutdown.wait(_LOGIN_GUARD_INTERVAL_S):
+                return
+
+    # ── the firewall step (SA-05) ────────────────────────────────────────────
+
+    def _ros_net_ipv6(self) -> "tuple[Optional[str], Optional[str]]":
+        """The ros_net network's IPv6 subnet and gateway when Docker IPv6 is
+        enabled on it, else (None, None). Read from ``docker network inspect``;
+        any failure is "not enabled" (the IPv4 rules are applied regardless)."""
+        try:
+            listed = subprocess.run(
+                docker_manager._docker("network", "ls", "-q", "--filter", f"label={_ROS_NET_LABEL}"),
+                capture_output=True, text=True, timeout=15, check=False,
+                env=docker_manager._scrubbed_env())
+            ids = (listed.stdout or "").split()
+            if listed.returncode != 0 or not ids:
+                return None, None
+            inspected = subprocess.run(
+                docker_manager._docker("network", "inspect", ids[0], "--format", "{{json .}}"),
+                capture_output=True, text=True, timeout=15, check=False,
+                env=docker_manager._scrubbed_env())
+            if inspected.returncode != 0:
+                return None, None
+            return firewall.ipv6_of_network(inspected.stdout)
+        except (OSError, subprocess.SubprocessError):
+            return None, None
+
+    def _firewall_tick(self) -> "list[tuple[str, bool, bool, str]]":
+        """Apply the firewall rules for every family ros_net uses; returns
+        ``[(family, ok, changed, detail), …]``. Logs in English (maintainer
+        only), and only when an outcome differs from the previous tick's."""
+        subnet = (config_generator.read_env_var("EDUBOTICS_ROS_NET_SUBNET", self.env_file)
+                  or _ROS_NET_SUBNET_DEFAULT)
+        gateway = (config_generator.read_env_var("EDUBOTICS_ROS_NET_GATEWAY", self.env_file)
+                   or _ROS_NET_GATEWAY_DEFAULT)
+        plans = []
+        try:
+            plans.append(("ipv4", firewall.build_rules(subnet, gateway, 4)))
+        except ValueError:
+            plans.append(("ipv4", None))
+        v6_subnet, v6_gateway = self._ros_net_ipv6()
+        if v6_subnet:
+            try:
+                plans.append(("ipv6", firewall.build_rules(v6_subnet, v6_gateway, 6)))
+            except ValueError:
+                plans.append(("ipv6", None))
+        outcomes = []
+        for family, rules in plans:
+            if rules is None:
+                outcomes.append((family, False, False, "the ros_net subnet or gateway is malformed"))
+            else:
+                outcomes.append((family, *firewall.apply(rules)))
+        for family, ok, changed, detail in outcomes:
+            state = (ok, detail)
+            if self._firewall_last.get(family) != state:
+                if ok:
+                    logger.info("firewall %s: rules against routing past nginx are in place%s",
+                                family, " (re-applied)" if changed else "")
+                else:
+                    logger.warning("firewall %s: could not apply the rules against routing past "
+                                   "nginx: %s; will retry", family, detail)
+            elif ok and changed:
+                logger.warning("firewall %s: the rules had to be re-applied (a Docker restart "
+                               "or another tool changed the chains)", family)
+            self._firewall_last[family] = state
+        return outcomes
+
+    def _firewall_loop(self) -> None:
+        while not self._shutdown.is_set():
+            try:
+                self._firewall_tick()
+            except Exception as e:  # noqa: BLE001 — the firewall step never stops the agent
+                logger.warning("firewall step failed: %s", type(e).__name__)
+            if self._shutdown.wait(_FIREWALL_INTERVAL_S):
                 return
 
     # ── hardware rehydrate / persist ─────────────────────────────────────────
@@ -3865,6 +3950,13 @@ class AgentApp:
         self._log("Weboberfläche (Manager) wird gestartet …")
         if not docker_manager.start_manager(log=self._log):
             self._log("[WARNUNG] Manager konnte nicht gestartet werden — bitte Images/Docker prüfen.")
+
+        # The firewall step against routing past nginx (SA-05): Docker is up
+        # now (the manager `up` ran), so DOCKER-USER exists; re-checked every
+        # _FIREWALL_INTERVAL_S because a Docker restart can reorder the chains.
+        threading.Thread(
+            target=self._firewall_loop, name="agent-firewall", daemon=True,
+        ).start()
 
         self._ready.set()
         self._log("Pi-Agent bereit.")

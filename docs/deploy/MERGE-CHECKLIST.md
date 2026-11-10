@@ -10,9 +10,11 @@ order, within minutes, and without a tag:
 | W3 `railway-deploy-teacher-web.yml` | `physical_ai_tools/physical_ai_manager/` | the teacher web |
 
 **W1 `supabase-migrate.yml` does NOT fire on a merge** (owner decision
-2026-11-15). The production database changes only through a release tag
-(`release.yml` calls W1 first) or by hand: GitHub → Actions → **supabase-migrate**
-→ **Run workflow**. Why: GitHub's required reviewers for an environment, the
+2026-11-15). The production database changes only through a release
+(`release.yml` calls W1 first, on a tag or when `release.yml` itself is
+dispatched by hand) or by hand: GitHub → Actions → **supabase-migrate** → **Run
+workflow**, target `production` (any other target fails the run and changes
+nothing, a rollback included). Why: GitHub's required reviewers for an environment, the
 SA-13 approval gate, exist on a PRIVATE repository only with GitHub Enterprise
 (Free, Pro and Team: public repositories only), so `environment: production`
 cannot hold a merge's migration on this plan, and the merge used to fire W1, W2
@@ -64,22 +66,101 @@ both schemas serves, so there is neither a crash window for the old API nor a
 4. **Sign-up is off** (SA-03): Supabase dashboard → Authentication → Sign In /
    Providers → „Allow new users to sign up" off, and auto-confirm off. 058 is
    the database's floor behind that switch.
-5. **Accounts that registered themselves are deleted.** List them in the SQL
-   editor (read-only):
+5. **Accounts that registered themselves are deleted.** Sign-up was open with
+   auto-confirm, and until 044 (`role`) and 055 (`created_by`, `username`, …)
+   an account could write its own `public.users` row through PostgREST, so
+   those columns prove nothing about who made an account (verification round C,
+   VC-02). The two queries below lean on what an account can NEVER write: Supabase
+   Auth's own audit log (`auth.audit_log_entries`: the server's
+   `auth.admin.create_user` is logged as `user_signedup` with the actor
+   `service_role`; a sign-up through `/signup` with the new user itself as the
+   actor) and the server's login e-mail `<username>@edubotics.local`, and they
+   list every admin and teacher BY NAME, because a self-made admin or teacher is
+   the dangerous one. Read-only, in the SQL editor. First, does the audit log
+   reach back far enough to help (it may be switched off for the database or
+   pruned)?
 
    ```sql
-   -- Every account that neither a teacher nor an admin created through the API
-   -- (both stamp public.users.created_by), plus any auth account without a
-   -- public.users row. Review the list: a teacher whose creating admin was
-   -- deleted also appears (created_by is set to NULL then).
-   SELECT a.id, a.email, a.created_at, a.last_sign_in_at,
-          u.role, u.username, u.classroom_id
-   FROM auth.users a
-   LEFT JOIN public.users u ON u.id = a.id
-   WHERE u.id IS NULL
-      OR (u.created_by IS NULL AND u.role IS DISTINCT FROM 'admin')
-   ORDER BY a.created_at;
+   SELECT count(*) AS entries, min(created_at) AS oldest FROM auth.audit_log_entries;
    ```
+
+   Then (a) every admin and every teacher — recognise each one by name; anyone
+   you do not know, or `origin` = `SIGNED ITSELF UP`, is deleted:
+
+   ```sql
+   SELECT u.role, u.username, u.full_name, a.email, a.created_at, a.last_sign_in_at,
+          creator.username AS created_by,
+          CASE
+            WHEN EXISTS (SELECT 1 FROM auth.audit_log_entries l
+                         WHERE l.payload->>'actor_id' = a.id::text
+                           AND l.payload->>'action' IN ('user_signedup', 'user_confirmation_requested'))
+              THEN 'SIGNED ITSELF UP'
+            WHEN EXISTS (SELECT 1 FROM auth.audit_log_entries l
+                         WHERE l.payload->>'action' = 'user_signedup'
+                           AND l.payload->>'actor_username' = 'service_role'
+                           AND l.payload->'traits'->>'user_id' = a.id::text)
+              THEN 'created by the server'
+            ELSE 'not in the audit log'
+          END AS origin
+   FROM public.users u
+   JOIN auth.users a ON a.id = u.id
+   LEFT JOIN public.users creator ON creator.id = u.created_by
+   WHERE u.role::text IN ('admin', 'teacher')
+   ORDER BY u.role, a.created_at;
+   ```
+
+   and (b) every other account whose origin the database cannot vouch for, with
+   the reasons in `why`:
+
+   ```sql
+   WITH acct AS (
+     SELECT a.id, a.email, a.created_at, a.last_sign_in_at,
+            u.id AS profile, u.role::text AS role, u.username, u.created_by,
+            creator.role::text AS creator_role, cl.teacher_id AS classroom_teacher,
+            EXISTS (SELECT 1 FROM auth.audit_log_entries l
+                    WHERE l.payload->>'actor_id' = a.id::text
+                      AND l.payload->>'action' IN ('user_signedup', 'user_confirmation_requested'))
+              AS signed_itself_up,
+            EXISTS (SELECT 1 FROM auth.audit_log_entries l
+                    WHERE l.payload->>'action' = 'user_signedup'
+                      AND l.payload->>'actor_username' = 'service_role'
+                      AND l.payload->'traits'->>'user_id' = a.id::text)
+              AS server_created
+     FROM auth.users a
+     LEFT JOIN public.users u ON u.id = a.id
+     LEFT JOIN public.users creator ON creator.id = u.created_by
+     LEFT JOIN public.classrooms cl ON cl.id = u.classroom_id
+   ), judged AS (
+     SELECT *, concat_ws('; ',
+       CASE WHEN signed_itself_up THEN 'SIGNED ITSELF UP (audit log)' END,
+       CASE WHEN profile IS NULL THEN 'no public.users row' END,
+       CASE WHEN email NOT LIKE '%@edubotics.local' THEN 'not an EduBotics login e-mail' END,
+       CASE WHEN username IS DISTINCT FROM split_part(email, '@', 1) THEN 'username is not the login name' END,
+       CASE WHEN created_by IS NULL OR created_by = id OR creator_role IS DISTINCT FROM 'teacher'
+            THEN 'no teacher created it' END,
+       CASE WHEN classroom_teacher IS DISTINCT FROM created_by
+            THEN 'not in a classroom of the teacher who created it' END
+     ) AS why
+     FROM acct
+     WHERE role IS NULL OR role NOT IN ('admin', 'teacher')
+   )
+   SELECT email, role, username, created_at, last_sign_in_at, server_created, why
+   FROM judged
+   WHERE signed_itself_up OR profile IS NULL OR (NOT server_created AND why <> '')
+   ORDER BY created_at;
+   ```
+
+   `SIGNED ITSELF UP` is proof: delete it. Any other row is a hint to review: an
+   account the audit log proves the server made is never listed, so without the
+   audit log a student an operator moved to another teacher's classroom shows
+   up too („not in a classroom of the teacher who created it"). The one
+   evasion neither query can see without the audit log is a sign-up that chose
+   an `@edubotics.local` address AND wrote a real teacher's id and one of that
+   teacher's classroom ids into its own row (ids only a classmate could have
+   leaked): it then sits in that teacher's class list, so **ask every teacher to
+   look over their class lists** for a student they did not create. Proven on a
+   052 replay with the verifier's evasions (`docs/CLAUDE-CHANGELOG.md`,
+   2026-11-15).
 
    Delete the ones nobody at the school created (Authentication → Users → the
    user → Delete). Accounts the server created before 058 carry no marker; that
@@ -246,11 +327,22 @@ own the account's second factor. Therefore:
 
   The new API runs on every one of these states, so the database can go back
   while it serves.
-- **The API, below this release: the 053 rollback FIRST.** The previous API
-  exits at start-up on a database with 053 (its probe asks for the Jetson
-  objects), and under 058 its account creation answers 500. So an API rollback
-  needs all seven rollbacks above, newest first (059 → 053), and only then
+- **The API, below this release: three rollbacks FIRST, in this order:
+  059 → 058 → 053** (rows 1, 2 and 7 of the table; 059's must precede 058's).
+  The previous API exits at start-up on a database with 053 (its probe asks for
+  the Jetson objects), and under 058 its account creation answers 500. Then
   Railway → the API service → Deployments → redeploy the previous deployment.
-  Never redeploy the previous API while 053 or 058 is applied.
+  Never redeploy the previous API while 053 or 058 is applied. **054–057 may
+  stay** and should (rolling them back re-opens SA-07, SA-09 and SA-10 for
+  nothing): measured in verification round C (VC-08), the previous API's boot
+  probe passes on 059/058/053 rolled back with 054–057 applied, and the
+  previous student React and teacher web (release `f964555e`) read nothing
+  057 closes — their one direct table read is the trainings `LIVE_COLUMNS`
+  (all 22 granted, plus `user_id`), their Realtime channels (datasets,
+  workflows, tutorial progress, trainings) are unchanged since and read only
+  granted columns, and the old teacher web's one other channel, `jetsons`,
+  restored by the 053 rollback without request-role grants, only ever
+  triggered a refetch through the API and has no writer left (the Jetson is
+  retired), so it stays silent as it would anyway.
 - **The teacher web:** redeploy the previous one only together with the API: its
   admin pages have no second-factor screen, which the new API demands.

@@ -97,7 +97,15 @@ class FilesAndOrder(unittest.TestCase):
         for p in (M056, R056, A056):
             self.assertTrue(p.is_file(), p)
         names = sorted(p.name for p in _MIG.glob('*.sql'))
-        self.assertEqual(names[-2:], [M055.name, M056.name])
+        # 056 follows 055 directly; after it come the deep audit's 057 (request
+        # roles default-deny), 058 (refuse self-registration) and 059 (reserved
+        # Hugging Face namespaces), 2026-11-13.
+        self.assertEqual(names[names.index(M055.name):], [
+            M055.name, M056.name,
+            '20261113120000_057_request_role_default_deny.sql',
+            '20261113130000_058_refuse_self_signup.sql',
+            '20261113140000_059_hf_reserved_namespaces.sql',
+        ])
 
     def test_one_transaction_each(self):
         for p in (M056, R056):
@@ -176,8 +184,9 @@ class NotApiVisible(unittest.TestCase):
     def test_the_boot_probe_is_untouched(self):
         self.assertNotIn('rls_is_admin', _read(MAIN))
 
-    def test_claude_md_names_056_as_the_latest(self):
-        self.assertTrue('latest is **056**' in _read(CLAUDE), 'CLAUDE.md must name 056 as the latest migration')
+    def test_claude_md_describes_056(self):
+        # 056 was the latest until the deep audit's 057-059 (2026-11-13).
+        self.assertIn('**056** (`admin_requires_aal2`, file `20261112120000_056_admin_requires_aal2.sql`', _read(CLAUDE))
 
 
 if __name__ == '__main__':

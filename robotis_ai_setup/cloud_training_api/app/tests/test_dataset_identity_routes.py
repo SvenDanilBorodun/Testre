@@ -154,12 +154,15 @@ from app.routes import me as meroute  # noqa: E402
 # POST /datasets/sync
 # ------------------------------------------------------------------
 class _SyncSupabase:
-    def __init__(self, registered):
+    def __init__(self, registered, proven):
         self._registered = registered
+        self._proven = proven  # user_hf_credentials.hf_username, or None
         self.rpc_calls = []
+        self.tables = []
 
-    def table(self, _name):
+    def table(self, name):
         outer = self
+        outer.tables.append(name)
 
         class _Q:
             def select(self, *a, **k):
@@ -168,7 +171,13 @@ class _SyncSupabase:
             def eq(self, *a, **k):
                 return self
 
+            def limit(self, *a, **k):
+                return self
+
             def execute(self):
+                if name == "user_hf_credentials":
+                    rows = [] if outer._proven is None else [{"hf_username": outer._proven}]
+                    return SimpleNamespace(data=rows)
                 return SimpleNamespace(data=outer._registered)
 
         return _Q()
@@ -195,14 +204,23 @@ class _SyncSupabase:
 
 
 class TestSyncDatasets(unittest.TestCase):
-    def _run(self, profile, hf_list, registered):
-        sb = _SyncSupabase(registered)
+    """SA-08: discovery runs on the PROVEN name (the stored token's account),
+    anonymously; users.hf_username alone drives nothing."""
+
+    def _run(self, profile, hf_list, registered, proven="__from_profile__"):
+        if proven == "__from_profile__":
+            proven = profile.get("hf_username")
+        sb = _SyncSupabase(registered, proven)
+        self.api_tokens = []
+        self.listed_authors = []
+        outer = self
 
         class _HfApi:
             def __init__(self, *a, **k):
-                pass
+                outer.api_tokens.append(k.get("token", "<unset>"))
 
             def list_datasets(self, author=None, **k):
+                outer.listed_authors.append(author)
                 return hf_list
 
         with patch.object(dsroute, "get_user_profile", return_value=profile), patch.object(
@@ -215,13 +233,53 @@ class TestSyncDatasets(unittest.TestCase):
         with self.assertRaises(HTTPException) as cm:
             self._run({"id": "u1", "hf_username": None, "workgroup_id": None}, [], [])
         self.assertEqual(cm.exception.status_code, 400)
+        self.assertIn("Token", cm.exception.detail)
+        self.assertEqual(self.listed_authors, [])
+
+    def test_a_self_asserted_name_without_a_token_drives_nothing(self):
+        # A legacy PATCH /me value with no stored token: no listing at all.
+        with self.assertRaises(HTTPException) as cm:
+            self._run({"id": "u1", "hf_username": "alice", "workgroup_id": None},
+                      [SimpleNamespace(id="alice/d1")], [], proven=None)
+        self.assertEqual(cm.exception.status_code, 400)
+        self.assertEqual(self.listed_authors, [])
+
+    def test_the_proven_name_wins_over_the_profile(self):
+        result, sb = self._run(
+            {"id": "u1", "hf_username": "EduBotics-Solutions", "workgroup_id": None},
+            [SimpleNamespace(id="anna/d1")], [], proven="anna")
+        self.assertEqual(self.listed_authors, ["anna"])
+        self.assertEqual(result.registered, 1)
 
     def test_denied_username_returns_400(self):
-        with self.assertRaises(HTTPException) as cm:
-            self._run(
-                {"id": "u1", "hf_username": "RobotisSW", "workgroup_id": None}, [], []
-            )
-        self.assertEqual(cm.exception.status_code, 400)
+        for denied in ("RobotisSW", "EduBotics-Solutions", "edubotics-solutions"):
+            with self.subTest(denied=denied):
+                with self.assertRaises(HTTPException) as cm:
+                    self._run(
+                        {"id": "u1", "hf_username": denied, "workgroup_id": None}, [], []
+                    )
+                self.assertEqual(cm.exception.status_code, 400)
+                self.assertEqual(self.listed_authors, [])
+
+    def test_an_unreadable_credential_table_is_503_not_a_listing(self):
+        class _Broken(_SyncSupabase):
+            def table(self, name):
+                if name == "user_hf_credentials":
+                    raise RuntimeError("down")
+                return super().table(name)
+
+        sb = _Broken([], "alice")
+        with patch.object(dsroute, "get_user_profile", return_value={"id": "u1"}), patch.object(
+            dsroute, "get_supabase", return_value=sb
+        ), patch.object(dsroute, "HfApi", side_effect=AssertionError("no listing")):
+            with self.assertRaises(HTTPException) as cm:
+                dsroute.sync_datasets(user=SimpleNamespace(id="u1"))
+        self.assertEqual(cm.exception.status_code, 503)
+
+    def test_the_listing_is_anonymous(self):
+        self._run({"id": "u1", "hf_username": "alice", "workgroup_id": None},
+                  [SimpleNamespace(id="alice/d1")], [])
+        self.assertEqual(self.api_tokens, [False])
 
     def test_registers_only_own_namespace_keyed_to_jwt(self):
         result, sb = self._run(
@@ -311,34 +369,17 @@ _PROFILE = {
 
 
 class TestUpdateMe(unittest.TestCase):
-    def _call(self, raw_hf):
-        body = meroute.HfUsernameUpdate(hf_username=raw_hf)
+    """SA-08: PATCH /me never writes hf_username (the token save is the only writer)."""
+
+    def test_no_name_is_accepted_any_more(self):
         sb = _MeSupabase()
-        from app.services.hf_identity import normalize_hf_username
-
-        fresh = dict(_PROFILE)
-        fresh["hf_username"] = normalize_hf_username(raw_hf)
-        with patch.object(meroute, "get_supabase", return_value=sb), patch.object(
-            meroute, "get_user_profile", return_value=fresh
-        ):
-            result = meroute.update_me(body=body, profile=dict(_PROFILE))
-        return result, sb
-
-    def test_valid_username_persists_keyed_to_jwt(self):
-        result, sb = self._call("alice")
-        self.assertEqual(sb.updated, [{"hf_username": "alice"}])
-        self.assertEqual(result.hf_username, "alice")
-        self.assertEqual(result.training_credits, 7, "052: the quota's legacy training_credits (2 + 1 + 4)")
-
-    def test_malformed_username_returns_400(self):
-        with self.assertRaises(HTTPException) as cm:
-            self._call("-not-valid")
-        self.assertEqual(cm.exception.status_code, 400)
-
-    def test_denied_username_returns_400(self):
-        with self.assertRaises(HTTPException) as cm:
-            self._call("RobotisSW")
-        self.assertEqual(cm.exception.status_code, 400)
+        for raw in ("alice", "-not-valid", "RobotisSW", "EduBotics-Solutions", "edubotics-solutions"):
+            with self.subTest(raw=raw):
+                with patch.object(meroute, "get_supabase", return_value=sb):
+                    with self.assertRaises(HTTPException) as cm:
+                        meroute.update_me(body={"hf_username": raw}, profile=dict(_PROFILE))
+                self.assertEqual(cm.exception.status_code, 400)
+        self.assertEqual(sb.updated, [])
 
 
 if __name__ == "__main__":

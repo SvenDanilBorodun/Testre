@@ -273,9 +273,13 @@ class _SweepSupabase:
     """Supabase double for the sweep: serves a fixed users payload and a fixed
     'already registered' datasets payload, and records every datasets insert."""
 
-    def __init__(self, users, registered=None):
+    def __init__(self, users, registered=None, proven=None):
         self._users = users
         self._registered = registered or []
+        # user_hf_credentials: {user_id: hf_username}; default = every user's
+        # hf_username is proven (a stored token named it).
+        self._proven = ({u["id"]: u["hf_username"] for u in users}
+                        if proven is None else proven)
         self.inserted = []
 
     def table(self, name):
@@ -288,7 +292,8 @@ class _SweepSupabase:
             def select(self, *a, **k):
                 return self
 
-            def eq(self, *a, **k):
+            def eq(self, col=None, val=None, *a, **k):
+                self._eq = (col, val)
                 return self
 
             @property
@@ -313,6 +318,10 @@ class _SweepSupabase:
                     return SimpleNamespace(data=outer._users)
                 if name == "datasets":
                     return SimpleNamespace(data=outer._registered)
+                if name == "user_hf_credentials":
+                    uid = getattr(self, "_eq", (None, None))[1]
+                    hf = outer._proven.get(uid)
+                    return SimpleNamespace(data=[] if hf is None else [{"hf_username": hf}])
                 return SimpleNamespace(data=[])
 
         return _Q()
@@ -432,6 +441,62 @@ class TestRunSweepOnce(unittest.TestCase):
         self.assertEqual(count, 0)
         self.assertEqual(list_calls, [])  # list_datasets never called for denied author
         self.assertEqual(sb.inserted, [])
+
+    def _sweep(self, sb, listing):
+        from app.services import dataset_sweep as ds
+        import app.services.supabase_client  # noqa: F401
+
+        calls = {"tokens": [], "authors": []}
+
+        class _HfApi:
+            def __init__(self, *a, **k):
+                calls["tokens"].append(k.get("token", "<unset>"))
+
+            def list_datasets(self, author=None, **k):
+                calls["authors"].append(author)
+                return listing.get(author, [])
+
+        with patch.dict(os.environ, {"HF_TOKEN": "t"}, clear=False), patch(
+            "app.services.supabase_client.get_supabase", return_value=sb
+        ), patch.object(sys.modules["huggingface_hub"], "HfApi", _HfApi):
+            count = ds._run_sweep_once()
+        return count, calls
+
+    def test_sa08_a_self_asserted_name_drives_nothing(self):
+        # users.hf_username set (a legacy PATCH /me value) but no stored token,
+        # or a token for ANOTHER account: no listing, no registration.
+        sb = _SweepSupabase(
+            users=[{"id": "u1", "hf_username": "alice", "workgroup_id": None},
+                   {"id": "u2", "hf_username": "bob", "workgroup_id": None}],
+            proven={"u2": "carol"},
+        )
+        count, calls = self._sweep(sb, {"alice": [SimpleNamespace(id="alice/d1")],
+                                         "bob": [SimpleNamespace(id="bob/d1")]})
+        self.assertEqual(count, 0)
+        self.assertEqual(calls["authors"], [])
+        self.assertEqual(sb.inserted, [])
+
+    def test_sa08_the_organisation_is_never_swept(self):
+        sb = _SweepSupabase(
+            users=[{"id": "u1", "hf_username": "EduBotics-Solutions", "workgroup_id": None},
+                   {"id": "u2", "hf_username": "edubotics-solutions", "workgroup_id": None}],
+        )
+        count, calls = self._sweep(
+            sb, {"EduBotics-Solutions": [SimpleNamespace(id="EduBotics-Solutions/x")],
+                 "edubotics-solutions": [SimpleNamespace(id="EduBotics-Solutions/x")]})
+        self.assertEqual(count, 0)
+        self.assertEqual(calls["authors"], [])
+        self.assertEqual(sb.inserted, [])
+
+    def test_sa08_the_listing_is_anonymous_and_case_insensitive(self):
+        sb = _SweepSupabase(
+            users=[{"id": "u1", "hf_username": "Anna", "workgroup_id": None}],
+            proven={"u1": "anna"},
+        )
+        count, calls = self._sweep(sb, {"anna": [SimpleNamespace(id="Anna/d1")]})
+        self.assertEqual(count, 1)
+        self.assertEqual(calls["tokens"], [False])
+        self.assertEqual(calls["authors"], ["anna"])
 
 
 # ------------------------------------------------------------------

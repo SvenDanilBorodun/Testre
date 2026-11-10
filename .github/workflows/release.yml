@@ -314,6 +314,9 @@ jobs:
   trainer-image-var:
     name: W2b. Pin RUNPOD_TRAINER_IMAGE (no deploy)
     needs: [version-preflight, trainer-image]
+    # SA-13 (2026-11-13): the production environment's required reviewers
+    # approve this job before it runs (docs/deploy/DEPLOY.md, section 0).
+    environment: production
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions: {}  # talks only to Railway via RAILWAY_TOKEN
@@ -824,6 +827,9 @@ jobs:
       always()
       && needs.installer.result == 'success'
       && startsWith(github.ref, 'refs/tags/v')
+    # SA-13 (2026-11-13): the production environment's required reviewers
+    # approve this job before it runs (docs/deploy/DEPLOY.md, section 0).
+    environment: production
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions: {}  # talks only to Railway via RAILWAY_TOKEN; no GITHUB_TOKEN use

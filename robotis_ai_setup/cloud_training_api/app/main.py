@@ -185,12 +185,14 @@ def _warn_optional_secrets() -> None:
         ),
         # GUI_DOWNLOAD_URL is OPTIONAL now: /version derives the GH Release
         # asset URL from GUI_VERSION + GUI_RELEASE_REPO when it's unset. We
-        # warn on GUI_RELEASE_REPO instead — without it (and without an
-        # explicit GUI_DOWNLOAD_URL) the derive yields null.
+        # warn on GUI_RELEASE_REPO instead — without it the derive yields null,
+        # and since SA-01 (2026-11-13) an explicit GUI_DOWNLOAD_URL is served
+        # only as a release asset of that repository (routes/version.py).
         (
             "GUI_RELEASE_REPO",
-            "/version may return download_url=null — set to 'owner/repo' (or set "
-            "GUI_DOWNLOAD_URL explicitly) so the update gate can locate the .exe.",
+            "/version returns download_url=null — set to 'owner/repo' so the "
+            "update gate can locate the .exe (GUI_DOWNLOAD_URL is served only as "
+            "a release asset of that repository).",
         ),
     )
     for key, msg in optional_warns:
@@ -357,7 +359,7 @@ def _validate_required_schema() -> None:
     # partial migration could leave absent even when the table exists.
     required_columns: tuple[tuple[str, str], ...] = (
         # Migration 030 — the HF-identity anchor read by auth.get_user_profile,
-        # GET/PATCH /me, POST /datasets/sync, and the rewritten dataset_sweep.
+        # GET /me, POST /datasets/sync, and the rewritten dataset_sweep.
         # A deploy that lands the new code before the ALTER TABLE would 500 on
         # every profile read; fail the deploy fast instead.
         ("users", "hf_username"),
@@ -1044,6 +1046,21 @@ _BACKGROUND_TASKS: set = set()
 def _keep_task(task) -> None:
     _BACKGROUND_TASKS.add(task)
     task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+
+@app.on_event("startup")
+async def _start_platform_identity() -> None:
+    """SA-08 (2026-11-13): the platform HF_TOKEN's own account is a reserved
+    namespace no student may claim. Resolved by the Hub's whoami (and read back
+    from migration 059's table) off the event loop; a task nothing awaits.
+    PLATFORM_IDENTITY_DISABLED=1 for unit tests."""
+    import asyncio as _asyncio
+
+    if os.environ.get("PLATFORM_IDENTITY_DISABLED") == "1":
+        return
+    from app.services import platform_identity as _platform_identity
+
+    _keep_task(_asyncio.create_task(_platform_identity.platform_identity_loop()))
 
 
 @app.on_event("startup")

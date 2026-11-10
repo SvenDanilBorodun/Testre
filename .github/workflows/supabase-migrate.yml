@@ -249,6 +249,9 @@ jobs:
       github.event_name == 'workflow_call' ||
       (github.event_name == 'workflow_dispatch' && inputs.target == 'production' && (inputs.rollback_to == '' || inputs.rollback_to == null))
     needs: [validate]
+    # SA-13 (2026-11-13): the production environment's required reviewers
+    # approve this job before it runs (docs/deploy/DEPLOY.md, section 0).
+    environment: production
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -320,6 +323,9 @@ jobs:
   rollback:
     name: Rollback (manual dispatch)
     if: github.event_name == 'workflow_dispatch' && inputs.rollback_to != ''
+    # SA-13 (2026-11-13): the production environment's required reviewers
+    # approve this job before it runs (docs/deploy/DEPLOY.md, section 0).
+    environment: production
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:

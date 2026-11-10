@@ -219,14 +219,21 @@ class FilesAndOrder(unittest.TestCase):
         # (2026-11-10: the advisor clean-up), which pins the search_path of
         # credit_ledger_immutable() and trainings_guard_credit_columns() and
         # changes nothing else of 052's, and 055 (2026-11-11: the users guard's
-        # whole-row rule 1), which touches no credit object, and 056
+        # whole-row rule 1), which touches no credit object, 056
         # (2026-11-12: an admin's read branches require aal2), which touches no
-        # credit object either. A later migration must be added here deliberately.
+        # credit object either, 057 (2026-11-13: the request roles
+        # default-deny), which leaves every credit object service-role only
+        # and narrows the students' trainings read to the live columns (052's
+        # four included), 058 (refuse self-registration) and 059 (reserved
+        # Hugging Face namespaces). A later migration must be added here deliberately.
         names = sorted(p.name for p in _MIG.glob("*.sql"))
         self.assertEqual(names[names.index(M052.name) + 1:], ["20261109120000_053_retire_jetson.sql",
                                                               "20261110120000_054_advisor_cleanup.sql",
                                                               "20261111120000_055_users_identity_guard.sql",
-                                                              "20261112120000_056_admin_requires_aal2.sql"])
+                                                              "20261112120000_056_admin_requires_aal2.sql",
+                                                              "20261113120000_057_request_role_default_deny.sql",
+                                                              "20261113130000_058_refuse_self_signup.sql",
+                                                              "20261113140000_059_hf_reserved_namespaces.sql"])
 
     def test_one_transaction_each(self):
         for p in (M052, R052):

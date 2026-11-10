@@ -1,0 +1,191 @@
+{
+  "about": "What the request roles anon and authenticated may still READ, WRITE or EXECUTE in schema public, and which storage policies and public buckets may exist, since migration 057 (default-deny, security audit SA-10 and the owner's scope extension of 2026-11-13). Read by .github/scripts/supabase_request_role_check.py (ci.yml::migrations-replay); 057's own self-check holds the same lists, and tests/test_supabase_057.py holds the two equal. An entry added after 057 must be granted by name in a later migration (the test checks that too). Reads are column grants: no request role holds a table-level privilege on any public table, and RLS still decides the rows of every read.",
+  "reads": [
+    {
+      "table": "public.trainings",
+      "roles": [
+        "authenticated"
+      ],
+      "columns": [
+        "id",
+        "user_id",
+        "status",
+        "model_name",
+        "model_type",
+        "dataset_name",
+        "current_step",
+        "total_steps",
+        "current_loss",
+        "loss_history",
+        "error_message",
+        "requested_at",
+        "terminated_at",
+        "last_progress_at",
+        "workgroup_id",
+        "status_note",
+        "capped_step",
+        "continuable_until",
+        "continued_from",
+        "reserved_hours",
+        "charged_hours",
+        "stop_requested_by_role",
+        "lost_seconds"
+      ],
+      "why": "hooks/useSupabaseTrainings.js: the direct read selects LIVE_COLUMNS (22 names, exported there) filtered on user_id / workgroup_id and ordered by requested_at; the Realtime channels trainings:user / trainings:group filter on user_id / workgroup_id and merge the delivered row (stripSecrets drops user_id, worker_token, cloud_job_id). So LIVE_COLUMNS plus user_id. Every other trainings column (training_params, cloud_job_id, log_url, managed, current_attempt, train_seconds_used, step_advanced_at, dataset_fps, unplaced_since, cancel_*) is read only through the cloud API."
+    },
+    {
+      "table": "public.datasets",
+      "roles": [
+        "authenticated"
+      ],
+      "columns": [
+        "id",
+        "owner_user_id",
+        "workgroup_id",
+        "hf_repo_id",
+        "name",
+        "updated_at"
+      ],
+      "why": "hooks/useGroupDatasets.js: Realtime channels datasets:user / datasets:group (filters owner_user_id / workgroup_id; mergeRow sorts by updated_at and keeps the API row's other fields); its only consumer, components/DatasetSelector.js, reads id, hf_repo_id and name. The list itself comes from the cloud API's /datasets."
+    },
+    {
+      "table": "public.workflows",
+      "roles": [
+        "authenticated"
+      ],
+      "columns": [
+        "id",
+        "owner_user_id",
+        "workgroup_id",
+        "name",
+        "description",
+        "is_template",
+        "updated_at"
+      ],
+      "why": "hooks/useSupabaseWorkflows.js: Realtime channels workflows:user / workflows:group (filters owner_user_id / workgroup_id; mergeWorkflow sorts by updated_at); its only consumer, components/Workshop/TemplatePicker.jsx, reads id, name, description, is_template and updated_at, and a pick passes only the id (WorkshopPage::handlePickWorkflow loads the document through the API)."
+    },
+    {
+      "table": "public.tutorial_progress",
+      "roles": [
+        "authenticated"
+      ],
+      "columns": [
+        "user_id",
+        "tutorial_id",
+        "current_step",
+        "completed_at",
+        "updated_at"
+      ],
+      "why": "hooks/useSupabaseTutorialProgress.js: the Realtime channel tutorial_progress:user (filter user_id) REPLACES the map entry with the delivered row, read by components/Workshop/SkillmapPlayer.jsx ({current_step, completed_at, updated_at}, keyed by tutorial_id): every column."
+    },
+    {
+      "table": "public.users",
+      "roles": [
+        "authenticated"
+      ],
+      "columns": [
+        "id",
+        "role",
+        "classroom_id",
+        "workgroup_id"
+      ],
+      "why": "No client reads users. The read policies of trainings, datasets, workflows, tutorial_progress, workgroups and workgroup_memberships sub-select users.id, role, classroom_id and workgroup_id (pg_depend), and a policy's sub-select runs with the reader's privileges: without these columns every kept read fails with 42501. RLS ('Users read consolidated') still limits the rows to the own row, a teacher's classroom and an aal2 admin."
+    },
+    {
+      "table": "public.classrooms",
+      "roles": [
+        "authenticated"
+      ],
+      "columns": [
+        "id",
+        "teacher_id"
+      ],
+      "why": "No client reads classrooms. The read policies of trainings, datasets, workflows, tutorial_progress, workgroups and workgroup_memberships sub-select classrooms.id and teacher_id (pg_depend). RLS still limits the rows."
+    },
+    {
+      "table": "public.workgroups",
+      "roles": [
+        "authenticated"
+      ],
+      "columns": [
+        "id",
+        "classroom_id"
+      ],
+      "why": "No client reads workgroups. The read policies of datasets and workgroup_memberships sub-select workgroups.id and classroom_id (pg_depend). RLS still limits the rows."
+    },
+    {
+      "table": "public.workgroup_memberships",
+      "roles": [
+        "authenticated"
+      ],
+      "columns": [
+        "user_id",
+        "workgroup_id"
+      ],
+      "why": "No client reads workgroup_memberships. The read policies of trainings, datasets and workflows sub-select workgroup_memberships.user_id and workgroup_id (pg_depend). RLS still limits the rows."
+    }
+  ],
+  "tables": {},
+  "sequences": {},
+  "functions": [
+    {
+      "function": "public.rls_is_admin()",
+      "roles": [
+        "authenticated"
+      ],
+      "why": "Called by the policies 'Users read consolidated' and 'Classrooms read consolidated' (pg_depend), and through them by every read policy whose sub-select reads users or classrooms; a policy runs as the reader, and only authenticated reads a table (anon reads none since 057), Realtime's postgres_changes included. Migration 056 makes it require aal2; its body is 056's."
+    },
+    {
+      "function": "public.rls_teacher_classroom_ids()",
+      "roles": [
+        "authenticated"
+      ],
+      "why": "Called by the policy 'Users read consolidated' (pg_depend), evaluated for every users read, the sub-selects of the other read policies included (authenticated only: anon reads no table)."
+    },
+    {
+      "function": "public.rls_user_classroom_id()",
+      "roles": [
+        "authenticated"
+      ],
+      "why": "Called by the policy 'Classrooms read consolidated' (pg_depend) (authenticated only: anon reads no table)."
+    },
+    {
+      "function": "public.update_training_progress(integer,uuid,text,integer,integer,real,text,text)",
+      "roles": [
+        "anon",
+        "authenticated"
+      ],
+      "why": "The training worker's only database write: modal_training/training_handler.py::_call_progress_rpc calls it with the anon key and the per-attempt worker token (legacy and managed mode, Modal and the RunPod trainer image). Granted to anon and authenticated since migration 010/032 (CLAUDE.md Rule 4); authenticated has no caller in this repository and is kept as that grant stood. Worker-token gated."
+    },
+    {
+      "function": "public.inference_session_peek(text,text)",
+      "roles": [
+        "anon"
+      ],
+      "why": "modal_inference/session_backend.py::SupabaseSessionBackend._rpc with the anon key (migration 048); token hash and Modal session id gated."
+    },
+    {
+      "function": "public.inference_session_connect(text,text,text)",
+      "roles": [
+        "anon"
+      ],
+      "why": "modal_inference/session_backend.py::SupabaseSessionBackend._rpc with the anon key (migration 048)."
+    },
+    {
+      "function": "public.inference_session_heartbeat(text,text,text,jsonb)",
+      "roles": [
+        "anon"
+      ],
+      "why": "modal_inference/session_backend.py::SupabaseSessionBackend._rpc with the anon key (migration 048)."
+    },
+    {
+      "function": "public.inference_session_end(text,text,text,text,jsonb)",
+      "roles": [
+        "anon"
+      ],
+      "why": "modal_inference/session_backend.py::SupabaseSessionBackend._rpc with the anon key (migration 048)."
+    }
+  ],
+  "storage_policies": [],
+  "public_buckets": []
+}

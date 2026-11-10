@@ -15,12 +15,16 @@ account (600+ junk rows) and poisoned each student's register_dataset_safe
 author anchor so real uploads 403'd. The rewrite removes all author guessing:
 
   1. Every SWEEP_INTERVAL_S, read the SOLE per-student anchor —
-     public.users.hf_username (migration 030). No guessing, no fan-out.
-  2. For each student that has an hf_username (and isn't on the upstream
-     deny-list), list THAT student's HF datasets via
-     HfApi.list_datasets(author=hf_username) and insert any missing registry
-     rows (discovered_via_sweep = TRUE), attributed to that student + their
-     current workgroup.
+     public.users.hf_username (migration 030) — and keep it only where it is
+     PROVEN: equal (case-insensitively) to the account Hugging Face reported for
+     the student's own stored token (user_hf_credentials.hf_username, 042).
+     A self-asserted legacy name drives nothing (SA-08, 2026-11-13).
+  2. For each such student whose name is not denied (upstream examples, the
+     platform's organisation, the platform token's own account), list THAT
+     student's PUBLIC HF datasets ANONYMOUSLY (HfApi(token=False):
+     list_datasets(author=...)) and insert any missing registry rows
+     (discovered_via_sweep = TRUE), attributed to that student + their current
+     workgroup. The platform token is never used on a student namespace.
   3. We never DELETE registry rows.
 
 Kill-switch: DATASET_SWEEP_ENABLED=0 makes every tick a no-op (an operational
@@ -38,7 +42,7 @@ import logging
 import os
 from typing import Any
 
-from app.services.hf_identity import is_denied_author
+from app.services.hf_identity import is_denied_author, proven_hf_username
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +88,18 @@ def _students_with_hf_username(supabase) -> list[dict[str, Any]]:
         logger.warning("dataset_sweep: users hf_username scan failed: %s", exc)
         return []
     return [r for r in rows if r.get("id") and r.get("hf_username")]
+
+
+def _proven_name(supabase, user_id: str) -> str | None:
+    """The account Hugging Face reported for the student's own stored token
+    (user_hf_credentials, migration 042), or None. A failed read is "not
+    proven": the sweep then skips that student this round."""
+    try:
+        return proven_hf_username(supabase, user_id)
+    except Exception as exc:
+        logger.warning("dataset_sweep: proven name unreadable for user %s: %s",
+                       user_id, type(exc).__name__)
+        return None
 
 
 def _registered_repo_ids(supabase, owner_user_id: str) -> set[str]:
@@ -134,8 +150,9 @@ def _run_sweep_once() -> int:
         )
         return 0
 
-    hf_token = os.environ.get("HF_TOKEN", "")
-    if not hf_token:
+    # A deploy without HF_TOKEN is not configured for the Hub at all; the
+    # listing itself is anonymous since SA-08 (2026-11-13).
+    if not os.environ.get("HF_TOKEN", ""):
         logger.info("dataset_sweep: HF_TOKEN not set, skipping tick")
         return 0
 
@@ -150,12 +167,17 @@ def _run_sweep_once() -> int:
     if not students:
         return 0
 
-    api = HfApi(token=hf_token)
+    # SA-08: anonymous — public datasets only, never the platform token.
+    api = HfApi(token=False)
     discovered_total = 0
 
     for student in students:
         uid = student["id"]
-        author = str(student["hf_username"]).strip()
+        author = _proven_name(supabase, str(uid))
+        if not author or author.lower() != str(student["hf_username"]).strip().lower():
+            # No stored token, or a users.hf_username that is not the proven
+            # name (a legacy self-asserted value): nothing to discover.
+            continue
         if is_denied_author(author):
             # A student's hf_username should never be an upstream/system
             # account; never enumerate one (the deny-list is the belt to the
@@ -178,7 +200,7 @@ def _run_sweep_once() -> int:
             # Only this student's own namespace. list_datasets(author=) should
             # already guarantee it; belt-and-suspenders against an SDK that
             # ever returns cross-namespace results.
-            if _parse_author(repo_id) != author:
+            if (_parse_author(repo_id) or "").lower() != author.lower():
                 continue
             payload = {
                 "owner_user_id": uid,

@@ -84,10 +84,18 @@ class Migration055(unittest.TestCase):
         for path in (M055, R055, A055):
             self.assertTrue(path.is_file(), path)
         names = sorted(p.name for p in _MIG.glob('*.sql'))
-        # 055 was the newest until 056 (2026-11-12, the admin's aal2 rule), which
-        # touches neither public.users' grants, its policies nor the guard.
         self.assertEqual(names[names.index(M055.name) - 1], '20261110120000_054_advisor_cleanup.sql')
-        self.assertEqual(names[names.index(M055.name) + 1:], ['20261112120000_056_admin_requires_aal2.sql'])
+        # 055 was the newest until 056 (2026-11-12, the admin's aal2 rule), which
+        # touches neither public.users' grants, its policies nor the guard, 057
+        # (2026-11-13, the request roles default-deny, which takes the request
+        # roles' SELECT on users down to four columns), 058 (refuse
+        # self-registration) and 059; none touches the guard.
+        self.assertEqual(names[names.index(M055.name) + 1:], [
+            '20261112120000_056_admin_requires_aal2.sql',
+            '20261113120000_057_request_role_default_deny.sql',
+            '20261113130000_058_refuse_self_signup.sql',
+            '20261113140000_059_hf_reserved_namespaces.sql',
+        ])
 
     def test_the_changes_in_one_transaction(self):
         statements = _statements(_code(_read(M055)))

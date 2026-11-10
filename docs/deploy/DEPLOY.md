@@ -24,6 +24,21 @@ Skip step 1 → Railway boot fails. Skip step 2 → student training spawns fail
 
 ---
 
+## 0. The production approval gate (security audit SA-13, 2026-11-13)
+
+Six jobs that change production run only after a person approves them: `supabase-migrate.yml` **apply-production** and **rollback** (W1), `railway-deploy-cloud-api.yml` **deploy** (W2), `railway-deploy-teacher-web.yml` **deploy** (W3), and in `release.yml` **trainer-image-var** (W2b) and **publish-gui-version** (W6). Each names `environment: production`; the gate is the environment's protection rule, which the workflow cannot create.
+
+**Owner, once, before the next push to `main` that touches a migration or the cloud API** (GitHub → the repository → Settings → Environments):
+
+1. **New environment** named exactly `production` (if a run created it already, open it: GitHub creates a missing environment on first use, WITHOUT any protection — that is the state in which the gate approves nothing).
+2. **Required reviewers**: add yourself (and a second maintainer if there is one); tick **Prevent self-review** only when a second reviewer exists, or every run waits forever.
+3. **Deployment branches and tags**: *Selected branches and tags* → add `main` and the tag pattern `v*` (W1 also runs on a `workflow_dispatch` from `main`).
+4. Leave the repository secrets where they are: the jobs still read `SUPABASE_*`, `RAILWAY_TOKEN` from the repository. (Moving them into the environment is a later, optional hardening: then no job without the gate can read them.)
+
+What it costs: a tagged release now stops five times for approval (W1, W2b, W2, W3, W6), and a plain push to `main` stops once per deploy workflow it triggers (W1 for a migration, W2 for the cloud API, W3 for the teacher web); a waiting job fails after 30 days. A run nobody approves deploys nothing; reject it to end it. The health gates and the build jobs need no approval.
+
+---
+
 ## 1. Supabase — Postgres migrations
 
 **When:** new table, column, RPC, RLS policy, trigger, or Realtime publication.
@@ -115,6 +130,49 @@ PostgREST, as the API already refused them. No API-visible shape, no row touched
 - Hand-run assertions: `supabase/tests/056_admin_requires_aal2_assertions.sql`
   (36 PASS on a local stack; 20 at 055; never against the linked project).
 
+### Migrations 057–059 — request roles default-deny, no self-registration, reserved Hugging Face namespaces (2026-11-13, deep security audit)
+
+`20261113120000_057_request_role_default_deny.sql` leaves `anon` and
+`authenticated` only the reads and RPCs in `supabase/request_role_allowlist.json`
+(no write, no sequence, no other function; default privileges revoked; the
+storage bucket `releases` locked); `20261113130000_058_refuse_self_signup.sql`
+refuses every account the server did not create;
+`20261113140000_059_hf_reserved_namespaces.sql` refuses the organisation and the
+platform token's account as a student's Hugging Face name and dataset
+namespace. None changes an API-visible shape.
+
+- **Before W1 (owner, dashboard):** delete the Storage policy „Service role
+  upload to releases" and the bucket `releases` (or make it private) and review
+  its objects. 057 does it itself when the migrating role may; when it may not,
+  057 stops and changes nothing, naming this step. Switch off sign-up
+  (Authentication → Sign In / Providers) and create the `production`
+  environment with required reviewers (section 0).
+- **Deploy order:** W1 (057, 058, 059) → W2 (the API of the same release:
+  the provisioning marker, PATCH /me refuses, anonymous discovery, the reserved
+  namespaces, the pinned `/version`). **058 needs the new API**: an older API's
+  `create_user` sends no marker, so between W1 and W2 a teacher's „Schüler
+  anlegen" (and an admin's new teacher) answers 500 and is simply repeated after
+  W2 — release outside lessons, or deploy the API first. For the same reason an
+  API ROLLBACK below this release needs the 058 rollback first. Otherwise an
+  OLDER API on the new database works (it is service-role only), except its
+  PATCH /me with an organisation name (the database refuses it, P0059 → a 500)
+  and its sync of the organisation (registers nothing, P0034); the NEW API works
+  on a database without 059 (it keeps its in-process deny-list).
+- **After W1:** the NOTICEs said „057 self-check passed", „058 self-check
+  passed", „059 self-check passed"; read 059's WARNING (registry rows already in
+  a reserved namespace, `docs/KNOWN-ISSUES.md` names the review query). Then the
+  live checks of `docs/KNOWN-ISSUES.md` (2026-11-13 entry): the Training page's
+  live chart, the dataset picker, the template picker, the Lernpfade progress,
+  and a few 42501 probes with a student token.
+- **Rollback, in this order:** 059 → 058 → 057
+  (`rollback/20261113140000_059_hf_reserved_namespaces_rollback.sql`,
+  `…_058_refuse_self_signup_rollback.sql`, `…_057_request_role_default_deny_rollback.sql`).
+  Each RE-OPENS what it closed; 057's restores neither the storage policy nor
+  `pg_stat_statements`. No API rollback is needed for any of them.
+- Hand-run assertions: `supabase/tests/057_…` (50 PASS), `058_…` (14 PASS + one
+  expected ERROR), `059_…` (13 PASS), on a local stack only. 057 breaks 049's
+  T3, 052's T2h and 055's T5a by design.
+
 ---
 
 ## 2. Modal — training app
@@ -169,7 +227,7 @@ git push
 
 **Required env vars** (Railway dashboard): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `EDUBOTICS_HF_TOKEN_KEY` (per-student Hugging Face token storage, migration 042: 32 random bytes as standard base64, generate with `python -c "import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())"`; absent, empty or malformed → the API refuses to boot (required since 2026-10-04); optional `EDUBOTICS_HF_TOKEN_KEY_PREVIOUS` for rotation; **set it BEFORE the cloud deploy**; losing it makes every stored token unusable and each student pastes theirs again).
 
-**Production-relevant optional:** `LEGAL_IMPRESSUM_URL`, `LEGAL_DATENSCHUTZ_URL`, `LEGAL_NUTZUNGSBEDINGUNGEN_URL` (the legal links, section 3d; an invalid one stops the boot), `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` + `GUI_RELEASE_REPO` (drives student `.exe` auto-update — normally set automatically by `release.yml` W6 on a `vX.Y.Z` tag; `GUI_DOWNLOAD_URL` is optional and derived from `GUI_VERSION` + `GUI_RELEASE_REPO` when unset), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`, `AUTH_VERIFY_MODE` and `TRUSTED_PROXY_HOPS` (§3c; leave both unset unless §3c says otherwise). (`EDUBOTICS_JETSON_HF_TOKEN`, `SUPABASE_JWT_ALGORITHM` and `SUPABASE_JWT_SECRET` were read only by the retired classroom Jetson's `/jetson/register`; no code reads them since 2026-11-09. Do not just delete them: revoke and rotate first, §4b.)
+**Production-relevant optional:** `LEGAL_IMPRESSUM_URL`, `LEGAL_DATENSCHUTZ_URL`, `LEGAL_NUTZUNGSBEDINGUNGEN_URL` (the legal links, section 3d; an invalid one stops the boot), `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` + `GUI_RELEASE_REPO` (drives student `.exe` auto-update — normally set automatically by `release.yml` W6 on a `vX.Y.Z` tag; `GUI_DOWNLOAD_URL` is optional and derived from `GUI_VERSION` + `GUI_RELEASE_REPO` when unset; when set it is served only as exactly `https://github.com/<GUI_RELEASE_REPO>/releases/download/<tag>/<asset>`, anything else is ignored with a WARNING), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`, `AUTH_VERIFY_MODE` and `TRUSTED_PROXY_HOPS` (§3c; leave both unset unless §3c says otherwise). (`EDUBOTICS_JETSON_HF_TOKEN`, `SUPABASE_JWT_ALGORITHM` and `SUPABASE_JWT_SECRET` were read only by the retired classroom Jetson's `/jetson/register`; no code reads them since 2026-11-09. Do not just delete them: revoke and rotate first, §4b.)
 
 **Never** set `EDUBOTICS_SKIP_SCHEMA_CHECK=1` on Railway.
 

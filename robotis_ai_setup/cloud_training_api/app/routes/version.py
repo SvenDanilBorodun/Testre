@@ -48,15 +48,76 @@ Two changes from the v1 shape:
      PublicReadCorsMiddleware): a Pi's SPA runs at whatever LAN address the
      school gave it, which ALLOWED_ORIGINS cannot list, and nothing here is
      private.
+
+  7. SA-01 (security audit, 2026-11-13): the update channel is pinned to the
+     release repository. GUI_RELEASE_REPO must be a GitHub ``owner/repo`` name,
+     and an explicit GUI_DOWNLOAD_URL is served only when it is exactly
+     ``https://github.com/<GUI_RELEASE_REPO>/releases/download/<tag>/<asset>``;
+     anything else (the April 2026 Supabase Storage bucket, any other host or
+     repository, a malformed value) is IGNORED with one WARNING per process and
+     the URL is derived from GUI_RELEASE_REPO + GUI_VERSION instead. The Pi
+     agent's URL has no override and is derived only from a valid
+     GUI_RELEASE_REPO. Release W6 sets both variables to exactly that shape.
 """
 
+import logging
 import os
+import re
+import threading
 
 from fastapi import APIRouter
 
 from app.services import legal_links
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+# A GitHub repository: owner (1-39 alphanumerics or hyphens, no leading hyphen)
+# and name (letters, digits, '.', '_', '-'), never '.' or '..'.
+_RELEASE_REPO_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}")
+# One path segment of a release download URL (the tag, the asset file name).
+_URL_SEGMENT_RE = re.compile(r"[A-Za-z0-9._+-]{1,128}")
+
+_warned: set[str] = set()
+_warned_lock = threading.Lock()
+
+
+def _warn_once(key: str, message: str, *args) -> None:
+    with _warned_lock:
+        if key in _warned:
+            return
+        _warned.add(key)
+    logger.warning(message, *args)
+
+
+def _release_repo() -> str | None:
+    """GUI_RELEASE_REPO when it is a GitHub ``owner/repo`` name, else None
+    (one WARNING). The only repository the update URLs may point into."""
+    raw = (os.environ.get("GUI_RELEASE_REPO") or "").strip()
+    if not raw:
+        return None
+    name = raw.split("/", 1)[-1]
+    if _RELEASE_REPO_RE.fullmatch(raw) and name not in (".", ".."):
+        return raw
+    _warn_once("repo", "GUI_RELEASE_REPO is not a GitHub owner/repo name; no update URL is served")
+    return None
+
+
+def _is_release_asset_url(url: str, repo: str) -> bool:
+    """True when ``url`` is exactly a release asset of ``repo`` on github.com:
+    https://github.com/<repo>/releases/download/<tag>/<asset> (owner and name
+    compared case-insensitively, like GitHub; no query, fragment, credentials,
+    port or extra segment)."""
+    prefix = "https://github.com/"
+    if not url.startswith(prefix):
+        return False
+    parts = url[len(prefix):].split("/")
+    if len(parts) != 6 or parts[2:4] != ["releases", "download"]:
+        return False
+    if f"{parts[0]}/{parts[1]}".lower() != repo.lower():
+        return False
+    return all(_URL_SEGMENT_RE.fullmatch(seg) and seg not in (".", "..") for seg in parts[4:])
 
 # Asset filename produced by release-installer.yml's softprops upload.
 _INSTALLER_ASSET = "EduBotics_Setup.exe"
@@ -94,18 +155,25 @@ def _resolve_installer_sha256() -> str | None:
 
 
 def _resolve_download_url(version: str | None) -> str | None:
-    """Explicit GUI_DOWNLOAD_URL wins; else derive the GH Release asset URL
-    from GUI_VERSION + GUI_RELEASE_REPO (owner/repo). Returns None when
-    neither is available so the GUI treats it as 'no update'.
+    """An explicit GUI_DOWNLOAD_URL that is a release asset of GUI_RELEASE_REPO
+    wins; else derive the GH Release asset URL from GUI_VERSION +
+    GUI_RELEASE_REPO (owner/repo). Returns None when neither is available so
+    the GUI treats it as 'no update'.
 
     Deriving keeps the version string and its download URL from drifting
     apart: a single GUI_VERSION bump is enough for the update gate to point
     at the right `.exe`, instead of two env vars that can disagree.
+
+    SA-01: an explicit URL anywhere else (another host — the old public
+    Supabase Storage bucket —, another repository, a malformed value, or no
+    valid GUI_RELEASE_REPO to judge it by) is ignored with one WARNING.
     """
-    explicit = os.environ.get("GUI_DOWNLOAD_URL")
+    repo = _release_repo()
+    explicit = (os.environ.get("GUI_DOWNLOAD_URL") or "").strip()
     if explicit:
-        return explicit
-    repo = os.environ.get("GUI_RELEASE_REPO")
+        if repo and _is_release_asset_url(explicit, repo):
+            return explicit
+        _warn_once("download_url", "GUI_DOWNLOAD_URL is not a release asset of GUI_RELEASE_REPO; ignored")
     if version and repo:
         return (
             f"https://github.com/{repo}/releases/download/"
@@ -141,9 +209,10 @@ def _resolve_pi_agent_download_url(version: str | None) -> str | None:
     Unlike the .exe there is NO explicit override env var — the tarball's URL
     is ALWAYS derived (deploy plan §7: "derived the same way as the .exe pair,
     from release repo + version + fixed asset name"), so the advertised Pi
-    version and its download asset can never disagree.
+    version and its download asset can never disagree. SA-01: only from a
+    GUI_RELEASE_REPO that is a GitHub owner/repo name.
     """
-    repo = os.environ.get("GUI_RELEASE_REPO")
+    repo = _release_repo()
     if version and repo:
         return (
             f"https://github.com/{repo}/releases/download/"

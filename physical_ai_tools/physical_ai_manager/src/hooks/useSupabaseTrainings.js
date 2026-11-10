@@ -20,7 +20,11 @@ const ACTIVE_POLL_MS = 6000;
 // because its migration grants it. test_managed_training_lockstep.py checks
 // every name here against those GRANT lists. The last four are the training
 // hours (migration 052 grants exactly them): the reservation, the charge, who
-// stopped it and the lost time that counts against the limit.
+// stopped it and the lost time that counts against the limit. Since migration
+// 057 the students may read EXACTLY these columns plus user_id (the filter
+// column) and nothing else of trainings: a new name here needs a migration
+// that grants it and an entry in supabase/request_role_allowlist.json
+// (tests/test_supabase_057.py holds this list equal to it).
 export const LIVE_COLUMNS =
   'id,status,model_name,model_type,dataset_name,current_step,total_steps,' +
   'current_loss,loss_history,error_message,requested_at,terminated_at,' +

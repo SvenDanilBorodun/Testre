@@ -359,6 +359,32 @@ class TestPutRejections(_RouteCase):
             self.assertIn("nicht zulässig", exc.detail)
         self._no_hub_call()
 
+    def test_sa08_the_organisation_and_the_platform_account_are_refused(self) -> None:
+        from app.services import hf_identity
+        try:
+            hf_identity.note_platform_account("plattform-bot")
+            for name in ("EduBotics-Solutions", "edubotics-solutions", "Plattform-Bot"):
+                self.hub.return_value = {"name": name, "role": "write"}
+                exc = self.assertHttp(422, self.put)
+                self.assertIn("nicht zulässig", exc.detail)
+        finally:
+            with hf_identity._platform_lock:
+                hf_identity._platform_accounts.discard("plattform-bot")
+        self.assertEqual(self.sb.credentials, {})
+        self._no_hub_call()
+
+    def test_sa08_the_platform_token_itself_is_refused_before_the_hub(self) -> None:
+        with patch.dict(os.environ, {"HF_TOKEN": TOK}):
+            exc = self.assertHttp(422, self.put)
+        self.assertIn("nicht zulässig", exc.detail)
+        self.hub.assert_not_called()
+        self.assertEqual(self.sb.credentials, {})
+
+    def test_sa08_the_databases_p0059_is_the_same_german_422(self) -> None:
+        self.sb.fail_rpc = RuntimeError("{'code': 'P0059', 'message': 'reserviert'}")
+        exc = self.assertHttp(422, self.put)
+        self.assertIn("nicht zulässig", exc.detail)
+
     def test_a_name_that_is_not_a_valid_account_name_is_refused(self) -> None:
         for name in ("-bad", "bad_name", "with space", "a" * 97):
             self.hub.return_value = {"name": name, "role": "write"}
@@ -615,6 +641,10 @@ class TestNothingSecretIsLogged(_RouteCase):
 
 
 class TestPatchMe(unittest.TestCase):
+    """SA-08 (2026-11-13): PATCH /me writes nothing. users.hf_username is set only
+    by proof (the token save); every body, a clearing included, is one German 400
+    that sends the student to the token on the Startseite, before any database call."""
+
     def setUp(self):
         self.sb = FakeSupabase()
         self._patch = patch.object(meroute, "get_supabase", return_value=self.sb)
@@ -623,64 +653,26 @@ class TestPatchMe(unittest.TestCase):
     def tearDown(self):
         self._patch.stop()
 
-    def _call(self, raw="alice", profile=None):
-        body = meroute.HfUsernameUpdate(hf_username=raw)
-        fresh = {**_profile(), "username": "s", "full_name": "S", "classroom_id": None,
-                 "workgroup_id": None, "training_credits": 0, "hf_username": raw}
-        with patch.object(meroute, "get_user_profile", return_value=fresh):
-            return meroute.update_me(body=body, profile=profile or _profile())
-
-    def test_409_when_a_credential_exists_and_nothing_is_written(self) -> None:
-        self.sb.credentials[UID] = {"user_id": UID}
+    def _refusal(self, body):
         with self.assertRaises(HTTPException) as cm:
-            self._call("someone-else")
-        self.assertEqual(cm.exception.status_code, 409)
-        self.assertEqual(
-            cm.exception.detail,
-            "Dein Hugging-Face-Konto ist über dein gespeichertes Token festgelegt. "
-            "Entferne zuerst das Token auf der Startseite, wenn du ein anderes Konto "
-            "verwenden möchtest.",
-        )
+            meroute.update_me(body=body, profile=_profile())
+        return cm.exception
+
+    def test_every_body_is_the_same_german_400_and_nothing_is_written(self) -> None:
+        for body in ({"hf_username": "alice"}, {"hf_username": "EduBotics-Solutions"},
+                     {"hf_username": ""}, {"hf_username": None}, {}, None, "alice", [1]):
+            with self.subTest(body=body):
+                exc = self._refusal(body)
+                self.assertEqual(exc.status_code, 400)
+                self.assertEqual(exc.detail, meroute.HF_USERNAME_BY_TOKEN_ONLY_DE)
+                self.assertIn("Startseite", exc.detail)
+                self.assertIn("Token", exc.detail)
         self.assertEqual(self.sb.updated, [])
 
-    def test_a_token_stored_between_the_check_and_the_update_is_still_the_409(self) -> None:
-        # Migration 044's users trigger raises P0044 when hf_username would leave
-        # the stored credential's name; the check-then-write is atomic in SQL.
-        real_table = self.sb.table
-
-        def table(name):
-            query = real_table(name)
-            if name == "users":
-                def execute():
-                    raise RuntimeError("{'code': 'P0044', 'message': 'Dein Hugging-Face-Konto ...'}")
-                query.execute = execute
-            return query
-
-        with patch.object(self.sb, "table", side_effect=table):
-            with self.assertRaises(HTTPException) as cm:
-                self._call("someone-else")
-        self.assertEqual(cm.exception.status_code, 409)
-        self.assertIn("über dein gespeichertes Token festgelegt", cm.exception.detail)
-
-    def test_still_200_without_a_credential(self) -> None:
-        result = self._call("alice")
-        self.assertEqual(self.sb.updated, [{"hf_username": "alice"}])
-        self.assertEqual(result.hf_username, "alice")
-
-    def test_another_students_credential_does_not_block_me(self) -> None:
-        self.sb.credentials[OTHER_UID] = {"user_id": OTHER_UID}
-        self._call("alice")
-        self.assertEqual(self.sb.updated, [{"hf_username": "alice"}])
-
-    def test_a_failing_lookup_is_a_german_500_not_a_silent_write(self) -> None:
-        self.sb.fail_read = True
-        with self.assertLogs(level="DEBUG") as logs:
-            with self.assertRaises(HTTPException) as cm:
-                self._call("alice")
-        self.assertEqual(cm.exception.status_code, 500)
-        self.assertIn("Benutzer-ID konnte nicht gespeichert werden", cm.exception.detail)
+    def test_a_stored_credential_changes_nothing(self) -> None:
+        self.sb.credentials[UID] = {"user_id": UID}
+        self.assertEqual(self._refusal({"hf_username": "someone-else"}).status_code, 400)
         self.assertEqual(self.sb.updated, [])
-        self.assertNotIn("read exploded", "\n".join(logs.output))
 
 
 class TestDeleteMyAccountRemovesTheToken(unittest.TestCase):

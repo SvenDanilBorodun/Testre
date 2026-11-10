@@ -94,9 +94,9 @@ SELECT CASE WHEN count(*) = 5 THEN 'PASS T8' ELSE 'FAIL T8 (' || count(*) || ' o
 
 \echo '=== T9-T15 the triggers behave as before (seeded, rolled back) ==='
 BEGIN;
-INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at)
+INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at, raw_app_meta_data)
 VALUES ('05400001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated',
-        'authenticated', 't054@edubotics.local', '', now(), now());
+        'authenticated', 't054@edubotics.local', '', now(), now(), '{"edubotics_provisioned": true}');
 INSERT INTO public.workflows (id, owner_user_id, name, blockly_json)
 VALUES ('05400002-0000-0000-0000-000000000001', '05400001-0000-0000-0000-000000000001', 't054 a', '{}'::jsonb),
        ('05400002-0000-0000-0000-000000000002', '05400001-0000-0000-0000-000000000001', 't054 b', '{}'::jsonb);
@@ -174,6 +174,12 @@ END $$;
 CREATE POLICY t054_insert ON public.workflow_trajectories FOR INSERT TO authenticated WITH CHECK (true);
 CREATE POLICY t054_insert ON public.workflow_submissions FOR INSERT TO authenticated WITH CHECK (true);
 GRANT INSERT ON public.workflow_trajectories, public.workflow_submissions TO authenticated;
+-- The simulated writer also needs what a real one holds for workflow_submissions'
+-- CHECK (code_files shape): since 057 the request roles no longer execute the
+-- three jsonb_* helpers it calls (a CHECK's functions are checked for the writer;
+-- before 057 this grant changes nothing). The prune trigger itself stays without.
+GRANT EXECUTE ON FUNCTION public.jsonb_all_values_are_strings(jsonb), public.jsonb_object_key_count(jsonb),
+                          public.jsonb_max_text_value_bytes(jsonb) TO authenticated;
 
 DO $$
 DECLARE v_left INT; v_oldest BOOLEAN;

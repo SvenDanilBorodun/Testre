@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from app.services import runpod_client
+from app.services.hf_identity import HF_ORG  # the one constant (hf_identity.py)
 from app.services import training_texts_de as T
 
 logger = logging.getLogger(__name__)
@@ -140,7 +141,6 @@ MANAGED_CAP_CEILING_S = MODAL_TIMEOUT_S - FINAL_UPLOAD_WAIT_S - 600  # 23 520 s:
 # for this long is lost; the grace covers one presigned PUT's validity plus an upload's tail.
 CKPT_OVERDUE_GRACE_S = PUT_TTL_S + 300
 
-HF_ORG = "EduBotics-Solutions"
 TRAINER_IMAGE_PREFIX = "ghcr.io/svendanilborodun/edubotics-trainer"
 TRAINER_IMAGE_RE = re.compile(
     r"ghcr\.io/svendanilborodun/edubotics-trainer(:[A-Za-z0-9._-]{1,128})?@sha256:[0-9a-f]{64}"
@@ -2003,6 +2003,10 @@ async def hf_check_tick(settings: Settings | None = None):
         else:
             logger.warning("managed training: HF write check %s; placement proceeds", exc.code)
         return STATE.hf_check
+    # SA-08: the platform token's own account is a reserved namespace.
+    from app.services import platform_identity
+
+    platform_identity.note(info.get("name"))
     verdict = org_repo_write(info, HF_ORG)
     STATE.hf_check = verdict
     if verdict is False:

@@ -79,6 +79,15 @@ const BACKOFF_CODES = new Set(['rate_limited', 'cloud_unreachable']);
 // in a row (`ticket_rejected`, see exchange). Not sent again until supabase-js
 // delivers another token (VA-03, adapted to the tickets).
 const REJECTED_CODES = new Set(['token_rejected', 'ticket_rejected']);
+// VC-10 (verification round C, 2026-11-15): an exchange that ends by handing
+// over to the probe because the Pi said „unclaimed" (its redeem, or the VB-04
+// re-read) starts no new exchange for this long, whoever asks (the probe that
+// finds the Pi claimed again, the rosbridge gate, a 401): a Pi whose state
+// flips claimed↔unclaimed otherwise looped exchange → re-read → probe →
+// exchange with no pause, minting a ticket each time. Only a new Supabase token
+// or the one scheduled retry at the end of the pause exchanges again, so a
+// flapping Pi costs at most one exchange chain (two mints, one re-read) per pause.
+const FLIP_PAUSE_MS = ERROR_RETRY_MS;
 
 // German sentences for the codes the agent answers (its own `message` wins).
 export const PI_AUTH_TEXT_DE = Object.freeze({
@@ -139,6 +148,9 @@ let exchangeInFlight = null;
 // (setPiAccessToken) is tried. Memory only, never browser storage (VA-03).
 let rejectedToken = null;
 let lastRefusedAt = 0;
+// VC-10: no exchange (bar a new token or the scheduled retry) before this time.
+let flipPauseUntil = 0;
+let flipTimer = null;
 
 const now = () => Date.now();
 
@@ -234,6 +246,33 @@ function scheduleErrorRetry() {
 /** True when the current token is the one the cloud refused (VA-03). */
 function tokenRejected() {
   return accessToken !== null && accessToken === rejectedToken;
+}
+
+/** VC-10: true while an „unclaimed" hand-over pauses the exchange. */
+function inFlipPause() {
+  return now() < flipPauseUntil;
+}
+
+/** VC-10: the one exchange at the end of the pause (a new token may come first). */
+function scheduleAfterFlipPause() {
+  if (flipTimer) return;
+  flipTimer = setTimeout(() => {
+    flipTimer = null;
+    if (accessToken && (state.phase === PI_AUTH_PHASE.LOCKED || state.phase === PI_AUTH_PHASE.ERROR)) {
+      exchange({ retry: true });
+    }
+  }, Math.max(0, flipPauseUntil - now()));
+}
+
+/**
+ * The exchange chain ends because the Pi said „unclaimed": start the pause, then
+ * let the probe show the claim screen (or find the Pi claimed again; its
+ * exchange then waits for the pause, VC-10).
+ */
+function handOverUnclaimed() {
+  flipPauseUntil = now() + FLIP_PAUSE_MS;
+  exchangeInFlight = null;
+  return probe();
 }
 
 /** True while a refusal that a new attempt cannot fix yet is fresh (VA-03). */
@@ -453,6 +492,10 @@ export function exchange({ retry = false } = {}) {
   if (exchangeInFlight) return exchangeInFlight;
   if (tokenRejected()) return Promise.resolve(state);
   if (!retry && inBackoff()) return Promise.resolve(state);
+  if (!retry && inFlipPause()) {
+    scheduleAfterFlipPause();
+    return Promise.resolve(state);
+  }
   const token = accessToken;
   if (state.phase !== PI_AUTH_PHASE.SESSION) setState({ phase: PI_AUTH_PHASE.EXCHANGING });
   exchangeInFlight = (async () => {
@@ -482,20 +525,14 @@ export function exchange({ retry = false } = {}) {
         setState({ phase: PI_AUTH_PHASE.LEGACY, error: null });
         return state;
       }
-      if (json.code === 'unclaimed') {
-        exchangeInFlight = null;
-        return probe();
-      }
+      if (json.code === 'unclaimed') return handOverUnclaimed();
       const code = typeof json.code === 'string' ? json.code : 'network';
       if (code === 'ticket_rejected' && attempt === 0) continue;
       if (code === 'ticket_rejected' && !reread) {
         reread = true;
         // eslint-disable-next-line no-await-in-loop
         const seen = await rereadPiState();
-        if (seen && !seen.claimed) {
-          exchangeInFlight = null;
-          return probe();
-        }
+        if (seen && !seen.claimed) return handOverUnclaimed();
         if (seen && seen.piId && seen.piId !== mintedFor) continue;
       }
       const message = typeof json.message === 'string' && json.message
@@ -531,6 +568,8 @@ export function resetPiAuthForTests() {
   refreshTimer = clearTimer(refreshTimer);
   errorTimer = clearTimer(errorTimer);
   suspectTimer = clearTimer(suspectTimer);
+  flipTimer = clearTimer(flipTimer);
+  flipPauseUntil = 0;
   started = false;
   fetchImpl = (...args) => fetch(...args);
   cloudApiUrl = CLOUD_API_URL || '';

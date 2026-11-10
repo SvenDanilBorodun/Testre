@@ -821,3 +821,84 @@ describe('VB-04: a factory reset and a re-claim give the Pi a new id', () => {
       .toEqual([OLD_ID, OLD_ID, NEW_ID]);
   });
 });
+
+describe('VC-10: a Pi whose state flips claimed↔unclaimed cannot make a tab mint in a loop', () => {
+  /** The verifier's scenario: /auth/state alternates claimed and unclaimed on
+   * every read, and the redeem refuses every ticket. Before the fix the tab
+   * looped exchange → re-read (unclaimed) → probe (claimed) → exchange with no
+   * pause; under fake timers it ran out of heap, and against a cloud that
+   * answers 429 after 30 mints it minted 31 tickets in 5 s. */
+  function flippingPi({ cloudLimit = Infinity } = {}) {
+    let reads = 0;
+    let mints = 0;
+    const { fetchFn, calls } = fakeAgent({
+      [STATE]: () => {
+        reads += 1;
+        const claimed = reads % 2 === 1;
+        return json(200, { ok: true, auth: 1, claimed, session: false, pi_id: PI_ID,
+          setup_code: claimed ? undefined : 'active' });
+      },
+      [MINT]: () => {
+        mints += 1;
+        if (mints > cloudLimit) return json(429, { detail: 'Zu viele Anfragen.' });
+        return json(200, { ticket: `t-${mints}`, expires_in: 60 });
+      },
+      [SESSION]: () => json(401, { ok: false, code: 'ticket_rejected', message: 'Abgelehnt (Agent).' }),
+    });
+    return { fetchFn, mints: () => calls.filter((c) => c.path === MINT).length, calls };
+  }
+
+  it('mints at most one chain per pause, however long the Pi keeps flipping', async () => {
+    vi.useFakeTimers();
+    const pi = flippingPi();
+    setPiAccessToken('jwt-1');
+    start(pi.fetchFn);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(pi.mints()).toBeLessThanOrEqual(2); // one chain: a ticket and its one replacement
+    await vi.advanceTimersByTimeAsync(55000);
+    // one chain per 15 s pause: at most 2 mints per 15 s, i.e. ≤ 10 in a minute
+    expect(pi.mints()).toBeLessThanOrEqual(10);
+    expect(pi.mints()).toBeGreaterThan(2); // it keeps trying, slowly
+    const stateReads = pi.calls.filter((c) => c.path === STATE).length;
+    expect(stateReads).toBeLessThanOrEqual(12);
+  });
+
+  it('the gate and a 401 do not cut the pause short', async () => {
+    vi.useFakeTimers();
+    const pi = flippingPi();
+    setPiAccessToken('jwt-1');
+    start(pi.fetchFn);
+    await vi.advanceTimersByTimeAsync(100);
+    const before = pi.mints();
+    for (let i = 0; i < 20; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await ensurePiSession().catch(() => {});
+      noteUnauthorized();
+      // eslint-disable-next-line no-await-in-loop
+      await vi.advanceTimersByTimeAsync(600);
+    }
+    // 12 s of a reconnect loop and 401s: still within the first pause
+    expect(pi.mints()).toBe(before);
+  });
+
+  it('a new Supabase token is still exchanged at once', async () => {
+    vi.useFakeTimers();
+    const pi = flippingPi();
+    setPiAccessToken('jwt-1');
+    start(pi.fetchFn);
+    await vi.advanceTimersByTimeAsync(100);
+    const before = pi.mints();
+    setPiAccessToken('jwt-2');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pi.mints()).toBeGreaterThan(before);
+  });
+
+  it('against a cloud that rate-limits, the tab stays far below the limit', async () => {
+    vi.useFakeTimers();
+    const pi = flippingPi({ cloudLimit: 30 });
+    setPiAccessToken('jwt-1');
+    start(pi.fetchFn);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(pi.mints()).toBeLessThanOrEqual(10);
+  });
+});

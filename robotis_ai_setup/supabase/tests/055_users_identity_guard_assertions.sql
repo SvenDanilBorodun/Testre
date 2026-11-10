@@ -40,10 +40,10 @@
 \set ON_ERROR_STOP off
 \pset pager off
 
-INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at)
-VALUES ('b5500001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-055@x.test', '', now(), now()),
-       ('b5500002-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 't1-055@x.test', '', now(), now()),
-       ('b5500003-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'c1-055@x.test', '', now(), now())
+INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at, raw_app_meta_data)
+VALUES ('b5500001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-055@x.test', '', now(), now(), '{"edubotics_provisioned": true}'),
+       ('b5500002-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 't1-055@x.test', '', now(), now(), '{"edubotics_provisioned": true}'),
+       ('b5500003-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'c1-055@x.test', '', now(), now(), '{"edubotics_provisioned": true}')
 ON CONFLICT (id) DO NOTHING;
 
 -- a teacher with a classroom, the student in it, created by the teacher
@@ -264,9 +264,12 @@ BEGIN
 EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'FAIL T19 (%: %)', SQLSTATE, SQLERRM; END $$;
 
 \echo '=== T20 defense in depth: with UPDATE granted back by mistake, the guard still refuses any change ==='
--- Rolled back: the grant and 024's own-row policy as they were before 055.
+-- Rolled back: the grant and 024's own-row policy as they were before 055. (Since
+-- 057 the student no longer reads username either, so the simulated mistake
+-- grants back the table-level SELECT it stood beside; before 057 that grant
+-- changes nothing.)
 BEGIN;
-GRANT UPDATE ON public.users TO authenticated;
+GRANT SELECT, UPDATE ON public.users TO authenticated;
 CREATE POLICY t055_update_own ON public.users FOR UPDATE TO authenticated
   USING (id = (SELECT auth.uid())) WITH CHECK (id = (SELECT auth.uid()));
 DO $$

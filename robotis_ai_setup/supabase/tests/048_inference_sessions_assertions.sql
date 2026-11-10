@@ -27,9 +27,9 @@
 -- an RPC's write and a check of it are separate statements.
 \set ON_ERROR_STOP off
 \pset pager off
-INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at)
-VALUES ('b4800001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-048@x.test', '', now(), now()),
-       ('b4800002-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's2-048@x.test', '', now(), now())
+INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at, raw_app_meta_data)
+VALUES ('b4800001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-048@x.test', '', now(), now(), '{"edubotics_provisioned": true}'),
+       ('b4800002-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's2-048@x.test', '', now(), now(), '{"edubotics_provisioned": true}')
 ON CONFLICT (id) DO NOTHING;
 UPDATE public.users SET role = 'student' WHERE id IN ('b4800001-0000-0000-0000-000000000001','b4800002-0000-0000-0000-000000000002');
 INSERT INTO public.trainings (id, user_id, dataset_name, model_name, model_type, status)

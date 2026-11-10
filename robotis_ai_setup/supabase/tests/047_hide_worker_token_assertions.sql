@@ -34,9 +34,9 @@
 \set ON_ERROR_STOP off
 \pset pager off
 
-INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at)
-VALUES ('b4700001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-047@x.test', '', now(), now()),
-       ('b4700002-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's2-047@x.test', '', now(), now())
+INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at, raw_app_meta_data)
+VALUES ('b4700001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-047@x.test', '', now(), now(), '{"edubotics_provisioned": true}'),
+       ('b4700002-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's2-047@x.test', '', now(), now(), '{"edubotics_provisioned": true}')
 ON CONFLICT (id) DO NOTHING;
 UPDATE public.users SET role = 'student' WHERE id IN ('b4700001-0000-0000-0000-000000000001', 'b4700002-0000-0000-0000-000000000002');
 
@@ -52,6 +52,10 @@ CREATE OR REPLACE FUNCTION pg_temp.claims_s1() RETURNS void LANGUAGE sql AS $$
   SELECT set_config('request.jwt.claim.sub', 'b4700001-0000-0000-0000-000000000001', true),
          set_config('request.jwt.claims', '{"sub":"b4700001-0000-0000-0000-000000000001","role":"authenticated"}', true);
 $$;
+-- T4-T7 call it after SET LOCAL ROLE authenticated. Since 057 a function postgres
+-- creates (pg_temp included) carries no EXECUTE for PUBLIC, so the helper is
+-- granted explicitly (before 057 the grant changes nothing).
+GRANT EXECUTE ON FUNCTION pg_temp.claims_s1() TO authenticated;
 
 \echo '=== T1 neither request role can read trainings.worker_token ==='
 SELECT CASE WHEN NOT has_column_privilege('anon', 'public.trainings', 'worker_token', 'SELECT')

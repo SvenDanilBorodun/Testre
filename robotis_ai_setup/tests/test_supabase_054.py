@@ -55,7 +55,12 @@ class Migration054(unittest.TestCase):
         # 054 was the newest until 055 (2026-11-11, the users guard), which
         # touches none of 054's four functions.
         self.assertEqual(names[names.index(M054.name) - 1], '20261109120000_053_retire_jetson.sql')
-        self.assertEqual(names[names.index(M054.name) + 1:], ['20261111120000_055_users_identity_guard.sql'])
+        # 057 (2026-11-13, the request roles default-deny) revokes EXECUTE on every
+        # public routine and grants back an allowlist the four functions are not on,
+        # which changes nothing for them; 058 refuses self-registration.
+        self.assertEqual(names[names.index(M054.name) + 1:], ['20261111120000_055_users_identity_guard.sql',
+                                                              '20261113120000_057_request_role_default_deny.sql',
+                                                              '20261113130000_058_refuse_self_signup.sql'])
 
     def test_exactly_the_four_changes_in_one_transaction(self):
         self.assertEqual(_statements(_code(_read(M054))), [

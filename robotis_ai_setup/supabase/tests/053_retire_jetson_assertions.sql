@@ -72,9 +72,9 @@ SELECT CASE WHEN has_table_privilege('service_role', 'public.inference_runs', 'S
 
 \echo '=== T10-T12 a run row of either backend is still accepted, another one refused (rolled back) ==='
 BEGIN;
-INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at)
+INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at, raw_app_meta_data)
 VALUES ('05300001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated',
-        'authenticated', 't053@edubotics.local', '', now(), now());
+        'authenticated', 't053@edubotics.local', '', now(), now(), '{"edubotics_provisioned": true}');
 SAVEPOINT s1;
 DO $$
 BEGIN

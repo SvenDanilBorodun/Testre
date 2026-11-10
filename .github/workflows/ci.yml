@@ -1506,6 +1506,47 @@ jobs:
         # and stay English on purpose. `# english-ok` is the escape hatch.
         run: python3 .github/scripts/german_detail_lint.py
 
+  migrations-replay:
+    # Security audit SA-10 (2026-11-13): Supabase's default privileges grant
+    # every new table, sequence and function to anon and authenticated, so a
+    # migration that forgets a REVOKE re-opens a PostgREST read, write or RPC
+    # path silently (046, 047, 054 and 055 each closed one after the fact).
+    # This job replays EVERY migration in timestamp order into a plain
+    # PostgreSQL 16 with Supabase's roles, auth/storage stand-ins, the live
+    # default privileges and the live storage drift
+    # (.github/scripts/supabase_replay_stub.sql), then fails on any request-role
+    # privilege outside robotis_ai_setup/supabase/request_role_allowlist.json
+    # (column reads, writes, EXECUTE), any write policy for a request role, any
+    # storage policy for one, any public bucket, and any default privilege that
+    # grants a request role or PUBLIC anything. --teeth-before also runs the
+    # check right before 057 and requires it to FAIL there.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16.15@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: postgres
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: psql is on the runner
+        run: psql --version
+      - name: Replay every migration and judge the request roles' privileges
+        run: python3 .github/scripts/supabase_request_role_check.py --teeth-before 20261113120000
+
   enum-parity:
     # The TaskPhase/TaskCommand wire ints are hand-duplicated across FOUR
     # sources (SendCommand.srv + TaskStatus.msg on the ROS side,

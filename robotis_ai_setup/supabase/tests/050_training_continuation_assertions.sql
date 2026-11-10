@@ -44,11 +44,11 @@
 \set ON_ERROR_STOP off
 \pset pager off
 
-INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at) VALUES
- ('b5000001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-050@x.test', '', now(), now()),
- ('b5000002-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's2-050@x.test', '', now(), now()),
- ('b5000003-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 't-050@x.test', '', now(), now()),
- ('b5000004-0000-0000-0000-000000000004', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'g1-050@x.test', '', now(), now())
+INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at, raw_app_meta_data) VALUES
+ ('b5000001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-050@x.test', '', now(), now(), '{"edubotics_provisioned": true}'),
+ ('b5000002-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's2-050@x.test', '', now(), now(), '{"edubotics_provisioned": true}'),
+ ('b5000003-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 't-050@x.test', '', now(), now(), '{"edubotics_provisioned": true}'),
+ ('b5000004-0000-0000-0000-000000000004', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'g1-050@x.test', '', now(), now(), '{"edubotics_provisioned": true}')
 ON CONFLICT (id) DO NOTHING;
 UPDATE public.users SET role = 'student', training_credits = 50 WHERE id IN ('b5000001-0000-0000-0000-000000000001','b5000002-0000-0000-0000-000000000002');
 UPDATE public.users SET role = 'teacher' WHERE id = 'b5000003-0000-0000-0000-000000000003';

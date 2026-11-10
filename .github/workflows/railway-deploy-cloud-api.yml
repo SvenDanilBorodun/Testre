@@ -92,6 +92,9 @@ jobs:
   deploy:
     name: Railway up
     needs: [schema-probe]
+    # SA-13 (2026-11-13): the production environment's required reviewers
+    # approve this job before it runs (docs/deploy/DEPLOY.md, section 0).
+    environment: production
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # RAILWAY_TOKEN is set on the steps that call `railway`, never on the job:

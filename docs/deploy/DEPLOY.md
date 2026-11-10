@@ -22,6 +22,21 @@ Skip step 1 → Railway boot fails. Skip step 2 → student training spawns fail
 
 ---
 
+## 0. The production approval gate (security audit SA-13, 2026-11-13)
+
+Six jobs that change production run only after a person approves them: `supabase-migrate.yml` **apply-production** and **rollback** (W1), `railway-deploy-cloud-api.yml` **deploy** (W2), `railway-deploy-teacher-web.yml` **deploy** (W3), and in `release.yml` **trainer-image-var** (W2b) and **publish-gui-version** (W6). Each names `environment: production`; the gate is the environment's protection rule, which the workflow cannot create.
+
+**Owner, once, before the next push to `main` that touches a migration or the cloud API** (GitHub → the repository → Settings → Environments):
+
+1. **New environment** named exactly `production` (if a run created it already, open it: GitHub creates a missing environment on first use, WITHOUT any protection — that is the state in which the gate approves nothing).
+2. **Required reviewers**: add yourself (and a second maintainer if there is one); tick **Prevent self-review** only when a second reviewer exists, or every run waits forever.
+3. **Deployment branches and tags**: *Selected branches and tags* → add `main` and the tag pattern `v*` (W1 also runs on a `workflow_dispatch` from `main`).
+4. Leave the repository secrets where they are: the jobs still read `SUPABASE_*`, `RAILWAY_TOKEN` from the repository. (Moving them into the environment is a later, optional hardening: then no job without the gate can read them.)
+
+What it costs: a tagged release now stops five times for approval (W1, W2b, W2, W3, W6), and a plain push to `main` stops once per deploy workflow it triggers (W1 for a migration, W2 for the cloud API, W3 for the teacher web); a waiting job fails after 30 days. A run nobody approves deploys nothing; reject it to end it. The health gates and the build jobs need no approval.
+
+---
+
 ## 1. Supabase — Postgres migrations
 
 **When:** new table, column, RPC, RLS policy, trigger, or Realtime publication.

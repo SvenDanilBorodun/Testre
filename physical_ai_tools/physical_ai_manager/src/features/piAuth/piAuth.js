@@ -377,6 +377,32 @@ async function mintTicket(token) {
   return { ok: false, code: 'cloud_unreachable', message: PI_AUTH_TEXT_DE.cloud_from_browser };
 }
 
+/**
+ * VB-04 (2026-11-15): after a factory reset and a re-claim the Pi has a NEW
+ * `pi_id`, and every ticket minted for the old one is refused (the cloud binds
+ * a ticket to the id it was minted for). A tab that last probed before the
+ * reset only learns the new id from /auth/state, so after a second refusal the
+ * exchange and the claim re-read it ONCE. Moves no phase; adopts the id.
+ * @returns {Promise<null|{piId: ?string, claimed: boolean}>} null when the
+ *   agent did not answer usefully
+ */
+async function rereadPiState() {
+  let res;
+  try {
+    res = await fetchImpl(`${STATE_URL}?_=${now()}`, {
+      cache: 'no-store',
+      credentials: 'same-origin',
+    });
+  } catch {
+    return null;
+  }
+  const json = res && res.ok ? await readJson(res) : null;
+  if (!json || json.auth !== 1) return null;
+  const piId = typeof json.pi_id === 'string' && json.pi_id ? json.pi_id : null;
+  if (piId !== state.piId) setState({ piId });
+  return { piId, claimed: Boolean(json.claimed) };
+}
+
 /** Post a body to the agent; null when the agent could not be asked. */
 async function postToAgent(url, body) {
   try {
@@ -412,8 +438,10 @@ function refuse(code, message, token) {
  * a one-time ticket (SA-06): the token goes to the cloud, the ticket to the Pi.
  * A ticket the Pi's redeem refused (`ticket_rejected`: during a blue-green
  * deploy of the cloud API a ticket minted on the old instance is unknown to the
- * new one) is replaced by a freshly minted one ONCE; refused again, it is
- * handled like a rejected token. A token the cloud rejected is never sent
+ * new one) is replaced by a freshly minted one ONCE; refused again, the Pi's
+ * state is re-read once (VB-04: a factory reset and a re-claim change its id):
+ * a new id gets one more ticket, an unclaimed Pi the claim screen, and anything
+ * else is handled like a rejected token. A token the cloud rejected is never sent
  * again (only a new one is), and after a refusal in BACKOFF_CODES nothing is
  * sent for ERROR_RETRY_MS unless the token changed or the scheduled retry asks
  * (VA-03).
@@ -428,7 +456,9 @@ export function exchange({ retry = false } = {}) {
   const token = accessToken;
   if (state.phase !== PI_AUTH_PHASE.SESSION) setState({ phase: PI_AUTH_PHASE.EXCHANGING });
   exchangeInFlight = (async () => {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    let reread = false;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const mintedFor = state.piId;
       // eslint-disable-next-line no-await-in-loop
       const minted = await mintTicket(token);
       if (!minted.ok) return refuse(minted.code, minted.message, token);
@@ -458,6 +488,16 @@ export function exchange({ retry = false } = {}) {
       }
       const code = typeof json.code === 'string' ? json.code : 'network';
       if (code === 'ticket_rejected' && attempt === 0) continue;
+      if (code === 'ticket_rejected' && !reread) {
+        reread = true;
+        // eslint-disable-next-line no-await-in-loop
+        const seen = await rereadPiState();
+        if (seen && !seen.claimed) {
+          exchangeInFlight = null;
+          return probe();
+        }
+        if (seen && seen.piId && seen.piId !== mintedFor) continue;
+      }
       const message = typeof json.message === 'string' && json.message
         ? json.message
         : PI_AUTH_TEXT_DE[code] || PI_AUTH_TEXT_DE.network;
@@ -610,7 +650,9 @@ export async function claimPi(code) {
     return { ok: false, code: 'ticket_missing', message: 'Bitte zuerst anmelden.' };
   }
   if (!state.piId) await probe();
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  let reread = false;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const mintedFor = state.piId;
     // eslint-disable-next-line no-await-in-loop
     const minted = await mintTicket(token);
     if (!minted.ok) return { ok: false, code: minted.code, message: minted.message };
@@ -624,6 +666,13 @@ export async function claimPi(code) {
       return { ok: true, message: json.message || '' };
     }
     if (json.code === 'ticket_rejected' && attempt === 0) continue;
+    if (json.code === 'ticket_rejected' && !reread) {
+      // VB-04: the Pi was reset again while this claim screen was open.
+      reread = true;
+      // eslint-disable-next-line no-await-in-loop
+      const seen = await rereadPiState();
+      if (seen && seen.piId && seen.piId !== mintedFor) continue;
+    }
     if (json.code === 'already_claimed') probe();
     return {
       ok: false,

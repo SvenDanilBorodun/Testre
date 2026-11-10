@@ -686,3 +686,138 @@ describe('SA-06: no request to the Pi carries the Supabase token', () => {
     expect(toPi.length + toCloud.length).toBe(calls.length);
   });
 });
+
+describe('VB-04: a factory reset and a re-claim give the Pi a new id', () => {
+  const OLD_ID = 'old-pi-id-AAAAAAAAAAAAAA';
+  const NEW_ID = 'new-pi-id-BBBBBBBBBBBBBB';
+
+  /** A Pi that is reset and claimed again on cue: its /auth/state then names
+   * NEW_ID, and its redeem accepts only a ticket the cloud minted for the id
+   * it holds (the cloud binds every ticket to the pi_id it was minted for). */
+  function resettablePi() {
+    let piId = OLD_ID;
+    let session = false;
+    const agent = fakeAgent({
+      [STATE]: () => json(200, { ok: true, auth: 1, claimed: true, session, pi_id: piId,
+        role: session ? 'student' : undefined, expires_in: session ? 900 : undefined }),
+      [MINT]: (init) => json(200, { ticket: `ticket-for-${JSON.parse(init.body).pi_id}`, expires_in: 60 }),
+      [SESSION]: (init) => {
+        const { ticket } = JSON.parse(init.body);
+        if (ticket === `ticket-for-${piId}`) {
+          session = true;
+          return json(200, { ok: true, role: 'student', expires_in: 900 });
+        }
+        return json(401, { ok: false, code: 'ticket_rejected', message: 'Abgelehnt (Agent).' });
+      },
+    });
+    return {
+      ...agent,
+      resetAndReclaim() {
+        piId = NEW_ID;
+        session = false; // a reset revokes every session
+      },
+    };
+  }
+
+  const mintedFor = (calls) => calls.filter((c) => c.path === MINT).map((c) => JSON.parse(c.init.body).pi_id);
+
+  it('a tab holding the old id re-reads the state once and mints for the new id', async () => {
+    vi.useFakeTimers();
+    const pi = resettablePi();
+    setPiAccessToken('jwt-1');
+    start(pi.fetchFn);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getPiAuthState().phase).toBe(PI_AUTH_PHASE.SESSION);
+    expect(getPiAuthState().piId).toBe(OLD_ID);
+
+    pi.resetAndReclaim(); // during the lesson: a teacher resets the Pi and claims it again
+    setPiAccessToken('jwt-2'); // the next Supabase refresh exchanges at once, no probe first
+    await vi.advanceTimersByTimeAsync(0);
+
+    const s = getPiAuthState();
+    expect(s.phase).toBe(PI_AUTH_PHASE.SESSION);
+    expect(s.error).toBeNull();
+    expect(s.piId).toBe(NEW_ID);
+    // the first session, two refused tickets for the stale id, then ONE for the new id
+    expect(mintedFor(pi.calls)).toEqual([OLD_ID, OLD_ID, OLD_ID, NEW_ID]);
+    await expect(ensurePiSession()).resolves.toBeUndefined();
+  });
+
+  it('the same for the 60 % refresh', async () => {
+    vi.useFakeTimers();
+    const pi = resettablePi();
+    setPiAccessToken('jwt-1');
+    start(pi.fetchFn);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getPiAuthState().phase).toBe(PI_AUTH_PHASE.SESSION);
+    pi.resetAndReclaim();
+    await vi.advanceTimersByTimeAsync(900 * 1000 * REFRESH_FRACTION + 10);
+    expect(getPiAuthState().phase).toBe(PI_AUTH_PHASE.SESSION);
+    expect(getPiAuthState().piId).toBe(NEW_ID);
+    expect(mintedFor(pi.calls)).toEqual([OLD_ID, OLD_ID, OLD_ID, NEW_ID]);
+  });
+
+  it('when the id did not change, the second refusal stands: one re-read, no further mint', async () => {
+    vi.useFakeTimers();
+    const { fetchFn, calls } = fakeAgent({
+      [STATE]: json(200, { ok: true, auth: 1, claimed: true, session: false, pi_id: PI_ID }),
+      [MINT]: mintOk(),
+      [SESSION]: () => json(401, { ok: false, code: 'ticket_rejected', message: 'Abgelehnt (Agent).' }),
+    });
+    setPiAccessToken('jwt-1');
+    start(fetchFn);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getPiAuthState().error).toEqual({ code: 'ticket_rejected', message: 'Abgelehnt (Agent).' });
+    expect(calls.filter((c) => c.path === MINT).length).toBe(2);
+    // the start-up probe and exactly one re-read after the second refusal
+    expect(calls.filter((c) => c.path === STATE).length).toBe(2);
+  });
+
+  it('a re-read that finds the Pi unclaimed hands over to the claim screen', async () => {
+    vi.useFakeTimers();
+    let claimed = true;
+    let piId = OLD_ID;
+    const { fetchFn, calls } = fakeAgent({
+      [STATE]: () => json(200, { ok: true, auth: 1, claimed, session: false, pi_id: piId,
+        setup_code: claimed ? undefined : 'active' }),
+      [MINT]: mintOk(),
+      [SESSION]: () => {
+        // reset while the exchange was under way, not claimed again yet
+        claimed = false;
+        piId = NEW_ID;
+        return json(401, { ok: false, code: 'ticket_rejected', message: 'Abgelehnt (Agent).' });
+      },
+    });
+    setPiAccessToken('jwt-1');
+    start(fetchFn);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getPiAuthState().phase).toBe(PI_AUTH_PHASE.UNCLAIMED);
+    expect(getPiAuthState().piId).toBe(NEW_ID);
+    expect(calls.filter((c) => c.path === MINT).length).toBe(2);
+  });
+
+  it('a claim screen holding an old id mints once more for the new one', async () => {
+    vi.useFakeTimers();
+    let piId = OLD_ID;
+    const { fetchFn, calls } = fakeAgent({
+      [STATE]: () => json(200, { ok: true, auth: 1, claimed: false, session: false, pi_id: piId,
+        setup_code: 'active' }),
+      [MINT]: (init) => json(200, { ticket: `ticket-for-${JSON.parse(init.body).pi_id}`, expires_in: 60 }),
+      [CLAIM]: (init) => {
+        const { ticket } = JSON.parse(init.body);
+        if (ticket === `ticket-for-${piId}`) return json(200, { ok: true, role: 'teacher', expires_in: 900 });
+        return json(401, { ok: false, code: 'ticket_rejected', message: 'Abgelehnt (Agent).' });
+      },
+    });
+    setPiAccessToken('jwt-teacher');
+    start(fetchFn);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getPiAuthState().phase).toBe(PI_AUTH_PHASE.UNCLAIMED);
+    piId = NEW_ID; // reset again while the claim screen was open
+    const result = await claimPi('ABCD-EFGH');
+    expect(result.ok).toBe(true);
+    expect(getPiAuthState().phase).toBe(PI_AUTH_PHASE.SESSION);
+    expect(calls.filter((c) => c.path === MINT).map((c) => JSON.parse(c.init.body).pi_id))
+      .toEqual([OLD_ID, OLD_ID, NEW_ID]);
+  });
+});

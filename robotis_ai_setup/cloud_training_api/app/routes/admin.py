@@ -28,6 +28,7 @@ from app.routes.teacher import (
 from app.services import credit_texts_de as credit_texts
 from app.services import deletion_requests
 from app.services import passwords
+from app.services import provisioning
 from app.services.supabase_client import get_supabase
 from app.services.training_dispatch import pg_code
 from app.services.usernames import synthetic_email, validate_username
@@ -143,12 +144,10 @@ def create_teacher(req: TeacherCreate, admin=Depends(get_current_admin)):
 
     email = synthetic_email(username)
     try:
+        # 058: the marker only the service role can set; a new account without
+        # it is refused by the database (self-registration).
         created = supabase.auth.admin.create_user(
-            {
-                "email": email,
-                "password": req.password,
-                "email_confirm": True,
-            }
+            provisioning.new_account_attributes(email, req.password)
         )
     except Exception as e:
         if passwords.is_weak_password_error(e):

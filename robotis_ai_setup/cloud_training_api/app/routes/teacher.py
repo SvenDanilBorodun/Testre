@@ -25,6 +25,7 @@ from app.auth import get_current_teacher, get_user_profile
 from app.services import credit_texts_de as credit_texts
 from app.services import deletion_requests
 from app.services import passwords
+from app.services import provisioning
 from app.services.supabase_client import get_supabase
 from app.services.usernames import synthetic_email, validate_username
 from app.validators.workflow import validate_blockly_json
@@ -695,12 +696,10 @@ def create_student(
 
     email = synthetic_email(username)
     try:
+        # 058: the marker only the service role can set; a new account without
+        # it is refused by the database (self-registration).
         created = supabase.auth.admin.create_user(
-            {
-                "email": email,
-                "password": req.password,
-                "email_confirm": True,
-            }
+            provisioning.new_account_attributes(email, req.password)
         )
     except Exception as e:
         if passwords.is_weak_password_error(e):

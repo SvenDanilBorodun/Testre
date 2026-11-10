@@ -26,6 +26,11 @@ from supabase import create_client
 
 SYNTHETIC_EMAIL_DOMAIN = "edubotics.local"
 USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,31}$")
+# Migration 058 refuses a new auth.users row without this app_metadata marker
+# (only the service role can set it). Equal to
+# cloud_training_api/app/services/provisioning.py::PROVISIONED_KEY
+# (tests/test_supabase_058.py holds them equal).
+PROVISIONED_KEY = "edubotics_provisioned"
 # The staff password rule (owner decision 2026-11-10): equal to
 # cloud_training_api/app/services/passwords.py::STAFF_MIN_LENGTH / MAX_LENGTH
 # (tests/test_password_rule_lockstep.py holds them equal).
@@ -73,7 +78,12 @@ def main():
     print(f"\nCreating auth user {email}...")
     try:
         created = client.auth.admin.create_user(
-            {"email": email, "password": password, "email_confirm": True}
+            {
+                "email": email,
+                "password": password,
+                "email_confirm": True,
+                "app_metadata": {PROVISIONED_KEY: True},
+            }
         )
     except Exception as e:
         sys.exit(f"auth.admin.create_user failed: {e}")

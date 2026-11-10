@@ -55,6 +55,14 @@ const MIN_REFRESH_MS = 20000;
 const VERIFY_FRESH_MS = 10000;
 const ERROR_RETRY_MS = 15000;
 const UNAUTHORIZED_DEBOUNCE_MS = 500;
+// VA-03 (2026-11-12): every exchange costs the cloud a GET /me (or the Pi's
+// login budget), and on a school network every browser shares ONE address
+// towards the cloud. After one of these answers the gate (the rosbridge
+// reconnect loop asks every ≤ 2 s), a 401 and a probe wait out ERROR_RETRY_MS
+// before they exchange again; only a new token or the scheduled retry ends the
+// wait. `network` (the agent itself did not answer) costs the cloud nothing and
+// keeps the fast retry.
+const BACKOFF_CODES = new Set(['rate_limited', 'cloud_unreachable']);
 
 // German sentences for the codes the agent answers (its own `message` wins).
 export const PI_AUTH_TEXT_DE = Object.freeze({
@@ -99,6 +107,11 @@ let errorTimer = null;
 let suspectTimer = null;
 let probeInFlight = null;
 let exchangeInFlight = null;
+// The access token an exchange was refused for with `token_rejected`. Never
+// sent again: only a different token (setPiAccessToken) is tried. Memory
+// only, never browser storage (VA-03).
+let rejectedToken = null;
+let lastRefusedAt = 0;
 
 const now = () => Date.now();
 
@@ -187,8 +200,20 @@ function scheduleErrorRetry() {
   errorTimer = clearTimer(errorTimer);
   errorTimer = setTimeout(() => {
     errorTimer = null;
-    if (accessToken && state.phase === PI_AUTH_PHASE.ERROR) exchange();
+    if (accessToken && state.phase === PI_AUTH_PHASE.ERROR) exchange({ retry: true });
   }, ERROR_RETRY_MS);
+}
+
+/** True when the current token is the one the cloud refused (VA-03). */
+function tokenRejected() {
+  return accessToken !== null && accessToken === rejectedToken;
+}
+
+/** True while a refusal that a new attempt cannot fix yet is fresh (VA-03). */
+function inBackoff() {
+  return state.phase === PI_AUTH_PHASE.ERROR
+    && BACKOFF_CODES.has(state.error && state.error.code)
+    && now() - lastRefusedAt < ERROR_RETRY_MS;
 }
 
 function applySession(expiresIn, role) {
@@ -283,10 +308,19 @@ export function probe() {
   return probeInFlight;
 }
 
-/** Trade the Supabase access token for a robot session (single-flight). */
-export function exchange() {
+/**
+ * Trade the Supabase access token for a robot session (single-flight).
+ * A token the cloud rejected is never sent again (only a new one is), and
+ * after a refusal in BACKOFF_CODES nothing is sent for ERROR_RETRY_MS unless
+ * the token changed or the scheduled retry asks (VA-03).
+ * @param {object} [opts]
+ * @param {boolean} [opts.retry] the error retry or a new token: skip the back-off
+ */
+export function exchange({ retry = false } = {}) {
   if (!started || !accessToken) return Promise.resolve(state);
   if (exchangeInFlight) return exchangeInFlight;
+  if (tokenRejected()) return Promise.resolve(state);
+  if (!retry && inBackoff()) return Promise.resolve(state);
   const token = accessToken;
   if (state.phase !== PI_AUTH_PHASE.SESSION) setState({ phase: PI_AUTH_PHASE.EXCHANGING });
   exchangeInFlight = (async () => {
@@ -328,8 +362,16 @@ export function exchange() {
       ? json.message
       : PI_AUTH_TEXT_DE[code] || PI_AUTH_TEXT_DE.network;
     refreshTimer = clearTimer(refreshTimer);
+    lastRefusedAt = now();
     setState({ phase: PI_AUTH_PHASE.ERROR, error: { code, message }, expiresAt: 0 });
-    scheduleErrorRetry();
+    if (code === 'token_rejected') {
+      // The cloud judged THIS token: asking again with it can only be refused
+      // again. Wait for supabase-js to deliver another one (VA-03).
+      if (accessToken === token) rejectedToken = token;
+      errorTimer = clearTimer(errorTimer);
+    } else {
+      scheduleErrorRetry();
+    }
     return state;
   })().finally(() => {
     exchangeInFlight = null;
@@ -365,6 +407,8 @@ export function resetPiAuthForTests() {
   probeAttempt = 0;
   probeInFlight = null;
   exchangeInFlight = null;
+  rejectedToken = null;
+  lastRefusedAt = 0;
   state = initialState();
   listeners.forEach((fn) => fn());
 }
@@ -380,6 +424,7 @@ export function setPiAccessToken(token, { resolved = true } = {}) {
   const next = typeof token === 'string' && token ? token : null;
   const changed = next !== accessToken;
   accessToken = next;
+  if (changed && next !== rejectedToken) rejectedToken = null;
   if (resolved) authResolved = true;
   if (!started) return;
   if (resolved && !hygieneDone) {
@@ -395,7 +440,7 @@ export function setPiAccessToken(token, { resolved = true } = {}) {
     || state.phase === PI_AUTH_PHASE.ERROR
     || state.phase === PI_AUTH_PHASE.SESSION
   ) {
-    exchange();
+    exchange({ retry: true });
   }
 }
 
@@ -448,6 +493,10 @@ export async function ensurePiSession() {
   if (state.phase === PI_AUTH_PHASE.LEGACY) throw new PiLoginError('agent_outdated');
   if (state.phase === PI_AUTH_PHASE.UNCLAIMED) throw new PiLoginError('unclaimed');
   if (state.phase === PI_AUTH_PHASE.UNREACHABLE) throw new PiLoginError('unreachable');
+  // VA-03: a token the cloud rejected is not sent again, and a fresh refusal
+  // the next attempt cannot fix is waited out (the error retry asks at 15 s).
+  if (tokenRejected()) throw new PiLoginError('login_required');
+  if (inBackoff()) throw new PiLoginError('retry_later');
   if (accessToken) {
     await exchange();
     if (state.phase === PI_AUTH_PHASE.SESSION) return;
@@ -523,6 +572,7 @@ export function endPiSessionOnLogout() {
     return Promise.resolve(false);
   }
   accessToken = null;
+  rejectedToken = null;
   return endPiSession();
 }
 

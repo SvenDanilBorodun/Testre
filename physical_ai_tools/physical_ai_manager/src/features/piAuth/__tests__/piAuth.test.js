@@ -357,3 +357,166 @@ describe('claim and sign-out', () => {
     expect(calls.some((c) => c.path === SESSION)).toBe(false);
   });
 });
+
+describe('a refused exchange is not repeated (VA-03, 2026-11-12)', () => {
+  // The rosbridge reconnect loop calls ensurePiSession() every ≤ 2 s on a Pi,
+  // and each exchange costs the cloud a GET /me that counts against the
+  // school's failed-authentication budget (one NAT address for everybody).
+  const claimedNoSession = () => json(200, { ok: true, auth: 1, claimed: true, session: false });
+  const posts = (calls) => calls.filter((c) => c.path === SESSION);
+
+  async function settle(gate) {
+    try {
+      await gate();
+    } catch (e) {
+      return e;
+    }
+    return null;
+  }
+
+  it('a rejected token is never sent again by the gate, the error retry or a 401', async () => {
+    vi.useFakeTimers();
+    const { fetchFn, calls } = fakeAgent({
+      [STATE]: claimedNoSession(),
+      [SESSION]: () => json(401, { ok: false, code: 'token_rejected', message: 'Abgelehnt (Agent).' }),
+    });
+    setPiAccessToken('jwt-gone');
+    startPiAuth({ fetch: fetchFn });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getPiAuthState().phase).toBe(PI_AUTH_PHASE.ERROR);
+    expect(getPiAuthState().error.code).toBe('token_rejected');
+    const before = posts(calls).length;
+    expect(before).toBe(1);
+    for (let i = 0; i < 10; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const err = await settle(ensurePiSession);
+      expect(err).toBeInstanceOf(PiLoginError);
+      expect(err.reason).toBe('login_required');
+    }
+    expect(posts(calls).length - before).toBe(0);
+    noteUnauthorized();
+    await vi.advanceTimersByTimeAsync(60000); // the 15 s error retry and a 401's probe
+    expect(posts(calls).length - before).toBe(0);
+    setPiAccessToken('jwt-gone'); // the same token again changes nothing
+    await vi.advanceTimersByTimeAsync(0);
+    expect(posts(calls).length - before).toBe(0);
+    expect(getPiAuthState().error.message).toBe('Abgelehnt (Agent).');
+  });
+
+  it('a new token is sent once', async () => {
+    vi.useFakeTimers();
+    let accept = false;
+    const { fetchFn, calls } = fakeAgent({
+      [STATE]: claimedNoSession(),
+      [SESSION]: () => (accept
+        ? json(200, { ok: true, role: 'student', expires_in: 900 })
+        : json(401, { ok: false, code: 'token_rejected' })),
+    });
+    setPiAccessToken('jwt-old');
+    startPiAuth({ fetch: fetchFn });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(posts(calls).length).toBe(1);
+    accept = true;
+    setPiAccessToken('jwt-new');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(posts(calls).map((c) => c.init.headers.Authorization))
+      .toEqual(['Bearer jwt-old', 'Bearer jwt-new']);
+    expect(getPiAuthState().phase).toBe(PI_AUTH_PHASE.SESSION);
+    await ensurePiSession();
+    expect(posts(calls).length).toBe(2);
+  });
+
+  it('a new token that is rejected too is sent once, and then not again', async () => {
+    vi.useFakeTimers();
+    const { fetchFn, calls } = fakeAgent({
+      [STATE]: claimedNoSession(),
+      [SESSION]: () => json(401, { ok: false, code: 'token_rejected' }),
+    });
+    setPiAccessToken('jwt-1');
+    startPiAuth({ fetch: fetchFn });
+    await vi.advanceTimersByTimeAsync(0);
+    setPiAccessToken('jwt-2');
+    await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 5; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await settle(ensurePiSession);
+    }
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(posts(calls).map((c) => c.init.headers.Authorization))
+      .toEqual(['Bearer jwt-1', 'Bearer jwt-2']);
+  });
+
+  for (const code of ['rate_limited', 'cloud_unreachable']) {
+    it(`after „${code}“ the gate waits 15 s before it asks again`, async () => {
+      vi.useFakeTimers();
+      let accept = false;
+      const status = code === 'rate_limited' ? 429 : 503;
+      const { fetchFn, calls } = fakeAgent({
+        [STATE]: claimedNoSession(),
+        [SESSION]: () => (accept
+          ? json(200, { ok: true, role: 'student', expires_in: 900 })
+          : json(status, { ok: false, code })),
+      });
+      setPiAccessToken('jwt-1');
+      startPiAuth({ fetch: fetchFn });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getPiAuthState().error.code).toBe(code);
+      expect(posts(calls).length).toBe(1);
+      for (let i = 0; i < 7; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        const err = await settle(ensurePiSession);
+        expect(err).toBeInstanceOf(PiLoginError);
+        // eslint-disable-next-line no-await-in-loop
+        await vi.advanceTimersByTimeAsync(2000); // the reconnect loop's pace
+      }
+      noteUnauthorized();
+      await vi.advanceTimersByTimeAsync(600);
+      expect(posts(calls).length).toBe(1); // 14.6 s: nothing sent
+      accept = true;
+      await vi.advanceTimersByTimeAsync(400); // the scheduled retry at 15 s
+      expect(posts(calls).length).toBe(2);
+      expect(getPiAuthState().phase).toBe(PI_AUTH_PHASE.SESSION);
+      await ensurePiSession();
+      expect(posts(calls).length).toBe(2);
+    });
+  }
+
+  it('after the back-off the gate may ask again', async () => {
+    vi.useFakeTimers();
+    let n = 0;
+    const { fetchFn, calls } = fakeAgent({
+      [STATE]: claimedNoSession(),
+      [SESSION]: () => {
+        n += 1;
+        return n < 3
+          ? json(503, { ok: false, code: 'cloud_unreachable' })
+          : json(200, { ok: true, role: 'student', expires_in: 900 });
+      },
+    });
+    setPiAccessToken('jwt-1');
+    startPiAuth({ fetch: fetchFn });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(15000); // the timer's retry: refused again
+    expect(posts(calls).length).toBe(2);
+    expect(await settle(ensurePiSession)).toBeInstanceOf(PiLoginError);
+    expect(posts(calls).length).toBe(2);
+    vi.setSystemTime(Date.now() + 15001);
+    expect(await settle(ensurePiSession)).toBeNull();
+    expect(posts(calls).length).toBe(3);
+  });
+
+  it('the rejected token is kept in memory only', async () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    const { fetchFn } = fakeAgent({
+      [STATE]: claimedNoSession(),
+      [SESSION]: json(401, { ok: false, code: 'token_rejected' }),
+    });
+    setPiAccessToken('jwt-secret-shape');
+    startPiAuth({ fetch: fetchFn });
+    await flush();
+    await flush();
+    await settle(ensurePiSession);
+    expect(setItem).not.toHaveBeenCalled();
+    setItem.mockRestore();
+  });
+});

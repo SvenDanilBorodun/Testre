@@ -442,8 +442,10 @@ variable decides how:
 - `EDUBOTICS_CSP_ENFORCE=1`: `Content-Security-Policy`. Violations are blocked
   (and still reported).
 - **The one-week rule:** after the first deploy with the policy, watch the
-  teacher-web logs for `csp-report {` (the report lines; a refused request's
-  error line does not match) for one week of normal teacher and admin
+  teacher-web logs for lines that START with the time and `csp-report {` (the
+  report lines; a refused request's error line starts with nginx's error
+  header, although a client can make it CONTAIN `csp-report {` through its
+  Referer) for one week of normal teacher and admin
   use (a template edited, a student's program opened, the admin's two-factor
   login). No line in that week → set `EDUBOTICS_CSP_ENFORCE=1`. A line → read
   its `violated-directive` and `blocked-uri`; a legitimate source is a code

@@ -6,6 +6,16 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### 2026-11-15, verification round D: the replay bypass and the checklist's invited accounts
+
+**Why.** An independent verification of `8e8a86bf` (round D: every suite, a private PostgreSQL 16, a real PostgREST 12.2.12, the real `nginx:1.27.5-alpine`, attack code against the node's own wiring) found ten of round C's eleven fixes holding, no P0 or P1, one P2 and six P3s. The owner chose to fix the P2 and the checklist wording and to record the rest (option 2), with no further verification round.
+
+**VD-01 (P2), fixed.** VC-05's „no envelope opens twice" hashed the client point AS SENT. ECDH uses only the shared point's x-coordinate and neither the HKDF nor the AEAD binds the point, so the negated point `(x, p − y)` decrypts the same value: the verifier put a classmate's token back into the slot after their sign-out, through the node's own `/register_hf_user` path, with a byte-identical replay refused and the negated one accepted. `hf_token_crypto.py::RobotKey.decrypt` now digests the context, the x-coordinate (`point[1:33]`, the point is always the uncompressed 65 bytes `parse_wire` admits), the iv and the ciphertext. On P-256 (cofactor 1) only `±P` give one shared x, so the x-coordinate is the point's whole identity here. `test_hf_token_crypto.py::TestReplay::test_a_negated_client_point_is_the_same_value` (three contexts, both orders) failed 6 of 6 before and passes; the verifier's own probe and node-level attack now read „replayed" and the slot stays empty.
+
+**VD-02 (P3), fixed.** `docs/deploy/MERGE-CHECKLIST.md` step 5 labelled an account the owner invited from the Supabase dashboard `SIGNED ITSELF UP` and called that proof: GoTrue logs the invitation as `user_invited` by the admin and the acceptance as `user_signedup` with the INVITEE as actor (`verify.go::signupVerify`). Both queries now check `user_invited` first (only an admin can invite) and list such an account as `INVITED from the dashboard` for review. Re-run on a fresh 052 replay with the fixer's and the verifier's seeds: with the audit log, the invited teacher reads „INVITED from the dashboard" and every self-made account (the admin, the teacher, five students) is still caught; without it, nothing changed; all three queries pass `BEGIN READ ONLY`.
+
+**Recorded, not fixed (owner decision).** VD-03 (four workflow edits the approval-gate test would miss, none present today), VD-04 (two overclaims, now corrected in the docs: `release.yml`'s `skip_supabase` dispatch input skips W1 on purpose; an error-log line can contain `csp-report {` through a client-chosen Referer), VD-05 (a session holder can force a key rotation cheaply, with a false „neu gestartet" sentence), VD-06 (pre-existing: „Abmelden" still waits for a push already on the wire) and VD-07 (a browser on the Pi itself at `localhost` with a failed marker takes the loopback path). Each is in `docs/KNOWN-ISSUES.md` with its trigger.
+
 ### 2026-11-15, verification round C fixes
 
 **Why.** An independent verification of `6549a44d` (round C: every suite, a private PostgreSQL 16, a real PostgREST 12.2.12, real nginx, a real Docker daemon) found every round-B fix doing what it said for the case it was written for, and two P2s and nine P3s around them:

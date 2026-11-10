@@ -76,7 +76,11 @@ both schemas serves, so there is neither a crash window for the old API nor a
    `service_role`; a sign-up through `/signup` with the new user itself as the
    actor) and the server's login e-mail `<username>@edubotics.local`, and they
    list every admin and teacher BY NAME, because a self-made admin or teacher is
-   the dangerous one. Read-only, in the SQL editor. First, does the audit log
+   the dangerous one. An account invited from the dashboard („Invite user") is
+   no self-registration although its acceptance is logged with the invitee as
+   the actor: only an admin can invite, and the invitation itself is logged as
+   `user_invited` (verification round D, VD-02), so both queries list it as
+   `INVITED from the dashboard` for you to recognise, never as proof. Read-only, in the SQL editor. First, does the audit log
    reach back far enough to help (it may be switched off for the database or
    pruned)?
 
@@ -95,6 +99,10 @@ both schemas serves, so there is neither a crash window for the old API nor a
    SELECT u.role, u.username, u.full_name, a.email, a.created_at, a.last_sign_in_at,
           creator.username AS created_by,
           CASE
+            WHEN EXISTS (SELECT 1 FROM auth.audit_log_entries l
+                         WHERE l.payload->>'action' = 'user_invited'
+                           AND l.payload->'traits'->>'user_id' = a.id::text)
+              THEN 'INVITED from the dashboard'
             WHEN EXISTS (SELECT 1 FROM auth.audit_log_entries l
                          WHERE l.payload->>'actor_id' = a.id::text
                            AND l.payload->>'action' IN ('user_signedup', 'user_confirmation_requested'))
@@ -122,9 +130,13 @@ both schemas serves, so there is neither a crash window for the old API nor a
             u.id AS profile, u.role::text AS role, u.username, u.created_by,
             creator.role::text AS creator_role, cl.teacher_id AS classroom_teacher,
             EXISTS (SELECT 1 FROM auth.audit_log_entries l
+                    WHERE l.payload->>'action' = 'user_invited'
+                      AND l.payload->'traits'->>'user_id' = a.id::text)
+              AS invited,
+            EXISTS (SELECT 1 FROM auth.audit_log_entries l
                     WHERE l.payload->>'actor_id' = a.id::text
                       AND l.payload->>'action' IN ('user_signedup', 'user_confirmation_requested'))
-              AS signed_itself_up,
+              AS signed_up_as_actor,
             EXISTS (SELECT 1 FROM auth.audit_log_entries l
                     WHERE l.payload->>'action' = 'user_signedup'
                       AND l.payload->>'actor_username' = 'service_role'
@@ -135,8 +147,9 @@ both schemas serves, so there is neither a crash window for the old API nor a
      LEFT JOIN public.users creator ON creator.id = u.created_by
      LEFT JOIN public.classrooms cl ON cl.id = u.classroom_id
    ), judged AS (
-     SELECT *, concat_ws('; ',
-       CASE WHEN signed_itself_up THEN 'SIGNED ITSELF UP (audit log)' END,
+     SELECT *, signed_up_as_actor AND NOT invited AS signed_itself_up, concat_ws('; ',
+       CASE WHEN invited THEN 'INVITED from the dashboard' END,
+       CASE WHEN signed_up_as_actor AND NOT invited THEN 'SIGNED ITSELF UP (audit log)' END,
        CASE WHEN profile IS NULL THEN 'no public.users row' END,
        CASE WHEN email NOT LIKE '%@edubotics.local' THEN 'not an EduBotics login e-mail' END,
        CASE WHEN username IS DISTINCT FROM split_part(email, '@', 1) THEN 'username is not the login name' END,
@@ -154,7 +167,9 @@ both schemas serves, so there is neither a crash window for the old API nor a
    ORDER BY created_at;
    ```
 
-   `SIGNED ITSELF UP` is proof: delete it. Any other row is a hint to review: an
+   `SIGNED ITSELF UP` is proof: delete it. `INVITED from the dashboard` is an
+   account an admin invited: keep it if you know it, delete it if you do not.
+   Any other row is a hint to review: an
    account the audit log proves the server made is never listed, so without the
    audit log a student an operator moved to another teacher's classroom shows
    up too („not in a classroom of the teacher who created it"). The one

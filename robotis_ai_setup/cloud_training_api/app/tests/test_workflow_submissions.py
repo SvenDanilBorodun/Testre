@@ -171,7 +171,7 @@ class TestRateLimitRulesUnchanged(unittest.TestCase):
 
     _PER_USER = (
         "/trainings/", "/workflows", "/me/hf-token", "/me/group-members", "/inference/",
-        "/teacher/", "/admin/",
+        "/teacher/", "/admin/", "/pi/tickets",
     )
 
     _EXPECTED = [
@@ -200,6 +200,10 @@ class TestRateLimitRulesUnchanged(unittest.TestCase):
         ("POST", "/me/hf-token/reveal", 20, 60.0),
         ("POST", "/me/hf-token/verify", 6, 60.0),
         ("GET", "/me/group-members", 30, 60.0),
+        # SA-06 (2026-11-13) — the Pi's one-time login tickets: mint per user,
+        # redeem per client address; inserted before the 048 rules.
+        ("POST", "/pi/tickets", 30, 60.0),
+        ("POST", "/pi/tickets/redeem", 600, 60.0),
         # 048 — Cloud-Inferenz, appended in this order.
         ("POST", "/inference/sessions", 30, 60.0),
         ("GET", "/inference/usage", 30, 60.0),

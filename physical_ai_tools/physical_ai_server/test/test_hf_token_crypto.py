@@ -334,7 +334,14 @@ class TestReplay(unittest.TestCase):
         (digest,) = self.key._seen
         self.assertIsInstance(digest, bytes)
         self.assertEqual(len(digest), 32)
-        self.assertGreaterEqual(crypto.MAX_SEEN_WIRES, 256)
+        assert crypto.MAX_SEEN_WIRES == 1024  # 32 KB of digests per key at most
+
+    def test_the_wire_bounds_are_pinned(self):
+        # A token is at most 3 + 256 characters, a connect token 43: 1024 is
+        # far above both wire values. The edge token is up to 4096 characters
+        # (cloud_protocol.EDGE_TOKEN_RE): its wire value is up to 5 610.
+        assert crypto.MAX_WIRE_LEN == 1024
+        assert crypto.CLOUD_EDGE_MAX_WIRE_LEN == 6144
 
 
 class TestContexts(unittest.TestCase):

@@ -266,6 +266,32 @@ class TestReplay(unittest.TestCase):
         self.assertEqual(caught.exception.code, 'replayed')
         self.assertNotIn(wire, str(caught.exception))
 
+    def test_a_negated_client_point_is_the_same_value(self):
+        # Verification round D, VD-01: ECDH uses only the x-coordinate of the
+        # shared point, so the client point (x, y) and its negation (x, p - y)
+        # give the same shared secret, the same key and the same plaintext.
+        # A digest over the point AS SENT called the negated twin new, and a
+        # captured value opened once more. Every context, both orders.
+        p = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff
+
+        def negate(wire):
+            kid, point, iv, ciphertext = crypto.parse_wire(wire)
+            y = int.from_bytes(point[33:], 'big')
+            neg = b'\x04' + point[1:33] + (p - y).to_bytes(32, 'big')
+            return f'{crypto.WIRE_PREFIX}{kid}.{crypto.b64url(neg)}.{crypto.b64url(iv)}.{crypto.b64url(ciphertext)}'
+
+        for context in (crypto.CONTEXT, crypto.CLOUD_SESSION_CONTEXT, crypto.CLOUD_EDGE_CONTEXT):
+            for first_negated in (False, True):
+                with self.subTest(context=context, first_negated=first_negated):
+                    wire = self.wire(context=context)
+                    twin = negate(wire)
+                    self.assertNotEqual(twin, wire)
+                    first, second = (twin, wire) if first_negated else (wire, twin)
+                    self.assertEqual(self.key.decrypt(first, context=context), TOK)
+                    with self.assertRaises(crypto.WireError) as caught:
+                        self.key.decrypt(second, context=context)
+                    self.assertEqual(caught.exception.code, 'replayed')
+
     def test_a_genuine_re_push_of_the_same_token_is_never_a_duplicate(self):
         for _ in range(5):
             self.assertEqual(self.key.decrypt(self.wire()), TOK)

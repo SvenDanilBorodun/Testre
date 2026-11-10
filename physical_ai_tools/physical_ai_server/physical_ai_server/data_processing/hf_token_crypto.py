@@ -64,7 +64,9 @@ read it, but it could replay it to the node later (a classmate's token back in
 the slot after their sign-out). ``RobotKey.decrypt`` records the SHA-256 of
 every value it opened (of the DECODED parts, and only canonical base64 is
 accepted, so a re-encoded value is the same value) and refuses it the second
-time (``replayed``). Each genuine push carries a fresh ephemeral client key and
+time (``replayed``); of the client point only the x-coordinate counts, since
+ECDH uses only the shared x and the negated point opens the same value
+(verification round D, VD-01). Each genuine push carries a fresh ephemeral client key and
 iv, so a real re-push is never a duplicate. The record lives with the key, so a
 new key (every node start) starts empty; it holds at most ``MAX_SEEN_WIRES``
 digests, and a key whose record is full refuses everything (``stale``) until
@@ -231,9 +233,13 @@ class RobotKey:
         kid, point, iv, ciphertext = parse_wire(value, _MAX_WIRE_LEN_BY_CONTEXT[context])
         if kid != self.kid:
             raise WireError('stale')
-        # The digest of the decoded parts (fixed-length point and iv, so the
-        # concatenation is unambiguous), keyed by the context.
-        digest = hashlib.sha256(context + b'|' + point + iv + ciphertext).digest()
+        # The digest of the decoded parts (fixed lengths, so the concatenation
+        # is unambiguous), keyed by the context. Of the client point only the
+        # x-coordinate counts (VD-01): ECDH uses only the shared point's x, so
+        # (x, y) and its negation (x, p - y) open the same value, and on P-256
+        # (cofactor 1) no other point gives that shared x. A digest over the
+        # point as sent let a captured value open once more, negated.
+        digest = hashlib.sha256(context + b'|' + point[1:33] + iv + ciphertext).digest()
         with self._seen_lock:
             if digest in self._seen:
                 raise WireError('replayed')

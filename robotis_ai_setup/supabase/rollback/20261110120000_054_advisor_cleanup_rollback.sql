@@ -30,8 +30,10 @@ BEGIN
     END IF;
   END LOOP;
   -- service_role is revoked and granted again in the same transaction only so that
-  -- the grants come back in their original order (PUBLIC, anon, authenticated,
-  -- service_role): pg_dump then prints exactly what it printed at 053.
+  -- the grants are restored as a set (PUBLIC, anon, authenticated, service_role):
+  -- pg_dump then prints exactly what it printed at 053. The item order inside
+  -- proacl may still differ ({=X,postgres=X,…} against {postgres=X,=X,…}),
+  -- which changes nothing (measured by the wave-A verification, 2026-11-12).
   FOREACH v_fn IN ARRAY ARRAY['prune_workflow_trajectories', 'prune_workflow_submissions'] LOOP
     IF to_regprocedure('public.' || v_fn || '()') IS NOT NULL THEN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.%I() FROM service_role', v_fn);

@@ -100,7 +100,8 @@ class TestMigration048Shape(unittest.TestCase):
         # after it are the RunPod training build's 047 (written later, the
         # number it had been earmarked), 049, v2.33.0's 050, the V1's 051, the
         # training-hour ledger's 052, the Jetson retirement's 053, the advisor
-        # clean-up's 054 and the users guard's 055, in that order.
+        # clean-up's 054, the users guard's 055 and the admin two-factor rule's
+        # 056, in that order.
         self.assertEqual(names[names.index(mine) + 1:], [
             "20261020120000_047_hide_worker_token.sql",
             "20261020130000_049_managed_training.sql",
@@ -110,6 +111,7 @@ class TestMigration048Shape(unittest.TestCase):
             "20261109120000_053_retire_jetson.sql",
             "20261110120000_054_advisor_cleanup.sql",
             "20261111120000_055_users_identity_guard.sql",
+            "20261112120000_056_admin_requires_aal2.sql",
         ])
         self.assertTrue(os.path.isfile(ROLLBACK))
         self.assertTrue(os.path.isfile(ASSERTIONS))

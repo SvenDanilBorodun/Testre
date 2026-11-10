@@ -80,12 +80,14 @@ def _policy(sql: str) -> str:
 
 
 class Migration055(unittest.TestCase):
-    def test_the_files_exist_and_055_is_the_newest(self):
+    def test_the_files_exist_and_055_follows_054(self):
         for path in (M055, R055, A055):
             self.assertTrue(path.is_file(), path)
         names = sorted(p.name for p in _MIG.glob('*.sql'))
-        self.assertEqual(names[-1], M055.name)
-        self.assertEqual(names[-2], '20261110120000_054_advisor_cleanup.sql')
+        # 055 was the newest until 056 (2026-11-12, the admin's aal2 rule), which
+        # touches neither public.users' grants, its policies nor the guard.
+        self.assertEqual(names[names.index(M055.name) - 1], '20261110120000_054_advisor_cleanup.sql')
+        self.assertEqual(names[names.index(M055.name) + 1:], ['20261112120000_056_admin_requires_aal2.sql'])
 
     def test_the_changes_in_one_transaction(self):
         statements = _statements(_code(_read(M055)))

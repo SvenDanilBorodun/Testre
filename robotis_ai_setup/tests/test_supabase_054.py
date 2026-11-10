@@ -52,10 +52,12 @@ class Migration054(unittest.TestCase):
         for path in (M054, R054, A054):
             self.assertTrue(path.is_file(), path)
         names = sorted(p.name for p in _MIG.glob('*.sql'))
-        # 054 was the newest until 055 (2026-11-11, the users guard), which
-        # touches none of 054's four functions.
+        # 054 was the newest until 055 (2026-11-11, the users guard) and 056
+        # (2026-11-12, the admin's aal2 rule), neither of which touches 054's
+        # four functions.
         self.assertEqual(names[names.index(M054.name) - 1], '20261109120000_053_retire_jetson.sql')
-        self.assertEqual(names[names.index(M054.name) + 1:], ['20261111120000_055_users_identity_guard.sql'])
+        self.assertEqual(names[names.index(M054.name) + 1:], ['20261111120000_055_users_identity_guard.sql',
+                                                              '20261112120000_056_admin_requires_aal2.sql'])
 
     def test_exactly_the_four_changes_in_one_transaction(self):
         self.assertEqual(_statements(_code(_read(M054))), [

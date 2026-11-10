@@ -219,12 +219,14 @@ class FilesAndOrder(unittest.TestCase):
         # (2026-11-10: the advisor clean-up), which pins the search_path of
         # credit_ledger_immutable() and trainings_guard_credit_columns() and
         # changes nothing else of 052's, and 055 (2026-11-11: the users guard's
-        # whole-row rule 1), which touches no credit object. A later migration
-        # must be added here deliberately.
+        # whole-row rule 1), which touches no credit object, and 056
+        # (2026-11-12: an admin's read branches require aal2), which touches no
+        # credit object either. A later migration must be added here deliberately.
         names = sorted(p.name for p in _MIG.glob("*.sql"))
         self.assertEqual(names[names.index(M052.name) + 1:], ["20261109120000_053_retire_jetson.sql",
                                                               "20261110120000_054_advisor_cleanup.sql",
-                                                              "20261111120000_055_users_identity_guard.sql"])
+                                                              "20261111120000_055_users_identity_guard.sql",
+                                                              "20261112120000_056_admin_requires_aal2.sql"])
 
     def test_one_transaction_each(self):
         for p in (M052, R052):

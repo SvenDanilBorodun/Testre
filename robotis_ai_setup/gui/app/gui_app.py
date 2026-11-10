@@ -4853,9 +4853,18 @@ class EduBoticsApp:
             self._log("Container werden gestoppt...")
             self.root.after(0, lambda: self.progress.start(10))
 
-            self._stop_camera_bridge()
-            self._stop_phone_server()
+            # ORDER (VA-07, 2026-11-12): the camera bridge and the phone
+            # receiver stop AFTER the containers. They are the recording's
+            # SOURCES: stopped first, the cameras went silent while
+            # physical_ai_server still ran, and SOURCE_STOPPED_S (2 s) later
+            # the server ended the recording like „Beenden" — finalize AND an
+            # upload, which the stack going down then killed mid-flight. With
+            # the sources still flowing, the server's own shutdown finalize
+            # (launch plan step 8: SIGINT, no upload) ends the session inside
+            # STACK_STOP_TIMEOUT_S. Only the health poll stops first, so the
+            # containers going down do not read as a camera fault.
             self._stop_rs_control_server()
+            self._stop_camera_health_poll()
             # CLOSE THE BROWSER WINDOW TOO. Two reasons, and the second is the
             # load-bearing one:
             #
@@ -4883,6 +4892,8 @@ class EduBoticsApp:
                 docker_manager.stop_cloud_only(log=self._log)
             else:
                 docker_manager.stop_containers(gpu=self.gpu_available)
+            self._stop_camera_bridge()
+            self._stop_phone_server()
             docker_manager.stop_keepalive()
 
             self._log("Alle Container gestoppt.")
@@ -5006,10 +5017,14 @@ class EduBoticsApp:
         #   * the webview child is now closed GRACEFULLY (WM_CLOSE first) so the
         #     browser's teardown hooks — JogPanel's re-torque, the cloud run's
         #     pagehide stop — actually run.
-        self._stop_camera_bridge()
-        self._stop_phone_server()
+        # The camera bridge and the phone receiver stop AFTER the containers
+        # (VA-07): they are the recording's sources, and a running recording
+        # must end by the server's shutdown finalize, not by the source-stop
+        # rule's upload that the stack going down would kill. See
+        # `_stop_environment`.
         self._stop_rs_control_server()
         webview_window.destroy_all()
+        self._stop_camera_health_poll()
 
         if stack_up:
             if self.cloud_only.get():
@@ -5017,6 +5032,8 @@ class EduBoticsApp:
             else:
                 docker_manager.stop_containers(gpu=self.gpu_available)
 
+        self._stop_camera_bridge()
+        self._stop_phone_server()
         docker_manager.stop_keepalive()
         self.root.destroy()
 

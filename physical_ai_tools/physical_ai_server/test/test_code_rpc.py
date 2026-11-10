@@ -575,16 +575,27 @@ def test_the_hello_read_is_bounded_as_a_whole_not_per_byte(server):
     t.start()
     s.settimeout(code_rpc.CODE_RPC_HELLO_TIMEOUT_S * 2)
     try:
+        # The server's close reaches this end as EOF (b'') — or, when a drip
+        # byte arrived after the server's last read, as ECONNRESET: Linux's
+        # af_unix sets the peer's error when a socket is closed with unread
+        # input (unix_release_sock). Both are the server closing the
+        # connection; which one is a race with the drip, so the test once
+        # failed with ConnectionResetError under load (verification round C).
         got = s.recv(1)
     except socket.timeout:
         pytest.fail('the drip kept an un-greeted connection alive past the hello deadline')
+    except ConnectionResetError:
+        got = b''
     finally:
         stop.set()
     elapsed = time.monotonic() - t0
     t.join(2.0)
-    s.close()
     assert got == b''
     assert elapsed <= code_rpc.CODE_RPC_HELLO_TIMEOUT_S + 1.0, f'closed only after {elapsed:.2f} s'
+    # ...and it is really gone: the server's end no longer takes a byte.
+    with pytest.raises(OSError):
+        s.sendall(b'x')
+    s.close()
 
 
 def test_data_frame_over_64kib_closes_the_connection(server):

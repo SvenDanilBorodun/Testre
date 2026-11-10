@@ -48,9 +48,12 @@ class TestInteropWithTheSpa(unittest.TestCase):
         self.assertEqual(self.key.kid, crypto.kid_of(_b64url(robot['pub'])))
 
     def test_every_case_the_spa_encrypted_decrypts_on_the_robot(self):
-        self.assertGreaterEqual(len(self.fixture['cases']), 3)
+        # Both SPA paths: WebCrypto (a secure context, a Windows page) and the
+        # pure-JS one (a Pi's plain-HTTP page has no crypto.subtle).
+        self.assertEqual({case['impl'] for case in self.fixture['cases']}, {'webcrypto', 'pure'})
+        self.assertGreaterEqual(len(self.fixture['cases']), 6)
         for case in self.fixture['cases']:
-            with self.subTest(plain=case['plain'][:12]):
+            with self.subTest(impl=case['impl'], plain=case['plain'][:12]):
                 self.assertEqual(self.key.decrypt(case['wire']), case['plain'])
                 self.assertTrue(store.valid_shape(case['plain']))
 

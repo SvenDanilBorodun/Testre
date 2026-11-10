@@ -16,9 +16,18 @@
 //   ECDH P-256 (the 32-byte x coordinate) → HKDF-SHA256(salt = CONTEXT,
 //   info = "aes-256-gcm|" + kid) → AES-256-GCM (12-byte iv, AAD = CONTEXT + "|" + kid)
 //
-// robotis_ai_setup's interop test decrypts, in Python, the cases
-// __tests__/hfTokenCrypto.test.js writes (hf-token-crypto-cases.json).
+// physical_ai_server/test/test_hf_token_crypto.py decrypts, in Python, the
+// cases __tests__/hfTokenCrypto.test.js writes (hf-token-crypto-cases.json).
 // Nothing here logs, stores or formats a token.
+//
+// TWO IMPLEMENTATIONS OF ONE SCHEME, chosen by what the page may use:
+// `crypto.subtle` is a [SecureContext] API, present on a Windows page
+// (http://localhost is a secure context) and ABSENT on a Pi's page (plain HTTP
+// at a LAN address is not) — exactly where the encryption matters. There the
+// same computation runs in hfTokenCryptoPure.js (BigInt P-256, SHA-256, HKDF,
+// AES-256-GCM; `crypto.getRandomValues` is available in every context).
+
+import { aes256GcmEncrypt, ecdhP256, hkdfSha256 } from './hfTokenCryptoPure';
 
 export const WIRE_PREFIX = 'enc1:';
 export const ENC_NAME = 'enc1';
@@ -68,23 +77,36 @@ export function parseRobotKey(data) {
   return { kid: raw.kid, pub: raw.pub };
 }
 
-function subtleOf(subtle) {
-  const s = subtle || (globalThis.crypto && globalThis.crypto.subtle);
-  if (!s) throw new Error('webcrypto_unavailable');
-  return s;
+function randomBytes(n) {
+  if (!globalThis.crypto || typeof globalThis.crypto.getRandomValues !== 'function') {
+    throw new Error('random_unavailable');
+  }
+  return globalThis.crypto.getRandomValues(new Uint8Array(n));
+}
+
+/** The pure path (no WebCrypto): the same wire value, computed in JS. */
+function encryptPure(token, key) {
+  const { publicPoint, shared } = ecdhP256(b64urlDecode(key.pub), randomBytes);
+  const aesKey = hkdfSha256(shared, utf8(CONTEXT), utf8(`aes-256-gcm|${key.kid}`), 32);
+  const iv = randomBytes(IV_LEN);
+  const ciphertext = aes256GcmEncrypt(aesKey, iv, utf8(token), utf8(`${CONTEXT}|${key.kid}`));
+  return `${WIRE_PREFIX}${key.kid}.${b64url(publicPoint)}.${b64url(iv)}.${b64url(ciphertext)}`;
 }
 
 /**
- * Encrypt `token` for the robot's key. Rejects when WebCrypto is missing or the
- * key does not import (the caller turns that into a German sentence).
+ * Encrypt `token` for the robot's key. Rejects when the key is malformed or no
+ * randomness is available (the caller turns that into a German sentence).
+ * WebCrypto when the page has it, else the pure path (a Pi's plain-HTTP page).
  * @param {string} token
  * @param {{kid: string, pub: string}} key from parseRobotKey
- * @param {SubtleCrypto} [subtle] injected (tests)
+ * @param {SubtleCrypto|null} [subtle] injected (tests); null forces the pure path
  * @returns {Promise<string>} the `enc1:` wire value
  */
 export async function encryptForRobot(token, key, subtle) {
-  const s = subtleOf(subtle);
   if (!key || !KID_SHAPE.test(key.kid) || !PUB_SHAPE.test(key.pub)) throw new Error('bad_key');
+  const s = subtle === null ? null
+    : subtle || (globalThis.crypto && globalThis.crypto.subtle) || null;
+  if (!s) return encryptPure(token, key);
   const robotPublic = await s.importKey(
     'raw', b64urlDecode(key.pub), { name: 'ECDH', namedCurve: 'P-256' }, false, [],
   );

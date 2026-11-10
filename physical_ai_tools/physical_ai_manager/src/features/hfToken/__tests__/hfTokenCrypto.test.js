@@ -77,9 +77,14 @@ async function regenerate() {
   const point = new Uint8Array(await subtle.exportKey('raw', pair.publicKey));
   const robot = { d: jwk.d, x: jwk.x, y: jwk.y, pub: b64url(point), kid: await kidOf(point) };
   const cases = [];
-  for (const plain of PLAINS) {
-    // eslint-disable-next-line no-await-in-loop
-    cases.push({ plain, wire: await encryptForRobot(plain, { kid: robot.kid, pub: robot.pub }, subtle) });
+  // Both implementations: WebCrypto (a secure context: a Windows page) and the
+  // pure path (a Pi's plain-HTTP page has no crypto.subtle).
+  for (const [impl, which] of [['webcrypto', subtle], ['pure', null]]) {
+    for (const plain of PLAINS) {
+      // eslint-disable-next-line no-await-in-loop
+      const wire = await encryptForRobot(plain, { kid: robot.kid, pub: robot.pub }, which);
+      cases.push({ impl, plain, wire });
+    }
   }
   return {
     _generated_by: 'physical_ai_manager/src/features/hfToken/__tests__/hfTokenCrypto.test.js '
@@ -119,7 +124,9 @@ describe('encryptForRobot ↔ the robot (fixture shared with Python)', () => {
       fs.writeFileSync(FIXTURE, `${JSON.stringify(await regenerate(), null, 1)}\n`);
     }
     const saved = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
-    expect(saved.cases.map((c) => c.plain)).toEqual(PLAINS);
+    expect(saved.cases.map((c) => c.plain)).toEqual([...PLAINS, ...PLAINS]);
+    expect(saved.cases.map((c) => c.impl)).toEqual([
+      ...PLAINS.map(() => 'webcrypto'), ...PLAINS.map(() => 'pure')]);
     expect(await kidOf(b64urlDecode(saved.robot.pub))).toBe(saved.robot.kid);
     const robotPrivate = await robotFromJwk(saved.robot);
     for (const c of saved.cases) {

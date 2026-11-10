@@ -120,7 +120,23 @@ describe('setRobotToken', () => {
     expect(mockCalls[0].request.token).toBe('');
   });
 
-  it('a browser without WebCrypto gets a German sentence, never the plain token', async () => {
+  it('a Pi page without crypto.subtle (plain HTTP is no secure context) still encrypts', async () => {
+    mockPi.on = true;
+    setRobotKeyForTests(KEY);
+    const saved = globalThis.crypto;
+    const noSubtle = { getRandomValues: (a) => webcrypto.getRandomValues(a) };
+    Object.defineProperty(globalThis, 'crypto', { value: noSubtle, configurable: true });
+    try {
+      const result = await setRobotToken(TOKEN);
+      expect(result.success).toBe(true);
+      expect(mockCalls[0].request.token.startsWith(`enc1:${KEY.kid}.`)).toBe(true);
+      expect(mockCalls[0].request.token).not.toContain('hf_');
+    } finally {
+      Object.defineProperty(globalThis, 'crypto', { value: saved, configurable: true });
+    }
+  });
+
+  it('a browser without any crypto gets a German sentence, never the plain token', async () => {
     setRobotKeyForTests(KEY);
     const saved = globalThis.crypto;
     Object.defineProperty(globalThis, 'crypto', { value: undefined, configurable: true });

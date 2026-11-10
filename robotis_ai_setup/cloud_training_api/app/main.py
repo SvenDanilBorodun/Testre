@@ -185,12 +185,14 @@ def _warn_optional_secrets() -> None:
         ),
         # GUI_DOWNLOAD_URL is OPTIONAL now: /version derives the GH Release
         # asset URL from GUI_VERSION + GUI_RELEASE_REPO when it's unset. We
-        # warn on GUI_RELEASE_REPO instead — without it (and without an
-        # explicit GUI_DOWNLOAD_URL) the derive yields null.
+        # warn on GUI_RELEASE_REPO instead — without it the derive yields null,
+        # and since SA-01 (2026-11-13) an explicit GUI_DOWNLOAD_URL is served
+        # only as a release asset of that repository (routes/version.py).
         (
             "GUI_RELEASE_REPO",
-            "/version may return download_url=null — set to 'owner/repo' (or set "
-            "GUI_DOWNLOAD_URL explicitly) so the update gate can locate the .exe.",
+            "/version returns download_url=null — set to 'owner/repo' so the "
+            "update gate can locate the .exe (GUI_DOWNLOAD_URL is served only as "
+            "a release asset of that repository).",
         ),
     )
     for key, msg in optional_warns:

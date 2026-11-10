@@ -3,7 +3,8 @@
 // Proprietary and confidential. Licensed under the EduBotics End-User
 // Licence Agreement; see LICENSE at the repository root.
 //
-// The token travels ENCRYPTED for the robot's key (2026-11-13). Pinned: a robot
+// The token travels ENCRYPTED for the robot's key (2026-11-13; the audited
+// libraries since 2026-11-14). Pinned: a robot
 // that advertises a key on /edubotics/hf_token_state gets the `enc1:` value
 // and never the token; an Orange Pi page sends NOTHING to a robot without a
 // key; a Windows page (loopback) still sends the plain token to such a robot;
@@ -149,9 +150,37 @@ describe('setRobotToken', () => {
     }
   });
 
+  it('a robot point off the curve gets a German sentence, never the plain token', async () => {
+    const bytes = Buffer.from(KEY.pub, 'base64url');
+    bytes[64] ^= 1; // no longer on P-256: noble refuses it
+    setRobotKeyForTests({ kid: KEY.kid, pub: bytes.toString('base64url') });
+    const result = await setRobotToken(TOKEN);
+    expect(result).toEqual({ success: false, message: hfCopy('robot.encryptFailed') });
+    expect(mockCalls).toHaveLength(0);
+  });
+
+  it('a chunk that did not load says to reload the page, and sends nothing', async () => {
+    vi.resetModules();
+    vi.doMock('../hfTokenSeal', () => {
+      throw new Error('Chunk nicht geladen');
+    });
+    try {
+      const fresh = await import('../robotChannel');
+      const copy = await import('../hfTokenCopy');
+      fresh.setRobotKeyForTests(KEY);
+      const result = await fresh.setRobotToken(TOKEN);
+      expect(result).toEqual({ success: false, message: copy.hfCopy('robot.sealUnavailable') });
+      expect(mockCalls).toHaveLength(0);
+    } finally {
+      vi.doUnmock('../hfTokenSeal');
+      vi.resetModules();
+    }
+  });
+
   it('the copy is German', () => {
     expect(hfCopy('robot.needsUpdate')).toMatch(/Roboter-Software/);
     expect(hfCopy('robot.encryptFailed')).toMatch(/verschlüsselt/);
+    expect(hfCopy('robot.sealUnavailable')).toMatch(/Seite neu laden/);
     expect(ROSLIB).toBeTruthy();
   });
 });

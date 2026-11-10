@@ -54,6 +54,12 @@
 #     * three 0.184.0 + urdf-loader 0.12.7, codemirror + @codemirror/* +
 #       @lezer/* (exact pins, eslint-fenced importers), react-icons (the icon
 #       registry is pinned to its trees), espree 9.6.1 (the glyph fence).
+#   The one exact npm pin deliberately NOT ignored (2026-11-14): the token
+#   encryption's @noble/curves, @noble/hashes and @noble/ciphers. A
+#   cryptography library's fixes must arrive; the grouped npm PR moves the
+#   three together (curves pins hashes exactly), and the known answers in
+#   hfTokenCrypto.test.js and physical_ai_server's test_hf_token_crypto.py
+#   judge any bump.
 #     * Base images: the ROBOTIS bases and the self-built arm64 bases
 #       (base-version-guard + bump-upstream-digests.sh own them), ros, ubuntu
 #       (wsl_rootfs: any change forces a ROOTFS_VERSION bump and a destructive

@@ -1,10 +1,13 @@
 """The student's Hugging Face token, encrypted on its way to the robot (2026-11-13).
 
 ``data_processing/hf_token_crypto.py`` is the robot's half; the SPA's
-``features/hfToken/hfTokenCrypto.js`` is the other. They meet in the fixture the
-JS test writes (``hf-token-crypto-cases.json``): every case there was encrypted
-by the SPA's WebCrypto code and is decrypted here by the robot's module, so the
-two cannot drift apart unseen. The fixture's robot key is a TEST key.
+``features/hfToken/hfTokenCrypto.js`` + ``hfTokenSeal.js`` (the audited @noble
+libraries since 2026-11-14) are the other. They meet in the fixture the JS test
+writes (``hf-token-crypto-cases.json``): every case there was encrypted by the
+SPA's product path and is decrypted here by the robot's module, and every known
+answer (a fixed ephemeral secret and iv) is recomputed here byte for byte with
+``cryptography``, so the two cannot drift apart unseen. The fixture's robot key
+is a TEST key.
 """
 
 from __future__ import annotations
@@ -48,14 +51,45 @@ class TestInteropWithTheSpa(unittest.TestCase):
         self.assertEqual(self.key.kid, crypto.kid_of(_b64url(robot['pub'])))
 
     def test_every_case_the_spa_encrypted_decrypts_on_the_robot(self):
-        # Both SPA paths: WebCrypto (a secure context, a Windows page) and the
-        # pure-JS one (a Pi's plain-HTTP page has no crypto.subtle).
-        self.assertEqual({case['impl'] for case in self.fixture['cases']}, {'webcrypto', 'pure'})
-        self.assertGreaterEqual(len(self.fixture['cases']), 6)
+        # ONE SPA path on every page (2026-11-14): @noble/curves, @noble/hashes
+        # and @noble/ciphers, the same code on a Windows page and on a Pi's
+        # plain-HTTP page (which has no crypto.subtle).
+        self.assertEqual({case['impl'] for case in self.fixture['cases']}, {'noble'})
+        self.assertGreaterEqual(len(self.fixture['cases']), 3)
         for case in self.fixture['cases']:
             with self.subTest(impl=case['impl'], plain=case['plain'][:12]):
                 self.assertEqual(self.key.decrypt(case['wire']), case['plain'])
                 self.assertTrue(store.valid_shape(case['plain']))
+
+    def test_every_known_answer_is_what_cryptography_computes_byte_for_byte(self):
+        # The SPA's noble code, given a fixed ephemeral secret and iv, wrote
+        # these wire values; `cryptography` (OpenSSL) recomputes each one from
+        # the same inputs, so every step (ECDH x coordinate, HKDF salt and info,
+        # GCM iv, AAD, tag layout, encoding) is pinned on both sides.
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+        robot = self.fixture['robot']
+        robot_public = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), _b64url(robot['pub']))
+        kid = robot['kid'].encode('ascii')
+        kats = self.fixture['kats']
+        self.assertGreaterEqual(len(kats), 3)
+        for kat in kats:
+            with self.subTest(plain=kat['plain'][:12]):
+                mine = ec.derive_private_key(int(kat['ephemeral_d'], 16), ec.SECP256R1())
+                shared = mine.exchange(ec.ECDH(), robot_public)
+                key = HKDF(algorithm=hashes.SHA256(), length=32, salt=crypto.CONTEXT,
+                           info=b'aes-256-gcm|' + kid).derive(shared)
+                iv = bytes.fromhex(kat['iv'])
+                ciphertext = AESGCM(key).encrypt(iv, kat['plain'].encode('utf-8'), crypto.CONTEXT + b'|' + kid)
+                point = mine.public_key().public_bytes(serialization.Encoding.X962,
+                                                       serialization.PublicFormat.UncompressedPoint)
+                expected = (f"{crypto.WIRE_PREFIX}{robot['kid']}.{crypto.b64url(point)}."
+                            f"{crypto.b64url(iv)}.{crypto.b64url(ciphertext)}")
+                self.assertEqual(kat['wire'], expected)
+                self.assertEqual(self.key.decrypt(kat['wire']), kat['plain'])
 
     def test_a_case_for_another_robot_is_stale(self):
         other = crypto.RobotKey.generate()

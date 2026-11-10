@@ -98,6 +98,10 @@ export const HF_TOKEN_COPY = Object.freeze({
   'robot.encryptFailed':
     'Das Token konnte in diesem Browser nicht verschlüsselt werden. Bitte einen aktuellen Browser '
     + 'verwenden.',
+  // 2026-11-14: the encryption is a lazy chunk (hfTokenSeal.js); a page whose
+  // chunk did not load needs a reload, not another browser.
+  'robot.sealUnavailable':
+    'Die Verschlüsselung für das Token konnte nicht geladen werden. Bitte die Seite neu laden.',
 });
 
 /** The sentence for `key`; an unknown key is a programming error, never shown. */

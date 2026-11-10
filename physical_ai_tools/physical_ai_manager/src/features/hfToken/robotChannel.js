@@ -11,7 +11,8 @@
 //   WRITE /register_hf_user          (physical_ai_interfaces/srv/SetHFUser)
 //         request.token: a token, or '' to clear the slot.
 //
-// ENCRYPTED when the robot advertises a key (2026-11-13, hfTokenCrypto.js): the
+// ENCRYPTED when the robot advertises a key (2026-11-13, hfTokenCrypto.js; the
+// audited @noble libraries since 2026-11-14, a lazy chunk): the
 // state's additive `enc`/`kid`/`pub` name the robot's ephemeral P-256 key, and
 // the token goes out as `enc1:…` in the same field. On an Orange Pi (a plain
 // LAN websocket) a token is NEVER sent in the clear: a robot that advertises no
@@ -37,7 +38,7 @@ import ROSLIB from 'roslib';
 import rosConnectionManager, { isLocalRosbridgeUrl } from '../../utils/rosConnectionManager';
 import { getPiModeSync } from '../../utils/piMode';
 import { hfCopy } from './hfTokenCopy';
-import { encryptForRobot, parseRobotKey } from './hfTokenCrypto';
+import { encryptForRobot, parseRobotKey, SEAL_UNAVAILABLE } from './hfTokenCrypto';
 
 export const STATE_TOPIC = '/edubotics/hf_token_state';
 export const SET_SERVICE = '/register_hf_user';
@@ -216,8 +217,9 @@ export function setRobotToken(token) {
       let wire;
       try {
         wire = await encryptForRobot(value, key);
-      } catch {
-        return { success: false, message: hfCopy('robot.encryptFailed') };
+      } catch (err) {
+        const unloaded = Boolean(err) && err.message === SEAL_UNAVAILABLE;
+        return { success: false, message: hfCopy(unloaded ? 'robot.sealUnavailable' : 'robot.encryptFailed') };
       }
       return callSetService(wire);
     }

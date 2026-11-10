@@ -84,6 +84,10 @@ both schemas serves, so there is neither a crash window for the old API nor a
    SELECT count(*) AS entries, min(created_at) AS oldest FROM auth.audit_log_entries;
    ```
 
+   (If the editor answers `permission denied` for `audit_log_entries`, write
+   `false` in place of each `EXISTS (SELECT 1 FROM auth.audit_log_entries …)`
+   below: the queries then judge as for an empty audit log.)
+
    Then (a) every admin and every teacher — recognise each one by name; anyone
    you do not know, or `origin` = `SIGNED ITSELF UP`, is deleted:
 

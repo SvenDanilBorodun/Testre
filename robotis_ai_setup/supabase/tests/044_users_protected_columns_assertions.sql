@@ -18,6 +18,13 @@
 -- file on a fresh reset), counted 2026-11-01 in fix round 3: 15 PASS, 1 FAIL (T15)
 -- and 0 ERROR. The 2026-10-28 and both earlier 2026-11-01 measurements reported the
 -- same numbers.
+-- 055 BREAKS this file's T7 and T8 by design: T7 proves full_name was still the
+-- student's own and T8 that a student's write of unchanged values went through,
+-- and 055 takes every write privilege on public.users from the request roles
+-- (the guard stays, rule 1 widened to the whole row). Its refusals T2-T6 still
+-- PASS (42501, now from the missing privilege). Measured 2026-11-11 (PostgreSQL
+-- 16, every migration through 054 applied by psql, then 055): 13 PASS, 3 FAIL
+-- (T7, T8, T15) and 0 ERROR; at 054 the same run prints 15 PASS, 1 FAIL (T15).
 -- Counted with stdout and stderr captured apart: PASS/FAIL = the file's own result
 -- lines on stdout plus its PASS/FAIL NOTICEs, ERROR = stderr's
 -- `psql:<file>:<n>: ERROR:` lines; psql's echo of a failing statement (LINE n:,

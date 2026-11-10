@@ -133,3 +133,18 @@ export const patchProgressEntry = (token, entryId, note) =>
 
 export const deleteProgressEntry = (token, entryId) =>
   apiRequest(`/teacher/progress-entries/${entryId}`, 'DELETE', token);
+
+// GDPR Art. 17 (launch plan step 5): the open deletion requests of the students
+// in the caller's own classrooms, oldest first:
+// [{student_id, username, full_name, classroom_id, classroom_name, requested_at, due_by}].
+export const listDeletionRequests = (token) =>
+  apiRequest('/teacher/deletion-requests', 'GET', token);
+
+// Carries out an OPEN request: the same answer as deleteStudent (the five
+// outcomes); 409 when the student withdrew it meanwhile.
+export const confirmDeletionRequest = (token, studentId) =>
+  apiRequest(
+    `/teacher/deletion-requests/${encodeURIComponent(studentId)}/confirm`,
+    'POST',
+    token
+  );

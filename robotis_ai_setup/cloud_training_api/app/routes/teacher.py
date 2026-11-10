@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import get_current_teacher, get_user_profile
 from app.services import credit_texts_de as credit_texts
+from app.services import deletion_requests
 from app.services import passwords
 from app.services.supabase_client import get_supabase
 from app.services.usernames import synthetic_email, validate_username
@@ -90,6 +91,9 @@ class StudentSummary(BaseModel):
     # (credit_assign refuses a grouped student, P0023).
     workgroup_id: str | None = None
     workgroup_name: str | None = None
+    # GDPR Art. 17 (launch plan step 5): set while the student's deletion request
+    # is open, so the roster can show it; the queue is GET /deletion-requests.
+    deletion_requested_at: str | None = None
 
 
 class TrainingSummary(BaseModel):
@@ -415,6 +419,7 @@ def _student_summary(
         classroom_id=row.get("classroom_id"),
         workgroup_id=workgroup_id,
         workgroup_name=workgroup_name,
+        deletion_requested_at=row.get("deletion_requested_at"),
     )
 
 
@@ -489,7 +494,7 @@ def get_classroom(classroom_id: str, teacher=Depends(get_current_teacher)):
     supabase = get_supabase()
     students_raw = (
         supabase.table("users")
-        .select("id, username, full_name, classroom_id, workgroup_id")
+        .select("id, username, full_name, classroom_id, workgroup_id, deletion_requested_at")
         .eq("classroom_id", classroom_id)
         .eq("role", "student")
         .order("full_name", desc=False)
@@ -1049,7 +1054,20 @@ def _delete_student_hf_artifacts(
 @router.delete("/students/{student_id}")
 def delete_student(student_id: str, teacher=Depends(get_current_teacher)):
     _assert_student_owned(teacher["id"], student_id)
+    return erase_student_account(student_id)
 
+
+def erase_student_account(student_id: str) -> dict:
+    """BLOCKING: delete a student's account and attempt the HuggingFace erasure.
+
+    The whole deletion, shared by ``DELETE /teacher/students/{id}``, a teacher's
+    confirmation of a deletion request (``confirm_deletion_request`` below) and the
+    admin's (``routes/admin.py::confirm_deletion_request``). It asserts nothing:
+    every caller has proven its right to the student first (Rule §4). Answers one
+    of the five outcomes below (503 and 500 raised; 200 with
+    ``hf_erasure_complete`` true, or false with ``hf_failures`` and a German
+    ``detail``).
+    """
     # ORDER MATTERS HERE, and until 2026-08-31 it was wrong in a way that made
     # a lawful Art. 17 request destructive AND unfinishable:
     #
@@ -1147,6 +1165,87 @@ def delete_student(student_id: str, teacher=Depends(get_current_teacher)):
         }
 
     return {"ok": True, "hf_erasure_complete": True}
+
+
+# ---------- Deletion requests (GDPR Art. 17, launch plan step 5) ----------
+
+
+class DeletionRequestSummary(BaseModel):
+    student_id: str
+    username: str | None = None
+    full_name: str | None = None
+    classroom_id: str | None = None
+    classroom_name: str | None = None
+    requested_at: str
+    # Art. 12(3): one calendar month after the request (services/deletion_requests.py).
+    due_by: str | None = None
+
+
+@router.get("/deletion-requests", response_model=list[DeletionRequestSummary])
+def list_deletion_requests(teacher=Depends(get_current_teacher)):
+    """The open deletion requests of the students in the caller's OWN classrooms,
+    oldest (most urgent) first.
+
+    Rule §4: no id comes from the request; both queries are scoped by the
+    JWT-verified teacher (the classrooms by ``teacher_id``, the students by those
+    classrooms). A student without a classroom is the admin's to confirm
+    (``GET /admin/deletion-requests`` lists every open request)."""
+    supabase = get_supabase()
+    try:
+        classrooms = (
+            supabase.table("classrooms").select("id, name").eq("teacher_id", teacher["id"]).execute()
+        ).data or []
+        if not classrooms:
+            return []
+        names = {c["id"]: c.get("name") for c in classrooms}
+        rows = (
+            supabase.table("users")
+            .select("id, username, full_name, classroom_id, deletion_requested_at")
+            .in_("classroom_id", list(names))
+            .eq("role", "student")
+            .not_.is_("deletion_requested_at", "null")
+            .order("deletion_requested_at", desc=False)
+            .execute()
+        ).data or []
+    except Exception as exc:
+        logger.warning("deletion-request list failed for teacher=%s: %s", teacher["id"], type(exc).__name__)
+        raise HTTPException(status_code=500, detail=deletion_requests.LIST_FAILED_DE) from None
+    return [
+        DeletionRequestSummary(
+            student_id=r["id"],
+            username=r.get("username"),
+            full_name=r.get("full_name"),
+            classroom_id=r.get("classroom_id"),
+            classroom_name=names.get(r.get("classroom_id")),
+            requested_at=r["deletion_requested_at"],
+            due_by=deletion_requests.due_by(r["deletion_requested_at"]),
+        )
+        for r in rows
+        if r.get("deletion_requested_at") and r.get("classroom_id") in names
+    ]
+
+
+def open_deletion_request(user_id: str) -> str | None:
+    """BLOCKING: the user's open request time, or None (no row, or no request)."""
+    rows = (
+        get_supabase().table("users").select("deletion_requested_at").eq("id", user_id).execute()
+    ).data or []
+    return rows[0].get("deletion_requested_at") if rows else None
+
+
+@router.post("/deletion-requests/{student_id}/confirm")
+def confirm_deletion_request(student_id: str, teacher=Depends(get_current_teacher)):
+    """The teacher carries out a student's deletion request (owner decision
+    „Teacher confirms"): the same full deletion as ``DELETE /students/{id}``, with
+    its five outcomes, but only while the request is still OPEN — a request the
+    student withdrew while the dialog was up is refused with 409 and nothing is
+    deleted. (The check runs before the deletion's read-only enumeration; a
+    withdrawal in those milliseconds is the accepted residual.)"""
+    _assert_student_owned(teacher["id"], student_id)
+    if not open_deletion_request(student_id):
+        raise HTTPException(status_code=409, detail=deletion_requests.NOT_OPEN_DE)
+    logger.info("deletion request of student=%s confirmed by teacher=%s", student_id, teacher["id"])
+    return erase_student_account(student_id)
 
 
 @router.post("/students/{student_id}/password")

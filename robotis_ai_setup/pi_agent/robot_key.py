@@ -73,11 +73,11 @@ def ensure_dir(log=None) -> bool:
         try:
             os.makedirs(path, mode=0o755, exist_ok=True)
             return True
-        except OSError as e:
-            log(f"Der Schlüsselordner für das Hugging-Face-Token konnte nicht angelegt werden ({type(e).__name__}).")
+        except OSError:
+            log("Der Schlüsselordner für das Hugging-Face-Token konnte nicht angelegt werden.")
             return False
-    except OSError as e:
-        log(f"Der Schlüsselordner für das Hugging-Face-Token ist nicht lesbar ({type(e).__name__}).")
+    except OSError:
+        log("Der Schlüsselordner für das Hugging-Face-Token ist nicht lesbar.")
         return False
     if stat.S_ISDIR(info.st_mode):
         return True

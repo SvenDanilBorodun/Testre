@@ -260,6 +260,25 @@ class TestEnsureDir(_DirBase):
         self.assertTrue(os.path.isfile(self.dir))
         self.assertEqual(len(lines), 1)
 
+    def test_the_german_lines_carry_no_english_exception_name(self):
+        """The start job's progress log is German (Rule §1): a failing mkdir or
+        lstat is said in German only, never with Python's class name
+        (verification round C, VC-11)."""
+        for target, error in (("makedirs", PermissionError("/run is read-only")),
+                              ("lstat", OSError("I/O error"))):
+            lines = []
+            with self.subTest(target=target):
+                if target == "lstat":
+                    p = patch.object(robot_key.os, "lstat", side_effect=error)
+                else:
+                    p = patch.object(robot_key.os, "makedirs", side_effect=error)
+                with p:
+                    self.assertFalse(robot_key.ensure_dir(log=lines.append))
+                self.assertEqual(len(lines), 1)
+                self.assertIn("Schlüsselordner", lines[0])
+                for english in ("PermissionError", "OSError", "Error", "read-only", "I/O"):
+                    self.assertNotIn(english, lines[0])
+
     def test_compose_up_of_the_server_creates_it_first(self):
         calls = []
 

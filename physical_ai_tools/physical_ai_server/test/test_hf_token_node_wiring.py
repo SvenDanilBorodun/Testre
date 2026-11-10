@@ -101,7 +101,7 @@ def _load(name, store_module=store):
 _METHODS = {n: _load(n) for n in (
     '_init_hf_token_state', '_hf_token_busy', '_publish_hf_token_state',
     '_hf_token_state_tick', '_apply_pending_hf_token_clear', '_apply_hf_token_request',
-    '_hf_token_from_wire', 'set_hf_user_callback')}
+    '_hf_token_from_wire', 'set_hf_user_callback', '_rotate_token_key_if_exhausted')}
 
 
 class _Worker:
@@ -142,6 +142,7 @@ class _Node:
         self._hf_token_last_error_log = None
         self._hf_token_clear_pending = False
         self._hf_token_key = None
+        self._token_key_lock = threading.Lock()
         self.log = _Logger()
         self.publishers = []
         self.timers = []
@@ -833,6 +834,92 @@ class TestEncryptedToken(_Base):
         self.assertEqual(self.stored(), TOK)
 
 
+class TestReplayedValues(_Base):
+    """VC-05 (verification round C, 2026-11-15): a session holder who advertised
+    /register_hf_user receives every push's ciphertext. It cannot read it, but
+    before this round it could replay it to the node for the rest of its run and
+    put a classmate's token back after their sign-out."""
+
+    def keyed_node(self):
+        node = self.node()
+        node._hf_token_key = crypto.RobotKey.generate()
+        return node
+
+    def wire(self, node, token=TOK):
+        return crypto.encrypt_for_tests(node._hf_token_key.public_b64, node._hf_token_key.kid, token)
+
+    def test_a_replay_after_the_victims_sign_out_is_refused_and_the_slot_stays_empty(self):
+        node = self.keyed_node()
+        captured = self.wire(node)
+        self.assertTrue(node.request(captured).success)
+        self.assertEqual(self.stored(), TOK)
+        self.assertTrue(node.request('').success)  # the victim signs out
+        response = node.request(captured)
+        self.assertFalse(response.success)
+        self.assertEqual(response.message, texts.HF_TOKEN_ENC_REPLAYED_DE)
+        self.assertIsNone(self.stored())
+
+    def test_a_value_refused_while_busy_still_cannot_be_replayed_later(self):
+        node = self.keyed_node()
+        node.request(self.wire(node, OTHER))  # someone else's token in the slot
+        node.on_recording = True
+        captured = self.wire(node)
+        self.assertEqual(node.request(captured).message, texts.HF_TOKEN_BUSY_DE)
+        node.on_recording = False
+        response = node.request(captured)
+        self.assertEqual(response.message, texts.HF_TOKEN_ENC_REPLAYED_DE)
+        self.assertEqual(self.stored(), OTHER)
+
+    def test_a_genuine_second_push_of_the_same_token_is_fresh_and_accepted(self):
+        node = self.keyed_node()
+        self.assertTrue(node.request(self.wire(node)).success)
+        self.assertTrue(node.request('').success)
+        self.assertTrue(node.request(self.wire(node)).success)  # a new envelope
+        self.assertEqual(self.stored(), TOK)
+
+    def test_a_replayed_clear_is_only_a_clear_anyone_may_send(self):
+        """Clearing is the empty string in the clear, never an envelope: any
+        session holder can send it, so replaying one adds nothing (no change)."""
+        node = self.keyed_node()
+        node.request(self.wire(node))
+        for _ in range(2):
+            response = node.request('')
+            self.assertTrue(response.success)
+        self.assertIsNone(self.stored())
+
+    def test_a_full_record_rotates_the_key_and_kills_every_older_envelope(self):
+        keydir = os.path.join(self._tmp.name, 'robot-key')
+        os.makedirs(keydir)
+        node = self.keyed_node()
+        old = node._hf_token_key
+        with patch.object(crypto, 'MAX_SEEN_WIRES', 2), patch.object(crypto, 'KEY_FILE_DIR', keydir):
+            first = self.wire(node)
+            self.assertTrue(node.request(first).success)
+            self.assertIs(node._hf_token_key, old)
+            pending = self.wire(node, OTHER)  # made for the old key, not yet sent
+            self.assertTrue(node.request(self.wire(node)).success)  # the record is full now
+            self.assertIsNot(node._hf_token_key, old)  # rotated at once
+            self.assertNotEqual(node._hf_token_key.kid, old.kid)
+            path = os.path.join(keydir, crypto.KEY_FILE_NAME)
+            self.assertEqual(json.loads(open(path, encoding='ascii').read())['kid'],
+                             node._hf_token_key.kid)
+            self.assertEqual(node.states()[-1]['kid'], node._hf_token_key.kid)
+            for stale in (first, pending):
+                response = node.request(stale)
+                self.assertEqual(response.message, texts.HF_TOKEN_ENC_STALE_DE)
+            self.assertTrue(node.request(self.wire(node, OTHER)).success)
+        self.assertIn('Rotated the token key', '\n'.join(node.log.lines))
+
+    def test_the_refusal_names_nothing_of_the_value(self):
+        node = self.keyed_node()
+        captured = self.wire(node)
+        node.request(captured)
+        response = node.request(captured)
+        self.assertNotIn(captured[:20], response.message)
+        self.assertNotIn('enc1', response.message)
+        self.assertNotIn(captured, '\n'.join(node.log.lines))
+
+
 class TestAstFences(unittest.TestCase):
     def test_the_old_login_path_is_gone_from_the_callback_and_its_helper(self):
         for name in ('set_hf_user_callback', '_apply_hf_token_request'):
@@ -875,7 +962,8 @@ class TestAstFences(unittest.TestCase):
         checked = 0
         for name in ('set_hf_user_callback', '_apply_hf_token_request',
                      '_publish_hf_token_state', '_init_hf_token_state',
-                     '_apply_pending_hf_token_clear', '_hf_token_from_wire'):
+                     '_apply_pending_hf_token_clear', '_hf_token_from_wire',
+                     '_rotate_token_key_if_exhausted'):
             for call in _logger_calls(_function_node(name)):
                 checked += 1
                 for arg in call.args:

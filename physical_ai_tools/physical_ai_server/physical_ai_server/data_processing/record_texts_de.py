@@ -234,6 +234,9 @@ HF_TOKEN_WRITE_FAILED_DE = 'Das Token konnte nicht auf dem Roboter gespeichert w
 HF_TOKEN_ENC_STALE_DE = ('Der Roboter wurde inzwischen neu gestartet. Das Token wird gleich noch '
                          'einmal übertragen.')
 HF_TOKEN_ENC_BAD_DE = 'Das verschlüsselte Token konnte auf dem Roboter nicht gelesen werden.'
+# Verification round C (VC-05): an encrypted value is opened at most once.
+HF_TOKEN_ENC_REPLAYED_DE = ('Diese verschlüsselte Übertragung wurde schon einmal angenommen und gilt '
+                            'kein zweites Mal. Bitte das Token erneut übertragen.')
 HF_TOKEN_ENC_UNSUPPORTED_DE = ('Dieser Roboter kann kein verschlüsseltes Token annehmen. Bitte die '
                                'Roboter-Software aktualisieren.')
 

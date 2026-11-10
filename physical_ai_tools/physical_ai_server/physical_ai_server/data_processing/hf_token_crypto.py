@@ -50,6 +50,27 @@ forged topic is then ignored, and a forged /register_hf_user receives only a
 ciphertext for this node's key, which it cannot open. On Windows (loopback)
 the directory does not exist and nothing is written.
 
+CLOUD-INFERENZ'S SESSION TOKENS ride the same envelope (verification round C,
+VC-06, 2026-11-15): on a remote page the SPA encrypts the connect token and the
+Modal edge token of `/edubotics/cloud_inference/start` for this key too, each
+under its OWN context (``CLOUD_SESSION_CONTEXT``, ``CLOUD_EDGE_CONTEXT``: the
+HKDF salt and the AAD), so an envelope made for one kind never opens as
+another. The edge token is up to 4 096 characters, so its wire value has its
+own bound (``CLOUD_EDGE_MAX_WIRE_LEN``).
+
+NO VALUE OPENS TWICE (verification round C, VC-05): a session holder who
+advertised one of the services receives every push's ciphertext; it could not
+read it, but it could replay it to the node later (a classmate's token back in
+the slot after their sign-out). ``RobotKey.decrypt`` records the SHA-256 of
+every value it opened (of the DECODED parts, and only canonical base64 is
+accepted, so a re-encoded value is the same value) and refuses it the second
+time (``replayed``). Each genuine push carries a fresh ephemeral client key and
+iv, so a real re-push is never a duplicate. The record lives with the key, so a
+new key (every node start) starts empty; it holds at most ``MAX_SEEN_WIRES``
+digests, and a key whose record is full refuses everything (``stale``) until
+the node rotates to a fresh one, so flooding the record can never evict the
+digest of a value worth replaying.
+
 What this does NOT stop (accepted, docs/KNOWN-ISSUES.md): an ACTIVE attacker
 on the LAN who rewrites the page the Pi serves (no HTTPS) can make the browser
 encrypt for the attacker's key. It stops the passive listener and a session
@@ -69,14 +90,30 @@ import json
 import os
 import re
 import tempfile
+import threading
 from typing import Optional
 
 WIRE_PREFIX = 'enc1:'
 ENC_NAME = 'enc1'
+# The envelope's context: the HKDF salt and the head of the AAD. One per kind
+# of secret (VC-06); the SPA's hfTokenCrypto.js spells the same three.
 CONTEXT = b'edubotics-hf-token:v1'
+CLOUD_SESSION_CONTEXT = b'edubotics-cloud-session-token:v1'
+CLOUD_EDGE_CONTEXT = b'edubotics-cloud-edge-token:v1'
 # A token is at most 3 + 256 characters (hf_token_store.TOKEN_SHAPE); a wire
-# value far beyond that is not ours and is refused before any crypto.
+# value far beyond that is not ours and is refused before any crypto. The
+# connect token is 43 characters; the Modal edge token up to 4 096
+# (cloud_protocol.EDGE_TOKEN_RE), i.e. a wire value of up to 5 610.
 MAX_WIRE_LEN = 1024
+CLOUD_EDGE_MAX_WIRE_LEN = 6144
+_MAX_WIRE_LEN_BY_CONTEXT = {
+    CONTEXT: MAX_WIRE_LEN,
+    CLOUD_SESSION_CONTEXT: MAX_WIRE_LEN,
+    CLOUD_EDGE_CONTEXT: CLOUD_EDGE_MAX_WIRE_LEN,
+}
+# VC-05: how many opened values one key remembers (32 bytes each). A full
+# record refuses everything until the node rotates the key.
+MAX_SEEN_WIRES = 1024
 KID_RE = re.compile(r'[0-9a-f]{16}')
 _B64URL_RE = re.compile(r'[A-Za-z0-9_-]+')
 POINT_LEN = 65
@@ -94,8 +131,9 @@ KEY_FILE_SCHEMA = 1
 
 class WireError(Exception):
     """A wire value that cannot be decrypted. ``code`` is ``malformed``,
-    ``stale`` (another key id) or ``bad`` (the AEAD check failed). Never
-    carries the value itself."""
+    ``stale`` (another key id, or a key whose replay record is full), ``bad``
+    (the AEAD check failed) or ``replayed`` (this key opened the value before,
+    VC-05). Never carries the value itself."""
 
     def __init__(self, code: str):
         super().__init__(code)
@@ -107,21 +145,27 @@ def is_wire(value) -> bool:
 
 
 def _b64url_decode(text: str) -> bytes:
+    """The bytes of a CANONICAL base64url text, else WireError. The decoder
+    ignores the unused low bits of a last character, so two texts can decode
+    to the same bytes; only the one the encoder writes is accepted (VC-05)."""
     if not _B64URL_RE.fullmatch(text or ''):
         raise WireError('malformed')
     try:
-        return base64.urlsafe_b64decode(text + '=' * (-len(text) % 4))
+        raw = base64.urlsafe_b64decode(text + '=' * (-len(text) % 4))
     except (ValueError, TypeError):
         raise WireError('malformed') from None
+    if b64url(raw) != text:
+        raise WireError('malformed')
+    return raw
 
 
 def b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode('ascii').rstrip('=')
 
 
-def parse_wire(value: str):
+def parse_wire(value: str, max_len: int = MAX_WIRE_LEN):
     """``(kid, client_point, iv, ciphertext)`` of a wire value, or WireError."""
-    if not is_wire(value) or len(value) > MAX_WIRE_LEN:
+    if not is_wire(value) or len(value) > max_len:
         raise WireError('malformed')
     parts = value[len(WIRE_PREFIX):].split('.')
     if len(parts) != 4 or not KID_RE.fullmatch(parts[0]):
@@ -149,6 +193,9 @@ class RobotKey:
             serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
         self.kid = kid_of(self.public_point)
         self.public_b64 = b64url(self.public_point)
+        # VC-05: the SHA-256 of every value this key opened (never a value).
+        self._seen = set()
+        self._seen_lock = threading.Lock()
 
     @classmethod
     def generate(cls) -> 'RobotKey':
@@ -167,12 +214,40 @@ class RobotKey:
         """The additive keys of /edubotics/hf_token_state."""
         return {'enc': ENC_NAME, 'kid': self.kid, 'pub': self.public_b64}
 
-    def decrypt(self, value: str) -> str:
-        """The token inside ``value``, or WireError. The result is NOT
-        shape-checked here; the caller runs its own validation."""
-        kid, point, iv, ciphertext = parse_wire(value)
+    @property
+    def exhausted(self) -> bool:
+        """True once the replay record is full: the key then refuses every
+        value, and the node must rotate to a fresh key (VC-05)."""
+        with self._seen_lock:
+            return len(self._seen) >= MAX_SEEN_WIRES
+
+    def decrypt(self, value: str, context: bytes = CONTEXT) -> str:
+        """The secret inside ``value``, opened under ``context`` (the HF
+        token by default), or WireError. Each value opens at most ONCE per key
+        (VC-05). The result is NOT shape-checked here; the caller runs its own
+        validation."""
+        if context not in _MAX_WIRE_LEN_BY_CONTEXT:
+            raise ValueError('unknown envelope context')
+        kid, point, iv, ciphertext = parse_wire(value, _MAX_WIRE_LEN_BY_CONTEXT[context])
         if kid != self.kid:
             raise WireError('stale')
+        # The digest of the decoded parts (fixed-length point and iv, so the
+        # concatenation is unambiguous), keyed by the context.
+        digest = hashlib.sha256(context + b'|' + point + iv + ciphertext).digest()
+        with self._seen_lock:
+            if digest in self._seen:
+                raise WireError('replayed')
+            if len(self._seen) >= MAX_SEEN_WIRES:
+                raise WireError('stale')
+        plain = self._open(kid, point, iv, ciphertext, context)
+        with self._seen_lock:
+            # Re-checked: two threads may have opened the same value at once.
+            if digest in self._seen:
+                raise WireError('replayed')
+            self._seen.add(digest)
+        return plain
+
+    def _open(self, kid: str, point: bytes, iv: bytes, ciphertext: bytes, context: bytes) -> str:
         from cryptography.exceptions import InvalidTag
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import ec
@@ -184,10 +259,10 @@ class RobotKey:
         except ValueError:
             raise WireError('malformed') from None
         shared = self._private.exchange(ec.ECDH(), peer)
-        key = HKDF(algorithm=hashes.SHA256(), length=32, salt=CONTEXT,
+        key = HKDF(algorithm=hashes.SHA256(), length=32, salt=context,
                    info=b'aes-256-gcm|' + kid.encode('ascii')).derive(shared)
         try:
-            plain = AESGCM(key).decrypt(iv, ciphertext, CONTEXT + b'|' + kid.encode('ascii'))
+            plain = AESGCM(key).decrypt(iv, ciphertext, context + b'|' + kid.encode('ascii'))
         except InvalidTag:
             raise WireError('bad') from None
         try:
@@ -258,8 +333,8 @@ def generate_or_none() -> Optional[RobotKey]:
         return None
 
 
-def encrypt_for_tests(public_b64: str, kid: str, token: str) -> str:
-    """Tests only: what the SPA's WebCrypto code sends, done in Python."""
+def encrypt_for_tests(public_b64: str, kid: str, token: str, context: bytes = CONTEXT) -> str:
+    """Tests only: what the SPA's seal sends, done in Python."""
     import os
 
     from cryptography.hazmat.primitives import hashes, serialization
@@ -270,10 +345,10 @@ def encrypt_for_tests(public_b64: str, kid: str, token: str) -> str:
     robot = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), _b64url_decode(public_b64))
     mine = ec.generate_private_key(ec.SECP256R1())
     shared = mine.exchange(ec.ECDH(), robot)
-    key = HKDF(algorithm=hashes.SHA256(), length=32, salt=CONTEXT,
+    key = HKDF(algorithm=hashes.SHA256(), length=32, salt=context,
                info=b'aes-256-gcm|' + kid.encode('ascii')).derive(shared)
     iv = os.urandom(IV_LEN)
-    ciphertext = AESGCM(key).encrypt(iv, token.encode('utf-8'), CONTEXT + b'|' + kid.encode('ascii'))
+    ciphertext = AESGCM(key).encrypt(iv, token.encode('utf-8'), context + b'|' + kid.encode('ascii'))
     point = mine.public_key().public_bytes(serialization.Encoding.X962,
                                            serialization.PublicFormat.UncompressedPoint)
     return f'{WIRE_PREFIX}{kid}.{b64url(point)}.{b64url(iv)}.{b64url(ciphertext)}'

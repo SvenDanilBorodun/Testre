@@ -506,8 +506,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self._hf_token_state_pub = None
         self._hf_token_last_error_log = None
         # The ephemeral key the SPA encrypts the token for (2026-11-13,
-        # hf_token_crypto.py): made in _init_hf_token_state, memory only.
+        # hf_token_crypto.py): made in _init_hf_token_state, memory only, and
+        # replaced only by _rotate_token_key_if_exhausted (VC-05) under its lock,
+        # so the key file and the attribute never name different keys.
         self._hf_token_key = None
+        self._token_key_lock = threading.Lock()
         # A clear refused while busy (recording / HF transfer) is remembered and
         # applied by the 1 Hz state tick once the robot is idle, unless a newer
         # set arrived meanwhile (_apply_pending_hf_token_clear). Guarded by
@@ -1887,7 +1890,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     def _hf_token_from_wire(self, wire):
         """(token, None) for an encrypted /register_hf_user value
         (hf_token_crypto's `enc1:` form), or (None, german_refusal). Never logs
-        the value; a failure is named by its class only."""
+        the value; a failure is named by its class only. A value this key
+        opened before is refused (VC-05: a captured push replayed after its
+        owner signed out)."""
         key = getattr(self, '_hf_token_key', None)
         if key is None:
             return None, record_texts_de.HF_TOKEN_ENC_UNSUPPORTED_DE
@@ -1896,7 +1901,35 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         except hf_token_crypto.WireError as e:
             if e.code == 'stale':
                 return None, record_texts_de.HF_TOKEN_ENC_STALE_DE
+            if e.code == 'replayed':
+                return None, record_texts_de.HF_TOKEN_ENC_REPLAYED_DE
             return None, record_texts_de.HF_TOKEN_ENC_BAD_DE
+        finally:
+            self._rotate_token_key_if_exhausted(key)
+
+    def _rotate_token_key_if_exhausted(self, key):
+        """VC-05: a key whose replay record is full refuses every value; give
+        the node a fresh one, so flooding the record can never evict the digest
+        of a value worth replaying, and every envelope made for the old key is
+        dead. The key file first, then the attribute, then the state topic (the
+        Pi page re-reads both and waits for them to agree). Never raises."""
+        try:
+            if key is None or not key.exhausted:
+                return
+            lock = getattr(self, '_token_key_lock', None) or threading.Lock()
+            with lock:
+                if getattr(self, '_hf_token_key', None) is not key:
+                    return  # another call rotated it already
+                fresh = hf_token_crypto.generate_or_none()
+                try:
+                    hf_token_crypto.write_key_file(fresh)
+                except Exception as e:  # noqa: BLE001 — the rotation still happens
+                    self.get_logger().warning(f'Could not write the token key file: {type(e).__name__}')
+                self._hf_token_key = fresh
+            self.get_logger().info('Rotated the token key: its record of opened values was full')
+            self._publish_hf_token_state()
+        except Exception as e:  # noqa: BLE001 — a rotation never breaks a service call
+            self.get_logger().error(f'token key rotation failed: {type(e).__name__}')
 
     def set_hf_user_callback(self, request, response):
         """/register_hf_user — since 042 it sets, replaces or clears the robot's

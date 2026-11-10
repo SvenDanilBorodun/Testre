@@ -242,3 +242,155 @@ class TestKeyFile(unittest.TestCase):
         self.assertNotIn(crypto.b64url(private), text)
         self.assertNotIn(private.hex(), text)
         self.assertEqual(set(json.loads(text)), {'v', 'enc', 'kid', 'pub'})
+
+
+class TestReplay(unittest.TestCase):
+    """VC-05 (verification round C, 2026-11-15): a captured ``enc1:`` value
+    could be replayed to the node for the rest of its run, putting a
+    classmate's token back into the slot after they signed out. The key now
+    refuses a value it already decrypted, judged on the DECODED parts (a
+    re-encoded value is the same value), and an exhausted record refuses
+    everything until the node rotates the key."""
+
+    def setUp(self):
+        self.key = crypto.RobotKey.generate()
+
+    def wire(self, token=TOK, context=crypto.CONTEXT):
+        return crypto.encrypt_for_tests(self.key.public_b64, self.key.kid, token, context=context)
+
+    def test_the_same_value_is_refused_the_second_time(self):
+        wire = self.wire()
+        self.assertEqual(self.key.decrypt(wire), TOK)
+        with self.assertRaises(crypto.WireError) as caught:
+            self.key.decrypt(wire)
+        self.assertEqual(caught.exception.code, 'replayed')
+        self.assertNotIn(wire, str(caught.exception))
+
+    def test_a_genuine_re_push_of_the_same_token_is_never_a_duplicate(self):
+        for _ in range(5):
+            self.assertEqual(self.key.decrypt(self.wire()), TOK)
+
+    def test_a_value_that_failed_is_not_recorded(self):
+        wire = self.wire()
+        head, tail = wire.rsplit('.', 1)
+        raw = bytearray(_b64url(tail))
+        raw[0] ^= 1
+        with self.assertRaises(crypto.WireError):
+            self.key.decrypt(head + '.' + crypto.b64url(bytes(raw)))
+        self.assertEqual(self.key.decrypt(wire), TOK)  # the genuine value still works once
+
+    def test_a_non_canonical_re_encoding_is_refused_not_a_new_value(self):
+        # Python's base64 decoder ignores the unused low bits of the last
+        # character: a value whose last character differs only there decodes
+        # to the same bytes. A digest of the STRING would call it new.
+        wire = self.wire()
+        self.assertEqual(self.key.decrypt(wire), TOK)
+        alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+        head, tail = wire.rsplit('.', 1)
+        unused = {2: 4, 3: 2}.get(len(tail) % 4, 0)  # low bits the decoder drops
+        self.assertGreater(unused, 0, 'the fixture tail must leave unused bits')
+        index = alphabet.index(tail[-1])
+        twin = head + '.' + tail[:-1] + alphabet[index ^ 1]
+        self.assertNotEqual(twin, wire)
+        self.assertEqual(_b64url(twin.rsplit('.', 1)[1]), _b64url(tail))  # the same bytes
+        with self.assertRaises(crypto.WireError) as caught:
+            self.key.decrypt(twin)
+        self.assertIn(caught.exception.code, ('malformed', 'replayed'))
+
+    def test_two_threads_racing_the_same_value_accept_it_once(self):
+        import threading
+        wire = self.wire()
+        results = []
+
+        def go():
+            try:
+                results.append(self.key.decrypt(wire))
+            except crypto.WireError as e:
+                results.append(e.code)
+        threads = [threading.Thread(target=go) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(sorted(results), sorted([TOK] + ['replayed'] * 7))
+
+    def test_a_full_record_refuses_everything_until_a_new_key(self):
+        from unittest.mock import patch
+        with patch.object(crypto, 'MAX_SEEN_WIRES', 3):
+            key = crypto.RobotKey.generate()
+            for _ in range(3):
+                self.assertFalse(key.exhausted)
+                key.decrypt(crypto.encrypt_for_tests(key.public_b64, key.kid, TOK))
+            self.assertTrue(key.exhausted)
+            with self.assertRaises(crypto.WireError) as caught:
+                key.decrypt(crypto.encrypt_for_tests(key.public_b64, key.kid, TOK))
+            self.assertEqual(caught.exception.code, 'stale')  # the SPA re-reads the key
+            fresh = crypto.RobotKey.generate()  # the node's rotation: an empty record
+            self.assertFalse(fresh.exhausted)
+            self.assertEqual(fresh.decrypt(crypto.encrypt_for_tests(fresh.public_b64, fresh.kid, TOK)), TOK)
+
+    def test_the_record_is_bounded_and_holds_no_value(self):
+        self.key.decrypt(self.wire())
+        (digest,) = self.key._seen
+        self.assertIsInstance(digest, bytes)
+        self.assertEqual(len(digest), 32)
+        self.assertGreaterEqual(crypto.MAX_SEEN_WIRES, 256)
+
+
+class TestContexts(unittest.TestCase):
+    """VC-06 (verification round C): Cloud-Inferenz's two session tokens ride
+    the same envelope, each with its OWN context (HKDF salt and AAD), so no
+    envelope can be replayed as another kind."""
+
+    def setUp(self):
+        self.key = crypto.RobotKey.generate()
+        self.contexts = (crypto.CONTEXT, crypto.CLOUD_SESSION_CONTEXT, crypto.CLOUD_EDGE_CONTEXT)
+
+    def test_three_distinct_contexts(self):
+        self.assertEqual(len(set(self.contexts)), 3)
+        self.assertEqual(crypto.CONTEXT, b'edubotics-hf-token:v1')
+        self.assertEqual(crypto.CLOUD_SESSION_CONTEXT, b'edubotics-cloud-session-token:v1')
+        self.assertEqual(crypto.CLOUD_EDGE_CONTEXT, b'edubotics-cloud-edge-token:v1')
+
+    def test_a_value_opens_only_under_its_own_context(self):
+        plain = 'C' * 43
+        for made in self.contexts:
+            for read in self.contexts:
+                with self.subTest(made=made, read=read):
+                    wire = crypto.encrypt_for_tests(self.key.public_b64, self.key.kid, plain, context=made)
+                    if made == read:
+                        self.assertEqual(self.key.decrypt(wire, context=read), plain)
+                    else:
+                        with self.assertRaises(crypto.WireError) as caught:
+                            self.key.decrypt(wire, context=read)
+                        self.assertEqual(caught.exception.code, 'bad')
+
+    def test_the_default_context_is_the_hf_token(self):
+        wire = crypto.encrypt_for_tests(self.key.public_b64, self.key.kid, TOK)
+        self.assertEqual(self.key.decrypt(wire, context=crypto.CONTEXT), TOK)
+
+    def test_an_unknown_context_is_a_programming_error(self):
+        wire = crypto.encrypt_for_tests(self.key.public_b64, self.key.kid, TOK)
+        with self.assertRaises(ValueError):
+            self.key.decrypt(wire, context=b'edubotics-something-else:v1')
+
+    def test_the_longest_edge_token_fits_its_bound_and_not_the_token_bound(self):
+        edge = '!' + '~' * 4095  # cloud_protocol.EDGE_TOKEN_RE: printable ASCII, 16..4096
+        wire = crypto.encrypt_for_tests(self.key.public_b64, self.key.kid, edge,
+                                        context=crypto.CLOUD_EDGE_CONTEXT)
+        self.assertGreater(len(wire), crypto.MAX_WIRE_LEN)
+        self.assertLessEqual(len(wire), crypto.CLOUD_EDGE_MAX_WIRE_LEN)
+        self.assertEqual(self.key.decrypt(wire, context=crypto.CLOUD_EDGE_CONTEXT), edge)
+        token_sized = crypto.encrypt_for_tests(self.key.public_b64, self.key.kid, edge,
+                                               context=crypto.CLOUD_SESSION_CONTEXT)
+        with self.assertRaises(crypto.WireError) as caught:
+            self.key.decrypt(token_sized, context=crypto.CLOUD_SESSION_CONTEXT)
+        self.assertEqual(caught.exception.code, 'malformed')
+
+    def test_one_record_across_contexts(self):
+        wire = crypto.encrypt_for_tests(self.key.public_b64, self.key.kid, 'C' * 43,
+                                        context=crypto.CLOUD_SESSION_CONTEXT)
+        self.key.decrypt(wire, context=crypto.CLOUD_SESSION_CONTEXT)
+        with self.assertRaises(crypto.WireError) as caught:
+            self.key.decrypt(wire, context=crypto.CLOUD_SESSION_CONTEXT)
+        self.assertEqual(caught.exception.code, 'replayed')

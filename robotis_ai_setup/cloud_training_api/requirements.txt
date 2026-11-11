@@ -1,14 +1,14 @@
-fastapi==0.115.12
-uvicorn[standard]==0.34.2
-supabase==2.15.1
+fastapi==0.115.14
+uvicorn[standard]==0.34.3
+supabase==2.34.0
 # Bounded: an unbounded `modal>=0.64` floor once floated to a breaking
 # major (1.4.3) on deploy and broke runtime Modal calls. Keep the upper
 # bound; 1.4.x is verified working — review before bumping to 2.x.
 # 1.6: Server/sessions for Cloud-Inferenz; the training dispatch calls are unchanged.
 modal>=1.6,<2
 httpx==0.28.1
-python-dotenv==1.1.0
-pydantic==2.11.3
+python-dotenv==1.2.4
+pydantic==2.14.2
 # Pinned (V2-3): hf_publish reads RepoFile.lfs / .blob_id back after every publish. 1.23.0 is the
 # server image's version, which CI's one python-tests venv installs, so
 # app/tests/test_hf_publish_real_hub.py runs against exactly this version.
@@ -19,5 +19,5 @@ cryptography==49.0.0
 # (services/jwt_auth.py). The [crypto] extra is the cryptography pinned above.
 PyJWT[crypto]==2.15.1
 # 049: Cloudflare R2 (S3 API) for managed-training checkpoints (services/r2_client.py).
-boto3==1.43.107
-botocore==1.43.107
+boto3==1.43.123
+botocore==1.43.123

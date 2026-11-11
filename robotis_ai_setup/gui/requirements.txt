@@ -14,5 +14,5 @@ pythonnet>=3.1.0rc0
 # see win_camera._capture_backend) and stream JPEG frames into the container.
 # The full opencv-python wheel is required (NOT -headless — we need the
 # Windows capture backends); it bundles numpy.
-opencv-python>=4.8
+opencv-python>=5.0.0.93
 numpy>=1.24

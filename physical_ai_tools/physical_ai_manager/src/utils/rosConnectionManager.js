@@ -1,4 +1,5 @@
-// Copyright 2025 EduBotics
+// Copyright 2025 ROBOTIS CO., LTD.
+// Modifications copyright 2026 Sven Danil Borodun (EduBotics)
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,14 +22,14 @@ import ROSLIB from 'roslib';
  * (spec-r5 §2.3-3). Local = the same-origin nginx proxy `ws(s)://<host>/rosbridge`
  * of the student PC and the Orange Pi; it comes back with the environment, so
  * the page retries every 2 s and never gives up — a page that lost its link
- * during a recording then sees the session's end within ~4 s, not ~30 s. The
- * Jetson proxy (`ws://<ip>:9091`) keeps the exponential backoff and its cap.
+ * during a recording then sees the session's end within ~4 s, not ~30 s. Any
+ * other URL (a developer pointing the page at a rosbridge elsewhere) keeps an
+ * exponential backoff with a 30 s cap and gives up after 30 attempts.
  */
 export const LOCAL_RECONNECT_MAX_DELAY_MS = 2000;
 const REMOTE_RECONNECT_MAX_DELAY_MS = 30000;
-const JETSON_PROXY_PORT = '9091';
 
-/** True for the local same-origin rosbridge (path `/rosbridge`, not the Jetson proxy port). */
+/** True for the local same-origin rosbridge (path `/rosbridge`). */
 export function isLocalRosbridgeUrl(url) {
   if (typeof url !== 'string' || !url) return false;
   let parsed;
@@ -37,7 +38,7 @@ export function isLocalRosbridgeUrl(url) {
   } catch {
     return false;
   }
-  return parsed.pathname.replace(/\/+$/, '') === '/rosbridge' && parsed.port !== JETSON_PROXY_PORT;
+  return parsed.pathname.replace(/\/+$/, '') === '/rosbridge';
 }
 
 /** The wait before reconnect attempt `attempt` (0-based) to `url`. */
@@ -60,25 +61,22 @@ class RosConnectionManager {
     this.maxReconnectAttempts = 30;
     this.reconnectTimer = null;
     this.intentionalDisconnect = false;
-    // Jetson auth: when the URL points at a Jetson rosbridge proxy
-    // (port 9091), the proxy expects the first WS frame to be
-    // {op: "auth", token: "<JWT>"}. We send that on the 'connection'
-    // event BEFORE any user-facing subscribe/advertise. useJetsonConnection
-    // pushes the rotated Supabase access token here via setAuthToken
-    // whenever it changes during a connected session (see its accessToken
-    // effect), so authToken is always current and a reconnect after a
-    // mid-session token rotation carries a live JWT instead of a dead one.
-    this.authToken = null;
+    // Orange Pi robot login (features/piAuth): an async function that must
+    // resolve before a websocket is opened. Null off a Pi.
+    this.connectGate = null;
+    // Bumped by every disconnect(): a gated attempt that outlived a disconnect
+    // neither opens a socket nor revives the reconnect loop.
+    this.disconnectGeneration = 0;
   }
 
   /**
-   * Set / clear the JWT to send as the first frame on connection.
-   * Called by useJetsonConnection on connect (with the current Supabase
-   * access token) and on disconnect (with null).
-   * @param {string|null} token
+   * Install the connect gate (Pi mode) or remove it (null). A gate that
+   * rejects fails this attempt WITHOUT opening a socket; the reconnect loop
+   * keeps trying, so the connection comes up once the robot session exists.
+   * @param {(() => Promise<void>)|null} gate
    */
-  setAuthToken(token) {
-    this.authToken = token || null;
+  setConnectGate(gate) {
+    this.connectGate = typeof gate === 'function' ? gate : null;
   }
 
   /**
@@ -136,7 +134,44 @@ class RosConnectionManager {
     console.log('Creating new global ROS connection to:', rosbridgeUrl);
     this.connecting = true;
 
-    this.connectionPromise = new Promise((resolve, reject) => {
+    if (this.connectGate) {
+      // Pi robot login: no websocket before a session. ONE gated attempt for
+      // every concurrent caller (they all await this promise).
+      const gate = this.connectGate;
+      const generation = this.disconnectGeneration;
+      this.connectionPromise = (async () => {
+        try {
+          await gate();
+        } catch (error) {
+          this.connecting = false;
+          this.connectionPromise = null;
+          // Keep the loop alive: no socket was opened, so no 'close' will
+          // schedule the next attempt, and the first attempt after a URL change
+          // still carries disconnect()'s intentional flag — without this the
+          // page would never connect once the student logs in. Unless the page
+          // itself disconnected meanwhile (a newer generation), and never
+          // stacking a second timer on a pending one.
+          if (generation === this.disconnectGeneration) {
+            this.intentionalDisconnect = false;
+            if (!this.reconnectTimer) this._scheduleReconnect();
+          }
+          throw new Error(`ROS connection waits for the robot login: ${error.message || error}`);
+        }
+        if (generation !== this.disconnectGeneration) {
+          throw new Error('ROS connection was closed while it waited for the robot login');
+        }
+        return this._openSocket(rosbridgeUrl);
+      })();
+      return this.connectionPromise;
+    }
+
+    this.connectionPromise = this._openSocket(rosbridgeUrl);
+    return this.connectionPromise;
+  }
+
+  /** Open the websocket (after any connect gate). */
+  _openSocket(rosbridgeUrl) {
+    return new Promise((resolve, reject) => {
       const ros = new ROSLIB.Ros({ url: rosbridgeUrl });
 
       const connectionTimeout = setTimeout(() => {
@@ -153,23 +188,6 @@ class RosConnectionManager {
         this.connectionPromise = null;
         this.reconnectAttempts = 0;
         this.intentionalDisconnect = false;
-
-        // Jetson auth-op: if a token is set, send it as the FIRST frame
-        // before any subscribe/advertise the user-side `onConnected`
-        // callback might queue. ROSLIB.Ros exposes the raw .socket; we
-        // use it directly because ROSLIB doesn't have an 'auth' op of
-        // its own. The Jetson proxy holds back upstream traffic until
-        // this frame arrives and verifies.
-        if (this.authToken && ros.socket && ros.socket.readyState === 1) {
-          try {
-            ros.socket.send(JSON.stringify({
-              op: 'auth',
-              token: this.authToken,
-            }));
-          } catch (error) {
-            console.warn('Failed to send JWT auth frame:', error);
-          }
-        }
 
         resolve(ros);
 
@@ -200,8 +218,6 @@ class RosConnectionManager {
         this._scheduleReconnect();
       });
     });
-
-    return this.connectionPromise;
   }
 
   /**
@@ -222,6 +238,7 @@ class RosConnectionManager {
       + `in ${delay}ms`);
 
     this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null;
       if (this.intentionalDisconnect) return;
       try {
         await this.getConnection(this.url);
@@ -236,6 +253,7 @@ class RosConnectionManager {
    */
   disconnect() {
     this.intentionalDisconnect = true;
+    this.disconnectGeneration += 1;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

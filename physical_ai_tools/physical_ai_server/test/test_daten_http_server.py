@@ -131,10 +131,14 @@ def test_unknown_routes_are_404_json(srv):
 def test_tokens_bad_expired_and_of_the_wrong_scope(srv):
     tok = LT.mint(SECRET, LT.dataset_scope(f'{NS}/omx_f_ok'))
     forged = LT.mint(b'x' * 32, LT.dataset_scope(f'{NS}/omx_f_ok'))
+    # The tampered copy must really differ: the signature's last character is
+    # uniform over 64 (its payload carries the expiry, so it changes every run),
+    # and `tok[:-1] + 'A'` was the token itself in 1 run of 64.
+    tampered = tok[:-1] + ('B' if tok.endswith('A') else 'A')
     cases = [
         (f'{C.API_PREFIX}/ds/garbage/summary', 'token_invalid'),
         (f'{C.API_PREFIX}/ds/{forged}/summary', 'token_invalid'),
-        (f'{C.API_PREFIX}/ds/{tok[:-1]}A/summary', 'token_invalid'),
+        (f'{C.API_PREFIX}/ds/{tampered}/summary', 'token_invalid'),
         (f'{ds(NS + "/omx_f_ok", now=time.time() - 4000)}/summary', 'token_expired'),
         (lib_url().replace('/lib/', '/ds/') + '/summary', 'scope'),                    # a lib token on a ds route
         (ds(NS + '/omx_f_ok').replace('/ds/', '/lib/') + '/library?ns=' + NS, 'scope'),  # and the reverse

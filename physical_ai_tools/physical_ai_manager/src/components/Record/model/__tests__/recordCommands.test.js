@@ -1,7 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 
 // The Aufnahme command table (spec §3.6): preconditions on the latest status,
 // the SendCommand sequence, the intents around it, and what the page says —

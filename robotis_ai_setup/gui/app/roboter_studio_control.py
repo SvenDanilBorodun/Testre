@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 #
-# Copyright 2025 EduBotics
+# Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Proprietary and confidential. Licensed under the EduBotics End-User
+# Licence Agreement; see LICENSE at the repository root.
 """Localhost HTTP control bridge for the Roboter Studio leader toggle.
 
 The student does Roboter Studio in the React app (served from the
@@ -226,7 +223,12 @@ class RoboterStudioControlServer:
                 # The state-changing POSTs restart the arm container. CORS only
                 # blocks the cross-origin RESPONSE read, not a "simple" POST's
                 # SIDE EFFECT — so we reject a cross-site Origin at the handler.
-                # Empty Origin = same-origin / non-browser caller (allowed).
+                # An EMPTY Origin is refused too (SA-21, 2026-11-13): every
+                # browser sends one on a POST (the SPA's fetch is CORS-mode and
+                # cross-origin — http://localhost → :8769 — so it always carries
+                # `Origin: http://localhost`), so an Origin-less POST can only
+                # come from another local process or another logged-in Windows
+                # user on a shared PC, neither of which may restart the arm.
                 # Parse the URL and require the HOST to be EXACTLY localhost /
                 # 127.0.0.1 — a `startswith` check is bypassable by an attacker
                 # origin like http://localhost.evil.com.
@@ -239,8 +241,8 @@ class RoboterStudioControlServer:
                 # `.port` is inside the try: urlsplit defers the port parse, so
                 # `http://localhost:notaport` raises ValueError only here.
                 origin = self.headers.get("Origin", "")
-                if origin == "":
-                    return True
+                if not origin:
+                    return False
                 try:
                     parts = urlsplit(origin)
                     host = parts.hostname

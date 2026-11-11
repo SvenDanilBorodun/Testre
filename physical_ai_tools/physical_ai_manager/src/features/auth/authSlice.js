@@ -34,6 +34,11 @@ const initialState = {
   // the token on the Startseite (PUT /me/hf-token). Null until a token has been
   // stored, and again after sign-out.
   hfUsername: null,
+  // GDPR Art. 17 (launch plan step 5): the caller's open deletion request and its
+  // Art. 12(3) deadline, from /me (ISO timestamps), null when none is open. The
+  // student SPA shows them (components/DeletionRequestNotice.jsx).
+  deletionRequestedAt: null,
+  deletionDueBy: null,
   profileLoaded: false,
   // Set when GET /me fails in a NON-auth way (404 = JWT valid but no
   // public.users row; network/5xx after retries). profileLoaded stays
@@ -84,6 +89,8 @@ function clearProfileFields(state) {
   state.workgroupId = null;
   state.workgroupName = null;
   state.hfUsername = null;
+  state.deletionRequestedAt = null;
+  state.deletionDueBy = null;
   state.profileLoaded = false;
   state.profileError = null;
   state.poolTotal = null;
@@ -134,6 +141,8 @@ const authSlice = createSlice({
       state.workgroupId = p.workgroup_id ?? null;
       state.workgroupName = p.workgroup_name ?? null;
       state.hfUsername = p.hf_username ?? null;
+      state.deletionRequestedAt = typeof p.deletion_requested_at === 'string' ? p.deletion_requested_at : null;
+      state.deletionDueBy = typeof p.deletion_due_by === 'string' ? p.deletion_due_by : null;
       state.profileLoaded = true;
       state.profileError = null;
       if (p.role === 'teacher') {
@@ -152,6 +161,11 @@ const authSlice = createSlice({
     // whole profile.
     setHfUsername: (state, action) => {
       state.hfUsername = action.payload ?? null;
+    },
+    // After POST /me/delete/withdraw: the request is no longer open.
+    clearDeletionRequest: (state) => {
+      state.deletionRequestedAt = null;
+      state.deletionDueBy = null;
     },
     // Surface a profile-load failure to the UI gates without signing out
     // (a valid JWT can still hit a missing public.users row, or a 5xx).
@@ -198,6 +212,7 @@ export const {
   setQuota,
   setProfile,
   setHfUsername,
+  clearDeletionRequest,
   setProfileError,
   requestProfileRefetch,
   updateTeacherPool,

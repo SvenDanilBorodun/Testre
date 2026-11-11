@@ -1,11 +1,8 @@
 /*
- * Copyright 2026 EduBotics
+ * Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * Proprietary and confidential. Licensed under the EduBotics End-User
+ * Licence Agreement; see LICENSE at the repository root.
  */
 
 // The icon a toast shows (react-hot-toast's `icon` option), by what the toast
@@ -41,8 +38,6 @@ export const TOAST_ICONS = Object.freeze({
   record: 'record',
   stop: 'hand',
   simulator: 'simulator',
-  unplugged: 'unplugged',
-  timeout: 'alarm',
 });
 
 /** The toast kind that draws a robot; it needs `{ profile }` (see above). */

@@ -1,15 +1,15 @@
-"""Rule §5 LeRobot pin lockstep across all six install sites (deps-free).
+"""Rule §5 LeRobot pin lockstep across all five install sites (deps-free).
 
 CLAUDE.md Rule §5 says the LeRobot version pin "must agree across" its sites
 and that bumping it is "a one-PR multi-site change". Nothing enforced that.
-The sixth site (Cloud-Inferenz, spec §3.2 / D10) is the Modal inference app,
+One site (Cloud-Inferenz, spec §3.2 / D10) is the Modal inference app,
 which pins plain ``lerobot==<version>`` WITHOUT extras (ACT needs none) and
 must share the training worker's scipy, accelerate and torch/torchvision/cu126.
 Before this test the repo had:
 
   - no test that reads ANY Dockerfile (the five test suites all stub lerobot
     out via sys.modules, so none of them can see a pin);
-  - image-source-parity, which DELETES all three base Dockerfiles before it
+  - image-source-parity, which DELETES both base Dockerfiles before it
     diffs, so its byte-equality check is blind to them by construction;
   - docker-publish's smoke-test, which asserts the image has ROS and is under a
     size ceiling but never asserts a package version.
@@ -47,20 +47,21 @@ _TESTS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _TESTS_DIR.parents[1]
 _PAS_DIR = _REPO_ROOT / "physical_ai_tools" / "physical_ai_server"
 
-# The six Rule §5 sites, keyed by the repo-relative label used in failures.
+# The five Rule §5 sites, keyed by the repo-relative label used in failures.
+# (Dockerfile.arm64, the classroom Jetson's base, was a sixth until the Jetson
+# was retired on 2026-11-09.)
 MODAL_SITE = "robotis_ai_setup/modal_training/make_training_lock.py"
 INFERENCE_SITE = "robotis_ai_setup/modal_inference/inference_app.py"
 SITES = {
     MODAL_SITE: _REPO_ROOT / "robotis_ai_setup" / "modal_training" / "make_training_lock.py",
     INFERENCE_SITE: _REPO_ROOT / "robotis_ai_setup" / "modal_inference" / "inference_app.py",
     "physical_ai_tools/physical_ai_server/Dockerfile.amd64": _PAS_DIR / "Dockerfile.amd64",
-    "physical_ai_tools/physical_ai_server/Dockerfile.arm64": _PAS_DIR / "Dockerfile.arm64",
     "physical_ai_tools/physical_ai_server/Dockerfile.arm64cpu": _PAS_DIR / "Dockerfile.arm64cpu",
     "robotis_ai_setup/docker/physical_ai_server/Dockerfile": (
         _REPO_ROOT / "robotis_ai_setup" / "docker" / "physical_ai_server" / "Dockerfile"
     ),
 }
-# The two Modal images (numpy 2.x, no cv_bridge) and the four SERVER images — the
+# The two Modal images (numpy 2.x, no cv_bridge) and the three SERVER images — the
 # numpy floor applies to the servers and ONLY there (see test_numpy_floor_*).
 MODAL_SITES = [MODAL_SITE, INFERENCE_SITE]
 SERVER_SITES = [name for name in SITES if name not in MODAL_SITES]
@@ -79,7 +80,7 @@ EXPECTED_SCIPY = "scipy>=1.14.0,<1.18"
 EXPECTED_NUMPY = "numpy==1.26.4"
 
 _RULE5 = (
-    "CLAUDE.md Rule §5: the LeRobot pin must agree across all six sites and "
+    "CLAUDE.md Rule §5: the LeRobot pin must agree across all five sites and "
     "moves in ONE PR. Divergence here ships a student image whose lerobot "
     "disagrees with the Modal trainer's."
 )
@@ -146,7 +147,7 @@ class LeRobotPinLockstepTest(unittest.TestCase):
             version = const.group(1)
         return extras, version
 
-    def test_lerobot_version_agrees_across_all_six_sites(self):
+    def test_lerobot_version_agrees_across_all_five_sites(self):
         found = {name: self._lerobot_pin(name)[1] for name in SITES}
         divergent = sorted(n for n, v in found.items() if v != EXPECTED_LEROBOT_VERSION)
         self.assertFalse(
@@ -175,7 +176,7 @@ class LeRobotPinLockstepTest(unittest.TestCase):
             f"`pi`. {_RULE5}",
         )
 
-    def test_accelerate_constraint_agrees_across_all_six_sites(self):
+    def test_accelerate_constraint_agrees_across_all_five_sites(self):
         found = {}
         for name in SITES:
             m = _ACCELERATE_RE.search(self.code[name])
@@ -188,8 +189,8 @@ class LeRobotPinLockstepTest(unittest.TestCase):
             f"{found!r}. Divergent: {divergent}. {_RULE5}",
         )
 
-    def test_scipy_cap_agrees_across_all_six_sites(self):
-        # The <1.18 cap is load-bearing on the four server images: scipy 1.18.0
+    def test_scipy_cap_agrees_across_all_five_sites(self):
+        # The <1.18 cap is load-bearing on the three server images: scipy 1.18.0
         # dropped numpy-1.x support and references np.long, which explodes
         # against the numpy==1.26.4 cv_bridge floor (it broke the v2.9.2 build).
         # Modal runs numpy 2.x so it would survive a widen — which is precisely

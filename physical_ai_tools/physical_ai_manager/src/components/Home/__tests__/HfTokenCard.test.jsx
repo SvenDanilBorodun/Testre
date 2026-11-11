@@ -1,7 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 //
 // The Startseite's token card, on a REAL store with the real thunks (only the
 // cloud calls are mocked). Pinned: every state of the account and of the robot
@@ -17,7 +17,6 @@ import { configureStore } from '@reduxjs/toolkit';
 
 import authReducer, { setIsLoading, setSession } from '../../../features/auth/authSlice';
 import tasksReducer, { setHeartbeatStatus } from '../../../features/tasks/taskSlice';
-import jetsonReducer, { setJetsonStatus } from '../../../store/jetsonSlice';
 import uiReducer from '../../../features/ui/uiSlice';
 import hfReducer, {
   accountFailed,
@@ -73,7 +72,6 @@ function setup(actions = [], { withSlice = true, heartbeat = 'connected' } = {})
     reducer: {
       auth: authReducer,
       tasks: tasksReducer,
-      jetson: jetsonReducer,
       ui: uiReducer,
       ...(withSlice ? { hfToken: hfReducer } : {}),
     },
@@ -296,7 +294,7 @@ describe('HfTokenCard — the stored view and its robot pill', () => {
     expect(pill('card.pill.noLink')).toBeInTheDocument();
   });
 
-  it('says an old image or a Jetson image takes no personal token', () => {
+  it('says an image without a personal slot takes no personal token', () => {
     const a = setup([stored(), robotLegacyConfirmed()]);
     expect(pill('card.pill.notAccepted')).toBeInTheDocument();
     a.unmount();
@@ -378,12 +376,6 @@ describe('HfTokenCard — the stored view and its robot pill', () => {
     expect(pill('card.pill.takenOver')).toBeInTheDocument();
   });
 
-  it('a claimed Jetson replaces the robot pill with the Jetson note', () => {
-    setup([stored(), setJetsonStatus('connected'), robot({ present: true, fp: OTHER })]);
-    expect(screen.getByText(T['card.jetsonNote'])).toBeInTheDocument();
-    expect(screen.queryByText(T['card.pill.working'])).toBeNull();
-    expect(screen.queryByText(T['card.pill.active'])).toBeNull();
-  });
 });
 
 describe('HfTokenCard — replace, verify, remove', () => {
@@ -467,11 +459,10 @@ describe('HfTokenCard — where it does not belong', () => {
 describe('robotView (pure)', () => {
   const base = {
     robot: { known: true, accepts: true, present: true, fp: OTHER, busy: false, legacy: false },
-    heartbeatConnected: true, jetsonConnected: false, inSync: false, working: false, decision: 'push', failed: false,
+    heartbeatConnected: true, inSync: false, working: false, decision: 'push', failed: false,
   };
 
   it('picks one view per situation, in a fixed order', () => {
-    expect(robotView({ ...base, jetsonConnected: true }).note).toBe('card.jetsonNote');
     expect(robotView({ ...base, inSync: true }).pill).toBe('card.pill.active');
     expect(robotView({ ...base, decision: 'taken_over', failed: true }).pill).toBe('card.pill.takenOver');
     expect(robotView({ ...base, failed: true, working: true }).pill).toBe('card.pill.failed');

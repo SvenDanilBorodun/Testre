@@ -77,7 +77,7 @@ def _read_version_file() -> str:
 APP_VERSION = _read_version_file()
 
 # Cloud API URL for the update check (`/version`). Same host the Windows
-# GUI + the Jetson agent use; override for dev/testing.
+# GUI uses; override for dev/testing.
 UPDATE_API_URL = os.environ.get(
     "EDUBOTICS_UPDATE_API_URL",
     "https://scintillating-empathy-production-1068.up.railway.app",
@@ -216,12 +216,14 @@ ALL_IMAGES = [image_ref(n) for n in IMAGE_NAMES]
 # --- Network ports (all native; no usbipd, no WSL localhost forwarder) ---
 PORT_WEB_UI = 80            # physical_ai_manager (nginx, serves the SPA)
 # :8080 and :9090 are the CONTAINER-side ports of web_video_server and
-# rosbridge. Since 4d1b046 the opi compose publishes them as
-# `127.0.0.1:8080:8080` / `127.0.0.1:9090:9090` — LOOPBACK-PINNED, reachable
-# only through `ssh -L 9090:127.0.0.1:9090 <pi>`, not from the LAN.
+# rosbridge. The opi compose publishes NEITHER on the host (SA-05,
+# 2026-11-13): the loopback debug publishes 4d1b046 had pinned were removed,
+# because Docker before 28.0 (the Pi pins 27.5.1) accepts a routed LAN packet
+# for a published container port whatever host address it is bound to. Debugging is `docker exec` into
+# the container; firewall.py drops routed LAN packets to ros_net on top.
 #
-# The old comment here called this port LAN-open "by decision" — true until
-# that commit, and now the opposite of the truth. It mattered: rosbridge is
+# An older comment here called this port LAN-open "by decision". It mattered:
+# rosbridge is
 # UNAUTHENTICATED and rosbridge_server 2.7.0's `check_origin` is literally
 # `return True`, so while the publish was LAN-bound the manager's /rosbridge
 # Origin gate was skippable rather than defeatable — a handshake straight at
@@ -544,8 +546,18 @@ ROS_DOMAIN_FILE = os.environ.get(
     "EDUBOTICS_ROS_DOMAIN_FILE", "/var/lib/edubotics/.ros_domain_id"
 )
 
+# The robot's PUBLIC token key (VB-03, 2026-11-15, robot_key.py): the ROS node
+# writes ROBOT_KEY_DIR/ROBOT_KEY_FILE_NAME through the opi compose's bind mount
+# of this host directory (the same path inside the container), and the agent
+# serves it on GET /robot-key behind the robot login. /run is a tmpfs: the
+# agent re-creates the directory before every robot-tier `up`. Equal to
+# hf_token_crypto.KEY_FILE_DIR / KEY_FILE_NAME and the compose's mount line
+# (robotis_ai_setup/tests/test_robot_key_file_lockstep.py).
+ROBOT_KEY_DIR = "/run/edubotics-robot-key"
+ROBOT_KEY_FILE_NAME = "hf_token_key.json"
+
 # Source of the stable machine identifier for the ROS_DOMAIN_ID derivation
-# (hash mod 233), matching the Jetson setup.sh convention. uuid.getnode() is
+# (hash mod 233), the retired Jetson setup.sh's convention. uuid.getnode() is
 # the fallback when this is unreadable.
 MACHINE_ID_FILE = os.environ.get("EDUBOTICS_MACHINE_ID_FILE", "/etc/machine-id")
 

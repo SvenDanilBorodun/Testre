@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 #
-# Copyright 2026 EduBotics
+# Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
+# Proprietary and confidential. Licensed under the EduBotics End-User
+# Licence Agreement; see LICENSE at the repository root.
 
-"""„Modellpfad auswählen" opens where checkpoints actually are.
+"""The server has ONE model root, and every reader of it uses it.
 
 THREE PLACES USED TO DISAGREE about where a downloaded model checkpoint lives,
 and after the 2026-08-06 browse confinement the disagreement stopped being
@@ -19,42 +19,27 @@ merely useless and became a hard refusal:
     from ``lerobot.__file__`` — the pip site-packages install, which nothing
     writes to. ``dataset_paths.model_root()`` took the browsable root from it,
     so the file browser's allowlist named an empty directory;
-  * React's ``constants/paths.js`` ``POLICY_MODEL_PATH`` named a THIRD path,
-    ``/root/ros2_ws/src/physical_ai_tools/lerobot/outputs/train/`` — inside the
-    tree the build deletes — from a ``REACT_APP_LEROBOT_OUTPUTS_PATH`` that no
-    Dockerfile sets.
+  * React's ``constants/paths.js`` named a THIRD path inside the tree the build
+    deletes.
 
-Measured before/after: the modal used to open on an empty directory and let the
-student navigate UP to find the checkpoint; with confinement in place it opened
-outside every browsable root and returned a German security refusal with
-nowhere to go.
+The React half (``constants/paths.js``, read by the Inferenz page's local model
+picker and its download dialog) went with that local-inference UI on
+2026-11-09: the page runs „In der Cloud" only and names no robot path. What
+stays is the server half — one root, derived from ``MODEL_ROOT_RELATIVE``, and
+every server reader calling it instead of respelling it.
 
 Nothing here needs lerobot, ROS or numpy: ``dataset_paths`` is stdlib-only by
-design and the React side is read as text. The DRIFT this file exists for is
-cross-language and silent in the same way the old one was — a rename on either
-side leaves both suites green while the student's modal refuses.
+design.
 """
 
 import ast
 import pathlib
-import re
 import unittest
 
 _HERE = pathlib.Path(__file__).resolve()
 _PKG = _HERE.parents[1] / 'physical_ai_server'
-_REPO_ROOT = _HERE.parents[3]
-_PATHS_JS = (
-    _REPO_ROOT / 'physical_ai_tools' / 'physical_ai_manager'
-    / 'src' / 'constants' / 'paths.js'
-)
 _DATA_MANAGER = _PKG / 'data_processing' / 'data_manager.py'
 _TRAINING_MANAGER = _PKG / 'training' / 'training_manager.py'
-
-# The container runs as root — the physical_ai_server image declares no USER —
-# so `Path.home()` inside it is `/root`. Stated here rather than computed,
-# because this test runs on a developer host where `Path.home()` is something
-# else entirely, and the React side can only ever carry an absolute literal.
-_CONTAINER_HOME = '/root'
 
 
 def _code_of(tree, name):
@@ -74,89 +59,6 @@ def _code_of(tree, name):
     if not body:
         raise AssertionError(f'{name} has no code, only a docstring')
     return '\n'.join(ast.unparse(stmt) for stmt in body)
-
-
-def _js_const(name):
-    """Resolve a `const NAME = ...;` in paths.js down to a plain string.
-
-    Handles the two forms the file uses — a bare literal and a template string
-    interpolating consts declared above it — which is enough to compare against
-    the Python constant without importing a JS engine.
-    """
-    text = _PATHS_JS.read_text(encoding='utf-8')
-    consts = {}
-    for m in re.finditer(
-            r"^const\s+([A-Za-z_$][\w$]*)\s*=\s*([`'\"])(.*?)\2\s*;",
-            text, re.MULTILINE):
-        consts[m.group(1)] = m.group(3)
-    # DEFAULT_PATHS members are template strings over those consts.
-    for m in re.finditer(
-            r"^\s*([A-Z_]+):\s*([`'\"])(.*?)\2\s*,", text, re.MULTILINE):
-        consts[m.group(1)] = m.group(3)
-
-    def expand(value, depth=0):
-        if depth > 5:
-            raise AssertionError(f'template expansion loop at {value!r}')
-        out = re.sub(
-            r'\$\{([A-Za-z_$][\w$]*)\}',
-            lambda mm: consts.get(mm.group(1), f'<<UNRESOLVED:{mm.group(1)}>>'),
-            value)
-        return out if out == value else expand(out, depth + 1)
-
-    if name not in consts:
-        raise AssertionError(
-            f'{name} not found in paths.js — either it was renamed or this '
-            f'test\'s parser is stale, and both mean nothing is compared')
-    return expand(consts[name])
-
-
-class TheParserActuallyReadsPathsJs(unittest.TestCase):
-    """Zero-find floor: every assertion below derives from this parse."""
-
-    def test_the_file_exists(self):
-        self.assertTrue(
-            _PATHS_JS.is_file(),
-            f'{_PATHS_JS} is missing — the React half of the contract')
-
-    def test_it_resolves_a_template_string_to_an_absolute_path(self):
-        value = _js_const('POLICY_MODEL_PATH')
-        self.assertNotIn('<<UNRESOLVED', value, value)
-        self.assertTrue(value.startswith('/'), value)
-
-
-class ReactAndTheServerNameTheSameModelRoot(unittest.TestCase):
-
-    def setUp(self):
-        from physical_ai_server.data_processing import dataset_paths
-        self.dataset_paths = dataset_paths
-
-    def test_policy_model_path_is_the_servers_model_root(self):
-        expected = f'{_CONTAINER_HOME}/{self.dataset_paths.MODEL_ROOT_RELATIVE}/'
-        self.assertEqual(
-            _js_const('POLICY_MODEL_PATH'), expected,
-            'React opens „Modellpfad auswählen" somewhere the server does not '
-            'consider a browsable root, so it answers with a German security '
-            'refusal and the student cannot navigate anywhere')
-
-    def test_dataset_path_is_the_servers_dataset_root(self):
-        expected = f'{_CONTAINER_HOME}/{self.dataset_paths.DATASET_ROOT_RELATIVE}/'
-        self.assertEqual(_js_const('DATASET_PATH'), expected)
-
-    def test_both_react_paths_keep_their_trailing_slash(self):
-        # InferencePanel builds `POLICY_MODEL_PATH + repoId` and
-        # LocalDatasetQuickPick builds `DATASET_PATH + user + '/' + name`.
-        for key in ('POLICY_MODEL_PATH', 'DATASET_PATH'):
-            self.assertTrue(_js_const(key).endswith('/'), key)
-
-    def test_react_no_longer_points_inside_the_deleted_lerobot_tree(self):
-        # docker/physical_ai_server/Dockerfile does
-        # `rm -rf /root/ros2_ws/src/physical_ai_tools/lerobot`, so no shipped
-        # path may live under it.
-        text = _PATHS_JS.read_text(encoding='utf-8')
-        code = '\n'.join(
-            ln for ln in text.split('\n')
-            if not re.match(r'^\s*(//|\*|/\*)', ln))
-        self.assertNotIn('physical_ai_tools/lerobot', code)
 
 
 class TheServerHasOneModelRootAndEveryReaderUsesIt(unittest.TestCase):

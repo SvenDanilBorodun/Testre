@@ -1,11 +1,8 @@
 /*
- * Copyright 2026 EduBotics
+ * Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * Proprietary and confidential. Licensed under the EduBotics End-User
+ * Licence Agreement; see LICENSE at the repository root.
  */
 
 // ── JointState stream → a smooth pose for the 3D twin ─────────────────────────
@@ -33,7 +30,7 @@
 //   * the server→browser clock offset is the sliding-window MINIMUM of
 //     (arrival − stamp): the fastest delivery seen recently is the best estimate
 //     of "clock difference + pure transport". This absorbs any constant offset —
-//     a WSL2 container clock, a Pi or a Jetson on the LAN — without NTP.
+//     a WSL2 container clock or a Pi on the LAN — without NTP.
 //
 // Deliberate behaviours, each of which a "simplification" would break:
 //   * NO EXTRAPOLATION. Past the newest sample the pose HOLDS. Predicting where

@@ -13,7 +13,7 @@ with no docker daemon. Focus areas:
   - two-tier lifecycle command construction (--no-deps, service names)
   - set_leader_mode .env regenerate + rollback-on-failure
 
-Mirrors the Jetson tests' import convention.
+Mirrors the retired Jetson tests' import convention.
 """
 
 from __future__ import annotations

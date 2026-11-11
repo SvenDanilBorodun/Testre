@@ -194,6 +194,7 @@ export default function TeacherRow({ teacher, onChanged }) {
       {showPwModal && (
         <PasswordResetModal
           username={teacher.username}
+          audience="staff"
           onClose={() => setShowPwModal(false)}
           onSubmit={handleResetPw}
         />

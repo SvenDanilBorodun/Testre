@@ -11,8 +11,7 @@ reaches a fielded Pi:
     mounts ONE tmpfs there (``size=1m,mode=0700``);
   * no compose sets ``HF_TOKEN``, ``HUGGING_FACE_HUB_TOKEN`` or
     ``HF_HUB_DISABLE_IMPLICIT_TOKEN`` anywhere (an environment token OUTRANKS
-    the file and would silence every personal token) — the Jetson compose keeps
-    its classroom ``HF_TOKEN=${EDUBOTICS_HF_TOKEN}`` and gets no path;
+    the file and would silence every personal token);
   * the ``code_runner`` sandbox (and every other service) never sees the slot.
 
 The thin Dockerfile carries a build-time gate that pins the ``HF_TOKEN_PATH``
@@ -41,7 +40,6 @@ _STUDENT = _REPO_ROOT / "robotis_ai_setup/docker/docker-compose.yml"
 _GPU = _REPO_ROOT / "robotis_ai_setup/docker/docker-compose.gpu.yml"
 _OPI = _REPO_ROOT / "robotis_ai_setup/docker/docker-compose.opi.yml"
 _TWIN = _REPO_ROOT / "robotis_ai_setup/pi_agent/docker/docker-compose.opi.yml"
-_JETSON = _REPO_ROOT / "robotis_ai_setup/jetson_agent/docker-compose.jetson.yml"
 _DOCKERFILE = _REPO_ROOT / "robotis_ai_setup/docker/physical_ai_server/Dockerfile"
 _STORE_PY = (_REPO_ROOT / "physical_ai_tools/physical_ai_server/physical_ai_server"
              / "data_processing/hf_token_store.py")
@@ -52,7 +50,7 @@ _TMPFS = "/run/edubotics-hf:size=1m,mode=0700"
 
 # (label, compose) — the three that carry the student stack.
 _STACKS = (("student", _STUDENT), ("opi", _OPI), ("twin", _TWIN))
-_NO_JETSON = (_STUDENT, _GPU, _OPI, _TWIN)
+_EVERY_COMPOSE = (_STUDENT, _GPU, _OPI, _TWIN)
 
 _GATE_RUN = "RUN env -u HF_TOKEN -u HUGGING_FACE_HUB_TOKEN HF_TOKEN_PATH="
 
@@ -155,22 +153,12 @@ class TestNoEnvironmentTokenAnywhere(unittest.TestCase):
     )
 
     def test_no_student_compose_sets_one_in_code(self):
-        for path in _NO_JETSON:
+        for path in _EVERY_COMPOSE:
             text = _code_text(path)
             self.assertTrue(text.strip(), path)
             for pattern in self._FORBIDDEN:
                 with self.subTest(compose=path.name, pattern=pattern.pattern):
                     self.assertIsNone(pattern.search(text))
-
-    def test_the_jetson_keeps_exactly_its_classroom_token_and_no_slot(self):
-        text = _code_text(_JETSON)
-        hits = re.findall(r"(?<![A-Z0-9_])HF_TOKEN(?![A-Z0-9_])[^\n]*", text)
-        self.assertEqual(hits, ["HF_TOKEN=${EDUBOTICS_HF_TOKEN}"] * len(hits))
-        self.assertGreaterEqual(len(hits), 1)
-        self.assertNotIn("HF_TOKEN_PATH", text)
-        self.assertNotIn("/run/edubotics-hf", text)
-        self.assertNotIn("HUGGING_FACE_HUB_TOKEN", text)
-        self.assertNotIn("HF_HUB_DISABLE_IMPLICIT_TOKEN", text)
 
 
 class TestNothingElseSeesTheSlot(unittest.TestCase):

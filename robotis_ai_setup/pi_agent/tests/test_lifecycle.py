@@ -28,6 +28,13 @@ from unittest.mock import MagicMock, patch
 SETUP_DIR = Path(__file__).resolve().parents[2]  # robotis_ai_setup/
 sys.path.insert(0, str(SETUP_DIR))
 
+# Robot login (pi_auth): never read or write the real /var/lib/edubotics claim
+# state and never write a minted setup code to a console from a test. Set before
+# any AgentApp is built; pi_auth resolves the path at call time.
+os.environ.setdefault("EDUBOTICS_PI_AUTH_FILE", os.path.join(
+    tempfile.mkdtemp(prefix="pi-auth-test-"), "pi_auth.json"))
+os.environ.setdefault("EDUBOTICS_PI_CONSOLE", "")
+
 from pi_agent import agent  # noqa: E402
 from pi_agent import config_generator as cg  # noqa: E402
 from pi_agent.config_generator import ArmDevice, CameraDevice, HardwareConfig  # noqa: E402
@@ -47,14 +54,20 @@ class _EnvTempBase(unittest.TestCase):
         fd, self.env_path = tempfile.mkstemp(suffix=".env")
         os.close(fd)
         os.unlink(self.env_path)  # start with no file (fresh Pi)
-        self.app = agent.AgentApp(env_file=self.env_path)
+        self.auth_path = self.env_path + ".pi_auth.json"
+        self.app = agent.AgentApp(env_file=self.env_path, auth_file=self.auth_path)
+        # The robot-login probe of the manager's nginx is its own subject
+        # (test_pi_auth.py); here the manager is the current one.
+        p = patch.object(agent.AgentApp, "_manager_login_state", return_value="enforced")
+        p.start()
+        self.addCleanup(p.stop)
 
     def tearDown(self):
         if self._prev_domain is None:
             os.environ.pop("EDUBOTICS_ROS_DOMAIN", None)
         else:
             os.environ["EDUBOTICS_ROS_DOMAIN"] = self._prev_domain
-        for p in (self.env_path, self.env_path + ".tmp"):
+        for p in (self.env_path, self.env_path + ".tmp", self.auth_path):
             try:
                 os.unlink(p)
             except OSError:
@@ -1190,7 +1203,7 @@ class TestUpdateBusyFastFail(_EnvTempBase):
     def test_factory_reset_fast_fails(self):
         with patch.object(agent.docker_manager, "factory_reset") as fr:
             code, payload = self.app.handle_factory_reset(
-                {"confirm": True, "confirm_again": True})
+                {"confirm": True, "confirm_again": True, "confirm_text": "ZURÜCKSETZEN"})
         self._assert_busy(code, payload)
         fr.assert_not_called()
 
@@ -1351,10 +1364,68 @@ class TestFactoryReset(_EnvTempBase):
         with patch.object(agent.docker_manager, "factory_reset",
                           return_value=(True, "2 Volumes gelöscht.")) as fr:
             code, payload = self.app.handle_factory_reset(
-                {"confirm": True, "confirm_again": True})
+                {"confirm": True, "confirm_again": True, "confirm_text": "ZURÜCKSETZEN"})
         self.assertEqual(code, 200)
         self.assertTrue(payload["ok"])
         fr.assert_called_once()
+
+    def test_the_typed_word_is_required_on_top_of_both_checkboxes(self):
+        """Owner decision 5: a reset needs the TYPED confirmation. Both flags
+        alone (what the pre-login SPA sent) are refused before any docker
+        call; so is a wrong or missing word."""
+        for body in ({"confirm": True, "confirm_again": True},
+                     {"confirm": True, "confirm_again": True, "confirm_text": "ja"},
+                     {"confirm": True, "confirm_again": True, "confirm_text": "ZURUECKSETZEN"},
+                     {"confirm": True, "confirm_again": True, "confirm_text": 1}):
+            with self.subTest(body=body), \
+                    patch.object(agent.docker_manager, "factory_reset") as fr:
+                code, payload = self.app.handle_factory_reset(body)
+                self.assertEqual(code, 400)
+                self.assertIn("ZURÜCKSETZEN", payload["message"])
+                fr.assert_not_called()
+
+    def test_the_word_ignores_case_and_surrounding_space(self):
+        with patch.object(agent.docker_manager, "factory_reset",
+                          return_value=(True, "ok")):
+            code, _ = self.app.handle_factory_reset(
+                {"confirm": True, "confirm_again": True, "confirm_text": "  zurücksetzen "})
+        self.assertEqual(code, 200)
+
+    def test_a_reset_unclaims_revokes_and_answers_a_new_code_once(self):
+        """Owner decision 3: a factory reset returns the Pi to UNCLAIMED with a
+        new code, and every robot session ends."""
+        auth = self.app._auth
+        auth.mint_code()
+        self.assertEqual(auth.try_claim("WRONG", "teacher"), "malformed")
+        # Claim through the store with the code it holds: mint a known one.
+        code = auth.mint_code()
+        self.assertEqual(auth.try_claim(code, "teacher"), "ok")
+        sid = auth.create_session("student", 600)
+        self.assertIsNotNone(auth.session(sid))
+        with patch.object(agent.docker_manager, "factory_reset",
+                          return_value=(True, "2 Volumes gelöscht.")):
+            code_, payload = self.app.handle_factory_reset(
+                {"confirm": True, "confirm_again": True, "confirm_text": "ZURÜCKSETZEN"})
+        self.assertEqual(code_, 200)
+        self.assertFalse(auth.claimed)
+        self.assertIsNone(auth.session(sid))
+        new = payload["setup_code"]
+        self.assertRegex(new, r"^[A-Z0-9]{4}-[A-Z0-9]{4}$")
+        self.assertNotEqual(new.replace("-", ""), code)
+        self.assertEqual(auth.code_status(), "active")
+        self.assertIn("nicht mehr eingerichtet", payload["message"])
+
+    def test_a_failed_wipe_keeps_the_claim(self):
+        auth = self.app._auth
+        code = auth.mint_code()
+        auth.try_claim(code, "admin")
+        with patch.object(agent.docker_manager, "factory_reset",
+                          return_value=(False, "Docker ist nicht erreichbar.")):
+            status, payload = self.app.handle_factory_reset(
+                {"confirm": True, "confirm_again": True, "confirm_text": "ZURÜCKSETZEN"})
+        self.assertEqual(status, 500)
+        self.assertTrue(auth.claimed)
+        self.assertNotIn("setup_code", payload)
 
 
 # ── the never-`compose down` invariant (agent layer) ─────────────────────────
@@ -1394,7 +1465,7 @@ class TestNeverComposeDown(unittest.TestCase):
             p.start()
         try:
             app.handle_environment_stop()
-            app.handle_factory_reset({"confirm": True, "confirm_again": True})
+            app.handle_factory_reset({"confirm": True, "confirm_again": True, "confirm_text": "ZURÜCKSETZEN"})
         finally:
             for p in spies.values():
                 p.stop()

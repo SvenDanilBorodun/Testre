@@ -1,10 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 
 // Reconcile, not push-once: what must the browser do about the robot's token
 // slot, given what the ROBOT says it holds and what the ACCOUNT says it should
@@ -96,7 +93,7 @@ export const START_BLOCK = Object.freeze({
  *
  * Unknown NEVER blocks: an account state that has not answered (unknown,
  * loading, error, unsupported, unavailable) and a robot that has not said
- * whether it takes a personal token (older image, Jetson) both return null. The
+ * whether it takes a personal token (older image) both return null. The
  * Benutzer-ID list that decides WHICH namespace a recording uploads under is
  * kept honest at its own choke point (hooks/useHfUserList), not by blocking
  * Start on a guess (owner decision C-1).

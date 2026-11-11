@@ -1,7 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 //
 // THE S1 GATE. The Benutzer-ID list is the account + organisations of the token
 // in the ROBOT's slot. If the slot still holds the previous student's token (they
@@ -17,7 +17,6 @@ import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 
 import uiReducer from '../../features/ui/uiSlice';
-import jetsonReducer, { setJetsonStatus } from '../../store/jetsonSlice';
 import hfReducer, {
   accountFailed,
   accountLoaded,
@@ -53,7 +52,7 @@ const stored = (fp) => accountLoaded({ status: 'stored', fp, hfUsername: 'alice'
 function setup({ slice = true, actions = [] } = {}) {
   calls.n = 0;
   whoamiGate = null;
-  const reducer = { ui: uiReducer, jetson: jetsonReducer, ...(slice ? { hfToken: hfReducer } : {}) };
+  const reducer = { ui: uiReducer, ...(slice ? { hfToken: hfReducer } : {}) };
   const store = configureStore({ reducer });
   actions.forEach((a) => store.dispatch(a));
   let api;
@@ -116,20 +115,8 @@ describe('the Benutzer-ID list reload is gated at the one choke point', () => {
     expect(calls.n).toBe(1);
   });
 
-  it('a robot that takes no personal token (the Jetson image): called', async () => {
+  it('a robot that takes no personal token (accepts: false): called', async () => {
     const t = setup({ actions: [accountLoaded({ status: 'none' }), robot({ accepts: false })] });
-    expect(await reload(t)).toEqual(['alice']);
-    expect(calls.n).toBe(1);
-  });
-
-  it('a claimed classroom Jetson: called, whatever the local slot says', async () => {
-    const t = setup({
-      actions: [
-        accountLoaded({ status: 'none' }),
-        robot({ present: true, fp: B }),
-        setJetsonStatus('connected'),
-      ],
-    });
     expect(await reload(t)).toEqual(['alice']);
     expect(calls.n).toBe(1);
   });

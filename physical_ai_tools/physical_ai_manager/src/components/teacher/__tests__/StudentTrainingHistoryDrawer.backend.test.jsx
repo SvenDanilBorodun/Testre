@@ -1,12 +1,13 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 
 // Cloud-Inferenz (spec §6.8): the teacher drawer's run list says where each run
 // ran — „Cloud" or „Klassen-Jetson" — under the heading „Inferenz-Läufe". A run
-// from an older API carries no `backend` and reads as the Jetson (every run was
-// the Jetson's then). Teachers read cloud runs; they cannot start one.
+// from an older API carries no `backend` and reads as the classroom Jetson (every
+// run was the Jetson's then; the Jetson is retired, its rows stay). Teachers read
+// cloud runs; they cannot start one.
 
 import React from 'react';
 import { render, screen, within } from '@testing-library/react';

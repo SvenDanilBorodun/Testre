@@ -1,4 +1,7 @@
-# Copyright 2026 EduBotics
+# Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
+#
+# Proprietary and confidential. Licensed under the EduBotics End-User
+# Licence Agreement; see LICENSE at the repository root.
 #
 # Teleoperation force/collision detector — PURE LOGIC, no rclpy/ROS imports.
 #

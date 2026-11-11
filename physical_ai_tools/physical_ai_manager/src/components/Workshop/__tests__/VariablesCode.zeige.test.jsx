@@ -1,11 +1,8 @@
 /*
- * Copyright 2026 EduBotics
+ * Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * Proprietary and confidential. Licensed under the EduBotics End-User
+ * Licence Agreement; see LICENSE at the repository root.
  */
 
 // The Variablen of a Python/Java program (owner decisions O3, O8), end to end
@@ -29,7 +26,7 @@ import { render, screen, renderHook, act, within, fireEvent } from '@testing-lib
 
 import workshopReducer from '../../../features/workshop/workshopSlice';
 import studioAssetsReducer, { openDrawer } from '../../../features/workshop/studioAssetsSlice';
-import rosReducer, { setRosbridgeUrl } from '../../../features/ros/rosSlice';
+import rosReducer from '../../../features/ros/rosSlice';
 import { useRosTopicSubscription } from '../../../hooks/useRosTopicSubscription';
 import VariableInspector from '../VariableInspector';
 import SammlungDrawer from '../sammlung/SammlungDrawer';
@@ -38,6 +35,10 @@ import { createDetachedDestinationStore } from '../sammlung/destinationStore';
 import { createCodeAssetDocument } from '../code/codeAssetDocument';
 import { DE } from '../blocks/messages_de';
 import { CODE_DE } from '../code/codeMessagesDe';
+
+// The rosbridge URL a test needs, set the way the store is first built (the app
+// itself derives it from the page's host, features/ros/rosSlice::setRosHost).
+const rosWithUrl = (url) => ({ ...rosReducer(undefined, { type: '@@init' }), rosbridgeUrl: url });
 
 const storeRef = vi.hoisted(() => ({ current: null }));
 vi.mock('../../../store/store', () => ({
@@ -107,8 +108,8 @@ const JAVA = [
 async function wireUp({ language = 'python', files = { 'main.py': PY } } = {}) {
   const store = configureStore({
     reducer: { workshop: workshopReducer, studioAssets: studioAssetsReducer, ros: rosReducer },
+    preloadedState: { ros: rosWithUrl('ws://localhost:9090') },
   });
-  store.dispatch(setRosbridgeUrl('ws://localhost:9090'));
   storeRef.current = store;
   const wrapper = ({ children }) => <Provider store={store}>{children}</Provider>;
   const { result } = renderHook(() => useRosTopicSubscription(), { wrapper });

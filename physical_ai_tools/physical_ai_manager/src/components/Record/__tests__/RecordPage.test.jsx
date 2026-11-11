@@ -1,7 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 //
 // The Aufnahme page end to end over a REAL reducer store (spec §4.1 C): the
 // header, the offline card with its reason, READY → Start sends start_record
@@ -28,7 +28,6 @@ import tasksReducer, {
 import uiReducer, { moveToPage } from '../../../features/ui/uiSlice';
 import rosReducer from '../../../features/ros/rosSlice';
 import trainingReducer from '../../../features/training/trainingSlice';
-import jetsonReducer from '../../../store/jetsonSlice';
 import PageType from '../../../constants/pageType';
 import TaskPhase from '../../../constants/taskPhases';
 import RecordPage, { RECORD_VIEW_KEY } from '../../../pages/RecordPage';
@@ -103,7 +102,7 @@ const recordTick = (patch = {}) => idleTick({
 
 function makeStore({ connected = true, form = FORM } = {}) {
   const store = configureStore({
-    reducer: { tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer, jetson: jetsonReducer },
+    reducer: { tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer },
   });
   store.dispatch(moveToPage(PageType.RECORD));
   store.dispatch(setTaskInfo(form));

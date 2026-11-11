@@ -1,0 +1,49 @@
+{
+ "_generated_by": "physical_ai_manager/src/features/hfToken/__tests__/hfTokenCrypto.test.js (EDUBOTICS_REGEN_HF_CRYPTO_CASES=1 to regenerate)",
+ "_checked_by": "physical_ai_server/test/test_hf_token_crypto.py (the robot decrypts every case and recomputes every known answer)",
+ "_note": "robot is a TEST key pair made for this file; it never belonged to a robot. ephemeral_d and iv are hex; every other binary value is base64url.",
+ "robot": {
+  "d": "0QK0tr_e2KSznrEG1jKH2TzuZSL6zscmtQIfwkMo-nY",
+  "x": "t5csY_cygsvMprWypZB8wuwjRTC1GCqRx_u5Xsa-9Fk",
+  "y": "4xOI_Wa0H8_9ijo41v1IFbDXw1kCOF8tzSY-g9VZGIs",
+  "pub": "BLeXLGP3MoLLzKa1sqWQfMLsI0UwtRgqkcf7uV7GvvRZ4xOI_Wa0H8_9ijo41v1IFbDXw1kCOF8tzSY-g9VZGIs",
+  "kid": "723a8c595e1e5c19"
+ },
+ "cases": [
+  {
+   "impl": "noble",
+   "plain": "hf_test0token0for0the0interop00",
+   "wire": "enc1:723a8c595e1e5c19.BPit7amf_hImdzkaCa2Pu_KrgN2VPhBi-Q15WVd9uvKPxqmsnroQHBhz6vd93C-6TTZ9h7rVZizNvViJpYECupA.iLHNfTnbG5gxs5y0.QxHeRY4VnbUyvw7VXKPU5cxKQZvCvUeCG5veKXMPJAbepBR98YEC3RQMZvxbZCA"
+  },
+  {
+   "impl": "noble",
+   "plain": "hf_0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789abcdef",
+   "wire": "enc1:723a8c595e1e5c19.BGyR7mfL-dnwabSYzwsxwSdhtLXVqpjGXIrPEFugzRzLq0CDs8QzUF7g2S8DN8ISpWvDRx4Hcu9SyYMRBhdEiJ8.03dHyyGnQqevxAqD.Svw4mJjZAfHESz9SVn_HU9w4qfCZ_nfdG9He9FY-Rbe8j0IL7QgYW-MzeGdfLI6OoED8xm-bz918unFs93cujFV5fbQ5HxOk4yyQcc4qoBAA2DMwWgE2NPwlzvMPY2opJPawvYob-YGDrfss5usLFEfwOOmvnidUWASXXdglw0y-39cfKNnY-kuU4gNs2YqLIRSo5l6IjpZSe3KHdSq1P11pG01y6IF4cpQAz_7oB648fS28H60zNQuu4mfSUPElRETK6a6oNg5MYoS-06HMzBxCVn1z78REUg8Y-QJaPBvvrspoNSX0XN2elUF60pkWF0bcrbm3QipVWK9OftCyx8eaz4clkcu2DVre_3CEdCaRv2Q"
+  },
+  {
+   "impl": "noble",
+   "plain": "hf_Ab-_0123456789xyz",
+   "wire": "enc1:723a8c595e1e5c19.BE1Uu5vkrGWXwoqdarPu7jxgSSY1IIuSkDcPd2L7qLJgykQYt8nz_TzHLp_gCcXvjQjXP8H9_kZhMGrytXiqHKw.Gtwt8-05jlpU4vW3.ihUi2lMmHaT_lhCUpet3112kKI0UmUYN_ZjxmdwN5z43ESVT"
+  }
+ ],
+ "kats": [
+  {
+   "plain": "hf_test0token0for0the0interop00",
+   "ephemeral_d": "c88f01f510d9ac3f70a292daa2316de544e9aab8afe84049c62a9c57862d1433",
+   "iv": "000102030405060708090a0b",
+   "wire": "enc1:723a8c595e1e5c19.BNrQtlOUIhz5sFHh_spXh9CY3-Y3_JC575RdDDdyWBGAUnGgRhzbglLWHxxFb6PlmrH0WzOsz19YOJ4Fd7iZC7M.AAECAwQFBgcICQoL.XgHEdYHBPGpwuUdPK2_GglUwxYH4_AiOF9GqV7H-3VlKqrMjwypjFSzkBxWurCU"
+  },
+  {
+   "plain": "hf_0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789abcdef",
+   "ephemeral_d": "7d7dc5f71eb29ddaf80d6214632eeae03d9058af1fb6d22ed80badb62bc1a534",
+   "iv": "cafebabefacedbaddecaf888",
+   "wire": "enc1:723a8c595e1e5c19.BOrSGFkBGeiHaykUb_icphdwxO27-X04zjhe0oHYprIwKK9hKB_TXi-nACUjrMhaQpywbuZkgyU4n1nt_OFAUUE.yv66vvrO263eyviI.kV0e8L7-puxbQZaJk7AJ45XPQQtI6NZ2Ny-j8UOYWe_XVzPFXDky42D32DXgwEfTZhZK2XdFglK_eE7MnHEADrh4SO85gBTwH_9jPtswclNDdEZBXSCNTmyJ6mS0bwOYv5rQ5kuS75Z73Cn4O0MwZa9oKBFKQR7OOCwY0CU994RU678W-jQi-vUQYKqTpTk5yM10uU_gDONUDOZoeHbKfyKiRFZ4G4Is3noGFoJpMUMLjOO5R9pzVNx92qQrhQC5zXEaPkTW7bTntVB27LY8oZSFTUPdPYqJSow943JzBIdPOIfL8ro4x8D5X3cObwHip_jkrfd-ReGBz1SBRIhVZZiS1hnlOlnJ4kuTtFpGilji5nk"
+  },
+  {
+   "plain": "hf_Ab-_0123456789xyz",
+   "ephemeral_d": "0000000000000000000000000000000000000000000000000000000000000001",
+   "iv": "ffffffffffffffffffffffff",
+   "wire": "enc1:723a8c595e1e5c19.BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU.________________.Mq-pAQhmy-Oz4gTjyDcc-WrgHSUuAYxd4wor5WCfcTy87m2O"
+  }
+ ]
+}

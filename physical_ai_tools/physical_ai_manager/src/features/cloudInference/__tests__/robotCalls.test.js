@@ -1,7 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 
 // The wire to the robot for Cloud-Inferenz. Pinned: the start request carries
 // EXACTLY task_info, session_token and edge_token (the srv's field names); only
@@ -112,7 +112,7 @@ describe('startCloudInference', () => {
     expect(START_TIMEOUT_MS).toBe(10000);
   });
 
-  it('never calls a Jetson proxy and never connects', async () => {
+  it('never calls a rosbridge other than the local proxy and never connects', async () => {
     rosConnectionManager.url = 'ws://10.0.0.5:9091';
     const r = await startCloudInference(request());
     expect(r.success).toBe(false);

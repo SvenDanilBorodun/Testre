@@ -1,7 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 //
 // Covers the robust /me loader. Cases: success, 401 → sign-out, 404 →
 // profileError (NO sign-out), and that the old HF auto-link is GONE: the hook
@@ -36,10 +36,10 @@ vi.mock('../../lib/supabaseClient', () => ({
   supabase: { auth: { signOut: () => mockSignOut() } },
 }));
 
-const mockResetJetson = vi.fn();
-vi.mock('../../features/jetson/sessionReset', () => ({
+const mockEndCloud = vi.fn();
+vi.mock('../../features/cloudInference/controller', () => ({
   __esModule: true,
-  resetJetsonOnLogout: (...a) => mockResetJetson(...a),
+  endCloudInferenceOnLogout: (...a) => mockEndCloud(...a),
 }));
 
 vi.mock('react-hot-toast', () => ({
@@ -68,7 +68,7 @@ beforeEach(() => {
   mockGetMe.mockReset();
   mockPatchHf.mockReset();
   mockSignOut.mockReset();
-  mockResetJetson.mockReset();
+  mockEndCloud.mockReset();
 });
 
 describe('useMeProfile — load + error branches', () => {
@@ -89,7 +89,7 @@ describe('useMeProfile — load + error branches', () => {
     expect(mockSignOut).not.toHaveBeenCalled();
   });
 
-  test('401 signs out (resetJetson + signOut + session/signedOut), no profileError', async () => {
+  test('401 signs out (end the cloud session + signOut + session/signedOut), no profileError', async () => {
     const store = makeStore();
     const err = new Error('expired');
     err.status = 401;
@@ -98,7 +98,7 @@ describe('useMeProfile — load + error branches', () => {
     renderHook(() => useMeProfile({}), { wrapper: wrapperFor(store) });
 
     await waitFor(() => expect(mockSignOut).toHaveBeenCalledTimes(1));
-    expect(mockResetJetson).toHaveBeenCalled();
+    expect(mockEndCloud).toHaveBeenCalled();
     expect(store.getState().auth.session).toBeNull(); // the broadcast reached authSlice
     expect(store.getState().auth.profileError).toBeNull();
   });

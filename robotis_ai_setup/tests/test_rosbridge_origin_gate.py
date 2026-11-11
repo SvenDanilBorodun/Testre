@@ -121,7 +121,7 @@ class StudentComposeMustNotPublishTheRobotTransports(unittest.TestCase):
 class NothingStillDocumentsTheOpiPortsAsLanOpenOrARollback(unittest.TestCase):
     """A prose lockstep against the class below.
 
-    `OpiDebugPublishesAreLoopbackPinned` fences the COMPOSE. Nothing fenced
+    `OpiPhysicalAiServerPublishesNothing` fences the COMPOSE. Nothing fenced
     what the rest of the tree SAYS about it, and four sites went on describing
     the pre-4d1b046 world for weeks after the pin landed:
 
@@ -159,6 +159,12 @@ class NothingStillDocumentsTheOpiPortsAsLanOpenOrARollback(unittest.TestCase):
 
     # Each phrase, and what believing it would cost.
     _RETIRED_CLAIMS = (
+        # SA-05 (2026-11-13): the loopback debug publishes are gone too.
+        ('ssh -L 9090:127.0.0.1:9090',
+         'there is no host publish left to tunnel to; debugging is `docker '
+         'exec` (a 127.0.0.1 publish was reachable by routing on Docker < 28)'),
+        ('stay published',
+         'the opi compose publishes neither :9090 nor :8080 any more'),
         ('LAN-open by decision',
          'the opi debug publishes are pinned to 127.0.0.1 — calling them '
          'LAN-open invites un-pinning them, which restores the rosbridge '
@@ -185,75 +191,55 @@ class NothingStillDocumentsTheOpiPortsAsLanOpenOrARollback(unittest.TestCase):
                     self.assertNotIn(phrase, text, f'{rel}: {why}')
 
     def test_the_premise_of_this_scan_is_still_true(self):
-        """Not vacuous: the compose really is loopback-pinned.
+        """Not vacuous: the compose really publishes nothing for the server.
 
-        If someone un-pins it, the prose above becomes correct again and this
-        whole class would be asserting the wrong thing. Fail loudly instead.
+        If someone re-adds a publish, the prose above becomes wrong in the
+        other direction and this whole class would be asserting the wrong
+        thing. Fail loudly instead.
         """
         block = _service_block(_OPI_COMPOSE, 'physical_ai_server')
-        published = _published_ports(block)
-        debug = [e for e in published if '9090' in e or '8080' in e]
-        self.assertTrue(debug, 'the opi debug publishes are gone entirely — '
-                               'the comments this scan polices are now stale '
-                               'in the other direction')
-        for entry in debug:
-            self.assertTrue(entry.startswith('127.0.0.1:'), entry)
+        self.assertTrue(block, 'opi physical_ai_server block not found')
+        self.assertEqual(_published_ports(block), [])
 
 
-class OpiDebugPublishesAreLoopbackPinned(unittest.TestCase):
-    """The opi debug ports keep existing, but ONLY on 127.0.0.1.
+class OpiPhysicalAiServerPublishesNothing(unittest.TestCase):
+    """The opi physical_ai_server publishes NO host port (SA-05, 2026-11-13).
 
-    This class replaces `OpiComposeKeepsItsPublishesDeliberately`, which
-    asserted merely that :9090/:8080 appear in the block and therefore stayed
-    green while they were bound to 0.0.0.0 — i.e. it pinned the hole open.
-
-    Measured 2026-08-08 against rosbridge_server 2.7.0: `check_origin` is
-    `return True`, so with a LAN-bound publish an `Origin: http://evil.example`
-    handshake straight to :9090 returns 101 and can publish to
-    /leader/joint_trajectory. The manager's `location = /rosbridge` Origin gate
-    is then simply skipped rather than defeated. Loopback-pinning is what makes
-    that gate the only browser-reachable route, exactly as the student compose
-    records for its own removed publishes.
-
-    The bind host is asserted LITERALLY: `${EDUBOTICS_BIND_HOST}` resolves to
-    0.0.0.0 on any Pi with the shipped `DEFAULT_LAN_OPEN = "1"`, so accepting
-    an interpolation here would accept the defect.
+    History: `OpiComposeKeepsItsPublishesDeliberately` once asserted merely
+    that :9090/:8080 appear, and stayed green while they were bound to
+    0.0.0.0 (measured 2026-08-08: rosbridge_server 2.7.0's `check_origin` is
+    `return True`, a handshake straight to :9090 returned 101 and could publish
+    /leader/joint_trajectory). 4d1b046 pinned them to 127.0.0.1 and this
+    class fenced the pin. The security audit then found that Docker before 28.0
+    (the Pi pins 27.5.1) accepts a routed packet for ANY published container
+    port, whatever host address the publish is bound to: a LAN host that routes
+    the ros_net subnet via the Pi reaches the container without nginx or the
+    robot login. So the publishes are gone; debugging is `docker exec`, or a
+    local override file that is never shipped. The tarball twin is held
+    byte-identical by `pi-compose-twin-guard`, and checked here as well.
     """
 
     def setUp(self):
         self.assertTrue(_OPI_COMPOSE.is_file(), _OPI_COMPOSE)
-        block = _service_block(_OPI_COMPOSE, "physical_ai_server")
-        self.assertTrue(block, "opi physical_ai_server block not found")
-        self.published = _published_ports(block)
-        self.assertTrue(self.published, "opi physical_ai_server publishes nothing at all")
+        self.block = _service_block(_OPI_COMPOSE, "physical_ai_server")
+        self.assertTrue(self.block, "opi physical_ai_server block not found")
 
-    def test_the_debug_ports_are_still_published_for_ssh_tunnelled_debugging(self):
-        joined = " ".join(self.published)
-        self.assertIn("9090", joined, "opi keeps :9090 for `ssh -L`-tunnelled debugging")
-        self.assertIn("8080", joined, "opi keeps :8080 for `ssh -L`-tunnelled debugging")
+    def test_no_port_is_published_at_all(self):
+        self.assertEqual(
+            _published_ports(self.block), [],
+            "the opi physical_ai_server publishes a host port again; on Docker "
+            "< 28 a LAN host can route straight to it and skip nginx and the "
+            "robot login (SA-05). Debug with `docker exec` instead.")
 
-    def test_every_debug_publish_is_pinned_to_loopback(self):
-        for entry in self.published:
-            if "9090" not in entry and "8080" not in entry:
-                continue
-            self.assertTrue(
-                entry.startswith("127.0.0.1:"),
-                "opi debug publish %r must be pinned to 127.0.0.1 — rosbridge is "
-                "unauthenticated and accepts every Origin, so a LAN-bound publish "
-                "lets any web page skip the nginx gate and drive the arm" % (entry,),
-            )
+    def test_not_even_a_ports_key(self):
+        keys = [line.strip() for line in self.block
+                if not line.strip().startswith("#") and line.strip().startswith("ports:")]
+        self.assertEqual(keys, [])
 
-    def test_the_bind_host_variable_never_reaches_a_debug_publish(self):
-        # The whole defect was one `${EDUBOTICS_BIND_HOST}` here: the agent
-        # writes 0.0.0.0 into it whenever EDUBOTICS_LAN_OPEN=1, which is the
-        # shipped default. The manager's :80 publish MUST keep using it.
-        for entry in self.published:
-            if "9090" in entry or "8080" in entry:
-                self.assertNotIn(
-                    "EDUBOTICS_BIND_HOST", entry,
-                    "the debug publish %r follows EDUBOTICS_BIND_HOST again; that "
-                    "resolves to 0.0.0.0 on every Pi with DEFAULT_LAN_OPEN='1'" % (entry,),
-                )
+    def test_the_shipped_twin_says_the_same(self):
+        twin = _OPI_COMPOSE.parents[1] / "pi_agent" / "docker" / "docker-compose.opi.yml"
+        self.assertTrue(twin.is_file(), twin)
+        self.assertEqual(twin.read_bytes(), _OPI_COMPOSE.read_bytes())
 
     def test_the_manager_port_80_still_follows_the_bind_host(self):
         # The counterpart the fix must NOT break: LAN_OPEN drives :80, and

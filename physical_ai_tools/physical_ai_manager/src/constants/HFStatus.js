@@ -1,4 +1,5 @@
-// Copyright 2025 EduBotics
+// Copyright 2025 ROBOTIS CO., LTD.
+// Modifications copyright 2026 Sven Danil Borodun (EduBotics)
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,22 +29,7 @@ const HFStatus = {
   FAILED: 'Failed',
 };
 
-// What a student reads for each status (the values above are the wire values
-// the server sends and the code compares; they stay English).
-const HF_STATUS_DE = Object.freeze({
-  [HFStatus.IDLE]: 'Bereit',
-  [HFStatus.UPLOADING]: 'Wird hochgeladen',
-  [HFStatus.DOWNLOADING]: 'Wird heruntergeladen',
-  [HFStatus.DELETING]: 'Wird gelöscht',
-  [HFStatus.FETCHING]: 'Wird abgerufen',
-  [HFStatus.PROCESSING]: 'Wird verarbeitet',
-  [HFStatus.SUCCESS]: 'Erfolgreich',
-  [HFStatus.FAILED]: 'Fehlgeschlagen',
-});
-
-/** The German label of an HF status; an unknown status is shown as it came. */
-export function hfStatusLabelDe(status) {
-  return Object.prototype.hasOwnProperty.call(HF_STATUS_DE, status) ? HF_STATUS_DE[status] : status;
-}
+// The values above are the wire values the server sends and the code compares;
+// they stay English.
 
 export default HFStatus;

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 #
 # Copyright 2025 ROBOTIS CO., LTD.
+# Modifications copyright 2026 Sven Danil Borodun (EduBotics)
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,6 +27,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import signal
 import threading
 import time
 import traceback
@@ -76,6 +78,9 @@ for _log_name in ('urllib3', 'urllib3.connectionpool', 'requests', 'http.client'
 # active before any logging below.
 from physical_ai_server.data_processing import hf_token_store  # noqa: E402
 hf_token_store.install_log_scrubber()
+# 2026-11-13: the token arrives encrypted for the robot's ephemeral key (a Pi
+# relays it over a plain LAN websocket). Imports `cryptography` lazily.
+from physical_ai_server.data_processing import hf_token_crypto  # noqa: E402
 
 from physical_ai_interfaces.msg import (
     Detection,
@@ -128,6 +133,7 @@ from physical_ai_server.communication.communicator import Communicator
 from physical_ai_server.data_processing import dataset_paths
 from physical_ai_server.data_processing import dataset_sync
 from physical_ai_server.data_processing import record_texts_de
+from physical_ai_server.data_processing import recording_shutdown
 from physical_ai_server.data_processing.data_manager import DataManager, SYNC_UNCHECKED
 from physical_ai_server.data_processing.hf_api_worker import HfApiWorker
 from physical_ai_server.inference import cloud_client, cloud_contract, cloud_protocol, cloud_schedule, cloud_texts_de
@@ -499,6 +505,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self._hf_token_seq = 0
         self._hf_token_state_pub = None
         self._hf_token_last_error_log = None
+        # The ephemeral key the SPA encrypts the token for (2026-11-13,
+        # hf_token_crypto.py): made in _init_hf_token_state, memory only, and
+        # replaced only by _rotate_token_key_if_exhausted (VC-05) under its lock,
+        # so the key file and the attribute never name different keys.
+        self._hf_token_key = None
+        self._token_key_lock = threading.Lock()
         # A clear refused while busy (recording / HF transfer) is remembered and
         # applied by the 1 Hz state tick once the robot is idle, unless a newer
         # set arrived meanwhile (_apply_pending_hf_token_clear). Guarded by
@@ -944,6 +956,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self.get_logger().error(f'sensor executor failure {len(failures)}: {error!r}')
         if len(failures) >= self.SENSOR_FAIL_LIMIT:
             self.get_logger().fatal('sensor executor keeps failing: exiting for respawn')
+            # Launch plan step 8: a recording session keeps what it saved before
+            # the process goes (bounded; os._exit runs whatever the outcome).
+            finalize = getattr(self, '_finalize_recording_on_shutdown', None)
+            if finalize is not None:
+                try:
+                    finalize()
+                except Exception:  # noqa: BLE001 — the exit must happen regardless
+                    pass
             os._exit(self.SENSOR_EXIT_CODE)
 
     def _shutdown_sensor_executor(self):
@@ -965,6 +985,71 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 sensor_node.destroy_node()
             except Exception:  # noqa: BLE001
                 pass
+
+    # ── Shutdown: a recording session keeps what it saved (launch plan step 8) ──
+
+    def _finalize_recording_on_shutdown(self, wait_s=None):
+        """The node is going down: end a recording session WITHOUT losing what
+        it saved.
+
+        Called in main()'s ``finally`` right after the Cloud-Inferenz bye (an
+        environment stop: s6's SIGINT to the launch, the launch's SIGINT/SIGTERM
+        to this node, rclpy shuts the context down and spin() returns; an
+        exception out of spin() before a respawn) and by the sensor supervisor
+        before its ``os._exit`` — before the HF worker, the sensor executor and
+        the node go. Before 2026-11-10
+        nothing finalized here and every saved episode of the session was lost
+        (KNOWN-ISSUES M2).
+
+        Gated on the DataManager, never on ``on_recording``: a collision clears
+        that flag while the session lives on (the CollisionModal is up). The
+        session is taken over first (the generation moves and ``on_recording``
+        goes False under ``_record_publish_lock``), so a record tick still in
+        flight adds no frame and publishes nothing (it re-checks both after the
+        recorder lock, F5). Then ``DataManager.end_for_shutdown`` — the error
+        stop (D5): count a latched save, drop the running take, finalize, upload
+        nothing, crash marker cleared only on success (F3) — runs on its own
+        thread, waited for at most recording_shutdown.SHUTDOWN_FINALIZE_WAIT_S.
+        Nothing is published: the context is down. Idempotent (a finalized
+        session answers ``already_final``); never raises; returns the outcome
+        dict or None."""
+        data_manager = getattr(self, 'data_manager', None)
+        if data_manager is None:
+            return None
+        try:
+            plock = getattr(self, '_record_publish_lock', None)
+            with (plock if plock is not None else contextlib.nullcontext()):
+                self._record_session_gen = getattr(self, '_record_session_gen', 0) + 1
+                self.on_recording = False
+        except Exception:  # noqa: BLE001 — the finalize below matters more
+            pass
+        try:
+            outcome = recording_shutdown.finalize_for_shutdown(
+                data_manager,
+                recording_shutdown.SHUTDOWN_FINALIZE_WAIT_S if wait_s is None else wait_s)
+        except Exception as e:  # noqa: BLE001 — never raise out of the shutdown
+            self._log_shutdown_line('error', f'Shutdown: recording finalize failed: {e!r}')
+            return None
+        verdict = outcome.get('verdict')
+        if verdict in (DataManager.SHUTDOWN_NO_DATASET, DataManager.SHUTDOWN_ALREADY_FINAL):
+            # Nothing was at stake: no dataset open, or the session had ended.
+            self._log_shutdown_line('debug', f'Shutdown: recording {verdict}')
+            return outcome
+        line = (f"Shutdown: recording session {verdict} after {outcome.get('seconds')} s; "
+                f"{outcome.get('saved')} saved episode(s), nothing uploaded")
+        if outcome.get('error'):
+            line += f" ({outcome['error']})"
+        self._log_shutdown_line(
+            'warning' if verdict == DataManager.SHUTDOWN_FINALIZED else 'error', line)
+        return outcome
+
+    def _log_shutdown_line(self, level, line):
+        """A shutdown log line that can never raise (the logger outlives the
+        context; a broken output stream must not matter here)."""
+        try:
+            getattr(self.get_logger(), level)(line)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _init_core_components(self):
         # D8 — monotonic() of the last /task/status publish, updated after EVERY
@@ -1614,8 +1699,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
         Deliberately NOT part of _init_ros_publisher: test_signal_status_node_wiring
         execs that method with a fixed namespace. The topic is published even when
-        this image takes no personal token (accepts=False), so the SPA can tell a
-        Jetson image from an old image that has no topic at all.
+        this image takes no personal token (accepts=False), so the SPA can tell an
+        image without the slot from an old image that has no topic at all.
         """
         state_qos = QoSProfile(
             depth=1,
@@ -1632,6 +1717,24 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self._hf_token_state_tick,
             callback_group=self._hf_state_group,
         )
+        # The ephemeral key pair the SPA encrypts the student's token for (a Pi
+        # relays it over a plain LAN websocket). Fresh at every start, memory
+        # only; its public half rides on the state topic.
+        self._hf_token_key = hf_token_crypto.generate_or_none()
+        if self._hf_token_key is None and hf_token_store.accepts():
+            self.get_logger().warning(
+                'The cryptography package is missing: the robot advertises no key, so an '
+                'Orange Pi page will not send the Hugging Face token at all.')
+        # VB-03 (2026-11-15): on an Orange Pi the public half also goes to the
+        # key file the pi-agent serves behind the robot login; the Pi's page
+        # encrypts only for that key (a rosbridge session can forge the topic).
+        # BEFORE the first state publish, so the file is never older than the
+        # topic. Elsewhere the directory is absent and nothing is written.
+        try:
+            if hf_token_crypto.write_key_file(self._hf_token_key):
+                self.get_logger().info('Wrote the token key file for the Pi agent')
+        except Exception as e:  # noqa: BLE001 — a key file never stops the node
+            self.get_logger().warning(f'Could not write the token key file: {type(e).__name__}')
         removed = hf_token_store.purge_legacy()
         if removed:
             self.get_logger().info(
@@ -1668,7 +1771,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             if publisher is None:
                 return
             self._hf_token_seq += 1
-            payload = hf_token_store.state_payload(self._hf_token_seq, self._hf_token_busy())
+            payload = hf_token_store.state_payload(
+                self._hf_token_seq, self._hf_token_busy(),
+                key=getattr(self, '_hf_token_key', None))
             msg = String()
             msg.data = hf_token_store.encode_payload(payload)
             publisher.publish(msg)
@@ -1782,14 +1887,67 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self.get_logger().error(f'hf token slot update failed: {type(e).__name__}')
             return False, record_texts_de.HF_TOKEN_WRITE_FAILED_DE
 
+    def _hf_token_from_wire(self, wire):
+        """(token, None) for an encrypted /register_hf_user value
+        (hf_token_crypto's `enc1:` form), or (None, german_refusal). Never logs
+        the value; a failure is named by its class only. A value this key
+        opened before is refused (VC-05: a captured push replayed after its
+        owner signed out)."""
+        key = getattr(self, '_hf_token_key', None)
+        if key is None:
+            return None, record_texts_de.HF_TOKEN_ENC_UNSUPPORTED_DE
+        try:
+            return key.decrypt(wire), None
+        except hf_token_crypto.WireError as e:
+            if e.code == 'stale':
+                return None, record_texts_de.HF_TOKEN_ENC_STALE_DE
+            if e.code == 'replayed':
+                return None, record_texts_de.HF_TOKEN_ENC_REPLAYED_DE
+            return None, record_texts_de.HF_TOKEN_ENC_BAD_DE
+        finally:
+            self._rotate_token_key_if_exhausted(key)
+
+    def _rotate_token_key_if_exhausted(self, key):
+        """VC-05: a key whose replay record is full refuses every value; give
+        the node a fresh one, so flooding the record can never evict the digest
+        of a value worth replaying, and every envelope made for the old key is
+        dead. The key file first, then the attribute, then the state topic (the
+        Pi page re-reads both and waits for them to agree). Never raises."""
+        try:
+            if key is None or not key.exhausted:
+                return
+            lock = getattr(self, '_token_key_lock', None) or threading.Lock()
+            with lock:
+                if getattr(self, '_hf_token_key', None) is not key:
+                    return  # another call rotated it already
+                fresh = hf_token_crypto.generate_or_none()
+                try:
+                    hf_token_crypto.write_key_file(fresh)
+                except Exception as e:  # noqa: BLE001 — the rotation still happens
+                    self.get_logger().warning(f'Could not write the token key file: {type(e).__name__}')
+                self._hf_token_key = fresh
+            self.get_logger().info('Rotated the token key: its record of opened values was full')
+            self._publish_hf_token_state()
+        except Exception as e:  # noqa: BLE001 — a rotation never breaks a service call
+            self.get_logger().error(f'token key rotation failed: {type(e).__name__}')
+
     def set_hf_user_callback(self, request, response):
         """/register_hf_user — since 042 it sets, replaces or clears the robot's
         per-student token slot. `user_id_list` is always empty (the SPA reads the
-        Benutzer-ID list with /get_registered_hf_user); the .srv is unchanged."""
+        Benutzer-ID list with /get_registered_hf_user); the .srv is unchanged.
+        Since 2026-11-13 the token may arrive encrypted for the robot's key (an
+        `enc1:` value in the same string field, hf_token_crypto.py); it is
+        decrypted first and then decided exactly like a plain one."""
         response.user_id_list = []
         try:
             # request.token is only ever handed to the decision helper below.
             token = request.token
+            if hf_token_crypto.is_wire(token):
+                token, refusal = self._hf_token_from_wire(token)
+                if refusal is not None:
+                    response.success = False
+                    response.message = refusal
+                    return response
             with self._hf_token_lock:
                 response.success, response.message = self._apply_hf_token_request(token)
         except Exception as e:  # noqa: BLE001
@@ -2668,6 +2826,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             response.message = cloud_texts_de.NOT_INFERABLE_DE
             return response
         token, edge = request.session_token, request.edge_token      # D24: connect + Modal edge token
+        # VC-06: a remote page sends both in the robot envelope; open them first.
+        token, edge, refusal = self._cloud_tokens_from_wire(token, edge)
+        if refusal is not None:
+            response.success = False
+            response.message = refusal                                      # neither value echoed
+            return response
         if not (isinstance(token, str) and cloud_protocol.TOKEN_RE.fullmatch(token)
                 and isinstance(edge, str) and cloud_protocol.EDGE_TOKEN_RE.fullmatch(edge)):
             response.success = False
@@ -2726,6 +2890,34 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         response.success = True
         response.message = cloud_texts_de.STARTED_DE
         return response
+
+    def _cloud_tokens_from_wire(self, token, edge):
+        """VC-06 (verification round C): on a remote page (a Pi) the SPA sends the
+        connect token and the Modal edge token in the HF token's `enc1:` envelope,
+        encrypted for this node's key (the one the pi-agent serves), each under its
+        own context, so neither opens as the other or as an HF token. Returns
+        (token, edge, None) with every envelope opened (a plain value passes as it
+        is: the Windows page), or (None, None, german_refusal). Each envelope opens
+        once (VC-05). Never logs a value."""
+        if not (hf_token_crypto.is_wire(token) or hf_token_crypto.is_wire(edge)):
+            return token, edge, None
+        key = getattr(self, '_hf_token_key', None)
+        if key is None:
+            return None, None, cloud_texts_de.ENC_UNSUPPORTED_DE
+        try:
+            if hf_token_crypto.is_wire(token):
+                token = key.decrypt(token, context=hf_token_crypto.CLOUD_SESSION_CONTEXT)
+            if hf_token_crypto.is_wire(edge):
+                edge = key.decrypt(edge, context=hf_token_crypto.CLOUD_EDGE_CONTEXT)
+        except hf_token_crypto.WireError as e:
+            if e.code == 'stale':
+                return None, None, cloud_texts_de.ENC_STALE_DE
+            if e.code == 'replayed':
+                return None, None, cloud_texts_de.ENC_REPLAYED_DE
+            return None, None, cloud_texts_de.ENC_BAD_DE
+        finally:
+            self._rotate_token_key_if_exhausted(key)
+        return token, edge, None
 
     def _cloud_inference_tick(self):
         """The 'inference' timer during a cloud run. Never raises into the executor (main()
@@ -8649,6 +8841,13 @@ class _CloudRun:
 
 
 def main(args=None):
+    # Launch plan step 8: SIGINT ends this node exactly like SIGTERM. rclpy's
+    # handler chains to the handler installed before rclpy.init(); with SIG_DFL
+    # there it chains to nothing, so SIGINT (the launch's first shutdown signal,
+    # and s6's down-signal for this service since 2026-11-10) only shuts the
+    # context down and spin() returns — no KeyboardInterrupt can land anywhere
+    # in the finally below, the recording finalize included.
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     rclpy.init(args=args)
     node = PhysicalAIServer()
     # Multi-threaded executor. Originally 3 threads — enough for the
@@ -8683,6 +8882,12 @@ def main(args=None):
     finally:
         # A live Cloud-Inferenz run first: its bye tells the cloud the robot stopped.
         node._shutdown_cloud_client()
+        # Launch plan step 8, right after it (a cloud run and a recording exclude
+        # each other, and without a live run the bye returns at once): a recording
+        # session that is still running is finalized without upload — its saved
+        # episodes survive the environment stop — while the recorder, the HF
+        # worker and the sensors still exist. Bounded.
+        node._finalize_recording_on_shutdown()
         # Cleanup HF API Worker before destroying node
         node._cleanup_hf_api_worker()
         # The sensor executor and its node go first: stop flag, executor

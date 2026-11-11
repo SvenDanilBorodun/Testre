@@ -14,14 +14,15 @@ import { useMeProfile } from './hooks/useMeProfile';
 import LoginForm from './components/LoginForm';
 import TeacherDashboard from './pages/teacher/TeacherDashboard';
 import AdminDashboard from './pages/admin/AdminDashboard';
+import AdminMfaGate from './components/admin/AdminMfaGate';
 import { signOutStudent } from './utils/signOut';
 
-// The teacher web build keeps its webfonts (Inter Tight + JetBrains Mono) from
-// Google, added at runtime once; index.css no longer @imports them, so the
-// student app never contacts Google (spec §3.5).
+// The teacher web build's two faces (Inter Tight + JetBrains Mono) are
+// self-hosted (F-27, 2026-11-11): public/fonts/web-fonts.css, linked at runtime
+// once, so the student build's CSS never carries them, and no build contacts
+// Google (the web build's CSP says `font-src 'self'`).
 const WEB_FONTS_LINK_ID = 'eb-web-fonts';
-const WEB_FONTS_HREF =
-  'https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap';
+const WEB_FONTS_HREF = '/fonts/web-fonts.css';
 
 export function addWebFontsOnce() {
   if (typeof document === 'undefined' || document.getElementById(WEB_FONTS_LINK_ID)) return;
@@ -77,8 +78,6 @@ function WebApp() {
         );
         // reload:false — a reload would destroy the toast above, and a student
         // who opened the teacher URL would be bounced with no explanation.
-        // (The teacher web never claims a Jetson, so the thunk's beacon step
-        // finds no jetsonId in the store and skips.)
         dispatch(signOutStudent({ reload: false }));
       }
     },
@@ -152,7 +151,13 @@ function WebApp() {
   }
 
   if (role === 'admin') {
-    return <AdminDashboard onLogout={handleLogout} />;
+    // Admins only: the admin routes need a two-factor (aal2) session, so the
+    // dashboard renders behind the TOTP enrolment / challenge (2026-11-10).
+    return (
+      <AdminMfaGate onLogout={handleLogout}>
+        <AdminDashboard onLogout={handleLogout} />
+      </AdminMfaGate>
+    );
   }
   if (role === 'teacher') {
     return <TeacherDashboard onLogout={handleLogout} />;

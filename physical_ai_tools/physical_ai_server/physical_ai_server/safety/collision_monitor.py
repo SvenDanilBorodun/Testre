@@ -1,4 +1,7 @@
-# Copyright 2026 EduBotics
+# Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
+#
+# Proprietary and confidential. Licensed under the EduBotics End-User
+# Licence Agreement; see LICENSE at the repository root.
 #
 # Teleoperation force/collision e-stop — ORCHESTRATION mixin for PhysicalAIServer.
 #
@@ -110,8 +113,8 @@ except ImportError:  # pragma: no cover - depends on image contents
 # (matches omx_f_config.yaml joint_order.leader).
 LEADER_JOINTS = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1')
 ARM_JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5')  # detector keys (no gripper)
-# Safe home for the 5 arm joints (gripper is held at its current pose, not commanded). Matches
-# jetson_agent.SAFE_HOME_JOINTS arm values — a neutral retracted pose.
+# Safe home for the 5 arm joints (gripper is held at its current pose, not commanded) — a
+# neutral retracted pose (the retired classroom Jetson's agent drove the same values).
 SAFE_HOME_ARM = (0.0, -0.785398, 0.785398, 0.0, 0.0)
 # gpio name (xacro <gpio name=...>) -> arm joint name.
 GPIO_NAME_TO_JOINT = {
@@ -335,7 +338,8 @@ class CollisionMonitorMixin:
         # immediately; the watchdog re-asserts False at 5 Hz to cover the discovery race (a
         # one-shot publish can be missed before the broadcaster's subscription is matched).
         self._publish_collision_flag(False)
-        # Mirrors the entrypoint Phase-3 / jetson_agent safe-home publisher QoS.
+        # RELIABLE + TRANSIENT_LOCAL, like the activation agent's home publisher (formerly the
+        # entrypoint's Phase 3).
         self._collision_leader_traj_pub = self.create_publisher(
             JointTrajectory, LEADER_TRAJECTORY_TOPIC, latched_qos)
         # Own /task/status publisher so collision notifications work even when the recording

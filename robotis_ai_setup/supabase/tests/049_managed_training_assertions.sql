@@ -4,12 +4,9 @@
 -- managed guard), run BY HAND against a fresh LOCAL database — never CI, never
 -- the linked project (it seeds rows).
 --
--- The squashed baseline does NOT replay on a fresh database as shipped
--- (docs/KNOWN-ISSUES.md, „baseline.sql is NOT replayable from scratch"): run
--- it in a SCRATCH copy of supabase/ whose baseline has its one
--- `RENAME COLUMN runpod_job_id` line guarded exactly as
--- 040_code_programs_assertions.sql's header shows, with every migration
--- through 048 applied by `supabase start`, then 047 and 049 with psql as
+-- Run it in a SCRATCH copy of supabase/ holding every migration through 048
+-- except 047 (the baseline replays on a fresh database as shipped), applied by
+-- `supabase start`, then 047 and 049 with psql as
 -- `postgres` (-v ON_ERROR_STOP=1), then
 --   psql <local db url> -f supabase/tests/049_managed_training_assertions.sql
 -- Built from the spec's behaviour probes 1–4 (§B.3), plus probe 5 (a managed
@@ -52,8 +49,8 @@
 \set ON_ERROR_STOP off
 \pset pager off
 
-INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at)
-VALUES ('b4900001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-049@x.test', '', now(), now())
+INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at, raw_app_meta_data)
+VALUES ('b4900001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-049@x.test', '', now(), now(), '{"edubotics_provisioned": true}')
 ON CONFLICT (id) DO NOTHING;
 UPDATE public.users SET role = 'student', training_credits = 50 WHERE id = 'b4900001-0000-0000-0000-000000000001';
 \set u '''b4900001-0000-0000-0000-000000000001'''

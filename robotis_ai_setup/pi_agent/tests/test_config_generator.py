@@ -6,7 +6,7 @@ so ROS_DOMAIN_ID resolution never touches the persist/machine-id files unless
 a test explicitly redirects them).
 
 Mirrors robotis_ai_setup/tests/test_config_generator.py (the GUI suite) +
-the Jetson tests' import convention (add the package parent to sys.path, then
+the retired Jetson tests' import convention (add the package parent to sys.path, then
 `from pi_agent import …`).
 """
 

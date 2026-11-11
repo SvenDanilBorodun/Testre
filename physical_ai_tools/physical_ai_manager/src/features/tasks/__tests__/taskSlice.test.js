@@ -1,7 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 //
 // Locks the robotType-wipe guard in setTaskStatus: a bare /task/status tick
 // (robot_type='') — e.g. a pre-capability/old server image or the degraded-boot
@@ -12,7 +12,6 @@
 
 import tasksReducer, {
   setTaskStatus,
-  clearCapabilities,
   isValidCapabilities,
 } from '../taskSlice';
 
@@ -180,26 +179,5 @@ describe('isValidCapabilities — the shared manifest validator', () => {
   it('tolerates the additive code_languages list (WP3 §3.9)', () => {
     expect(isValidCapabilities({ ...CAPS_FULL, code_languages: ['python', 'java'] }))
       .toBe(true);
-  });
-});
-
-describe('taskSlice clearCapabilities — Jetson release reset (audit fix 1b)', () => {
-  it('nulls capabilities + robotProfile but keeps robotType', () => {
-    let state = tasksReducer(
-      init(),
-      setTaskStatus({ robotType: 'omx_f', robotProfile: 'omx_follower', capabilities: CAPS_FOLLOWER })
-    );
-    state = tasksReducer(state, clearCapabilities());
-    // Null caps = "unknown" — the nav capability filter hides NOTHING until
-    // the local rig's idle identity tick re-delivers a manifest.
-    expect(state.taskStatus.capabilities).toBe(null);
-    expect(state.taskStatus.robotProfile).toBe('');
-    expect(state.taskStatus.robotType).toBe('omx_f');
-  });
-
-  it('leaves the rest of taskStatus untouched', () => {
-    let state = tasksReducer(init(), setTaskStatus({ capabilities: CAPS_FULL, usedCpu: 42 }));
-    state = tasksReducer(state, clearCapabilities());
-    expect(state.taskStatus.usedCpu).toBe(42);
   });
 });

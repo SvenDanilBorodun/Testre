@@ -8,7 +8,7 @@ to validate the teleop collision e‑stop's **two‑step recovery** end‑to‑e
 **report back** so the feature can ship through the normal CI pipeline.
 
 The live dry‑run **cannot be done on a Mac** (Docker Desktop for macOS can't pass the USB serial
-bus into a container, and the stack is Windows‑WSL2 / Jetson only) — that's why this runs here.
+bus into a container, and the stack is Windows‑WSL2 / Orange Pi only) — that's why this runs here.
 
 **History (why several things look the way they do):** the first shipped version (commit
 `96f5ee0`, in `:latest`) (a) declared `Present Current` on ALL follower arm joints — but dxl11‑13

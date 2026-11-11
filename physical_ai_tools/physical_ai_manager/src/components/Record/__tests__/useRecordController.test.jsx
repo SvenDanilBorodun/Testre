@@ -1,7 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 
 // useRecordController (spec §3.7) against a real reducer store: the window
 // key listener, validation on Start, the Benutzer-ID auto-reload / auto-select
@@ -471,7 +471,7 @@ describe('Start and the student\'s own Hugging-Face token', () => {
     }
   });
 
-  it('a robot that takes no personal token (the Jetson image) is never blocked', () => {
+  it('a robot that takes no personal token (accepts: false) is never blocked', () => {
     const store = makeStore({
       hfActions: [accountLoaded({ status: 'none' }), robotHolds(null, { accepts: false })],
     });

@@ -1306,7 +1306,8 @@ class RecorderLockTest(_FsmTestCase):
     _MUTATORS = ('record', 're_record', 'rerecord_from_command', 'record_finish',
                  'record_stop', 'record_early_save', 'record_skip_task',
                  'record_next_episode', 'finish_for_low_disk', 'end_session_now',
-                 'cancel_pending_discard', 'get_current_record_status', 'end_after_error')
+                 'cancel_pending_discard', 'get_current_record_status', 'end_after_error',
+                 'end_for_shutdown')
 
     def test_every_public_mutator_holds_the_lock(self):
         for name in self._MUTATORS:
@@ -1584,6 +1585,202 @@ class ErrorStopFinalizesTest(_FsmTestCase):
         run_until(dm, 'reset')
         self.assertTrue(dm.end_after_error())
         self.assertEqual(dm.saved_episode_count(), 1)
+
+
+class _CountingFinalizeDataset(_FakeDataset):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.finalize_calls = 0
+
+    def finalize(self):
+        self.finalize_calls += 1
+        super().finalize()
+
+
+class ShutdownFinalizeTest(_FsmTestCase):
+    """Launch plan step 8 (2026-11-10): the node going down (an environment
+    stop) ends a recording session like an error stop (D5) — the saved episodes
+    are counted and finalized, the running take is dropped through the official
+    discard, NOTHING is uploaded, the crash marker is cleared only by a
+    successful finalize (F3) — and answers what it did."""
+
+    def _two_saved_and_a_running_take(self, **kw):
+        dm, up = make(n=5, reset=0, **kw)
+        dm._session_marker_enabled = True
+        for _ in range(2):
+            run_until(dm, 'save')
+            run_until(dm, 'reset')
+        run_until(dm, 'run')
+        ticks(dm, 20)                                      # the take at the stop
+        self.assertEqual(dm._record_episode_count, 2)
+        self.assertEqual(dm.get_status(), 'run')
+        self.assertTrue(dm._session_marker_path().exists())
+        return dm, up
+
+    def test_a_live_session_keeps_its_saved_episodes(self):
+        dm, up = self._two_saved_and_a_running_take()
+        self.assertEqual(dm.end_for_shutdown(), DataManager.SHUTDOWN_FINALIZED)
+        fake = dm._lerobot_dataset
+        self.assertEqual(fake.committed, 2)                 # the running take is not saved
+        self.assertEqual(dm._record_episode_count, 2)
+        self.assertEqual(len([t for e, t in fake.events if e == 'discard']), 1)
+        self.assertTrue(fake.finalized)
+        self.assertFalse(dm._session_marker_path().exists())
+        self.assertEqual(up, [])                            # never an upload on this path
+        self.assertEqual(dm.get_status(), 'stop')
+
+    def test_the_discard_comes_before_the_finalize(self):
+        dm, _ = self._two_saved_and_a_running_take()
+        order = []
+        fake = dm._lerobot_dataset
+        discard, finalize = fake.discard_episode, fake.finalize
+        fake.discard_episode = lambda: order.append('discard') or discard()
+        fake.finalize = lambda: order.append('finalize') or finalize()
+        dm.end_for_shutdown()
+        self.assertEqual(order, ['discard', 'finalize'])
+
+    def test_a_latched_save_is_counted(self):
+        dm, up = make(n=3)
+        dm._session_marker_enabled = True
+        run_until(dm, 'save')
+        tick(dm)                                          # committed, latched, not counted
+        self.assertTrue(dm._on_saving)
+        self.assertEqual(dm._record_episode_count, 0)
+        self.assertEqual(dm.end_for_shutdown(), DataManager.SHUTDOWN_FINALIZED)
+        self.assertEqual(dm._record_episode_count, 1)
+        self.assertEqual(dm._lerobot_dataset.committed, 1)
+        self.assertEqual(up, [])
+
+    def test_a_finish_in_flight_is_finalized_without_its_upload(self):
+        dm, up = make(n=3)
+        run_until(dm, 'run')
+        ticks(dm, 45)
+        dm.record_finish()
+        tick(dm)                                          # FINISH committed, latched
+        self.assertEqual(dm.get_status(), 'finish')
+        self.assertEqual(dm.end_for_shutdown(), DataManager.SHUTDOWN_FINALIZED)
+        self.assertEqual(dm._record_episode_count, 1)
+        self.assertEqual(up, [])
+        self.assertFalse(tick(dm))                        # inert: no late upload either
+        self.assertEqual(up, [])
+
+    def test_during_a_collision_the_session_is_still_finalized(self):
+        # A collision clears the node's on_recording while the session lives on:
+        # the DataManager decides, not that flag.
+        dm, up = make(n=3, reset=2)
+        run_until(dm, 'save')
+        run_until(dm, 'run')
+        ticks(dm, 10)
+        dm.request_collision_discard()
+        self.assertEqual(dm.get_status(), 'reset')
+        self.assertEqual(dm.end_for_shutdown(), DataManager.SHUTDOWN_FINALIZED)
+        self.assertEqual(dm._record_episode_count, 1)
+        self.assertTrue(dm._lerobot_dataset.finalized)
+        self.assertEqual(up, [])
+
+    def test_a_failing_finalize_keeps_the_marker(self):
+        dm, up = self._two_saved_and_a_running_take()
+        dm._lerobot_dataset.finalize_raises = True
+        self.assertEqual(dm.end_for_shutdown(), DataManager.SHUTDOWN_FAILED)
+        self.assertTrue(dm._session_marker_path().exists())
+        self.assertEqual(dm._upload_blocked_reason_de, _texts().FINALIZE_FAILED_DE)
+        self.assertEqual(up, [])
+
+    def test_a_finalize_that_failed_earlier_is_tried_again(self):
+        dm, up = self._two_saved_and_a_running_take()
+        dm._lerobot_dataset.finalize_raises = True
+        self.assertEqual(dm.end_for_shutdown(), DataManager.SHUTDOWN_FAILED)
+        dm._lerobot_dataset.finalize_raises = False
+        self.assertEqual(dm.end_for_shutdown(), DataManager.SHUTDOWN_FINALIZED)
+        self.assertFalse(dm._session_marker_path().exists())
+        self.assertEqual(up, [])
+
+    def test_a_second_call_changes_nothing(self):
+        dm, up = make(n=3)
+        dm._lerobot_dataset = _CountingFinalizeDataset()
+        run_until(dm, 'save')
+        run_until(dm, 'run')
+        ticks(dm, 10)
+        self.assertEqual(dm.end_for_shutdown(), DataManager.SHUTDOWN_FINALIZED)
+        self.assertEqual(dm.end_for_shutdown(), DataManager.SHUTDOWN_ALREADY_FINAL)
+        self.assertEqual(dm._lerobot_dataset.finalize_calls, 1)
+        self.assertEqual(dm._record_episode_count, 1)
+
+    def test_a_session_that_ended_normally_is_left_alone(self):
+        dm, up = make(n=1)
+        dm._lerobot_dataset = _CountingFinalizeDataset()
+        run_until(dm, 'run')
+        for _ in range(200):                              # the node stops ticking at completion
+            if tick(dm):
+                break
+        else:
+            self.fail('the session did not complete')
+        self.assertEqual(dm._lerobot_dataset.finalize_calls, 1)   # finalized, upload handed off
+        self.assertEqual(len(up), 1)
+        self.assertEqual(dm.end_for_shutdown(), DataManager.SHUTDOWN_ALREADY_FINAL)
+        self.assertEqual(dm._lerobot_dataset.finalize_calls, 1)
+        self.assertEqual(len(up), 1)
+
+    def test_without_a_dataset_the_start_is_ended_like_stop(self):
+        dm, up = make()
+        dm._lerobot_dataset = None
+        dm._session_marker_enabled = True
+        tick(dm)                                          # the first tick writes the marker
+        self.assertTrue(dm._session_marker_path().exists())
+        self.assertEqual(dm.end_for_shutdown(), DataManager.SHUTDOWN_NO_DATASET)
+        self.assertEqual(dm.get_status(), 'stop')
+        self.assertTrue(dm._upload_enqueued)
+        self.assertEqual(up, [])
+        # VA-05 (2026-11-12): nothing was recorded, so no crashed session may
+        # be reported at the next boot — the marker goes, as STOP clears it.
+        self.assertFalse(dm._session_marker_path().exists())
+
+    def test_without_a_dataset_stop_and_shutdown_leave_the_same_marker_state(self):
+        answers = {}
+        for name, end in (('stop', lambda dm: (dm.record_stop(), ticks(dm, 4))),
+                          ('shutdown', lambda dm: dm.end_for_shutdown())):
+            dm, _ = make()
+            dm._lerobot_dataset = None
+            dm._session_marker_enabled = True
+            tick(dm)
+            end(dm)
+            answers[name] = dm._session_marker_path().exists()
+        self.assertEqual(answers, {'stop': False, 'shutdown': False})
+
+    def test_it_waits_for_a_record_step_in_flight(self):
+        import threading
+        dm, _ = make(n=3)
+        run_until(dm, 'run')
+        ticks(dm, 10)
+        entered, release, done = threading.Event(), threading.Event(), threading.Event()
+        answer = []
+
+        def _holder():
+            with dm.locked():
+                entered.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=_holder)
+        holder.start()
+        self.assertTrue(entered.wait(5))
+        ender = threading.Thread(target=lambda: answer.append(dm.end_for_shutdown()) or done.set())
+        ender.start()
+        self.assertFalse(done.wait(0.2))                  # blocked behind the step
+        release.set()
+        self.assertTrue(done.wait(5))
+        holder.join(5)
+        ender.join(5)
+        self.assertEqual(answer, [DataManager.SHUTDOWN_FINALIZED])
+
+    def test_the_finalized_flag_is_ours_not_lerobots(self):
+        # The recording path names no private LeRobot symbol (round 5): the
+        # shutdown path tells a finished session by DataManager's own flag.
+        import ast
+        source = DATA_MANAGER_PATH.read_text(encoding='utf-8')
+        names = {n.attr for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Attribute)}
+        self.assertNotIn('_is_finalized', names)
+        self.assertNotIn('_finalized', names)
+        self.assertIn('self._dataset_finalized = True', source)
 
 
 class OfficialDiscardOnlyTest(_FsmTestCase):

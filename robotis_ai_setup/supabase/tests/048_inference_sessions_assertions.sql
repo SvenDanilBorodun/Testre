@@ -1,9 +1,7 @@
 -- Behavioural assertions for migration 048 (Cloud-Inferenz sessions), run BY HAND against a fresh
 -- LOCAL database — never CI, never the linked project (it seeds rows).
--- The squashed baseline does not replay as shipped (docs/KNOWN-ISSUES.md, „baseline.sql is NOT
--- replayable from scratch"): use a SCRATCH copy of supabase/ whose baseline has
--- its one `ALTER TABLE public.trainings RENAME COLUMN runpod_job_id TO cloud_job_id;` line guarded as
--- 040_code_programs_assertions.sql's header shows, apply every migration through 048, then
+-- Use a SCRATCH copy of supabase/ holding every migration through 048 except 047 (the baseline
+-- replays on a fresh database as shipped), apply them, then
 --   psql <local db url> -f supabase/tests/048_inference_sessions_assertions.sql
 -- 052 BREAKS this file by design (spec §12.3): its seed INSERTs a trainings row
 -- directly, which 052's trainings_ledger_shape refuses (a new row defaults to
@@ -29,9 +27,9 @@
 -- an RPC's write and a check of it are separate statements.
 \set ON_ERROR_STOP off
 \pset pager off
-INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at)
-VALUES ('b4800001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-048@x.test', '', now(), now()),
-       ('b4800002-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's2-048@x.test', '', now(), now())
+INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at, raw_app_meta_data)
+VALUES ('b4800001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-048@x.test', '', now(), now(), '{"edubotics_provisioned": true}'),
+       ('b4800002-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's2-048@x.test', '', now(), now(), '{"edubotics_provisioned": true}')
 ON CONFLICT (id) DO NOTHING;
 UPDATE public.users SET role = 'student' WHERE id IN ('b4800001-0000-0000-0000-000000000001','b4800002-0000-0000-0000-000000000002');
 INSERT INTO public.trainings (id, user_id, dataset_name, model_name, model_type, status)

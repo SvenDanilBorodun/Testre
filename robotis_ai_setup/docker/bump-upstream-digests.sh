@@ -21,18 +21,19 @@
 # WHAT IT USED TO MISS (fixed): it parsed the two THIN-overlay
 # `ARG BASE_IMAGE=` lines and nothing else — which is only the amd64 story. It
 # was blind to:
-#   - the THREE bases we build OURSELVES and pin in build-images.sh
-#     (physical-ai-server-opi-base, physical-ai-server-jetson-base,
-#     open-manipulator-jetson-base). Those are the pins most likely to be wrong,
+#   - the TWO bases we build OURSELVES and pin in build-images.sh
+#     (physical-ai-server-opi-base and the Orange Pi's open_manipulator base,
+#     whose repo keeps its historical name open-manipulator-jetson-base). Those
+#     are the pins most likely to be wrong,
 #     because nothing in CI builds them: a maintainer hand-runs
 #     `BUILD_BASE_*=1 ./build-images.sh` and pushes once. A pin naming a tag
 #     that was never published fails the release, and this is the cheap place to
 #     find out. Their tags are parsed OUT of build-images.sh rather than
 #     duplicated here, so this script can never disagree with what builds.
-#   - the upstream `FROM` of each base Dockerfile (`ros:jazzy-ros-base` for the
-#     Orange Pi CPU base, `robotis/ros:...-cuda12.8.0` for the other two) —
-#     mutable upstream tags that reach students through a rebuild, entirely
-#     unreviewed.
+#   - the upstream `FROM` of each server base Dockerfile (`ros:jazzy-ros-base`
+#     for the Orange Pi CPU base, `robotis/ros:...-cuda12.8.0` for the amd64
+#     forward-compat scaffold) — mutable upstream tags that reach students
+#     through a rebuild, entirely unreviewed.
 #
 # Behaviour:
 #   - Exits non-zero if a Dockerfile is missing or unparseable.
@@ -153,7 +154,7 @@ REGISTRY="${REGISTRY:-nettername}"
 BUILD_SH="${SCRIPT_DIR}/build-images.sh"
 PAS_DOCKERFILE="${SCRIPT_DIR}/physical_ai_server/Dockerfile"
 OMX_DOCKERFILE="${SCRIPT_DIR}/open_manipulator/Dockerfile"
-# The three server BASE Dockerfiles live in the physical_ai_tools tree, one
+# The two server BASE Dockerfiles live in the physical_ai_tools tree, one
 # level up from robotis_ai_setup/ (build-images.sh resolves them the same way).
 PAT_DIR="${PHYSICAL_AI_TOOLS_DIR:-$(dirname "$(dirname "$SCRIPT_DIR")")/physical_ai_tools}"
 
@@ -163,12 +164,12 @@ OMX_BASE=$(parse_base_image "$OMX_DOCKERFILE")
 
 # 2. The bases we build ourselves, pinned in build-images.sh.
 PAS_OPI_BASE=$(parse_selfbuilt_base "physical-ai-server-opi-base")
-PAS_JETSON_BASE=$(parse_selfbuilt_base "physical-ai-server-jetson-base")
-OMX_JETSON_BASE=$(parse_selfbuilt_base "open-manipulator-jetson-base")
+# The opi open_manipulator base; the repo name is historical (build-images.sh,
+# BUILD_BASE_OPI_OMX).
+OMX_OPI_BASE=$(parse_selfbuilt_base "open-manipulator-jetson-base")
 
 # 3. The upstream FROMs those self-built bases are cut from.
 FROM_AMD64=$(parse_from_image "${PAT_DIR}/physical_ai_server/Dockerfile.amd64")
-FROM_ARM64=$(parse_from_image "${PAT_DIR}/physical_ai_server/Dockerfile.arm64")
 FROM_ARM64CPU=$(parse_from_image "${PAT_DIR}/physical_ai_server/Dockerfile.arm64cpu")
 
 echo "Pinned base images (parsed from ARG BASE_IMAGE defaults):"
@@ -177,8 +178,7 @@ echo "  open_manipulator   -> ${OMX_BASE}"
 echo ""
 echo "Self-built bases (parsed from build-images.sh; NOT built by CI):"
 echo "  physical_ai_server opi    -> ${PAS_OPI_BASE}"
-echo "  physical_ai_server jetson -> ${PAS_JETSON_BASE}"
-echo "  open_manipulator jetson   -> ${OMX_JETSON_BASE}"
+echo "  open_manipulator opi      -> ${OMX_OPI_BASE}"
 echo ""
 printf '%-44s | %-46s | %s | %s\n' \
     "Dockerfile" "Pinned tag" "Registry digest" "Last pushed"
@@ -196,16 +196,14 @@ report_row "$PAS_BASE" "docker/physical_ai_server/Dockerfile" || errors=$((error
 report_row "$OMX_BASE" "docker/open_manipulator/Dockerfile"   || errors=$((errors + 1))
 
 # Self-built bases. A MISSING here is a different diagnosis from an upstream
-# MISSING — it means the base Dockerfile was edited and nobody rebuilt/pushed
-# it (exactly what ci.yml::base-version-guard fences at review time).
-report_row "$PAS_OPI_BASE"    "build-images.sh (opi base, hand-built)"    || { errors=$((errors + 1)); selfbuilt_missing=1; }
-report_row "$PAS_JETSON_BASE" "build-images.sh (jetson base, hand-built)" || { errors=$((errors + 1)); selfbuilt_missing=1; }
-report_row "$OMX_JETSON_BASE" "build-images.sh (jetson OMX, hand-built)"  || { errors=$((errors + 1)); selfbuilt_missing=1; }
+# MISSING — it means a base Dockerfile was edited and its tag moved, but nobody
+# rebuilt/pushed it (ci.yml::base-version-guard fences the tag move for both).
+report_row "$PAS_OPI_BASE" "build-images.sh (opi base, hand-built)"     || { errors=$((errors + 1)); selfbuilt_missing=1; }
+report_row "$OMX_OPI_BASE" "build-images.sh (opi OMX base, hand-built)" || { errors=$((errors + 1)); selfbuilt_missing=1; }
 
 # Upstream FROMs of the self-built bases — mutable tags that reach a rig only
 # via a base rebuild, so they are reviewed here rather than never.
 report_row "$FROM_AMD64"    "Dockerfile.amd64 FROM"    || errors=$((errors + 1))
-report_row "$FROM_ARM64"    "Dockerfile.arm64 FROM"    || errors=$((errors + 1))
 report_row "$FROM_ARM64CPU" "Dockerfile.arm64cpu FROM" || errors=$((errors + 1))
 
 echo ""
@@ -220,8 +218,8 @@ if [ "$errors" -gt 0 ]; then
         echo "       One of the MISSING rows is a base WE build. That is not an upstream" >&2
         echo "       problem: the tag pinned in build-images.sh has never been pushed." >&2
         echo "       Build + push it before tagging a release, e.g.:" >&2
-        echo "         BUILD_BASE_OPI=1  PLATFORM=opi   ./build-images.sh   # opi CPU base" >&2
-        echo "         BUILD_BASE_ARM64=1 PLATFORM=arm64 ./build-images.sh  # both Jetson bases" >&2
+        echo "         BUILD_BASE_OPI=1     PLATFORM=opi ./build-images.sh   # opi CPU server base" >&2
+        echo "         BUILD_BASE_OPI_OMX=1 PLATFORM=opi ./build-images.sh   # opi open_manipulator base" >&2
         echo "       Until then the matching build leg fails its manifest resolve — and for" >&2
         echo "       opi (continue-on-error in docker-publish.yml) it SKIPS silently." >&2
     fi
@@ -237,14 +235,20 @@ To bump a pinned tag (review first!):
   3. Smoke-test the GUI flow + a training job before pushing.
   4. Commit the digest bump in its own commit.
 
-To change a base WE build (Dockerfile.amd64 / .arm64 / .arm64cpu):
+To change a base WE build (the two Orange Pi bases):
+
+  physical-ai-server-opi-base   <- physical_ai_tools/physical_ai_server/Dockerfile.arm64cpu
+                                   rebuild: BUILD_BASE_OPI=1     PLATFORM=opi ./build-images.sh
+                                   pin:     PAS_BASE_IMAGE in build-images.sh (opi case)
+  open-manipulator-jetson-base  <- open_manipulator/docker/Dockerfile (historical repo name)
+                                   rebuild: BUILD_BASE_OPI_OMX=1 PLATFORM=opi ./build-images.sh
+                                   pin:     OMX_BASE_IMAGE in build-images.sh (opi case)
 
   1. Edit the base Dockerfile.
-  2. Rebuild + push it:  BUILD_BASE_OPI=1 PLATFORM=opi ./build-images.sh
-                    (or) BUILD_BASE_ARM64=1 PLATFORM=arm64 ./build-images.sh
-  3. Bump the matching PAS_BASE_IMAGE tag in build-images.sh, SAME commit —
-     ci.yml::base-version-guard enforces this. Nothing in CI builds these
-     bases, so an un-bumped tag means the release silently ships the old one.
+  2. Rebuild + push that base with its command above.
+  3. Bump its pin to the new tag in build-images.sh, SAME commit —
+     ci.yml::base-version-guard enforces this for both. Nothing in CI builds
+     these bases, so an un-bumped tag means the release silently ships the old one.
 
 Modal training base (CUDA) is pinned inline in
 modal_training/modal_app.py — bump that separately.

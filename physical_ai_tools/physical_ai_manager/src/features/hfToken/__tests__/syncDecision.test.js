@@ -1,7 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 //
 // The reconcile decision, as a table. `decideSync` is pure, so the whole
 // contract is these 28 rows (one per case the audit enumerated), the start-block
@@ -34,7 +34,7 @@ describe('decideSync — the 28-row truth table', () => {
     ['1 disabled', { enabled: false, robot: R(), accountStatus: 'stored', accountFp: A }, 'noop'],
     ['2 robot state unknown', { robot: { known: false }, accountStatus: 'stored', accountFp: A }, 'noop'],
     ['3 robot null', { robot: null, accountStatus: 'stored', accountFp: A }, 'noop'],
-    ['4 Jetson / no slot (accepts false)', { robot: R({ accepts: false }), accountStatus: 'stored', accountFp: A }, 'noop'],
+    ['4 no slot (accepts false)', { robot: R({ accepts: false }), accountStatus: 'stored', accountFp: A }, 'noop'],
     ['5 account unknown', { robot: R({ present: true, fp: B }), accountStatus: 'unknown' }, 'noop'],
     ['6 account loading', { robot: R({ present: true, fp: B }), accountStatus: 'loading' }, 'noop'],
     ['7 account error', { robot: R({ present: true, fp: B }), accountStatus: 'error' }, 'noop'],

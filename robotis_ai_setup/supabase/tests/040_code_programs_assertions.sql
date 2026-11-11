@@ -2,20 +2,10 @@
 -- „Abgeben"), run BY HAND against a fresh LOCAL stack — never CI, never the
 -- linked project (it seeds rows and deletes a workflow).
 --
--- The squashed baseline does NOT replay on a fresh database as shipped (its
--- migration-005 body renames a runpod_job_id column its own CREATE TABLE never
--- declares; docs/KNOWN-ISSUES.md, „baseline.sql is NOT replayable from
--- scratch"). So run it in a SCRATCH copy of supabase/ whose baseline has that
--- one line guarded:
---   ALTER TABLE public.trainings RENAME COLUMN runpod_job_id TO cloud_job_id;
--- becomes
---   DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns
---     WHERE table_schema='public' AND table_name='trainings'
---       AND column_name='runpod_job_id')
---   THEN ALTER TABLE public.trainings RENAME COLUMN runpod_job_id TO cloud_job_id;
---   END IF; END $$;
--- with the migrations only THROUGH 040 (after 041 this file is not the
--- right check: see 041_code_destinations_assertions.sql), then
+-- Run it in a SCRATCH copy of supabase/ holding the migrations only THROUGH
+-- 040 (after 041 this file is not the right check: see
+-- 041_code_destinations_assertions.sql); the baseline replays on a fresh
+-- database as shipped. Then
 --   supabase start   (in the scratch copy; it applies the migrations)
 --   psql <local db url> < supabase/tests/040_code_programs_assertions.sql
 -- Expected: 16 PASS, 0 FAIL/ERROR (T1..T10, some with a/b/c/d halves).
@@ -23,10 +13,10 @@
 \pset pager off
 
 -- seed: one classroom, one teacher, two students (auth.users first: users.id FKs it)
-INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at)
-VALUES ('11111111-1111-1111-1111-111111111111', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1@x.test', '', now(), now()),
-       ('22222222-2222-2222-2222-222222222222', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's2@x.test', '', now(), now()),
-       ('33333333-3333-3333-3333-333333333333', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 't@x.test', '', now(), now())
+INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at, raw_app_meta_data)
+VALUES ('11111111-1111-1111-1111-111111111111', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1@x.test', '', now(), now(), '{"edubotics_provisioned": true}'),
+       ('22222222-2222-2222-2222-222222222222', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's2@x.test', '', now(), now(), '{"edubotics_provisioned": true}'),
+       ('33333333-3333-3333-3333-333333333333', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 't@x.test', '', now(), now(), '{"edubotics_provisioned": true}')
 ON CONFLICT (id) DO NOTHING;
 -- the baseline's auth trigger already mirrored the three ids into public.users;
 -- set the roles / classroom on those rows instead of inserting.

@@ -1,10 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 //
 // „Roboter aktivieren" — the one control on the Startseite, and the only thing
 // in the product that puts a physical arm in motion without a student having
@@ -115,21 +112,13 @@ export function pillLabel(state, busy, warned = false) {
 
 export default function ActivationCard() {
   const heartbeatStatus = useSelector((s) => s.tasks.heartbeatStatus);
-  // The classroom Jetson OWNS its own lifecycle — its compose runs
-  // `restart: unless-stopped` and its agent drives the follower to
-  // SAFE_HOME_JOINTS on every CLAIM, which is already a logged-in student's
-  // deliberate action. So on a Jetson there is nothing here to activate, and
-  // showing „nicht aktiv" over an arm the agent has already homed would be a
-  // lie. Don't conflate the two lifecycles — the same rule the compose
-  // `restart:` carve-out states.
-  const jetsonConnected = useSelector((s) => s.jetson?.status === 'connected');
   const taskRunning = useSelector((s) => s.tasks.taskStatus.running);
   const workflowRunning = useSelector((s) => (s.workshop ? selectWorkflowRunning(s) : false));
   const caps = useSelector((s) => s.tasks.taskStatus.capabilities);
   const connected = heartbeatStatus === 'connected';
 
   const { status, activate, calling, error } = useRobotActivation({
-    enabled: connected && !jetsonConnected,
+    enabled: connected,
   });
 
   const state = status?.state ?? null;
@@ -145,8 +134,6 @@ export default function ActivationCard() {
   const teleopOwnsTheArm = isActive && hasLeader;
 
   const onClick = useCallback(() => { activate(); }, [activate]);
-
-  if (jetsonConnected) return null;
 
   // The agent's own message wins whenever it has one: it is the only party
   // that knows WHY a home glide was refused (a joint on the position-map edge,

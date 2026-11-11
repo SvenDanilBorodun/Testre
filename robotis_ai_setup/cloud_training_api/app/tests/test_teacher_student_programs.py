@@ -100,8 +100,10 @@ class _Ctx:
         teacher.get_supabase = self._orig
 
 
-def _run(coro):
-    return asyncio.run(coro)
+def _run(result):
+    """The four handlers are plain ``def`` since 2026-11-10 (they run in FastAPI's
+    threadpool, test_event_loop_not_blocked.py); a coroutine is still awaited."""
+    return asyncio.run(result) if asyncio.iscoroutine(result) else result
 
 
 def _refusal_async(fn, *args, **kwargs):

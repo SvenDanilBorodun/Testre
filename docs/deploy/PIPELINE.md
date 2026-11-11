@@ -22,10 +22,10 @@ The four CI-driven workflows in `.github/workflows/`:
 
 | Workflow | Triggers on changes to | What it does |
 |----------|------------------------|--------------|
-| `supabase-migrate.yml` | `supabase/migrations/**` | Applies migrations to production (or PR-branch for PRs) |
+| `supabase-migrate.yml` | `supabase/migrations/**` (PRs only) | PR: applies to an ephemeral branch. Production: only from `release.yml` (a tag) or the manual „Run workflow" button — never on a push to `main` (owner decision 2026-11-10) |
 | `railway-deploy-cloud-api.yml` | `cloud_training_api/**` | Schema-probe → `railway up` → `/health` gate |
 | `railway-deploy-teacher-web.yml` | `physical_ai_manager/**` | Validate → `railway up` teacher-web → `/version.json` gate |
-| `docker-publish.yml` | `docker/**`, `open_manipulator/**`, `physical_ai_tools/**` | Native amd64 + arm64 builds → push → smoke-test |
+| `docker-publish.yml` | `docker/**`, `open_manipulator/**`, `physical_ai_tools/**` | Native amd64 + opi (arm64) builds → push → smoke-test |
 
 Plus `release.yml` which chains all four on `v*.*.*` tag pushes.
 
@@ -35,7 +35,7 @@ Plus `release.yml` which chains all four on `v*.*.*` tag pushes.
 
 ## One-time setup (operator runs this once, ever)
 
-### Step 1: Mint the 12 GitHub Actions secrets
+### Step 1: Mint the 10 GitHub Actions secrets (plus one optional)
 
 Settings → Secrets and variables → Actions → New repository secret:
 
@@ -44,15 +44,15 @@ Settings → Secrets and variables → Actions → New repository secret:
 | `DOCKERHUB_USERNAME` | `nettername` |
 | `DOCKERHUB_TOKEN` | hub.docker.com → Account Settings → Security → New Access Token, scope **Read/Write/Delete** |
 | `RAILWAY_TOKEN` | `railway tokens create --project scintillating-empathy --name gha-deploy` (run from your laptop where Railway CLI is logged in) |
-| `MODAL_TOKEN_ID` | Copy from existing Railway env (`railway variables` shows it; starts `ak-`) |
-| `MODAL_TOKEN_SECRET` | Copy from existing Railway env (starts `as-`) |
 | `SUPABASE_ACCESS_TOKEN` | supabase.com → Account → Access Tokens → Generate new token |
 | `SUPABASE_DB_URL` | Supabase Dashboard → Project Settings → Database → Connection string → URI (pooler, port 6543). Format: `postgresql://postgres.fnnbysrjkfugsqzwcksd:<svc-pw>@aws-0-eu-west-1.pooler.supabase.com:6543/postgres` |
 | `SUPABASE_PROJECT_REF` | `fnnbysrjkfugsqzwcksd` (literal) |
 | `SUPABASE_URL` | `https://fnnbysrjkfugsqzwcksd.supabase.co` (literal) |
-| `SUPABASE_SERVICE_ROLE_KEY` | Copy from existing Railway env |
-| `SUPABASE_ANON_KEY` | Copy from existing Railway env or from `robotis_ai_setup/docker/.env.build` |
+| `SUPABASE_ANON_KEY` | Copy from existing Railway env |
 | `REACT_APP_CLOUD_API_URL` | `https://scintillating-empathy-production-1068.up.railway.app` (literal) |
+| `RELEASES_REPO_TOKEN` | **Optional.** Only with the repository variable `RELEASES_REPO` set (the public release channel of a private repository): a fine-grained PAT with Contents read/write on that repository only. See `docs/deploy/PRIVATE-REPOSITORY.md`. |
+
+No workflow reads `SUPABASE_SERVICE_ROLE_KEY`, `MODAL_TOKEN_ID` or `MODAL_TOKEN_SECRET`: W2's import probe carries a dummy service-role key, and Modal deploys are manual (the Modal token lives with the operator's `modal` CLI). Do not create them; delete a stored copy.
 
 ### Step 2: Register the Supabase baseline as already-applied
 
@@ -132,7 +132,7 @@ Same flow. On merge to main, all path-filter-matching workflows fire in
 parallel. Sequencing matters here:
 
 ```
-Schema change       → supabase-migrate fires
+Schema change       → nothing on the merge: run supabase-migrate by hand (2026-11-10)
 FastAPI change      → railway-deploy-cloud-api fires
 React change        → railway-deploy-teacher-web fires
 Image source change → docker-publish fires
@@ -303,7 +303,9 @@ want them still available.
 
 ## Known issue: supabase-migrate CI
 
-**Status:** `apply-production` job consistently fails at step 5 "Apply pending migrations" since 2026-05-19. Tried `--db-url`, `--linked --password`, all variants — without admin GH-Actions log access we can't see the exact CLI error. Production is unaffected (failure is at the CLI call, no partial DDL).
+**RESOLVED (read 2026-11-11):** `apply-production` applies migrations again — its run on the push of 2026-11-02 (`supabase-migrate` run 58, merge of #46) applied 052 green, and production's ledger ends at 052. Since 2026-11-10 W1 runs only by hand or from `release.yml` (`MERGE-CHECKLIST.md`). The history below is kept for reference.
+
+**Status (historical):** `apply-production` job consistently fails at step 5 "Apply pending migrations" since 2026-05-19. Tried `--db-url`, `--linked --password`, all variants — without admin GH-Actions log access we can't see the exact CLI error. Production is unaffected (failure is at the CLI call, no partial DDL).
 
 **Workaround for applying new migrations:**
 
@@ -381,7 +383,7 @@ Railway dashboard, then re-run W1, then re-run W3.
 
 | Event | Workflows fired |
 |---|---|
-| `push` to main, paths match `supabase/migrations/**` | `supabase-migrate.yml::apply-production` |
+| `push` to main, paths match `supabase/migrations/**` | _(none since 2026-11-10 — run `supabase-migrate.yml` by hand, „Run workflow")_ |
 | `push` to main, paths match `modal_training/**` | _(none — operator deploys Modal manually)_ |
 | `push` to main, paths match `cloud_training_api/**` | `railway-deploy-cloud-api.yml` |
 | `push` to main, paths match `physical_ai_manager/**` | `railway-deploy-teacher-web.yml` |
@@ -397,7 +399,7 @@ Railway dashboard, then re-run W1, then re-run W3.
 
 ## Reference: required GitHub Actions secrets
 
-12 secrets (Step 1 above). Workflows reference these via `${{ secrets.X }}`.
+10 secrets, plus the optional `RELEASES_REPO_TOKEN` (Step 1 above), and the repository variables `RELEASES_REPO` and `SUPABASE_BRANCHING_ENABLED`. Workflows reference these via `${{ secrets.X }}` / `${{ vars.X }}`.
 
 For `release.yml` to invoke child workflows, it uses `secrets: inherit`
 which only works because each child has a `workflow_call:` trigger.
@@ -411,7 +413,7 @@ Don't remove those triggers.
 - Teacher web: `https://teacher-web-production.up.railway.app`
 - Supabase: `https://fnnbysrjkfugsqzwcksd.supabase.co` (region eu-west-1)
 - Modal app: `edubotics-training` in workspace `svendanilborodun`
-- Docker Hub: `docker.io/nettername/{open-manipulator,physical-ai-server,physical-ai-manager}` (amd64) + same with `-jetson` suffix (arm64)
+- Docker Hub: `docker.io/nettername/{open-manipulator,physical-ai-server,physical-ai-manager,code-runner}` (amd64) + same with `-opi` suffix (arm64, Orange Pi); GHCR `ghcr.io/svendanilborodun/*` is the primary
 
 ---
 

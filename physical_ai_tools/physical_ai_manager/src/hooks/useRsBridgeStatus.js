@@ -1,14 +1,15 @@
 /*
- * Copyright 2026 EduBotics
+ * Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
+ * Proprietary and confidential. Licensed under the EduBotics End-User
+ * Licence Agreement; see LICENSE at the repository root.
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
 import { useEffect, useMemo, useState } from 'react';
 import { rsControlBase, usePiMode } from '../utils/piMode';
+import { noteUnauthorized } from '../features/piAuth/piAuth';
 
 // The Roboter-Studio control bridge probe, moved out of RunControls so every
 // Roboter-Studio surface reads ONE answer to "is the leader arm on?".
@@ -18,7 +19,7 @@ import { rsControlBase, usePiMode } from '../utils/piMode';
 // its broadcaster also floods that topic at ~100 Hz with the limp leader's pose,
 // so the two writers fight and the follower jerks between poses. We probe the
 // GUI's localhost control bridge (roboter_studio_control.py, the same one
-// LeaderToggle uses). When the bridge is ABSENT (Jetson/cloud/old GUI), there is
+// LeaderToggle uses). When the bridge is ABSENT (cloud/old GUI), there is
 // no leader to fight — Roboter Studio there is follower-only by construction —
 // so the probe FAILS OPEN. The base is Windows-loopback (:8769) OR the Pi's
 // same-origin /api/system proxy (rsControlBase, utils/piMode) — a remote browser
@@ -39,6 +40,9 @@ export async function probeRsStatus(base) {
   const timer = setTimeout(() => ctrl.abort(), RS_STATUS_TIMEOUT_MS);
   try {
     const res = await fetch(`${base}/roboter-studio/status`, { signal: ctrl.signal });
+    // Orange Pi robot login: a 401 means the session is gone — re-check it
+    // (a no-op off a Pi).
+    if (res.status === 401) noteUnauthorized();
     if (!res.ok) return UNAVAILABLE;
     const body = await res.json().catch(() => ({}));
     // A `null` body throws on the property read and lands in the catch — the
@@ -52,7 +56,7 @@ export async function probeRsStatus(base) {
       busy: !!body.busy,
     };
   } catch (e) {
-    // No bridge reachable (Jetson/cloud/old GUI) → don't block.
+    // No bridge reachable (cloud/old GUI) → don't block.
     return UNAVAILABLE;
   } finally {
     clearTimeout(timer);

@@ -26,6 +26,16 @@ from supabase import create_client
 
 SYNTHETIC_EMAIL_DOMAIN = "edubotics.local"
 USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,31}$")
+# Migration 058 refuses a new auth.users row without this app_metadata marker
+# (only the service role can set it). Equal to
+# cloud_training_api/app/services/provisioning.py::PROVISIONED_KEY
+# (tests/test_supabase_058.py holds them equal).
+PROVISIONED_KEY = "edubotics_provisioned"
+# The staff password rule (owner decision 2026-11-10): equal to
+# cloud_training_api/app/services/passwords.py::STAFF_MIN_LENGTH / MAX_LENGTH
+# (tests/test_password_rule_lockstep.py holds them equal).
+ADMIN_PASSWORD_MIN_LENGTH = 12
+PASSWORD_MAX_LENGTH = 128
 
 
 def main():
@@ -53,12 +63,14 @@ def main():
     if not url or not key:
         sys.exit("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be in the .env")
 
-    password = getpass.getpass("New admin password (min 6 chars): ")
+    password = getpass.getpass(f"New admin password (min {ADMIN_PASSWORD_MIN_LENGTH} chars): ")
     password_confirm = getpass.getpass("Confirm password: ")
     if password != password_confirm:
         sys.exit("Passwords do not match")
-    if len(password) < 6:
-        sys.exit("Password must be at least 6 characters")
+    if len(password) < ADMIN_PASSWORD_MIN_LENGTH:
+        sys.exit(f"Password must be at least {ADMIN_PASSWORD_MIN_LENGTH} characters")
+    if len(password) > PASSWORD_MAX_LENGTH:
+        sys.exit(f"Password must be at most {PASSWORD_MAX_LENGTH} characters")
 
     client = create_client(url, key)
     email = f"{username}@{SYNTHETIC_EMAIL_DOMAIN}"
@@ -66,7 +78,12 @@ def main():
     print(f"\nCreating auth user {email}...")
     try:
         created = client.auth.admin.create_user(
-            {"email": email, "password": password, "email_confirm": True}
+            {
+                "email": email,
+                "password": password,
+                "email_confirm": True,
+                "app_metadata": {PROVISIONED_KEY: True},
+            }
         )
     except Exception as e:
         sys.exit(f"auth.admin.create_user failed: {e}")
@@ -97,6 +114,8 @@ def main():
     print("\nDone! You can now log in to the web dashboard with:")
     print(f"  Username: {username}")
     print(f"  Password: (what you entered)")
+    print("At the first login the dashboard asks you to set up two-factor")
+    print("authentication (an authenticator app, TOTP): every admin route needs it.")
 
 
 if __name__ == "__main__":

@@ -7,8 +7,8 @@ agent is the brain the SPA drives — through the manager's same-origin
 ``/api/system`` reverse proxy (nginx strips ``/api/system`` so the agent sees
 bare paths: ``/status``, ``/scan-arms``, ``/roboter-studio/status`` …).
 
-It merges the Jetson agent's systemd/scrubbed-env skeleton (``jetson_agent/
-agent.py``) with the platform-neutral GUI brain (the Phase-A ``pi_agent``
+It merges the systemd/scrubbed-env skeleton of the classroom Jetson's agent
+(retired and deleted 2026-11-09) with the platform-neutral GUI brain (the Phase-A ``pi_agent``
 modules: ``config_generator`` / ``docker_manager`` / ``identify_arm`` /
 ``camera_enum`` / ``update_checker`` / ``phone_camera`` / ``lan_ip``). Every
 Windows/WSL2 artifact is shed (no usbipd, no ``wsl -d`` tunnelling, no MSMF
@@ -40,13 +40,23 @@ error. The React side still needs its backoff-retried ``/api/system/status``
 probe because that first-boot window — agent up, ``ros_net`` not yet created —
 is real, so a one-shot probe can land on a 502.
 
-Security (deploy plan §8): with open LAN binding and no auth, LAN peers can
-drive any arm (the accepted risk). The one mitigation here is a Host/Origin
-exact-host allowlist on every MUTATING (POST) endpoint — a drive-by cross-site
-``POST /api/system/factory-reset`` from a hostile web page carries an Origin of
-a DNS domain, which is rejected; a request from the Pi itself (or a header-less
-``curl``) is allowed. Ported from ``roboter_studio_control.py``'s exact-host
-check (never a ``startswith`` match).
+Security (robot login, 2026-11-10; ``pi_auth``): every route but a handful of
+public ones (``_PUBLIC_GET_PATHS``, the ``/auth/*`` routes) needs a ROBOT
+SESSION — an HttpOnly ``SameSite=Strict`` cookie this agent mints after an
+EduBotics login (the browser hands over a one-time ticket it minted from the
+cloud over HTTPS; the agent redeems it at the cloud, so the Supabase token never
+crosses the LAN) — or a loopback peer (a process on the Pi itself). The
+maintenance routes (``_MAINTENANCE_POST_PATHS``) need a teacher's or an admin's
+session (SA-12). The agent enforces it on
+``/api/system/*`` ITSELF, because a LAN host can route to the ros_net gateway
+IP and reach this listener without nginx; nginx gates the three robot
+transports (rosbridge, the camera stream, the dataset sidecar) with
+``auth_request`` to ``/auth/check``. An unclaimed Pi has no sessions until a
+teacher or admin claims it with the one-time setup code. On top: a Host/Origin
+exact-host allowlist on every MUTATING (POST) endpoint (a drive-by cross-site
+POST carries a foreign Origin and is rejected), and an EMPTY Origin is accepted
+only from a loopback peer. Ported from ``roboter_studio_control.py``'s
+exact-host check (never a ``startswith`` match).
 
 Run as PID 1 under ``edubotics-pi.service`` (root — needs the docker socket +
 ``/dev``). Logs to journald; the Protokoll SSE stream mirrors a redacted
@@ -76,7 +86,7 @@ import urllib.request
 import uuid
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
 from typing import Optional
 from urllib.parse import parse_qs, urlsplit
 
@@ -84,8 +94,11 @@ from . import (
     camera_enum,
     config_generator,
     docker_manager,
+    firewall,
     identify_arm,
     phone_camera,
+    pi_auth,
+    robot_key,
     update_checker,
 )
 from .config_generator import ArmDevice, CameraDevice, HardwareConfig
@@ -211,6 +224,120 @@ _COMPOSE_VALIDATE_TIMEOUT_S = 60
 _ARM_FAMILY_MISMATCH_DE = (
     "Die gescannten Arme gehören zu einem anderen Robotertyp. "
     "Bitte die Arme für den gewählten Robotertyp neu scannen."
+)
+
+
+# ── Robot login (pi_auth) ─────────────────────────────────────────────────────
+#
+# Every route below is PUBLIC (no robot session needed). Everything else on the
+# gateway listener needs a session; the loopback listener's peers are local
+# root processes and stay trusted (``AgentApp.peer_is_trusted``). nginx gates
+# /rosbridge, /video/stream and /daten-api/ through ``/auth/check``; /api/system
+# is gated HERE, because a LAN host can route to the ros_net gateway IP and
+# reach this listener without nginx (docs/KNOWN-ISSUES.md).
+#
+#   /, /health            liveness only
+#   /auth/state           claimed? session? (the SPA's pre-login probe)
+#   /auth/check           nginx's auth_request target (cookie only)
+#   /update/check         read-only, cached + rate-floored (unchanged)
+#   /update/status/<id>   a 128-bit job id is its own capability; survives the
+#                         self-update restart that wipes every session
+#   /netzwerk-check       the diagnosis for a FAILING login, so it must work
+#                         without one; single-flight + cached
+_PUBLIC_GET_PATHS = frozenset({"/", "/health", "/auth/state", "/auth/check",
+                               "/update/check", "/netzwerk-check"})
+
+# Maintenance routes (SA-12, 2026-11-13): a STUDENT session may run a lesson
+# (scan, cameras, environment start/stop, the update a stale Pi needs, the
+# leader toggle) but not maintain the Pi. Only a teacher's or an admin's session
+# — or a process on the Pi itself (loopback) — may reset it or change its robot
+# type. The setup code is minted for loopback peers only (/auth/setup-code).
+# The full route table is in docs/CLAUDE-CHANGELOG.md (2026-11-13).
+_MAINTENANCE_POST_PATHS = frozenset({"/factory-reset", "/robot-type"})
+_MAINTENANCE_ROLES = frozenset({"teacher", "admin"})
+_MAINTENANCE_ROLE_DE = (
+    "Das darf nur eine Lehrkraft oder ein Admin: bitte mit einem solchen Konto "
+    "anmelden. Für den Unterricht wird es nicht gebraucht."
+)
+
+# The typed confirmation a factory reset needs on top of the two checkboxes
+# (owner decision 5). Compared case-insensitively; the umlaut is part of it.
+_FACTORY_RESET_CONFIRM_WORD = "ZURÜCKSETZEN"
+
+# Rate limits on the two routes that cost a cloud call (and, for a claim, a
+# setup-code guess). Per client IP (nginx's X-Real-IP) plus one overall bucket,
+# because a whole classroom of browsers reaches the agent through one nginx.
+_SESSION_RATE_PER_CLIENT = (20, 60.0)
+_SESSION_RATE_OVERALL = (120, 60.0)
+_CLAIM_RATE_PER_CLIENT = (10, 15 * 60.0)
+
+# Netzwerk-Check is public (the login diagnosis), so it must not be an
+# amplifier: one run at a time, and a result is reused for this long.
+_NETCHECK_CACHE_S = 20.0
+
+# The login guard: how often the agent re-proves that the manager's nginx
+# gates the robot transports, and the backoff of its self-heal (re-pull +
+# recreate of an outdated manager). See _login_guard_tick.
+_LOGIN_GUARD_FIRST_S = 20.0
+_LOGIN_GUARD_INTERVAL_S = 60.0
+_LOGIN_HEAL_BACKOFF_S = (10 * 60.0, 20 * 60.0, 40 * 60.0, 80 * 60.0, 4 * 3600.0)
+# The manager's nginx, as the agent reaches it. The opi compose publishes :80 on
+# EDUBOTICS_BIND_HOST, which is 0.0.0.0 or 127.0.0.1 — both include loopback.
+_MANAGER_PROBE_BASE = "http://127.0.0.1:80"
+_MANAGER_PROBE_TIMEOUT_S = 3.0
+# Three cookie-less requests that the CURRENT nginx must answer 401 (its auth
+# subrequest to /auth/check) and an OLD nginx proxies straight to
+# physical_ai_server (502 while the tier is down, 400/200 while it is up).
+_MANAGER_PROBE_PATHS = ("/rosbridge", "/video/stream", "/daten-api/v1/health")
+
+# The firewall step against routing past nginx (SA-05, pi_agent/firewall.py):
+# first run once Docker is up at boot, then re-checked, because a Docker
+# restart recreates DOCKER-USER and re-inserts its own jumps.
+_FIREWALL_INTERVAL_S = 60.0
+_ROS_NET_SUBNET_DEFAULT = "172.28.0.0/24"
+_ROS_NET_GATEWAY_DEFAULT = "172.28.0.1"
+# The compose label Docker puts on the ros_net network (any project name).
+_ROS_NET_LABEL = "com.docker.compose.network=ros_net"
+
+# Where a freshly minted setup code is shown when nobody asked for it (the
+# boot-time mint of an unclaimed Pi): the first HDMI text console. Best effort —
+# on a desktop image the console may not be visible. NEVER the journal.
+_CONSOLE_TTY_DEFAULT = "/dev/tty1"
+
+_LOGIN_REQUIRED_DE = (
+    "Anmeldung am Roboter erforderlich. Bitte die Seite neu laden und mit "
+    "einem EduBotics-Konto anmelden. Zeigt die Seite keine Anmeldung für den "
+    "Roboter, ist die Weboberfläche älter als die Pi-Software: der Pi lädt die "
+    "neue Weboberfläche selbst — bitte einige Minuten warten und die Seite neu "
+    "laden, sonst den Pi neu starten."
+)
+_UNCLAIMED_DE = (
+    "Dieser Roboter ist noch nicht eingerichtet. Eine Lehrkraft oder ein Admin "
+    "richtet ihn einmal mit dem Einrichtungscode ein; danach kann sich jedes "
+    "EduBotics-Konto hier anmelden."
+)
+_MANAGER_OUTDATED_DE = (
+    "Die Weboberfläche dieses Pis ist älter als die Pi-Software und prüft noch "
+    "keine Anmeldung. Die Roboter-Umgebung bleibt deshalb gesperrt. Der Pi lädt "
+    "die neue Weboberfläche selbst — bitte einige Minuten warten. Hilft das "
+    "nicht: im System-Fenster „Aktualisieren“ ausführen oder den Pi neu starten."
+)
+# What a teacher does when the setup code is gone (none minted yet) or voided
+# (too many wrong attempts): mint a new one ON the Pi. Root-only by design —
+# the code is the proof of physical/administrative access.
+_SETUP_CODE_CLI_DE = "sudo sh -c 'cd /opt/edubotics && python3 -m pi_agent.setup_code'"
+_SETUP_CODE_REMEDY_DE = {
+    "no_code": ("Auf diesem Pi gibt es noch keinen Einrichtungscode. Bitte am Pi "
+                f"im Terminal {_SETUP_CODE_CLI_DE} ausführen; der Befehl zeigt "
+                "einen neuen Code an."),
+    "void": ("Der Einrichtungscode ist nach zu vielen Fehlversuchen gesperrt. "
+             f"Bitte am Pi im Terminal {_SETUP_CODE_CLI_DE} ausführen; der Befehl "
+             "zeigt einen neuen Code an."),
+}
+_MANAGER_LOGIN_UNKNOWN_DE = (
+    "Die Anmeldeprüfung der Weboberfläche ist gerade nicht erreichbar — die "
+    "Roboter-Umgebung wird deshalb nicht gestartet. Bitte kurz warten und "
+    "erneut versuchen."
 )
 
 
@@ -438,9 +565,30 @@ class AgentApp:
     directly through the handler (``stream_*``).
     """
 
-    def __init__(self, env_file: str = ENV_FILE, compose_file: str = COMPOSE_FILE) -> None:
+    def __init__(self, env_file: str = ENV_FILE, compose_file: str = COMPOSE_FILE,
+                 auth_file: Optional[str] = None) -> None:
         self.env_file = env_file
         self.compose_file = compose_file
+
+        # Robot login (pi_auth): the claim state (persisted, hash-only setup
+        # code) and the live sessions (memory only — a restart logs everyone
+        # out and the SPA re-exchanges). The path resolves at CALL time so a
+        # test can point it at a temp dir; see pi_auth.default_state_file.
+        self._auth = pi_auth.AuthStore(auth_file)
+        self._session_rate_client = pi_auth.RateLimiter(*_SESSION_RATE_PER_CLIENT)
+        self._session_rate_overall = pi_auth.RateLimiter(*_SESSION_RATE_OVERALL)
+        self._claim_rate_client = pi_auth.RateLimiter(*_CLAIM_RATE_PER_CLIENT)
+        # Login guard state (_login_guard_tick): the last definite verdict on
+        # the manager's nginx, and when the next self-heal may run.
+        self._login_guard_lock = threading.Lock()
+        self._login_guard_last: Optional[str] = None
+        self._login_heal_attempts = 0
+        self._login_heal_next_at = 0.0
+        # Public /netzwerk-check: single-flight + a short cache.
+        self._netcheck_lock = threading.Lock()
+        self._netcheck_cache: Optional[tuple] = None
+        # The firewall step's last outcome per family (logs only on a change).
+        self._firewall_last: dict = {}
 
         # Scanned hardware — rehydrated from the .env at start() so a reboot
         # keeps the arms/cameras identified without a rescan.
@@ -597,7 +745,7 @@ class AgentApp:
             self._own_ips_cache = (time.monotonic(), frozenset(normalized))
         return normalized
 
-    def origin_allowed(self, origin: str) -> bool:
+    def origin_allowed(self, origin: str, allow_empty: bool = True) -> bool:
         """Whether a mutating request's ``Origin`` is the Pi itself.
 
         Ported exact-host check from ``roboter_studio_control._origin_allowed``
@@ -606,14 +754,20 @@ class AgentApp:
         localhost, or an IP literal that is one of the Pi's OWN addresses
         (loopback or an interface address). A hostile page served from
         ``http://<attacker-ip>/`` carries that attacker IP as its Origin and is
-        REJECTED — an IP literal is no longer a blanket allow. An EMPTY Origin
-        is allowed: same-origin browser requests omit it, and header-less
-        callers (``curl`` — the P2 acceptance path) must work. CORS blocks the
+        REJECTED — an IP literal is no longer a blanket allow. CORS blocks the
         cross-origin RESPONSE read but not a no-cors POST's SIDE EFFECT, so this
         handler-level check is the real one.
+
+        An EMPTY Origin is decided by ``allow_empty``, which the POST router
+        sets to "the TCP peer is loopback" (owner decision 5, 2026-11-10): every
+        browser sends an Origin on a POST, same-origin included, so an Origin-
+        less POST through nginx is a script (``curl`` from another LAN host) and
+        is refused, while a root process on the Pi itself (the setup-code CLI)
+        still works. The read-only ``/update/check?force=1`` keeps the old
+        allow-empty default (a no-cors GET carries no Origin).
         """
         if origin == "":
-            return True
+            return bool(allow_empty)
         try:
             host = urlsplit(origin).hostname
         except ValueError:
@@ -632,6 +786,446 @@ class AgentApp:
         if ip.is_loopback:
             return True
         return str(ip) in self._own_ip_addresses()
+
+    # ── robot login (pi_auth): who is asking ─────────────────────────────────
+
+    @staticmethod
+    def peer_is_trusted(peer_ip: str) -> bool:
+        """A TCP peer on the loopback interface is a process ON the Pi (root's
+        setup-code CLI, an operator's curl over SSH): trusted without a session,
+        as before. Every browser reaches the agent through nginx's container on
+        ros_net (never loopback), and no packet from the LAN can carry a
+        loopback source (the kernel drops it as a martian)."""
+        try:
+            return ip_address(str(peer_ip).split("%", 1)[0]).is_loopback
+        except ValueError:
+            return False
+
+    def client_ip(self, peer_ip: str, x_real_ip: str) -> str:
+        """The browser's address for the rate limits. nginx sets X-Real-IP; it
+        is believed only when the TCP peer sits in the ros_net subnet (i.e. the
+        request really came through the manager's nginx), never from a peer that
+        reached the gateway listener directly."""
+        candidate = (x_real_ip or "").strip()
+        if candidate:
+            try:
+                subnet = config_generator.read_env_var(
+                    "EDUBOTICS_ROS_NET_SUBNET", self.env_file) or "172.28.0.0/24"
+                if ip_address(peer_ip) in ip_network(subnet, strict=False):
+                    return str(ip_address(candidate))
+            except ValueError:
+                pass
+        return str(peer_ip)
+
+    def session_from_cookie(self, cookie_header: str) -> Optional[dict]:
+        return self._auth.session(pi_auth.parse_session_cookie(cookie_header))
+
+    def maintenance_refusal(self, path: str, trusted: bool,
+                            session: Optional[dict]) -> Optional["tuple[int, dict]"]:
+        """None when ``path`` may run for this caller, else the German 403 (SA-12).
+        A maintenance route needs a teacher's or an admin's session, or a
+        loopback peer (a root process on the Pi)."""
+        if path not in _MAINTENANCE_POST_PATHS or trusted:
+            return None
+        if session is not None and session.get("role") in _MAINTENANCE_ROLES:
+            return None
+        return 403, {"ok": False, "code": "role_not_allowed",
+                     "message": _MAINTENANCE_ROLE_DE}
+
+    def unauthorized_response(self) -> "tuple[int, dict]":
+        """The 401 every protected route answers without a session. ``code`` is
+        for the current SPA (it has its own wording); ``message`` is for an
+        OLDER SPA that knows nothing of the robot login (version skew — it
+        renders ``message`` raw, so the sentence names the way out)."""
+        if not self._auth.claimed:
+            return 401, {"ok": False, "code": "unclaimed", "message": _UNCLAIMED_DE}
+        return 401, {"ok": False, "code": "login_required", "message": _LOGIN_REQUIRED_DE}
+
+    # ── robot login: the routes ──────────────────────────────────────────────
+
+    def handle_auth_state(self, cookie_header: str) -> "tuple[int, dict]":
+        """The SPA's pre-login probe. Reveals nothing beyond what the login
+        screen needs: whether the Pi is set up, whether THIS browser holds a
+        live session (and how long it has left), and the Pi's own name (which
+        mDNS announces anyway). ``auth`` names the protocol version, so a new
+        SPA can tell this agent from an old one (an old agent answers 404).
+        ``pi_id`` is the id a login ticket is minted for (SA-06): public, it
+        only binds a ticket to this Pi."""
+        session = self.session_from_cookie(cookie_header)
+        payload = {
+            "ok": True,
+            "auth": 1,
+            "claimed": self._auth.claimed,
+            "session": session is not None,
+            "hostname": socket.gethostname(),
+            "pi_id": self._auth.pi_id(),
+        }
+        if session is not None:
+            payload["role"] = session["role"]
+            payload["expires_in"] = session["expires_in"]
+        if not payload["claimed"]:
+            payload["setup_code"] = self._auth.code_status()
+        return 200, payload
+
+    def _rate_limited(self) -> "tuple[int, dict]":
+        return 429, {"ok": False, "code": "rate_limited",
+                     "message": "Zu viele Anmeldeversuche — bitte eine Minute "
+                                "warten und erneut versuchen."}
+
+    def _cloud_verdict_response(self, verdict: str) -> "tuple[int, dict]":
+        if verdict == "rejected":
+            return 401, {"ok": False, "code": "ticket_rejected",
+                         "message": "Die Anmeldung wurde nicht angenommen. Bitte "
+                                    "die Seite neu laden; hilft das nicht, "
+                                    "abmelden und erneut anmelden."}
+        return 503, {"ok": False, "code": "cloud_unreachable",
+                     "message": "Die EduBotics-Cloud ist vom Pi aus gerade nicht "
+                                "erreichbar, deshalb kann die Anmeldung nicht "
+                                "geprüft werden. Bitte die Internetverbindung des "
+                                "Pis prüfen (Netzwerk-Check) und erneut versuchen."}
+
+    def _ticket_missing(self, claim: bool) -> "tuple[int, dict, list]":
+        message = ("Bitte zuerst mit einem Lehrkräfte- oder Admin-Konto anmelden."
+                   if claim else
+                   "Anmeldung fehlt. Bitte die Seite neu laden und anmelden.")
+        return 401, {"ok": False, "code": "ticket_missing", "message": message}, []
+
+    def handle_auth_session(self, body: dict, cookie_header: str,
+                            client: str) -> "tuple[int, dict, list]":
+        """Exchange a one-time login ticket for a robot session (SA-06).
+
+        The browser minted the ticket from the cloud over HTTPS with its
+        Supabase token; the agent redeems it at the cloud for THIS Pi once, then
+        drops it: never stored, logged or sent anywhere else. A session the
+        browser already holds is replaced (rotation)."""
+        ticket = pi_auth.ticket_from(body.get("ticket") if isinstance(body, dict) else None)
+        if ticket is None:
+            return self._ticket_missing(claim=False)
+        if not self._auth.claimed:
+            code, payload = self.unauthorized_response()
+            return code, payload, []
+        if not (self._session_rate_client.allow(client)
+                and self._session_rate_overall.allow("*")):
+            code, payload = self._rate_limited()
+            return code, payload, []
+        verdict, role, account, max_s = pi_auth.redeem_with_cloud(
+            ticket, self._auth.pi_id(), UPDATE_API_URL)
+        if verdict != "ok":
+            code, payload = self._cloud_verdict_response(verdict)
+            return code, payload, []
+        ttl = pi_auth.session_ttl(max_s)
+        self._auth.revoke(pi_auth.parse_session_cookie(cookie_header))
+        sid = self._auth.create_session(role, ttl, account=account)
+        return 200, {"ok": True, "role": role, "expires_in": ttl,
+                     "message": "Am Roboter angemeldet."}, [
+            ("Set-Cookie", pi_auth.session_cookie_header(sid, ttl))]
+
+    def handle_auth_claim(self, body: dict, cookie_header: str,
+                          client: str) -> "tuple[int, dict, list]":
+        """Claim an unclaimed Pi: a teacher/admin login (a one-time ticket the
+        cloud redeems FIRST, so a student cannot even guess) plus the one-time
+        setup code. Success spends the code and answers with a session."""
+        body = body if isinstance(body, dict) else {}
+        ticket = pi_auth.ticket_from(body.get("ticket"))
+        if ticket is None:
+            return self._ticket_missing(claim=True)
+        if self._auth.claimed:
+            return 409, {"ok": False, "code": "already_claimed",
+                         "message": "Dieser Roboter ist bereits eingerichtet. "
+                                    "Bitte die Seite neu laden und anmelden."}, []
+        if pi_auth.normalize_code(body.get("code")) is None:
+            return 400, {"ok": False, "code": "code_malformed",
+                         "message": "Der Einrichtungscode hat acht Zeichen, zum "
+                                    "Beispiel ABCD-EFGH. Bitte genau so eingeben, "
+                                    "wie er angezeigt wurde."}, []
+        if not self._claim_rate_client.allow(client):
+            code, payload = self._rate_limited()
+            return code, payload, []
+        verdict, role, account, max_s = pi_auth.redeem_with_cloud(
+            ticket, self._auth.pi_id(), UPDATE_API_URL)
+        if verdict != "ok":
+            code, payload = self._cloud_verdict_response(verdict)
+            return code, payload, []
+        if role not in pi_auth.CLAIM_ROLES:
+            return 403, {"ok": False, "code": "role_not_allowed",
+                         "message": "Nur Lehrkräfte oder Admins können einen "
+                                    "Roboter einrichten. Bitte mit einem solchen "
+                                    "Konto anmelden."}, []
+        result = self._auth.try_claim(body.get("code"), role)
+        if result == "ok":
+            self._log("Roboter eingerichtet (Einrichtungscode angenommen).")
+            ttl = pi_auth.session_ttl(max_s)
+            self._auth.revoke(pi_auth.parse_session_cookie(cookie_header))
+            sid = self._auth.create_session(role, ttl, account=account)
+            return 200, {"ok": True, "role": role, "expires_in": ttl,
+                         "message": "Roboter eingerichtet. Ab jetzt kann sich "
+                                    "jedes EduBotics-Konto hier anmelden."}, [
+                ("Set-Cookie", pi_auth.session_cookie_header(sid, ttl))]
+        if result == "claimed":
+            return 409, {"ok": False, "code": "already_claimed",
+                         "message": "Dieser Roboter ist bereits eingerichtet. "
+                                    "Bitte die Seite neu laden und anmelden."}, []
+        if result in ("no_code", "void"):
+            self._log("[WARNUNG] Einrichtung abgelehnt: kein gültiger "
+                      "Einrichtungscode vorhanden.")
+            return 409, {"ok": False, "code": f"code_{result}",
+                         "message": _SETUP_CODE_REMEDY_DE[result]}, []
+        if result == "write_failed":
+            return 500, {"ok": False, "code": "write_failed",
+                         "message": "Die Einrichtung konnte auf dem Pi nicht "
+                                    "gespeichert werden. Bitte freien Speicher "
+                                    "prüfen und erneut versuchen."}, []
+        return 403, {"ok": False, "code": "code_wrong",
+                     "message": "Der Einrichtungscode stimmt nicht. Bitte genau "
+                                "so eingeben, wie er angezeigt wurde."}, []
+
+    def handle_auth_logout(self, cookie_header: str) -> "tuple[int, dict, list]":
+        self._auth.revoke(pi_auth.parse_session_cookie(cookie_header))
+        return 200, {"ok": True, "message": "Vom Roboter abgemeldet."}, [
+            ("Set-Cookie", pi_auth.clear_cookie_header())]
+
+    def handle_setup_code_new(self) -> "tuple[int, dict]":
+        """Loopback-only (the router enforces it): mint a new setup code for the
+        CLI ``python3 -m pi_agent.setup_code``. The code is in the RESPONSE to
+        that local caller and nowhere else — not in the Protokoll, not in the
+        journal."""
+        if self._auth.claimed:
+            return 409, {"ok": False, "code": "already_claimed",
+                         "message": "Dieser Roboter ist bereits eingerichtet — ein "
+                                    "neuer Einrichtungscode entsteht erst mit dem "
+                                    "Zurücksetzen (System → Zurücksetzen)."}
+        try:
+            code = self._auth.mint_code()
+        except RuntimeError:
+            return 409, {"ok": False, "code": "already_claimed",
+                         "message": "Dieser Roboter ist bereits eingerichtet."}
+        except OSError as e:
+            return 500, {"ok": False, "code": "write_failed",
+                         "message": f"Der Einrichtungscode konnte nicht gespeichert "
+                                    f"werden: {e}"}
+        self._log("Neuer Einrichtungscode erzeugt (am Pi angezeigt).")
+        return 200, {"ok": True, "setup_code": pi_auth.format_code(code),
+                     "hostname": socket.gethostname(),
+                     "message": "Neuer Einrichtungscode erzeugt."}
+
+    def _announce_code_on_console(self, code: str) -> None:
+        """Best effort: show a code minted at boot or by a factory reset on the
+        HDMI text console, the one screen a teacher may have plugged in. Never
+        the journal, never the Protokoll ring. Silent on any failure (no
+        console, a desktop session)."""
+        tty = os.environ.get("EDUBOTICS_PI_CONSOLE", _CONSOLE_TTY_DEFAULT)
+        if not tty:
+            return
+        try:
+            host = socket.gethostname()
+        except OSError:
+            host = "edubotics"
+        text = (
+            "\n============================================================\n"
+            "  EduBotics: dieser Roboter ist noch nicht eingerichtet.\n"
+            f"  Einrichtungscode:  {pi_auth.format_code(code)}\n"
+            f"  Im Browser: http://{host}.local/ öffnen, mit einem Lehrkräfte-\n"
+            "  oder Admin-Konto anmelden und den Code eingeben.\n"
+            "============================================================\n"
+        )
+        try:
+            with open(tty, "w", encoding="utf-8") as f:
+                f.write(text)
+        except OSError:
+            pass
+
+    def _ensure_setup_code_at_boot(self) -> None:
+        """An unclaimed Pi without a code (a freshly updated fielded Pi, a golden
+        clone) gets one minted at boot and shown on the console. An existing
+        code is NEVER rotated here: the one setup.sh printed must survive a
+        reboot."""
+        if self._auth.load_failed:
+            self._log("[WARNUNG] Der Anmeldezustand des Roboters war nicht lesbar — "
+                      "der Roboter gilt als nicht eingerichtet und muss mit einem "
+                      "neuen Einrichtungscode eingerichtet werden.")
+        if self._auth.claimed or self._auth.code_status() != "none":
+            return
+        try:
+            code = self._auth.mint_code()
+        except (OSError, RuntimeError) as e:
+            self._log(f"[WARNUNG] Einrichtungscode konnte nicht erzeugt werden: {e}")
+            return
+        self._log("Dieser Roboter ist noch nicht eingerichtet — ein Einrichtungscode "
+                  "wurde erzeugt (Anzeige am Pi: sudo python3 -m pi_agent.setup_code "
+                  "im Ordner /opt/edubotics erzeugt bei Bedarf einen neuen).")
+        self._announce_code_on_console(code)
+
+    # ── robot login: does the manager's nginx gate the transports? ───────────
+
+    @staticmethod
+    def _probe_status(path: str) -> Optional[int]:
+        """HTTP status of a cookie-less GET to the manager's nginx, or None
+        when nothing answered (connection refused, timeout)."""
+        req = urllib.request.Request(_MANAGER_PROBE_BASE + path, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=_MANAGER_PROBE_TIMEOUT_S) as r:
+                return int(r.status)
+        except urllib.error.HTTPError as e:
+            try:
+                e.close()
+            except Exception:  # noqa: BLE001
+                pass
+            return int(e.code)
+        except Exception:  # noqa: BLE001 — refused / timeout / reset: no answer
+            return None
+
+    def _manager_login_state(self) -> str:
+        """``enforced`` | ``open`` | ``unknown`` — measured, never assumed.
+
+        The robot transports (rosbridge, the camera stream, the dataset
+        sidecar) live in physical_ai_server and are gated ONLY by the
+        manager's nginx. The nginx config ships in the manager IMAGE, this agent
+        in the TARBALL, so after a self-update the two disagree for as long as
+        the new images take to pull (and forever if they never arrive). So the
+        agent asks nginx itself: the current config answers every cookie-less
+        probe 401 (its auth subrequest to /auth/check) or 500 (that subrequest
+        failed); an older config proxies to physical_ai_server and answers
+        anything else (502 while the tier is down, 400/200 while it is up).
+        """
+        statuses = [self._probe_status(p) for p in _MANAGER_PROBE_PATHS]
+        if any(s is not None and s not in (401, 500) for s in statuses):
+            return "open"
+        if all(s == 401 for s in statuses):
+            return "enforced"
+        return "unknown"
+
+    def _login_guard_tick(self) -> None:
+        """One round of the login guard (every _LOGIN_GUARD_INTERVAL_S).
+
+        Only a DEFINITE ``open`` verdict acts: a running robot tier is stopped
+        (its transports would be reachable without a login), and the manager is
+        re-pulled at this agent's IMAGE_TAG and recreated, with backoff — the
+        self-heal of the post-update window in which the old SPA cannot log in
+        and therefore cannot press „Aktualisieren"."""
+        state = self._manager_login_state()
+        with self._login_guard_lock:
+            previous = self._login_guard_last
+            self._login_guard_last = state
+            if state != "open":
+                if state == "enforced":
+                    self._login_heal_attempts = 0
+                    self._login_heal_next_at = 0.0
+                return
+            heal_due = time.monotonic() >= self._login_heal_next_at
+            if heal_due:
+                idx = min(self._login_heal_attempts, len(_LOGIN_HEAL_BACKOFF_S) - 1)
+                self._login_heal_next_at = time.monotonic() + _LOGIN_HEAL_BACKOFF_S[idx]
+                self._login_heal_attempts += 1
+        if previous != "open":
+            self._log(f"[FEHLER] {_MANAGER_OUTDATED_DE}")
+        try:
+            status = docker_manager.get_container_status()
+        except Exception:  # noqa: BLE001
+            status = {}
+        if status.get("physical_ai_server") == "running":
+            self._log("[WARNUNG] Roboter-Umgebung wird gestoppt: die Weboberfläche "
+                      "prüft keine Anmeldung, Kamera und Robotersteuerung wären "
+                      "ohne Anmeldung erreichbar.")
+            try:
+                docker_manager.stop_robot_tier(log=self._log)
+            except Exception as e:  # noqa: BLE001
+                self._log(f"Roboter-Umgebung konnte nicht gestoppt werden: {e}")
+        if heal_due and not self._update_in_flight():
+            if self._lifecycle_lock.acquire(blocking=False):
+                try:
+                    self._log("Neue Weboberfläche wird geladen (Anmeldeprüfung) …")
+                    missing: list = []
+                    try:
+                        docker_manager.check_for_updates(log=self._log, missing_out=missing)
+                    except Exception as e:  # noqa: BLE001
+                        self._log(f"Images konnten nicht geladen werden: {e}")
+                    docker_manager.start_manager(log=self._log)
+                finally:
+                    self._lifecycle_lock.release()
+
+    def _login_guard_loop(self) -> None:
+        if self._shutdown.wait(_LOGIN_GUARD_FIRST_S):
+            return
+        while not self._shutdown.is_set():
+            try:
+                self._login_guard_tick()
+            except Exception as e:  # noqa: BLE001 — the guard never dies
+                self._log(f"Anmeldeprüfung fehlgeschlagen: {e}")
+            if self._shutdown.wait(_LOGIN_GUARD_INTERVAL_S):
+                return
+
+    # ── the firewall step (SA-05) ────────────────────────────────────────────
+
+    def _ros_net_ipv6(self) -> "tuple[Optional[str], Optional[str]]":
+        """The ros_net network's IPv6 subnet and gateway when Docker IPv6 is
+        enabled on it, else (None, None). Read from ``docker network inspect``;
+        any failure is "not enabled" (the IPv4 rules are applied regardless)."""
+        try:
+            listed = subprocess.run(
+                docker_manager._docker("network", "ls", "-q", "--filter", f"label={_ROS_NET_LABEL}"),
+                capture_output=True, text=True, timeout=15, check=False,
+                env=docker_manager._scrubbed_env())
+            ids = (listed.stdout or "").split()
+            if listed.returncode != 0 or not ids:
+                return None, None
+            inspected = subprocess.run(
+                docker_manager._docker("network", "inspect", ids[0], "--format", "{{json .}}"),
+                capture_output=True, text=True, timeout=15, check=False,
+                env=docker_manager._scrubbed_env())
+            if inspected.returncode != 0:
+                return None, None
+            return firewall.ipv6_of_network(inspected.stdout)
+        except (OSError, subprocess.SubprocessError):
+            return None, None
+
+    def _firewall_tick(self) -> "list[tuple[str, bool, bool, str]]":
+        """Apply the firewall rules for every family ros_net uses; returns
+        ``[(family, ok, changed, detail), …]``. Logs in English (maintainer
+        only), and only when an outcome differs from the previous tick's."""
+        subnet = (config_generator.read_env_var("EDUBOTICS_ROS_NET_SUBNET", self.env_file)
+                  or _ROS_NET_SUBNET_DEFAULT)
+        gateway = (config_generator.read_env_var("EDUBOTICS_ROS_NET_GATEWAY", self.env_file)
+                   or _ROS_NET_GATEWAY_DEFAULT)
+        plans = []
+        try:
+            plans.append(("ipv4", firewall.build_rules(subnet, gateway, 4)))
+        except ValueError:
+            plans.append(("ipv4", None))
+        v6_subnet, v6_gateway = self._ros_net_ipv6()
+        if v6_subnet:
+            try:
+                plans.append(("ipv6", firewall.build_rules(v6_subnet, v6_gateway, 6)))
+            except ValueError:
+                plans.append(("ipv6", None))
+        outcomes = []
+        for family, rules in plans:
+            if rules is None:
+                outcomes.append((family, False, False, "the ros_net subnet or gateway is malformed"))
+            else:
+                outcomes.append((family, *firewall.apply(rules)))
+        for family, ok, changed, detail in outcomes:
+            state = (ok, detail)
+            if self._firewall_last.get(family) != state:
+                if ok:
+                    logger.info("firewall %s: rules against routing past nginx are in place%s",
+                                family, " (re-applied)" if changed else "")
+                else:
+                    logger.warning("firewall %s: could not apply the rules against routing past "
+                                   "nginx: %s; will retry", family, detail)
+            elif ok and changed:
+                logger.warning("firewall %s: the rules had to be re-applied (a Docker restart "
+                               "or another tool changed the chains)", family)
+            self._firewall_last[family] = state
+        return outcomes
+
+    def _firewall_loop(self) -> None:
+        while not self._shutdown.is_set():
+            try:
+                self._firewall_tick()
+            except Exception as e:  # noqa: BLE001 — the firewall step never stops the agent
+                logger.warning("firewall step failed: %s", type(e).__name__)
+            if self._shutdown.wait(_FIREWALL_INTERVAL_S):
+                return
 
     # ── hardware rehydrate / persist ─────────────────────────────────────────
 
@@ -1335,6 +1929,19 @@ class AgentApp:
                         else "Bitte zuerst den Roboterarm scannen."
                     ),
                 }
+            # The robot tier's transports (rosbridge, the camera stream, the
+            # dataset sidecar) are gated by the manager's nginx alone. Start it
+            # only once nginx is PROVEN to gate them (version skew: a fresh agent
+            # beside a manager image from before the robot login would otherwise
+            # expose the arm to the whole LAN). Three local requests, refused /
+            # answered in milliseconds unless nginx itself hangs (3 s each).
+            login_state = self._manager_login_state()
+            if login_state == "open":
+                return 409, {"ok": False, "code": "manager_outdated",
+                             "message": _MANAGER_OUTDATED_DE}
+            if login_state != "enforced":
+                return 503, {"ok": False, "code": "manager_login_unknown",
+                             "message": _MANAGER_LOGIN_UNKNOWN_DE}
             self.stop_active_previews()  # free /dev/video* before usb_cam claims it
             try:
                 config_generator.generate_env_file(
@@ -1840,13 +2447,28 @@ class AgentApp:
 
     def handle_factory_reset(self, body: dict) -> "tuple[int, dict]":
         """Delete the persistent data volumes (datasets, HF cache, Roboter-Studio
-        calibration). Requires a DOUBLE confirmation and never ``compose down``
-        (that would delete ros_net + drop the manager)."""
+        calibration) and return the Pi to UNCLAIMED.
+
+        Requires the double confirmation AND the typed word „ZURÜCKSETZEN"
+        (owner decision 5) and never ``compose down`` (that would delete ros_net
+        + drop the manager). Only a teacher's or an admin's session (or a
+        loopback peer) reaches it (SA-12; the router checks). A successful reset
+        revokes EVERY robot session, forgets the claim and mints a new setup
+        code, which is answered ONCE here (``setup_code``) to the teacher or
+        admin who reset AND shown on the HDMI console (best effort, as at boot),
+        so a Pi without a monitor can still be claimed again and one with a
+        monitor even when the answer is lost."""
         if self._update_in_flight():
             return self._busy_updating()
         if not (bool(body.get("confirm")) and bool(body.get("confirm_again"))):
             return 400, {"ok": False,
                          "message": "Doppelte Bestätigung erforderlich (confirm + confirm_again)."}
+        typed = body.get("confirm_text")
+        if (not isinstance(typed, str)
+                or typed.strip().casefold() != _FACTORY_RESET_CONFIRM_WORD.casefold()):
+            return 400, {"ok": False, "code": "confirm_text",
+                         "message": "Zur Bestätigung bitte das Wort "
+                                    f"„{_FACTORY_RESET_CONFIRM_WORD}“ eintippen."}
         if not self._acquire_lifecycle():
             return self._busy_lifecycle()
         try:
@@ -1854,9 +2476,44 @@ class AgentApp:
             ok, msg = docker_manager.factory_reset(log=self._log)
         finally:
             self._lifecycle_lock.release()
-        return (200 if ok else 500), {"ok": bool(ok), "message": msg}
+        if not ok:
+            return 500, {"ok": False, "message": msg}
+        try:
+            code = self._auth.reset_to_unclaimed()
+        except (OSError, RuntimeError) as e:
+            # Every session is revoked regardless (reset_to_unclaimed clears them
+            # first); what failed is the write of the new state.
+            self._log(f"[FEHLER] Anmeldezustand konnte nach dem Zurücksetzen nicht "
+                      f"gespeichert werden: {e}")
+            return 500, {"ok": False,
+                         "message": f"{msg} Der Anmeldezustand des Roboters konnte "
+                                    "aber nicht gespeichert werden — bitte freien "
+                                    "Speicher prüfen und am Pi einen neuen "
+                                    f"Einrichtungscode erzeugen ({_SETUP_CODE_CLI_DE})."}
+        self._announce_code_on_console(code)
+        self._log("Roboter zurückgesetzt: alle Anmeldungen beendet, ein neuer "
+                  "Einrichtungscode wurde erzeugt.")
+        return 200, {"ok": True,
+                     "setup_code": pi_auth.format_code(code),
+                     "message": f"{msg} Der Roboter ist jetzt nicht mehr eingerichtet: "
+                                "bitte mit einem Lehrkräfte- oder Admin-Konto und dem "
+                                "neuen Einrichtungscode neu einrichten."}
 
     # ── GET: /netzwerk-check ─────────────────────────────────────────────────
+
+    def handle_netzwerk_check_cached(self) -> "tuple[int, dict]":
+        """The route's entry: Netzwerk-Check is PUBLIC since the robot login (a
+        failing login is exactly what it diagnoses), so it must not become an
+        amplifier — one run at a time, and a result younger than
+        _NETCHECK_CACHE_S is answered again. A caller arriving while a run is
+        in flight waits for it and gets its result."""
+        with self._netcheck_lock:
+            cached = self._netcheck_cache
+            if cached is not None and (time.monotonic() - cached[0]) < _NETCHECK_CACHE_S:
+                return cached[1], dict(cached[2])
+            code, payload = self.handle_netzwerk_check()
+            self._netcheck_cache = (time.monotonic(), code, dict(payload))
+            return code, payload
 
     def handle_netzwerk_check(self) -> "tuple[int, dict]":
         """Run the school-network diagnostics FROM the Pi: cloud/registry/HF
@@ -1997,6 +2654,15 @@ class AgentApp:
             return True, "NTP-Status unbekannt"
 
     # ── Roboter Studio leader toggle (ported RS contract + busy lock) ────────
+
+    def handle_robot_key(self) -> "tuple[int, dict]":
+        """GET /robot-key — the ROS node's PUBLIC token key (VB-03, 2026-11-15;
+        robot_key.py), behind the robot login like every lesson route. The Pi's
+        page encrypts the student's Hugging Face token only for this key: a
+        rosbridge session can forge /edubotics/hf_token_state, not this file.
+        ``key`` is null while the node has written none (the robot tier is down
+        or still starting, or an image from before the file)."""
+        return 200, {"ok": True, "key": robot_key.read_key()}
 
     def handle_rs_status(self) -> "tuple[int, dict]":
         """GET /roboter-studio/status → the exact ``roboter_studio_control`` JSON
@@ -2222,6 +2888,8 @@ class AgentApp:
             server_version = "EduBoticsPiAgent/1.0"
 
             def log_message(self, *_a):  # silence the default stderr access log
+                # Never re-enable a per-request log here: a request line can
+                # carry a Daten link token, and a Cookie header the session.
                 pass
 
             # ---- response helpers ----
@@ -2230,12 +2898,17 @@ class AgentApp:
                 self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
                 self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
-            def _send_json(self, code, payload):
+            def _send_json(self, code, payload, headers=()):
                 body = json.dumps(payload).encode("utf-8")
                 self.send_response(code)
                 self._cors()
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
+                # Robot-login answers (a Set-Cookie, a session state) must
+                # never be cached by the browser or a middlebox.
+                self.send_header("Cache-Control", "no-store")
+                for name, value in headers:
+                    self.send_header(name, value)
                 self.end_headers()
                 try:
                     self.wfile.write(body)
@@ -2261,24 +2934,92 @@ class AgentApp:
                     return {}
                 return data if isinstance(data, dict) else {}
 
+            # ---- robot-login helpers ----
+            def _peer_ip(self) -> str:
+                try:
+                    return str(self.client_address[0])
+                except (TypeError, IndexError):
+                    return ""
+
+            def _peer_trusted(self) -> bool:
+                return app.peer_is_trusted(self._peer_ip())
+
+            def _client(self) -> str:
+                return app.client_ip(self._peer_ip(), self.headers.get("X-Real-IP", ""))
+
+            def _cookie(self) -> str:
+                return self.headers.get("Cookie", "") or ""
+
+            def _authorized(self) -> bool:
+                """A protected route needs a live robot session — or a peer on
+                the Pi itself (loopback, see AgentApp.peer_is_trusted)."""
+                return (self._peer_trusted()
+                        or app.session_from_cookie(self._cookie()) is not None)
+
             def do_OPTIONS(self):  # noqa: N802 — http.server API
                 self.send_response(204)
                 self._cors()
                 self.end_headers()
 
-            # ---- GET routing (open; not Origin-gated). Mostly read-only, with
-            # two DELIBERATE documented exceptions: /cameras/scan and
-            # /cameras/preview stop any live preview first (the device must be
-            # released before it can be re-opened). The React callers depend on
-            # the GET method for both, so the method stays — the mutation is
-            # confined to the agent's own preview session, never to the .env,
-            # containers, or hardware config. ----
+            # ---- GET routing. Public: _PUBLIC_GET_PATHS + /update/status/<id>.
+            # Everything else needs a robot session (401 — for an unknown path
+            # too, so an unauthenticated caller cannot map the routes).
+            # Mostly read-only, with two DELIBERATE documented exceptions:
+            # /cameras/scan and /cameras/preview stop any live preview first
+            # (the device must be released before it can be re-opened). The
+            # React callers depend on the GET method for both, so the method
+            # stays — the mutation is confined to the agent's own preview
+            # session, never to the .env, containers, or hardware config. ----
             def do_GET(self):  # noqa: N802
                 path = urlsplit(self.path).path.rstrip("/") or "/"
                 query = parse_qs(urlsplit(self.path).query)
                 if path in ("/", "/health"):
                     self._send_json(200, {"ok": True, "agent_ready": app._ready.is_set()})
-                elif path == "/status":
+                    return
+                if path == "/auth/state":
+                    self._send_json(*app.handle_auth_state(self._cookie()))
+                    return
+                if path == "/auth/check":
+                    # nginx's auth_request target: the COOKIE alone decides (the
+                    # subrequest always comes from nginx, never from loopback).
+                    # nginx reads only the status.
+                    if app.session_from_cookie(self._cookie()) is not None:
+                        self.send_response(204)
+                        self.send_header("Cache-Control", "no-store")
+                        self.end_headers()
+                    else:
+                        self._send_json(*app.unauthorized_response())
+                    return
+                if path == "/update/check":
+                    # `force` skips the poll-storm cache, so it is the one bit of
+                    # this read-only endpoint worth gating. A browser omits Origin
+                    # on a no-cors GET, so an ABSENT header proves nothing and
+                    # stays allowed (origin_allowed's allow-empty default, and the
+                    # header-less curl path) — but a PRESENT, foreign Origin is a
+                    # cross-site caller with no business bypassing the cache, and
+                    # it silently gets the cached answer. The real bound on the
+                    # no-cors case is the rate floor inside handle_update_check;
+                    # this is the cheap layer on top.
+                    force = (query.get("force") or query.get("refresh")
+                             or [""])[0] in ("1", "true", "yes")
+                    if force:
+                        try:
+                            force = app.origin_allowed(self.headers.get("Origin", ""))
+                        except Exception:  # noqa: BLE001 — /update/check never 500s
+                            force = False
+                    self._send_json(*app.handle_update_check(force=force))
+                    return
+                if path.startswith("/update/status/"):
+                    job_id = path[len("/update/status/"):]
+                    self._send_json(*app.handle_update_status(job_id))
+                    return
+                if path == "/netzwerk-check":
+                    self._send_json(*app.handle_netzwerk_check_cached())
+                    return
+                if not self._authorized():
+                    self._send_json(*app.unauthorized_response())
+                    return
+                if path == "/status":
                     self._send_json(*app.handle_status())
                 elif path == "/cameras/scan":
                     self._send_json(*app.handle_cameras_scan())
@@ -2291,49 +3032,64 @@ class AgentApp:
                         self._send_json(400, {"ok": False, "message": "Kein Kameragerät angegeben."})
                         return
                     if not _is_allowed_camera_device(device):
-                        # GETs are not Origin-gated — validate the device path so
-                        # a URL/index can't drive cv2.VideoCapture (SSRF).
+                        # Validate the device path so a URL/index can't drive
+                        # cv2.VideoCapture (SSRF).
                         self._send_json(400, {"ok": False, "message": "Ungültiges Kameragerät."})
                         return
                     app.stream_camera_preview(self, device)
                 elif path == "/protokoll":
                     app.stream_protokoll(self)
-                elif path == "/netzwerk-check":
-                    self._send_json(*app.handle_netzwerk_check())
                 elif path == "/roboter-studio/status":
                     self._send_json(*app.handle_rs_status())
-                elif path == "/update/check":
-                    # `force` skips the poll-storm cache, so it is the one bit of
-                    # this read-only endpoint worth gating. A browser omits Origin
-                    # on a no-cors GET, so an ABSENT header proves nothing and
-                    # stays allowed (same posture as origin_allowed's empty case,
-                    # and the header-less curl path) — but a PRESENT, foreign
-                    # Origin is a cross-site caller with no business bypassing the
-                    # cache, and it silently gets the cached answer. The real
-                    # bound on the no-cors case is the rate floor inside
-                    # handle_update_check; this is the cheap layer on top.
-                    force = (query.get("force") or query.get("refresh")
-                             or [""])[0] in ("1", "true", "yes")
-                    if force:
-                        try:
-                            force = app.origin_allowed(self.headers.get("Origin", ""))
-                        except Exception:  # noqa: BLE001 — /update/check never 500s
-                            force = False
-                    self._send_json(*app.handle_update_check(force=force))
-                elif path.startswith("/update/status/"):
-                    job_id = path[len("/update/status/"):]
-                    self._send_json(*app.handle_update_status(job_id))
+                elif path == "/robot-key":
+                    self._send_json(*app.handle_robot_key())
                 else:
                     self._send_json(404, {"ok": False, "message": "Nicht gefunden."})
 
-            # ---- POST routing (mutating; Host/Origin allowlist) ----
+            # ---- POST routing (mutating). Order: Origin (an EMPTY Origin only
+            # from a loopback peer), then the robot-login routes, then a robot
+            # session for everything else. ----
             def do_POST(self):  # noqa: N802
                 path = urlsplit(self.path).path.rstrip("/") or "/"
                 origin = self.headers.get("Origin", "")
-                if not app.origin_allowed(origin):
+                trusted = self._peer_trusted()
+                if not app.origin_allowed(origin, allow_empty=trusted):
                     # Drain the body so the kernel doesn't reset the connection.
                     self._read_json_body()
                     self._send_json(403, {"ok": False, "message": "Origin nicht erlaubt."})
+                    return
+                if path == "/auth/session":
+                    body = self._read_json_body()
+                    self._send_json(*app.handle_auth_session(
+                        body, self._cookie(), self._client()))
+                    return
+                if path == "/auth/claim":
+                    body = self._read_json_body()
+                    self._send_json(*app.handle_auth_claim(
+                        body, self._cookie(), self._client()))
+                    return
+                if path == "/auth/logout":
+                    self._read_json_body()
+                    self._send_json(*app.handle_auth_logout(self._cookie()))
+                    return
+                if path == "/auth/setup-code":
+                    self._read_json_body()
+                    if not trusted:
+                        # The setup code is the proof of physical access: it is
+                        # minted only for a process ON the Pi (the CLI).
+                        self._send_json(404, {"ok": False, "message": "Nicht gefunden."})
+                        return
+                    self._send_json(*app.handle_setup_code_new())
+                    return
+                if not self._authorized():
+                    self._read_json_body()
+                    self._send_json(*app.unauthorized_response())
+                    return
+                refusal = app.maintenance_refusal(
+                    path, trusted, None if trusted else app.session_from_cookie(self._cookie()))
+                if refusal is not None:
+                    self._read_json_body()
+                    self._send_json(*refusal)
                     return
                 body = self._read_json_body()
                 if path == "/scan-arms":
@@ -3090,6 +3846,10 @@ class AgentApp:
         """
         self.rehydrate_hardware()
         self._check_system_files_version()
+        # Robot login: an unclaimed Pi without a setup code gets one now (shown
+        # on the console, never logged). Before the listeners, so the first
+        # claim attempt already finds it.
+        self._ensure_setup_code_at_boot()
 
         needs_image_pull = False
         if not os.path.isfile(self.env_file):
@@ -3203,8 +3963,21 @@ class AgentApp:
         if not docker_manager.start_manager(log=self._log):
             self._log("[WARNUNG] Manager konnte nicht gestartet werden — bitte Images/Docker prüfen.")
 
+        # The firewall step against routing past nginx (SA-05): Docker is up
+        # now (the manager `up` ran), so DOCKER-USER exists; re-checked every
+        # _FIREWALL_INTERVAL_S because a Docker restart can reorder the chains.
+        threading.Thread(
+            target=self._firewall_loop, name="agent-firewall", daemon=True,
+        ).start()
+
         self._ready.set()
         self._log("Pi-Agent bereit.")
+        # The login guard: proves (and keeps proving) that the manager's nginx
+        # gates the robot transports, stops a robot tier that would be exposed,
+        # and re-pulls an outdated manager itself (_login_guard_tick).
+        threading.Thread(
+            target=self._login_guard_loop, name="agent-login-guard", daemon=True,
+        ).start()
 
     def request_shutdown(self) -> None:
         self._shutdown.set()

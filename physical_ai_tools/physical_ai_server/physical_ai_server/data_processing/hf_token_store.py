@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 #
-# Copyright 2026 EduBotics
+# Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Proprietary and confidential. Licensed under the EduBotics End-User
+# Licence Agreement; see LICENSE at the repository root.
 
 """The robot's one-slot, memory-only Hugging Face token (the 042 feature).
 
@@ -49,11 +46,15 @@ TMP_NAME = '.token.tmp'
 TOKEN_SHAPE = re.compile(r'hf_[A-Za-z0-9_-]{16,256}')
 # Unanchored, for scrubbing free text.
 TOKEN_IN_TEXT = re.compile(r'hf_[A-Za-z0-9_-]{16,}')
+# An ENCRYPTED token as it arrives on /register_hf_user (hf_token_crypto's wire
+# form, 2026-11-13). Not readable without the robot's key, but it is still the
+# student's token in transit, so it never reaches a log either.
+WIRE_IN_TEXT = re.compile(r'enc1:[0-9A-Za-z_.-]*')
 
 
 def token_path(environ=None) -> Optional[str]:
     """The slot's absolute path, or None when this image does not take a
-    personal token (the Jetson sets no HF_TOKEN_PATH)."""
+    personal token (its compose sets no HF_TOKEN_PATH)."""
     env = os.environ if environ is None else environ
     raw = (env.get(PATH_ENV) or '').strip()
     return raw if raw and os.path.isabs(raw) else None
@@ -137,15 +138,24 @@ def clear(path: Optional[str] = None) -> bool:
     return removed
 
 
-def state_payload(seq: int, busy: bool, path: Optional[str] = None, environ=None) -> dict:
-    """The /edubotics/hf_token_state document, key order fixed."""
+def state_payload(seq: int, busy: bool, path: Optional[str] = None, environ=None,
+                  key=None) -> dict:
+    """The /edubotics/hf_token_state document, key order fixed.
+
+    ``key`` is the node's hf_token_crypto.RobotKey (or None): when this image
+    takes a token, its public half rides along as three ADDITIVE keys after the
+    six of schema v1 (``enc``, ``kid``, ``pub``), so an SPA encrypts the token
+    for it and an older SPA, which reads only the six, is unaffected."""
     if not accepts(environ):
         return {'v': SCHEMA_VERSION, 'seq': int(seq), 'accepts': False,
                 'present': False, 'fp': None, 'busy': bool(busy)}
     token = read(path or token_path(environ))
-    return {'v': SCHEMA_VERSION, 'seq': int(seq), 'accepts': True,
-            'present': token is not None,
-            'fp': fingerprint(token) if token else None, 'busy': bool(busy)}
+    payload = {'v': SCHEMA_VERSION, 'seq': int(seq), 'accepts': True,
+               'present': token is not None,
+               'fp': fingerprint(token) if token else None, 'busy': bool(busy)}
+    if key is not None:
+        payload.update(key.advertisement())
+    return payload
 
 
 def encode_payload(payload: dict) -> str:
@@ -155,7 +165,7 @@ def encode_payload(payload: dict) -> str:
 def purge_legacy(environ=None, home: Optional[str] = None) -> List[str]:
     """Delete the token files the old `huggingface-cli login` path wrote into the
     persistent `huggingface_cache` volume. Only on an image that takes a personal
-    token (the Jetson keeps its classroom token untouched). Returns the removed
+    token (an image without the slot keeps its files untouched). Returns the removed
     paths; their content is never read or logged."""
     env = os.environ if environ is None else environ
     if not accepts(env):
@@ -179,8 +189,11 @@ def purge_legacy(environ=None, home: Optional[str] = None) -> List[str]:
 REDACTED = 'hf_***'
 
 
+REDACTED_WIRE = 'enc1:***'
+
+
 def _scrub(text: str) -> str:
-    return TOKEN_IN_TEXT.sub(REDACTED, text)
+    return WIRE_IN_TEXT.sub(REDACTED_WIRE, TOKEN_IN_TEXT.sub(REDACTED, text))
 
 
 def _scrub_arg(arg):
@@ -197,12 +210,12 @@ def _scrub_arg(arg):
         text = str(arg)
     except Exception:  # noqa: BLE001 - an object whose __str__ raises is not our business
         return arg
-    return _scrub(text) if TOKEN_IN_TEXT.search(text) else arg
+    return _scrub(text) if (TOKEN_IN_TEXT.search(text) or WIRE_IN_TEXT.search(text)) else arg
 
 
 class TokenScrubber(logging.Filter):
     """Replace any `hf_…` token in a record's message, arguments, traceback and
-    stack info with `hf_***`.
+    stack info with `hf_***`, and any encrypted one (`enc1:…`) with `enc1:***`.
 
     A logger-level filter only sees records logged DIRECTLY on that logger, so a
     child logger ('huggingface_hub.lfs') slips past it; `install_log_scrubber`

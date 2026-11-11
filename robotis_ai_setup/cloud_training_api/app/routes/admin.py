@@ -17,8 +17,18 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.auth import get_current_admin
-from app.routes.teacher import history_payload, parse_history_page, parse_request_id, pool_fields, teacher_summary
+from app.routes.teacher import (
+    erase_student_account,
+    history_payload,
+    parse_history_page,
+    parse_request_id,
+    pool_fields,
+    teacher_summary,
+)
 from app.services import credit_texts_de as credit_texts
+from app.services import deletion_requests
+from app.services import passwords
+from app.services import provisioning
 from app.services.supabase_client import get_supabase
 from app.services.training_dispatch import pg_code
 from app.services.usernames import synthetic_email, validate_username
@@ -33,13 +43,15 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 class TeacherCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=32)
-    password: str = Field(..., min_length=6, max_length=128)
+    # Checked by hand (services/passwords.py, ≥ 12 for staff since 2026-11-10):
+    # pydantic's 422 is English and echoes the password back.
+    password: str
     full_name: str = Field(..., min_length=1, max_length=100)
     credits: int = Field(default=0, ge=0, le=10000)
 
 
 class PasswordReset(BaseModel):
-    new_password: str = Field(..., min_length=6, max_length=128)
+    new_password: str  # checked by hand, see TeacherCreate.password
 
 
 class TeacherSummary(BaseModel):
@@ -90,7 +102,7 @@ def _teacher_summary_row(t: dict, *, classroom_count: int, old: dict) -> Teacher
 
 
 @router.get("/teachers", response_model=list[TeacherSummary])
-async def list_teachers(admin=Depends(get_current_admin)):
+def list_teachers(admin=Depends(get_current_admin)):
     supabase = get_supabase()
     teachers = (
         supabase.table("users")
@@ -113,13 +125,16 @@ async def list_teachers(admin=Depends(get_current_admin)):
 
 
 @router.post("/teachers", response_model=TeacherSummary)
-async def create_teacher(req: TeacherCreate, admin=Depends(get_current_admin)):
+def create_teacher(req: TeacherCreate, admin=Depends(get_current_admin)):
     supabase = get_supabase()
 
     try:
         username = validate_username(req.username)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    refusal = passwords.password_error_de(req.password, "teacher")
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
 
     existing = (
         supabase.table("users").select("id").eq("username", username).execute()
@@ -129,14 +144,14 @@ async def create_teacher(req: TeacherCreate, admin=Depends(get_current_admin)):
 
     email = synthetic_email(username)
     try:
+        # 058: the marker only the service role can set; a new account without
+        # it is refused by the database (self-registration).
         created = supabase.auth.admin.create_user(
-            {
-                "email": email,
-                "password": req.password,
-                "email_confirm": True,
-            }
+            provisioning.new_account_attributes(email, req.password)
         )
     except Exception as e:
+        if passwords.is_weak_password_error(e):
+            raise HTTPException(status_code=400, detail=passwords.WEAK_PASSWORD_DE)
         msg = str(e).lower()
         if "already" in msg or "exists" in msg or "duplicate" in msg:
             raise HTTPException(status_code=409, detail="Benutzername bereits vergeben")
@@ -192,7 +207,7 @@ def _free_in(exc) -> int | None:
 
 
 @router.post("/teachers/{teacher_id}/credits")
-async def change_teacher_credits(
+def change_teacher_credits(
     teacher_id: str,
     body: dict | None = Body(default=None),
     admin=Depends(get_current_admin),
@@ -252,7 +267,7 @@ def _target_not_found(kind: str) -> HTTPException:
 
 
 @router.post("/credit-grants")
-async def compensate(body: dict | None = Body(default=None), admin=Depends(get_current_admin)):
+def compensate(body: dict | None = Body(default=None), admin=Depends(get_current_admin)):
     """An admin's compensation (owner D4, §8.5): hours straight into the student's or
     group's account, funded from outside the teacher pool, with a mandatory reason the
     teacher sees in the history. Naming a training credits the account that paid for it
@@ -306,7 +321,7 @@ async def compensate(body: dict | None = Body(default=None), admin=Depends(get_c
 
 
 @router.delete("/credit-reasons/{reason_id}")
-async def erase_reason(reason_id: str, admin=Depends(get_current_admin)):
+def erase_reason(reason_id: str, admin=Depends(get_current_admin)):
     """Erase one reason text (an Art. 17 request about what an admin typed, review m11);
     the ledger row keeps a dangling id and the history shows „(gelöscht)"."""
     try:
@@ -327,7 +342,7 @@ async def erase_reason(reason_id: str, admin=Depends(get_current_admin)):
 
 
 @router.get("/credit-history")
-async def admin_credit_history(
+def admin_credit_history(
     scope: str | None = Query(default=None),
     teacher_id: str | None = Query(default=None),
     before: int | None = Query(default=None),
@@ -349,7 +364,7 @@ async def admin_credit_history(
 
 
 @router.get("/refusals")
-async def admin_refusals(
+def admin_refusals(
     user_id: str | None = Query(default=None),
     limit: int | None = Query(default=None),
     admin=Depends(get_current_admin),
@@ -371,11 +386,14 @@ async def admin_refusals(
 
 
 @router.post("/teachers/{teacher_id}/password")
-async def reset_teacher_password(
+def reset_teacher_password(
     teacher_id: str,
     req: PasswordReset,
     admin=Depends(get_current_admin),
 ):
+    refusal = passwords.password_error_de(req.new_password, "teacher")
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
     supabase = get_supabase()
     existing = (
         supabase.table("users").select("role").eq("id", teacher_id).execute()
@@ -385,20 +403,30 @@ async def reset_teacher_password(
     try:
         supabase.auth.admin.update_user_by_id(teacher_id, {"password": req.new_password})
     except Exception as e:
+        if passwords.is_weak_password_error(e):
+            raise HTTPException(status_code=400, detail=passwords.WEAK_PASSWORD_DE)
         logger.error("reset_teacher_password failed: %s", e)
         raise HTTPException(status_code=500, detail="Passwort konnte nicht gesetzt werden")
     return {"ok": True}
 
 
 @router.delete("/teachers/{teacher_id}")
-async def delete_teacher(teacher_id: str, admin=Depends(get_current_admin)):
+def delete_teacher(teacher_id: str, admin=Depends(get_current_admin)):
     supabase = get_supabase()
     existing = (
         supabase.table("users").select("id, role").eq("id", teacher_id).execute()
     )
     if not existing.data or existing.data[0]["role"] != "teacher":
         raise HTTPException(status_code=404, detail="Lehrer nicht gefunden")
+    return erase_teacher_account(teacher_id)
 
+
+def erase_teacher_account(teacher_id: str) -> dict:
+    """BLOCKING: delete a teacher's account; 409 while the teacher still has
+    classrooms (their students need a teacher first). Shared by
+    ``DELETE /admin/teachers/{id}`` and the confirmation of a teacher's own
+    deletion request; the caller has checked the role."""
+    supabase = get_supabase()
     classroom_count_res = (
         supabase.table("classrooms")
         .select("id", count="exact")
@@ -416,3 +444,95 @@ async def delete_teacher(teacher_id: str, admin=Depends(get_current_admin)):
         logger.error("delete_user failed: %s", e)
         raise HTTPException(status_code=500, detail="Konto konnte nicht gelöscht werden")
     return {"ok": True}
+
+
+# ---------- Deletion requests (GDPR Art. 17, launch plan step 5) ----------
+
+
+class AdminDeletionRequest(BaseModel):
+    user_id: str
+    role: str
+    username: str | None = None
+    full_name: str | None = None
+    classroom_id: str | None = None
+    classroom_name: str | None = None
+    # The teacher who normally confirms (a student's classroom's teacher); None
+    # when the student has no classroom (then only the admin can confirm).
+    teacher_name: str | None = None
+    requested_at: str
+    due_by: str | None = None
+
+
+@router.get("/deletion-requests", response_model=list[AdminDeletionRequest])
+def list_deletion_requests(admin=Depends(get_current_admin)):
+    """Every open deletion request, students' and teachers', oldest first.
+
+    The admin may confirm any of them (owner decision „teacher confirms", with
+    the admin as the backstop): a teacher who left the school, a deleted
+    classroom or a teacher's own request would otherwise leave a request open past
+    Art. 12(3)'s one month with nobody able to carry it out."""
+    supabase = get_supabase()
+    try:
+        rows = (
+            supabase.table("users")
+            .select("id, role, username, full_name, classroom_id, deletion_requested_at")
+            .not_.is_("deletion_requested_at", "null")
+            .in_("role", ["student", "teacher"])
+            .order("deletion_requested_at", desc=False)
+            .execute()
+        ).data or []
+        class_ids = sorted({r["classroom_id"] for r in rows if r.get("role") == "student" and r.get("classroom_id")})
+        classrooms = {}
+        if class_ids:
+            classrooms = {
+                c["id"]: c for c in (
+                    supabase.table("classrooms").select("id, name, teacher_id").in_("id", class_ids).execute()
+                ).data or []
+            }
+        teacher_ids = sorted({c.get("teacher_id") for c in classrooms.values() if c.get("teacher_id")})
+        teachers = {}
+        if teacher_ids:
+            teachers = {
+                t["id"]: t for t in (
+                    supabase.table("users").select("id, username, full_name").in_("id", teacher_ids).execute()
+                ).data or []
+            }
+    except Exception as exc:
+        logger.warning("admin deletion-request list failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=500, detail=deletion_requests.LIST_FAILED_DE) from None
+    out = []
+    for r in rows:
+        if not r.get("deletion_requested_at"):
+            continue
+        classroom = classrooms.get(r.get("classroom_id")) if r.get("role") == "student" else None
+        teacher = teachers.get(classroom.get("teacher_id")) if classroom else None
+        out.append(AdminDeletionRequest(
+            user_id=r["id"], role=r.get("role") or "", username=r.get("username"),
+            full_name=r.get("full_name"),
+            classroom_id=classroom["id"] if classroom else None,
+            classroom_name=classroom.get("name") if classroom else None,
+            teacher_name=(teacher.get("full_name") or teacher.get("username")) if teacher else None,
+            requested_at=r["deletion_requested_at"],
+            due_by=deletion_requests.due_by(r["deletion_requested_at"]),
+        ))
+    return out
+
+
+@router.post("/deletion-requests/{user_id}/confirm")
+def confirm_deletion_request(user_id: str, admin=Depends(get_current_admin)):
+    """The admin carries out an OPEN deletion request: a student's through the
+    teacher's own full deletion (``routes/teacher.py::erase_student_account``,
+    same five outcomes), a teacher's through ``DELETE /admin/teachers/{id}``'s
+    rule (409 while classrooms exist). A user without an open request is refused
+    (409), so this route deletes nobody who did not ask."""
+    rows = (
+        get_supabase().table("users").select("id, role, deletion_requested_at").eq("id", user_id).execute()
+    ).data or []
+    if not rows or rows[0].get("role") not in ("student", "teacher"):
+        raise HTTPException(status_code=404, detail=deletion_requests.NO_REQUESTER_DE)
+    if not rows[0].get("deletion_requested_at"):
+        raise HTTPException(status_code=409, detail=deletion_requests.NOT_OPEN_DE)
+    logger.info("deletion request of user=%s (%s) confirmed by admin=%s", user_id, rows[0]["role"], admin["id"])
+    if rows[0]["role"] == "teacher":
+        return erase_teacher_account(user_id)
+    return erase_student_account(user_id)

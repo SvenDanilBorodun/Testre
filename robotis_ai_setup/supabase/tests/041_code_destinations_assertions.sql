@@ -2,12 +2,8 @@
 -- Positionen in blockly_json['edubotics-destinations']), run BY HAND against a
 -- fresh LOCAL stack — never CI, never the linked project (it seeds rows).
 --
--- The squashed baseline does NOT replay on a fresh database as shipped
--- (docs/KNOWN-ISSUES.md, „baseline.sql is NOT replayable from scratch"): run
--- it in a SCRATCH copy of supabase/ whose baseline has its one
--- `RENAME COLUMN runpod_job_id` line guarded exactly as
--- 040_code_programs_assertions.sql's header shows, with every migration
--- through 041, then
+-- Run it in a SCRATCH copy of supabase/ holding every migration through 041
+-- (the baseline replays on a fresh database as shipped), then
 --   supabase start   (in the scratch copy; it applies the migrations)
 --   psql <local db url> < supabase/tests/041_code_destinations_assertions.sql
 -- Expected: 21 PASS, 0 FAIL/ERROR (T1..T12, some with a/b/c/d halves).
@@ -25,10 +21,10 @@
 \pset pager off
 
 -- seed: one classroom, one teacher, two students (auth.users first: users.id FKs it)
-INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at)
-VALUES ('41111111-1111-1111-1111-111111111111', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-041@x.test', '', now(), now()),
-       ('42222222-2222-2222-2222-222222222222', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's2-041@x.test', '', now(), now()),
-       ('43333333-3333-3333-3333-333333333333', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 't-041@x.test', '', now(), now())
+INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at, raw_app_meta_data)
+VALUES ('41111111-1111-1111-1111-111111111111', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-041@x.test', '', now(), now(), '{"edubotics_provisioned": true}'),
+       ('42222222-2222-2222-2222-222222222222', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's2-041@x.test', '', now(), now(), '{"edubotics_provisioned": true}'),
+       ('43333333-3333-3333-3333-333333333333', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 't-041@x.test', '', now(), now(), '{"edubotics_provisioned": true}')
 ON CONFLICT (id) DO NOTHING;
 UPDATE public.users SET role = 'teacher' WHERE id = '43333333-3333-3333-3333-333333333333';
 INSERT INTO public.classrooms (id, teacher_id, name) VALUES

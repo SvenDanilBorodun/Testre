@@ -15,8 +15,8 @@ itself; that must stay in the container that carries ``dynamixel_sdk``.
 
 **Two-identical-arms disambiguation (design decision).** Both OpenMANIPULATOR
 arms are OpenRB-150 boards with the SAME VID ``2F5D`` / PIDs ``0103|2202``, so a
-static udev VID/PID rule cannot tell leader from follower (unlike the Jetson,
-which has ONE arm). We follow the camera precedent and disambiguate by SERVO-ID
+static udev VID/PID rule cannot tell leader from follower (unlike the retired
+classroom Jetson, which had ONE arm). We follow the camera precedent and disambiguate by SERVO-ID
 PING at scan time, then persist each role to its STABLE
 ``/dev/serial/by-id/...`` path (the arms have DISTINCT stable serials —
 identical-serial is a camera-only problem, per CLAUDE.md). The agent writes
@@ -25,8 +25,8 @@ identical-serial is a camera-only problem, per CLAUDE.md). The agent writes
 Chosen over serial-keyed dynamic udev symlinks (``/dev/edubotics-{leader,
 follower}``) because it needs NO extra udev machinery: the by-id path is already
 stable per physical arm and survives replug, and the compose references
-``${FOLLOWER_PORT}`` / ``${LEADER_PORT}`` (student-file style), NOT the Jetson's
-hardcoded ``/dev/edubotics-follower``. The static ROBOTIS VID/PID udev rule
+``${FOLLOWER_PORT}`` / ``${LEADER_PORT}`` (student-file style), NOT the retired
+Jetson's hardcoded ``/dev/edubotics-follower``. The static ROBOTIS VID/PID udev rule
 (``pi_agent/udev/99-edubotics-robotis.rules``, another stream) remains useful
 only for group permissions / a last-resort by-id fallback, not for the role
 mapping.

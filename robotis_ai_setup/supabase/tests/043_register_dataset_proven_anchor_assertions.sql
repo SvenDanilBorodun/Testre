@@ -3,12 +3,8 @@
 -- anchor), run BY HAND against a fresh LOCAL database — never CI, never the
 -- linked project (it seeds rows).
 --
--- The squashed baseline does NOT replay on a fresh database as shipped
--- (docs/KNOWN-ISSUES.md, „baseline.sql is NOT replayable from scratch"): run
--- it in a SCRATCH copy of supabase/ whose baseline has its one
--- `RENAME COLUMN runpod_job_id` line guarded exactly as
--- 040_code_programs_assertions.sql's header shows, with every migration
--- through 045, then
+-- Run it in a SCRATCH copy of supabase/ holding every migration through 045
+-- (the baseline replays on a fresh database as shipped), then
 --   supabase start   (in the scratch copy; it applies the migrations)
 --   psql <local db url> < supabase/tests/043_register_dataset_proven_anchor_assertions.sql
 -- (2026-10-04 it was run against public.ecr.aws/supabase/postgres:17.6.1.106
@@ -17,9 +13,9 @@
 \set ON_ERROR_STOP off
 \pset pager off
 
-INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at)
-VALUES ('b4300001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-043@x.test', '', now(), now()),
-       ('b4300002-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's2-043@x.test', '', now(), now())
+INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at, raw_app_meta_data)
+VALUES ('b4300001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-043@x.test', '', now(), now(), '{"edubotics_provisioned": true}'),
+       ('b4300002-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's2-043@x.test', '', now(), now(), '{"edubotics_provisioned": true}')
 ON CONFLICT (id) DO NOTHING;
 
 \echo '=== T1 exactly one register_dataset_safe: the 026 signature, SECURITY DEFINER, pinned search_path ==='

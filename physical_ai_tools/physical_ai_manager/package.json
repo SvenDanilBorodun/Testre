@@ -7,7 +7,7 @@
     "EduBotics",
     "Kiwoong Park <pkw@robotis.com>"
   ],
-  "license": "Apache-2.0",
+  "license": "SEE LICENSE IN ../../LICENSE",
   "private": true,
   "dependencies": {
     "@blockly/block-plus-minus": "^9.0.10",
@@ -24,6 +24,9 @@
     "@codemirror/lang-java": "6.0.2",
     "@codemirror/lang-python": "6.2.1",
     "@mit-app-inventor/blockly-plugin-workspace-multiselect": "^1.0.2",
+    "@noble/ciphers": "2.4.0",
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0",
     "@reduxjs/toolkit": "^2.8.2",
     "@supabase/supabase-js": "^2.49.8",
     "@testing-library/dom": "^10.4.0",
@@ -35,7 +38,6 @@
     "codemirror": "6.0.2",
     "html-to-image": "^1.11.13",
     "idb-keyval": "^6.2.1",
-    "jspdf": "^2.5.2",
     "react": "^19.1.0",
     "react-blockly": "^9.0.0",
     "react-dom": "^19.1.0",
@@ -50,7 +52,7 @@
   },
   "scripts": {
     "start": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/write-third-party-licenses.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "start:debug": "REACT_APP_DEBUG=true vite"
@@ -106,6 +108,12 @@
                     "@lezer/*"
                   ],
                   "message": "@codemirror/* and @lezer/* must stay out of the entry bundle — only the lazy-loaded src/components/Workshop/code/CodeEditor.jsx and src/components/teacher/CodeViewer.jsx may import them (parseMarkers.js takes the tree and doc as arguments for exactly this reason)."
+                },
+                {
+                  "group": [
+                    "@noble/*"
+                  ],
+                  "message": "@noble/* (the audited token encryption) must stay out of the entry bundle — only the lazy-loaded src/features/hfToken/hfTokenSeal.js may import it (hfTokenCrypto.js loads it with a dynamic import)."
                 }
               ]
             }
@@ -133,6 +141,12 @@
                     "@lezer/*"
                   ],
                   "message": "@codemirror/* and @lezer/* must stay out of the entry bundle — only the two lazy-loaded editor components may import them."
+                },
+                {
+                  "group": [
+                    "@noble/*"
+                  ],
+                  "message": "@noble/* (the audited token encryption) must stay out of the entry bundle — only the lazy-loaded src/features/hfToken/hfTokenSeal.js may import it (hfTokenCrypto.js loads it with a dynamic import)."
                 }
               ]
             }
@@ -165,6 +179,54 @@
                     "urdf-loader/*"
                   ],
                   "message": "three/urdf-loader subpaths must stay out of the entry bundle — only the lazy-loaded src/components/UrdfTwin.jsx may import them."
+                },
+                {
+                  "group": [
+                    "@noble/*"
+                  ],
+                  "message": "@noble/* (the audited token encryption) must stay out of the entry bundle — only the lazy-loaded src/features/hfToken/hfTokenSeal.js may import it (hfTokenCrypto.js loads it with a dynamic import)."
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "files": [
+          "src/features/hfToken/hfTokenSeal.js"
+        ],
+        "rules": {
+          "no-restricted-imports": [
+            "error",
+            {
+              "paths": [
+                {
+                  "name": "three",
+                  "message": "three (~600 KB) must stay out of the entry bundle — only the lazy-loaded src/components/UrdfTwin.jsx may import it (simConstants.js rides the entry chunk and must stay three-free)."
+                },
+                {
+                  "name": "urdf-loader",
+                  "message": "urdf-loader must stay out of the entry bundle — only the lazy-loaded src/components/UrdfTwin.jsx may import it."
+                },
+                {
+                  "name": "codemirror",
+                  "message": "codemirror must stay out of the entry bundle — only the lazy-loaded src/components/Workshop/code/CodeEditor.jsx and src/components/teacher/CodeViewer.jsx may import it."
+                }
+              ],
+              "patterns": [
+                {
+                  "group": [
+                    "three/*",
+                    "urdf-loader/*"
+                  ],
+                  "message": "three/urdf-loader subpaths must stay out of the entry bundle — only the lazy-loaded src/components/UrdfTwin.jsx may import them."
+                },
+                {
+                  "group": [
+                    "@codemirror/*",
+                    "@lezer/*"
+                  ],
+                  "message": "@codemirror/* and @lezer/* must stay out of the entry bundle — only the lazy-loaded src/components/Workshop/code/CodeEditor.jsx and src/components/teacher/CodeViewer.jsx may import them (parseMarkers.js takes the tree and doc as arguments for exactly this reason)."
                 }
               ]
             }

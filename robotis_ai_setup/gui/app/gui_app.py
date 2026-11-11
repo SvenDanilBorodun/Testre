@@ -982,6 +982,12 @@ class EduBoticsApp:
         ttk.Label(main, text=f"Version {APP_VERSION}",
                   style="Hint.TLabel").pack(pady=(0, 6))
 
+        # „Impressum · Datenschutz · Nutzungsbedingungen" (launch plan step 4,
+        # 2026-11-11): empty, and so invisible, until the cloud API's /version
+        # names an address; `_show_legal_links` fills it from a daemon thread.
+        self.legal_frame = ttk.Frame(main)
+        self.legal_frame.pack()
+
         # Status bar
         self.status_var = tk.StringVar(value="System wird geprüft...")
         status_label = ttk.Label(main, textvariable=self.status_var,
@@ -1606,6 +1612,9 @@ class EduBoticsApp:
         # Fire the informational system preflight once per launch, off on its own
         # daemon thread so it never blocks or gates the startup checks below.
         threading.Thread(target=self._run_preflight_diagnostics, daemon=True).start()
+        # The legal links, likewise off the startup path: offline they simply
+        # never appear.
+        threading.Thread(target=self._load_legal_links, daemon=True).start()
 
         def _check():
             self.root.after(0, lambda: self.progress.start(10))
@@ -1634,6 +1643,44 @@ class EduBoticsApp:
             self._run_prerequisite_checks()
 
         threading.Thread(target=_check, daemon=True).start()
+
+    # ── Legal links (launch plan step 4) ─────────────────────────────
+
+    def _load_legal_links(self):
+        """Worker thread: ask the cloud API's /version for the legal links and
+        hand them to the Tk thread. Never raises and never logs: no address set,
+        an older API or an offline PC all mean no links."""
+        try:
+            links = update_checker.fetch_legal_links(UPDATE_API_URL)
+        except Exception:
+            links = []
+        if links:
+            self.root.after(0, lambda: self._show_legal_links(links))
+
+    def _show_legal_links(self, links):
+        """Tk thread: one underlined, clickable, keyboard-reachable label per
+        link under the version line. Only an https address the checker
+        re-validated is ever opened."""
+        for child in self.legal_frame.winfo_children():
+            child.destroy()
+        shown = 0
+        for label_text, url in links:
+            if update_checker.safe_legal_url(url) != url:
+                continue
+            if shown:
+                ttk.Label(self.legal_frame, text="·", style="Hint.TLabel").pack(side=tk.LEFT, padx=4)
+            link = ttk.Label(self.legal_frame, text=label_text, style=theme_mod.LINK_LABEL,
+                             cursor="hand2", takefocus=True)
+            link.pack(side=tk.LEFT)
+
+            def _open(_event=None, target=url):
+                webbrowser.open(target)
+
+            for sequence in ("<Button-1>", "<Return>", "<space>"):
+                link.bind(sequence, _open)
+            shown += 1
+        if shown:
+            self.legal_frame.pack_configure(pady=(0, 6))
 
     def _run_prerequisite_checks(self):
         """Re-entrancy guard around the prerequisite scan.
@@ -3078,7 +3125,7 @@ class EduBoticsApp:
             # where that condition is False.
             #
             # FIRST, so the graceful close still has a live rosbridge for
-            # JogPanel's unmount re-torque and the Jetson release beacon, the
+            # JogPanel's unmount re-torque and the cloud run's pagehide stop, the
             # same ordering `_stop_environment` keeps. Best-effort: a failure
             # here must never stop the scan the student asked for.
             #
@@ -4336,7 +4383,7 @@ class EduBoticsApp:
     def _start_camera_bridge(self, phone_enabled: bool = False):
         """Start native Windows camera capture → TCP stream into the container.
 
-        No-op when cameras run via usb_cam (Jetson). Maps each assigned camera's
+        No-op when cameras run via usb_cam (native Linux). Maps each assigned camera's
         OpenCV index to its role (gripper -> cam_id 0, scene -> cam_id 1,
         matching the container's EDUBOTICS_CAMERA_NAMES order). When
         ``phone_enabled`` is True, also starts the phone HTTPS receiver and
@@ -4806,9 +4853,18 @@ class EduBoticsApp:
             self._log("Container werden gestoppt...")
             self.root.after(0, lambda: self.progress.start(10))
 
-            self._stop_camera_bridge()
-            self._stop_phone_server()
+            # ORDER (VA-07, 2026-11-12): the camera bridge and the phone
+            # receiver stop AFTER the containers. They are the recording's
+            # SOURCES: stopped first, the cameras went silent while
+            # physical_ai_server still ran, and SOURCE_STOPPED_S (2 s) later
+            # the server ended the recording like „Beenden" — finalize AND an
+            # upload, which the stack going down then killed mid-flight. With
+            # the sources still flowing, the server's own shutdown finalize
+            # (launch plan step 8: SIGINT, no upload) ends the session inside
+            # STACK_STOP_TIMEOUT_S. Only the health poll stops first, so the
+            # containers going down do not read as a camera fault.
             self._stop_rs_control_server()
+            self._stop_camera_health_poll()
             # CLOSE THE BROWSER WINDOW TOO. Two reasons, and the second is the
             # load-bearing one:
             #
@@ -4836,6 +4892,8 @@ class EduBoticsApp:
                 docker_manager.stop_cloud_only(log=self._log)
             else:
                 docker_manager.stop_containers(gpu=self.gpu_available)
+            self._stop_camera_bridge()
+            self._stop_phone_server()
             docker_manager.stop_keepalive()
 
             self._log("Alle Container gestoppt.")
@@ -4957,12 +5015,16 @@ class EduBoticsApp:
         #   * the Roboter-Studio bridge holds 127.0.0.1:8769 and a thread — it
         #     starts BEFORE _open_webview, so a partial start leaves it up,
         #   * the webview child is now closed GRACEFULLY (WM_CLOSE first) so the
-        #     browser's teardown hooks — the Jetson release beacon, JogPanel's
-        #     re-torque — actually run.
-        self._stop_camera_bridge()
-        self._stop_phone_server()
+        #     browser's teardown hooks — JogPanel's re-torque, the cloud run's
+        #     pagehide stop — actually run.
+        # The camera bridge and the phone receiver stop AFTER the containers
+        # (VA-07): they are the recording's sources, and a running recording
+        # must end by the server's shutdown finalize, not by the source-stop
+        # rule's upload that the stack going down would kill. See
+        # `_stop_environment`.
         self._stop_rs_control_server()
         webview_window.destroy_all()
+        self._stop_camera_health_poll()
 
         if stack_up:
             if self.cloud_only.get():
@@ -4970,6 +5032,8 @@ class EduBoticsApp:
             else:
                 docker_manager.stop_containers(gpu=self.gpu_available)
 
+        self._stop_camera_bridge()
+        self._stop_phone_server()
         docker_manager.stop_keepalive()
         self.root.destroy()
 

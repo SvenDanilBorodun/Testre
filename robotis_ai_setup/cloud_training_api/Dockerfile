@@ -1,4 +1,12 @@
-FROM python:3.11-slim
+# Python 3.12, the minor version CI's python-tests job runs the API's suite on
+# and W2's import probe (railway-deploy-cloud-api.yml::schema-probe) runs on.
+# Digest-pinned, so a deploy builds on the base that was reviewed, never on
+# whatever a floating `3.12-slim` tag points at that day; today the same base
+# the trainer image and the training lock use (runpod_training/Dockerfile,
+# modal_training/make_training_lock.py), though nothing ties the two. Move the
+# tag and the digest together, by hand (Dependabot ignores `python` bases);
+# tests/test_cloud_api_base_image.py holds the three 3.12s equal.
+FROM python:3.12.14-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
 
 # Build metadata — surface the deployed commit via /health so we can correlate
 # a live Railway deploy with a git SHA without grepping the registry.

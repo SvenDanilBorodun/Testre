@@ -1,0 +1,33 @@
+EduBotics
+Copyright (c) 2025-2026 [Anbieter – wird nach Klärung der Rechtsform ergänzt] (EduBotics)
+
+This product includes software developed by ROBOTIS Co., Ltd.:
+
+  - open_manipulator  (https://github.com/ROBOTIS-GIT/open_manipulator)
+  - physical_ai_tools (https://github.com/ROBOTIS-GIT/physical_ai_tools)
+
+both licensed under the Apache License, Version 2.0. A copy of the licence is
+in open_manipulator/LICENSE and physical_ai_tools/LICENSE, and ships with the
+installer as licenses/Apache-2.0.txt.
+
+Both works were absorbed into this repository on 2026-03-27 and have been
+modified by EduBotics since. Modified and derived ROBOTIS files include, among
+others:
+
+  - the ros2_control xacros, launch files and controller YAMLs applied to the
+    open_manipulator image as overlays
+    (robotis_ai_setup/docker/open_manipulator/overlays/);
+  - the physical_ai_server ROS package
+    (physical_ai_tools/physical_ai_server/);
+  - the physical_ai_interfaces messages and services
+    (physical_ai_tools/physical_ai_interfaces/);
+  - the physical_ai_manager web application
+    (physical_ai_tools/physical_ai_manager/).
+
+The history of every change is in this repository's version control. Files
+added by EduBotics are not part of the ROBOTIS works.
+
+Third-party components that EduBotics distributes in binary form are listed,
+with their licences and a written offer for the source code of GPL/LGPL
+components, in robotis_ai_setup/installer/assets/THIRD_PARTY_NOTICES.txt
+(installed as THIRD_PARTY_NOTICES.txt).

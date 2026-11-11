@@ -1,7 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 //
 // Orange Pi forced-update gate — the Pi's parity for the Windows GUI's
 // `_check_prerequisites` first step (`update_checker.check_for_update` → the
@@ -15,13 +15,14 @@
 //   * a live progress/phase display;
 //   * „Ohne Update fortfahren" (skip) that appears ONLY after a FAILED attempt.
 //
-// Pi-only: it renders NOTHING on Windows / cloud / Jetson (guarded on `piMode`),
+// Pi-only: it renders NOTHING on Windows / cloud (guarded on `piMode`),
 // and is mounted app-globally (StudentApp, next to StartupGate) so it gates the
 // whole app, not just the System tab. All strings are German (Rule §1).
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { usePiMode } from '../utils/piMode';
 import { useAgentUpdate } from '../hooks/useAgentUpdate';
+import { PI_AUTH_PHASE, usePiAuth } from '../features/piAuth/piAuth';
 
 // Read-only availability probe (cached agent-side with a short TTL). Same-origin
 // through the opi manager's /api/system reverse proxy. A non-2xx / non-JSON body
@@ -49,6 +50,15 @@ const UPDATE_CHECK_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000];
 
 export default function PiUpdateGate() {
   const { piMode, piModeResolved } = usePiMode();
+  // Robot login (2026-11-10): the update is a session-only route, so the gate
+  // arms only once this browser holds a robot session — or where the robot
+  // asks for none (an agent from before the login, whose /update is open and is
+  // exactly the way out of that state). Before the login the student sees the
+  // login form, not an update button that would answer 401.
+  const piAuthPhase = usePiAuth().phase;
+  const loginReady = piAuthPhase === PI_AUTH_PHASE.OFF
+    || piAuthPhase === PI_AUTH_PHASE.LEGACY
+    || piAuthPhase === PI_AUTH_PHASE.SESSION;
 
   const [available, setAvailable] = useState(false);
   const [latestVersion, setLatestVersion] = useState('');
@@ -71,7 +81,7 @@ export default function PiUpdateGate() {
   // disarming the gate for the page load, and settle the instant the agent
   // answers with valid JSON (update or no update) OR the schedule exhausts.
   useEffect(() => {
-    if (!piModeResolved || !piMode) return undefined;
+    if (!piModeResolved || !piMode || !loginReady) return undefined;
     let cancelled = false;
     let timer = null;
     let attempt = 0;
@@ -101,13 +111,13 @@ export default function PiUpdateGate() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [piMode, piModeResolved]);
+  }, [piMode, piModeResolved, loginReady]);
 
   const handleSkip = useCallback(() => setSkipped(true), []);
 
   // Nothing to show: not a Pi, no update advertised, or the student already
   // skipped / finished. Hooks above always run first (rules-of-hooks).
-  if (!piMode || !piModeResolved || !available || skipped || done) return null;
+  if (!piMode || !piModeResolved || !loginReady || !available || skipped || done) return null;
 
   const running = !!updateJob && updateJob.status === 'running';
   const primaryLabel = updating

@@ -1,16 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 
 import { useCallback, useEffect, useRef } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
@@ -97,10 +88,10 @@ export function useMeProfile({ onProfile } = {}) {
           const status = err?.status ?? err?.response?.status;
           if (status === 401 || status === 403) {
             // reload:false so the German reason above survives — the login form
-            // alone does not say WHY they were bounced. (The thunk still
-            // attempts the Jetson beacon with the now-dead JWT; the server
-            // rejects it and the lock waits for the 5-min sweeper, exactly as
-            // before. A dead token is not worth a second code path.)
+            // alone does not say WHY they were bounced. (The thunk still sends
+            // the cloud session's end with the now-dead JWT; the server rejects
+            // it and the session sweep ends the session by its own clock. A dead
+            // token is not worth a second code path.)
             toast.error('Sitzung abgelaufen — bitte erneut anmelden.');
             dispatch(signOutStudent({ reload: false }));
             return;

@@ -5,19 +5,18 @@ import re
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
 
+from app import edge as _edge
+from app.auth import CodedHTTPException, coded_http_exception_handler
 from app.routes.admin import router as admin_router
 from app.routes.datasets import router as datasets_router
 from app.routes.health import router as health_router
 from app.routes.hf_token import router as hf_token_router
 from app.routes.inference import router as inference_router
-from app.routes.jetson import router as jetson_router
-from app.routes.jetson import teacher_router as jetson_teacher_router
 from app.routes.me import router as me_router
+from app.routes.pi_tickets import router as pi_tickets_router
 from app.routes.policies import router as policies_router
 from app.routes.teacher import router as teacher_router
 from app.routes.training import router as training_router
@@ -27,8 +26,8 @@ from app.routes.workflows import router as workflows_router
 from app.routes.workgroups import router as workgroups_router
 from app.services.dataset_sweep import sweep_loop as _dataset_sweep_loop
 from app.services.inference_sweep import sweep_loop as _inference_sweep_loop
-from app.services.jetson_sweep import sweep_loop as _jetson_sweep_loop
-from app.services.rate_limiter import RateLimiter
+from app.services.rate_limiter import FailureCounter, RateLimiter
+from app.services import jwt_auth as _jwt_auth
 from app.services import training_dispatch as _training_dispatch
 from app.services.training_sweep import active_sweep_loop as _training_active_sweep_loop
 from app.services.training_sweep import sweep_loop as _training_cancel_sweep_loop
@@ -38,7 +37,22 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="EduBotics Cloud Training API")
+
+def _api_docs_kwargs() -> dict:
+    """FastAPI keyword arguments for the interactive docs and the schema.
+
+    Off unless ``EDUBOTICS_API_DOCS=1``: FastAPI's defaults served /docs,
+    /redoc and /openapi.json to anyone on the internet, listing every route,
+    the admin and worker ones included. A developer turns them back on locally
+    with the variable (``.env`` works, load_dotenv ran above); production
+    never sets it.
+    """
+    if os.environ.get("EDUBOTICS_API_DOCS", "").strip() == "1":
+        return {}
+    return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+
+
+app = FastAPI(title="EduBotics Cloud Training API", **_api_docs_kwargs())
 
 
 def _validate_required_secrets() -> None:
@@ -113,6 +127,34 @@ def _validate_managed_training() -> None:
 
 _validate_managed_training()
 
+
+def _validate_edge_settings() -> int:
+    """API hardening (2026-11-10): ``AUTH_VERIFY_MODE`` must be ``local`` (the
+    default: access tokens verified against the project's JWKS) or ``remote``
+    (the rollback to Supabase's ``auth.get_user``), and ``TRUSTED_PROXY_HOPS``
+    an integer 1–5 (default 1). Either malformed stops the boot; the messages
+    name the variable, never the value. Returns the hop count."""
+    _jwt_auth.validate_boot()
+    return _edge.trusted_proxy_hops()
+
+
+_TRUSTED_PROXY_HOPS = _validate_edge_settings()
+
+
+def _validate_legal_links() -> None:
+    """Launch plan step 4 (2026-11-11): LEGAL_IMPRESSUM_URL,
+    LEGAL_DATENSCHUTZ_URL and LEGAL_NUTZUNGSBEDINGUNGEN_URL are each empty
+    (no link) or an absolute https:// URL; anything else stops the boot, so a
+    typo fails the /health gate instead of silently dropping a legally required
+    link (app/services/legal_links.py). The message names the variable, never
+    the value."""
+    from app.services import legal_links
+
+    legal_links.validate_boot()
+
+
+_validate_legal_links()
+
 # One id per process start, the publish/mirror lease owner (FR-4): uvicorn is
 # PID 1 in every Railway container, so a process id would make two instances
 # one owner. Defined in training_dispatch (its user), named here.
@@ -121,19 +163,11 @@ BOOT_ID = _training_dispatch.BOOT_ID
 
 def _warn_optional_secrets() -> None:
     """Log WARNING at boot for env vars that aren't strictly required but
-    silently disable specific routes when missing. Migration 019 added
-    EDUBOTICS_JETSON_HF_TOKEN — without it /jetson/register returns 503
-    and no Jetson can be set up. Operators deploying a classroom-Jetson
-    feature flag should see a clear log line during Railway boot rather
-    than discover the misconfiguration when a teacher tries to pair a
-    Jetson.
+    silently disable specific features when missing, so the operator sees a
+    clear log line during the Railway boot rather than discovering the
+    misconfiguration later.
     """
     optional_warns = (
-        (
-            "EDUBOTICS_JETSON_HF_TOKEN",
-            "/jetson/register will return 503 — classrooms cannot pair Jetsons. "
-            "Set the read-only HF org token on Railway to enable.",
-        ),
         (
             "HF_TOKEN",
             "dataset reconciliation sweep + GDPR Art. 17 cleanup disabled.",
@@ -152,12 +186,14 @@ def _warn_optional_secrets() -> None:
         ),
         # GUI_DOWNLOAD_URL is OPTIONAL now: /version derives the GH Release
         # asset URL from GUI_VERSION + GUI_RELEASE_REPO when it's unset. We
-        # warn on GUI_RELEASE_REPO instead — without it (and without an
-        # explicit GUI_DOWNLOAD_URL) the derive yields null.
+        # warn on GUI_RELEASE_REPO instead — without it the derive yields null,
+        # and since SA-01 (2026-11-13) an explicit GUI_DOWNLOAD_URL is served
+        # only as a release asset of that repository (routes/version.py).
         (
             "GUI_RELEASE_REPO",
-            "/version may return download_url=null — set to 'owner/repo' (or set "
-            "GUI_DOWNLOAD_URL explicitly) so the update gate can locate the .exe.",
+            "/version returns download_url=null — set to 'owner/repo' so the "
+            "update gate can locate the .exe (GUI_DOWNLOAD_URL is served only as "
+            "a release asset of that repository).",
         ),
     )
     for key, msg in optional_warns:
@@ -210,25 +246,6 @@ def _warn_optional_secrets() -> None:
                 gui_version_env,
                 in_tree_version,
             )
-
-    # Conditional: when SUPABASE_JWT_ALGORITHM=HS256 (legacy Supabase
-    # auth, pre-2024), the Jetson rosbridge proxy needs the shared HMAC
-    # secret to verify student JWTs. Without it, every WebSocket
-    # connection closes 4401 and no inference works.
-    # Modern Supabase projects (post-2024) default to ES256 with a
-    # JWKS endpoint, which needs NO shared secret — only SUPABASE_URL
-    # for the JWKS lookup. Default left as ES256 to match Supabase's
-    # current default; legacy projects need to set the env var.
-    if os.environ.get("SUPABASE_JWT_ALGORITHM") == "HS256" and not os.environ.get(
-        "SUPABASE_JWT_SECRET"
-    ):
-        logger.warning(
-            "env var SUPABASE_JWT_SECRET not set but SUPABASE_JWT_ALGORITHM=HS256 — "
-            "/jetson/register will return 503 because Jetson agents cannot verify "
-            "student JWTs without the shared HMAC secret. "
-            "Set SUPABASE_JWT_SECRET on Railway (Supabase Dashboard → Settings → API → JWT Secret) "
-            "OR switch to ES256/RS256 (the default for modern Supabase projects)."
-        )
 
 
 _warn_optional_secrets()
@@ -310,7 +327,6 @@ def _validate_required_schema() -> None:
         "tutorial_progress",  # 016
         "datasets",
         "progress_entries",
-        "jetsons",  # 019 — classroom Jetson Orin Nano support
         "workflow_submissions",  # 040 — Roboter Studio „Abgeben" snapshots
         "user_hf_credentials",  # 042 — a student's own HF token, AES-GCM encrypted
         "inference_sessions",  # 048 — Cloud-Inferenz sessions (service-role only)
@@ -344,13 +360,10 @@ def _validate_required_schema() -> None:
     # partial migration could leave absent even when the table exists.
     required_columns: tuple[tuple[str, str], ...] = (
         # Migration 030 — the HF-identity anchor read by auth.get_user_profile,
-        # GET/PATCH /me, POST /datasets/sync, and the rewritten dataset_sweep.
+        # GET /me, POST /datasets/sync, and the rewritten dataset_sweep.
         # A deploy that lands the new code before the ALTER TABLE would 500 on
         # every profile read; fail the deploy fast instead.
         ("users", "hf_username"),
-        # Migration 022 — jetsons pair-intent columns (Fix #1 of the
-        # 2026-05 audit). Without these the new two-step pair flow 500s.
-        ("jetsons", "intent_token, intent_teacher_id"),
         # Migration 023 — trainings cancel-sweep columns (Fix #3 of the
         # 2026-05 audit). The status CHECK constraint expansion can't be
         # probed via PostgREST, but the new columns can.
@@ -358,8 +371,8 @@ def _validate_required_schema() -> None:
         # 028: full-log pointer written by the extended
         # update_training_progress RPC on terminal transitions.
         ("trainings", "log_url"),
-        # 029: compact Jetson inference run records (student-self write,
-        # teacher read).
+        # 029: compact inference run records (teacher read; the session sweep
+        # writes the Cloud-Inferenz rows, old classroom-Jetson rows stay).
         ("inference_runs", "id, student_user_id, policy_repo, exit_reason"),
         # Migration 033 — Roboter Studio Phase-3 Sim-Szene. WorkflowResponse
         # round-trips this column on every read; routes/workflows.py writes it
@@ -500,51 +513,6 @@ def _validate_required_schema() -> None:
             "p_version_id": dummy,
             "p_user_id": dummy,
         }),
-        # Migration 019 — classroom Jetson lifecycle RPCs. Each probe
-        # passes the signature the routes use; an existence-check P0002
-        # ("nicht gefunden") response proves the RPC is callable, while
-        # PGRST202 means the migration hasn't been applied yet.
-        ("claim_jetson", {"p_jetson_id": dummy, "p_user_id": dummy}),
-        ("release_jetson", {"p_jetson_id": dummy, "p_user_id": dummy}),
-        ("heartbeat_jetson", {"p_jetson_id": dummy, "p_user_id": dummy}),
-        ("agent_heartbeat_jetson", {
-            "p_jetson_id": dummy,
-            "p_agent_token": dummy,
-            "p_lan_ip": "",
-            "p_agent_version": "",
-        }),
-        # Migration 022 — pair_jetson now requires p_intent_token. The
-        # 4-arg overload is DROP'd by 022 so the probe MUST send the
-        # 5-arg shape, otherwise PostgREST reports the function as
-        # missing and the deploy aborts. claim_pair_intent is the new
-        # /pair-intent RPC.
-        ("pair_jetson", {
-            "p_classroom_id": dummy,
-            "p_pairing_code": "_probe",
-            "p_teacher_id": dummy,
-            "p_mdns_name": "_probe",
-            "p_intent_token": dummy,
-        }),
-        ("claim_pair_intent", {
-            "p_pairing_code": "_probe",
-            "p_teacher_id": dummy,
-        }),
-        ("force_release_jetson", {"p_jetson_id": dummy, "p_teacher_id": dummy}),
-        ("sweep_jetson_locks", {}),
-        # Migration 020 — v2.3.0 follow-up RPCs (agent-side claim-fail
-        # release, teacher pairing-code regeneration, teacher unpair).
-        # Same fingerprint pattern: PGRST202 means the migration hasn't
-        # been applied yet to the live DB and Railway should abort the
-        # deploy instead of returning 200 from /health and 500'ing the
-        # first teacher who tries to rotate a code.
-        ("agent_release_jetson", {"p_jetson_id": dummy, "p_agent_token": dummy}),
-        ("regenerate_pairing_code", {
-            "p_jetson_id": dummy,
-            "p_teacher_id": dummy,
-            "p_new_code": "_probe",
-            "p_expires_at": "1970-01-01T00:00:00+00:00",
-        }),
-        ("unpair_jetson", {"p_jetson_id": dummy, "p_teacher_id": dummy}),
         # Migration 026 — atomic register_dataset upsert + HF-author
         # anchor check. Without this RPC, /datasets POST 500s on the
         # supabase-py rpc('register_dataset_safe') call (PGRST202).
@@ -776,17 +744,14 @@ def _parse_and_validate_origins() -> list[str]:
 allowed_origins = _parse_and_validate_origins()
 logger.info("CORS allowed origins: %s", allowed_origins)
 
-# ─── Simple in-process rate limiter ────────────────────────────────────
-# Stops a student script from hammering /trainings/start or the auth
-# endpoints. The RateLimiter implementation lives in
-# app.services.rate_limiter (extracted so it is unit-testable without the
-# full FastAPI app import, and so the LRU key-cap memory guard is
-# documented in one place). Keyed by client IP from X-Forwarded-For for
-# most rules, or a hashed bearer token for the per-user prefixes below.
+# ─── The edge: rate limits, body limits, failed-authentication cap ──────
+# The middleware classes live in app/edge.py (testable without every router);
+# the tables stay literals HERE because several tests read them from this file.
 # State lives in-process, so this only behaves correctly at
 # uvicorn --workers 1 (Railway default). If we ever scale out, swap to
 # Redis-backed slowapi.
 _rate_limiter = RateLimiter()
+_auth_failures = FailureCounter()
 
 # (method, path prefix, limit, window seconds). Method "*" matches any.
 # Method-aware so each verb under one prefix gets its own budget: POST
@@ -831,36 +796,6 @@ _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     # 20/min is more than enough for any classroom while stopping a
     # broken recording loop from spamming.
     ("POST", "/datasets", 20, 60.0),
-    # Jetson agent bootstrap (no auth). IP-keyed because the agent has
-    # no JWT yet. Five registrations per minute per public IP is fine
-    # for a teacher physically setting up a Jetson; a rogue actor on
-    # the LAN would burn through the pool without getting credentials
-    # bound to any classroom.
-    #
-    # MUST come BEFORE the broader "/jetson/" rule below — the
-    # middleware's first-match-wins (break-on-match) ordering means a
-    # less-specific prefix listed first shadows a more-specific one.
-    # The original "/jetson/" rule was listed first and turned this
-    # 5/60s into dead code.
-    ("POST", "/jetson/register", 5, 60.0),
-    # Classroom Jetson claim/heartbeat/release/agent-heartbeat/
-    # agent-release/release-beacon — single prefix rule for everything
-    # under /jetson/{id}/. Per-user (JWT sub keyed) when an
-    # Authorization header is present; falls back to IP keying when
-    # absent (agent endpoints + release-beacon body-token path).
-    #
-    # Why 30/60s and not 10/60s: a classroom of 30 students all closing
-    # their browser tab at the end of a lesson would each fire one
-    # navigator.sendBeacon('release-beacon') call. The beacon path has
-    # no JWT header (sendBeacon can't set headers) so it falls back to
-    # IP keying; 30 students from one NAT IP would exceed 10/60s and
-    # some beacons would get 429'd, sending their locks back to the
-    # 5-min sweeper — exactly what v2.3.0 fixed. 30/60s comfortably
-    # absorbs that storm and still catches a tight-loop bug. For the
-    # JWT-authenticated paths (claim, heartbeat, release) the
-    # per-user-keying means 30/min/user is still very generous (claim
-    # is 1x/session, heartbeat is 2/min, release is 1x/session).
-    ("POST", "/jetson/", 30, 60.0),
     # Tutorial progress upsert — a Blockly editor that auto-saves on
     # every step transition can burst a few requests per minute per
     # student; 30/60s easily absorbs that while stopping a runaway
@@ -882,6 +817,15 @@ _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     # Daten 2.0 (spec §E6): the SPA asks once per session; per-user keyed
     # (_PER_USER_RATE_LIMIT_PREFIXES) because a classroom shares one NAT IP.
     ("GET", "/me/group-members", 30, 60.0),
+    # The Orange Pi's one-time login tickets (SA-06, 2026-11-13). Minting is
+    # per user (_PER_USER_RATE_LIMIT_PREFIXES): the SPA mints at each exchange
+    # (≈ every 9 min, on a token refresh, after a 401). Redeeming is per client
+    # address — the Pi agents of a whole school share ONE NAT address towards
+    # the cloud, so it is generous; a ticket is 256 random bits and cannot be
+    # guessed at any rate. Inserted before the 048 rules (test_inference_routes
+    # pins them as the table's last two).
+    ("POST", "/pi/tickets", 30, 60.0),
+    ("POST", "/pi/tickets/redeem", 600, 60.0),
     # Cloud-Inferenz (048). Reserve, arm, the 15 s heartbeat and end share the
     # POST budget: ≤ 6/min in normal use, and a student clicking through ten
     # models in a minute stays under 30 (R-16). Per-user keyed
@@ -890,96 +834,42 @@ _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     ("GET", "/inference/usage", 30, 60.0),
 ]
 
-# Sort rules longest-prefix-first so a more-specific rule (e.g.
-# /jetson/register) always wins over a broader one (/jetson/). Without
+# Sort rules longest-prefix-first so a more-specific prefix always wins
+# over a broader one for the same verb. Without
 # this, a newly-added narrow rule listed AFTER a broad rule in the
 # literal becomes dead code on the first-match-wins middleware path.
 # Done in code so future additions can't regress by accidental ordering.
 _RATE_LIMIT_RULES.sort(key=lambda rule: len(rule[1]), reverse=True)
 
 
-def _client_ip(request: Request) -> str:
-    """Resolve the real client IP behind Railway's proxy.
-
-    request.client.host is the proxy address — every student's request
-    would carry the same value, so a per-IP limiter would behave as one
-    global bucket. Railway always sets X-Forwarded-For; the leftmost
-    entry is the original client.
-    """
-    xff = request.headers.get("x-forwarded-for", "")
-    if xff:
-        first = xff.split(",")[0].strip()
-        if first:
-            return first
-    return request.client.host if request.client else "unknown"
-
-
-def _user_key_from_jwt(request: Request) -> str | None:
-    """Derive a stable per-token rate-limit bucket key.
-
-    NOTE on the trade-off — the middleware runs BEFORE
-    ``Depends(get_current_user)`` so the JWT signature is unverified at
-    this point. We deliberately do NOT trust the JWT payload (a forged
-    token can claim any ``sub``). Instead, we hash the full token bytes
-    and use the truncated hex digest as the bucket key. Two
-    consequences:
-
-      1. Per-user bucketing still holds for legitimate users — every
-         valid session reuses the same JWT until it expires, so the
-         hash is stable.
-      2. A forged-token attacker gets one bucket per distinct forged
-         token rather than colliding into one bucket per claimed
-         ``sub`` — slightly less aggressive limiting than trusting
-         ``sub`` would be, but no attacker can starve a real user's
-         bucket by spamming forgeries that claim the victim's id.
-
-    The route's ``Depends(get_current_user)`` still authenticates the
-    forged tokens away with a clean 401; the rate limiter only matters
-    for the (legitimate or near-legitimate) traffic that reaches the
-    inner handler.
-    """
-    auth = request.headers.get("authorization") or request.headers.get("Authorization")
-    if not auth or not auth.lower().startswith("bearer "):
-        return None
-    token = auth[len("Bearer "):].strip()
-    if not token:
-        return None
-    import hashlib
-    return "jwt:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
-
-
-# Routes that should rate-limit per AUTHENTICATED USER rather than per
-# IP. Anything missing here keeps the IP-keyed legacy behavior. The
-# /jetson/ prefix uses per-JWT-sub keying for claim/heartbeat/release
-# so a NAT'd classroom of 30 students doesn't share one bucket. The
-# /jetson/register sub-prefix has no JWT and falls back to IP keying
-# (the _user_key_from_jwt helper returns None → IP path).
+# Every IP-keyed bucket (and the failed-authentication cap) keys on
+# app/edge.py::client_ip: the TRUSTED_PROXY_HOPS-th X-Forwarded-For entry from
+# the RIGHT (default 1, the address Railway's edge added), never the left-most,
+# which the client writes itself.
+#
+# Routes that rate-limit per AUTHENTICATED USER rather than per IP. Since the
+# API hardening (2026-11-10) the key is the VERIFIED `sub` of the access token
+# (app/edge.py::rate_limit_key: the cached signing keys only, never a fetch), so
+# a forged token can neither claim another user's bucket nor get a fresh bucket
+# per rotation: an unverifiable bearer falls back to the client address. A UUID
+# worker token on /trainings/worker keeps its hashed key; under
+# AUTH_VERIFY_MODE=remote the old hashed-token key comes back.
 #
 # /trainings/ (covers the rate-limited /trainings/start + /trainings/cancel
-# rules) is per-user for the same NAT reason: both endpoints require
-# Depends(get_current_user) so a JWT is always present, and IP keying
-# meant 30 students behind one school NAT shared the 10/min start bucket —
-# the 11th student got a spurious 429 even though nobody individually
-# exceeded the limit. The IP fallback still covers any missing header.
+# rules) is per-user because IP keying meant 30 students behind one school NAT
+# shared the 10/min start bucket — the 11th student got a spurious 429 even
+# though nobody individually exceeded the limit.
 #
 # /workflows (no trailing slash so it covers the bare `POST /workflows`
 # create path AS WELL AS `POST /workflows/{id}/{clone,versions/.../restore,
-# trajectories}`) is per-user for the identical NAT reason: the single
-# ("POST", "/workflows", 10, 60.0) rule matches by prefix, so all four
-# workflow POSTs share one bucket — IP-keyed, a 30-student NAT classroom
-# collectively blew the 10/min IP bucket → spurious 429. Every /workflows
-# route requires Depends(get_current_user) (verified: create_workflow,
-# clone_workflow, restore_workflow_version, create_trajectory), so a JWT is
-# always present and there is no no-JWT/beacon fallback to regress. The IP
-# fallback still covers any (unreachable) missing-header case.
+# trajectories,submit}`) is per-user for the identical NAT reason: the single
+# ("POST", "/workflows", 10, 60.0) rule matches by prefix, so every workflow
+# POST shares one bucket. Every /workflows route requires
+# Depends(get_current_user), so a token is always present.
 #
-# /me/hf-token (042) is per-user for the same NAT reason: every route under it
-# requires Depends(get_current_profile), so a JWT is always present.
-#
-# /me/group-members (Daten 2.0) likewise: Depends(get_current_profile).
-#
-# /inference/ (Cloud-Inferenz, 048) likewise: every route requires
-# Depends(get_current_profile), so a JWT is always present.
+# /me/hf-token (042), /me/group-members (Daten 2.0) and /inference/ (048) are
+# per-user for the same NAT reason: every route under them requires
+# Depends(get_current_profile).
 #
 # /teacher/ and /admin/ (052, review m9) likewise: every route requires
 # get_current_teacher / get_current_admin. Several teachers behind one school
@@ -987,8 +877,8 @@ def _user_key_from_jwt(request: Request) -> str | None:
 # also keys the existing POST /teacher/classrooms and /teacher/workgroups rules
 # per teacher, which is what those limits meant anyway.
 _PER_USER_RATE_LIMIT_PREFIXES = (
-    "/jetson/", "/trainings/", "/workflows", "/me/hf-token", "/me/group-members", "/inference/",
-    "/teacher/", "/admin/",
+    "/trainings/", "/workflows", "/me/hf-token", "/me/group-members", "/inference/",
+    "/teacher/", "/admin/", "/pi/tickets",
 )
 
 
@@ -999,7 +889,74 @@ _PER_USER_RATE_LIMIT_PREFIXES = (
 # force a multi-MB allocation. Give 50% headroom over the validator cap
 # so an oversized-but-legitimate payload still gets the German 413 from
 # the validator (which includes the limit in the message) rather than
-# the generic middleware 413.
+# the generic middleware 413. Every OTHER route is capped at
+# app/edge.py::MAX_BODY_BYTES (1 MB, 2026-11-10), and a chunked body is refused
+# on every body method.
+# Paths ANY browser origin may read without credentials (launch plan step 4):
+# /version carries the legal links, and a Pi's SPA runs at a LAN address
+# ALLOWED_ORIGINS cannot list. Only public, token-free GET routes belong here.
+_PUBLIC_READ_PATHS = ("/version",)
+# Bearer-authenticated routes ANY browser origin may call, without credentials
+# (app/edge.py::AnyOriginBearerCorsMiddleware): exactly the cloud calls the
+# student SPA makes, because a Pi serves that SPA at a LAN origin
+# (http://192.168.x.y, http://edubotics.local) ALLOWED_ORIGINS cannot list
+# (SA-06, 2026-11-13: the login ticket; 2026-11-14: every student route — before,
+# each of them failed its CORS preflight on a Pi). (method, FastAPI path
+# template) pairs, each matched WHOLE, never a prefix. Only a route
+# authenticated by an Authorization header belongs here (the API reads no
+# cookie anywhere); never a /teacher, /admin or /trainings/worker route (the
+# middleware refuses to construct with one). /version is public and has its own
+# rule above. robotis_ai_setup/tests/test_pi_cloud_cors_lockstep.py holds this
+# list equal to the student build's calls and to the declared routes.
+_ANY_ORIGIN_BEARER_ROUTES = (
+    # The account (routes/me.py, routes/hf_token.py)
+    ("GET", "/me"),
+    ("GET", "/me/group-members"),
+    ("POST", "/me/delete/withdraw"),
+    ("GET", "/me/tutorial-progress"),
+    ("PATCH", "/me/tutorial-progress/{tutorial_id}"),
+    ("GET", "/me/hf-token"),
+    ("PUT", "/me/hf-token"),
+    ("DELETE", "/me/hf-token"),
+    ("POST", "/me/hf-token/reveal"),
+    ("POST", "/me/hf-token/verify"),
+    # The Orange Pi's one-time login ticket (routes/pi_tickets.py, SA-06)
+    ("POST", "/pi/tickets"),
+    # Training (routes/training.py, routes/policies.py)
+    ("GET", "/policies"),
+    ("GET", "/trainings/quota"),
+    ("GET", "/trainings/list"),
+    ("POST", "/trainings/start"),
+    ("POST", "/trainings/cancel"),
+    ("POST", "/trainings/continue"),
+    ("GET", "/trainings/{training_id}/stop-preview"),
+    # Datasets (routes/datasets.py)
+    ("GET", "/datasets"),
+    ("POST", "/datasets"),
+    ("POST", "/datasets/sync"),
+    # Roboter Studio (routes/workflows.py)
+    ("GET", "/workflows"),
+    ("POST", "/workflows"),
+    ("GET", "/workflows/{workflow_id}"),
+    ("PATCH", "/workflows/{workflow_id}"),
+    ("POST", "/workflows/{workflow_id}/clone"),
+    ("POST", "/workflows/{workflow_id}/submit"),
+    ("GET", "/workflows/{workflow_id}/versions"),
+    ("POST", "/workflows/{workflow_id}/versions/{version_id}/restore"),
+    ("GET", "/workflows/{workflow_id}/trajectories"),
+    ("POST", "/workflows/{workflow_id}/trajectories"),
+    ("GET", "/workflows/{workflow_id}/trajectories/by-name/{name}"),
+    ("GET", "/workflows/{workflow_id}/trajectories/{trajectory_id}"),
+    ("PATCH", "/workflows/{workflow_id}/trajectories/{trajectory_id}"),
+    ("DELETE", "/workflows/{workflow_id}/trajectories/{trajectory_id}"),
+    # Cloud-Inferenz (routes/inference.py)
+    ("POST", "/inference/sessions"),
+    ("POST", "/inference/sessions/{session_id}/arm"),
+    ("POST", "/inference/sessions/{session_id}/heartbeat"),
+    ("POST", "/inference/sessions/{session_id}/end"),
+    ("GET", "/inference/usage"),
+)
+
 _MAX_WRITE_BODY_BYTES = 384 * 1024
 _BODY_SIZE_LIMITED_PREFIXES: tuple[tuple[str, str], ...] = (
     ("POST", "/workflows"),
@@ -1010,109 +967,31 @@ _BODY_SIZE_LIMITED_PREFIXES: tuple[tuple[str, str], ...] = (
 )
 
 
-class BodySizeLimitMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        if request.method in {"POST", "PATCH", "PUT"}:
-            for m, prefix in _BODY_SIZE_LIMITED_PREFIXES:
-                if m == request.method and request.url.path.startswith(prefix):
-                    # Reject Transfer-Encoding: chunked on these
-                    # protected paths — without a Content-Length the
-                    # size check below is useless and an attacker
-                    # could stream multi-MB bodies past the guard.
-                    # 411 Length Required is the standards-correct
-                    # response when the server demands Content-Length.
-                    if request.headers.get("transfer-encoding", "").lower() == "chunked":
-                        logger.warning(
-                            "Rejecting chunked %s %s — Content-Length required.",
-                            request.method, request.url.path,
-                        )
-                        return JSONResponse(
-                            status_code=411,
-                            content={
-                                "detail": (
-                                    "Chunked-Übertragung wird auf diesem "
-                                    "Endpunkt nicht unterstützt."
-                                )
-                            },
-                        )
-                    cl = request.headers.get("content-length")
-                    if cl:
-                        try:
-                            size = int(cl)
-                        except ValueError:
-                            size = -1
-                        if size > _MAX_WRITE_BODY_BYTES:
-                            logger.warning(
-                                "Rejecting oversized %s %s body: %s bytes",
-                                request.method, request.url.path, cl,
-                            )
-                            return JSONResponse(
-                                status_code=413,
-                                content={
-                                    "detail": (
-                                        "Anfrage zu groß "
-                                        f"(>{_MAX_WRITE_BODY_BYTES // 1024} KB)."
-                                    )
-                                },
-                            )
-                    break
-        return await call_next(request)
-
-
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        path = request.url.path
-        method = request.method
-        for rule_method, prefix, limit, window in _RATE_LIMIT_RULES:
-            if rule_method != "*" and rule_method != method:
-                continue
-            # Anchored prefix match: a rule for "/trainings/start" must
-            # NOT match "/trainings/started". Either the path is exactly
-            # the prefix or the prefix must be followed by "/" so the
-            # next segment is fully delimited. Path prefixes that end
-            # in "/" (e.g. "/jetson/") still match all sub-resources
-            # because path == "/jetson/" or path startswith "/jetson/"
-            # via the second branch.
-            if prefix.endswith("/"):
-                matched = path.startswith(prefix)
-            else:
-                matched = path == prefix or path.startswith(prefix + "/")
-            if matched:
-                # The prefix match applies across path lengths, so a
-                # method-pinned rule covers every sub-resource under its
-                # prefix for THAT verb only: the POST /workflows rule never
-                # counts a PATCH, which has its own rule on the same prefix.
-                use_user_key = any(
-                    path.startswith(p) for p in _PER_USER_RATE_LIMIT_PREFIXES
-                )
-                key = None
-                if use_user_key:
-                    key = _user_key_from_jwt(request)
-                if not key:
-                    key = _client_ip(request)
-                bucket_key = f"{rule_method}:{prefix}"
-                if not _rate_limiter.check(bucket_key, key, limit, window):
-                    logger.warning("Rate limit hit on %s %s from %s", rule_method, prefix, key)
-                    # Return a Response directly. Raising HTTPException
-                    # inside BaseHTTPMiddleware.dispatch is a footgun:
-                    # Starlette doesn't route middleware exceptions
-                    # through FastAPI's exception handlers, so the
-                    # client would see a 500 instead of a clean 429.
-                    return JSONResponse(
-                        status_code=429,
-                        content={"detail": "Zu viele Anfragen — bitte einen Moment warten."},
-                    )
-                break
-        return await call_next(request)
-
-
 # Middleware ordering: Starlette wraps in reverse of add_middleware calls
-# (last-added becomes outermost). We want CORS to be the OUTERMOST layer so
-# a 429 from RateLimitMiddleware still carries Access-Control-* headers —
-# otherwise the browser sees the response as a generic CORS failure instead
-# of a structured 429. Therefore: add RateLimit first, then CORS.
-app.add_middleware(RateLimitMiddleware)
-app.add_middleware(BodySizeLimitMiddleware)
+# (last-added becomes outermost): any-origin bearer CORS → CORS →
+# failed-authentication cap → body limits → rate limits → public-read CORS →
+# the app. CORS outermost so a
+# 429/411/413 still carries Access-Control-* headers (the browser would
+# otherwise see a generic CORS failure); the failed-authentication cap next, so
+# an address over its budget is refused before anything else runs — every
+# bearer of it that does not verify against the cached keys; a verified one
+# passes (VA-02: one school NAT is one address). The
+# public-read star (/version only, 2026-11-11) sits INSIDE CORSMiddleware so an
+# allowed origin still gets its own echo; any other origin keeps the star.
+app.add_middleware(_edge.PublicReadCorsMiddleware, paths=_PUBLIC_READ_PATHS)
+app.add_middleware(
+    _edge.RateLimitMiddleware,
+    rules=_RATE_LIMIT_RULES,
+    per_user_prefixes=_PER_USER_RATE_LIMIT_PREFIXES,
+    limiter=_rate_limiter,
+    hops=_TRUSTED_PROXY_HOPS,
+)
+app.add_middleware(
+    _edge.BodySizeLimitMiddleware,
+    limited_prefixes=_BODY_SIZE_LIMITED_PREFIXES,
+    limited_max_bytes=_MAX_WRITE_BODY_BYTES,
+)
+app.add_middleware(_edge.AuthFailureLimitMiddleware, counter=_auth_failures, hops=_TRUSTED_PROXY_HOPS)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -1120,6 +999,21 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
+# Outermost: CORSMiddleware refuses an unlisted origin's preflight itself. A
+# listed origin (and a request without Origin) passes through untouched; no
+# answer to an unlisted origin carries Access-Control-Allow-Credentials.
+app.add_middleware(
+    _edge.AnyOriginBearerCorsMiddleware,
+    routes=_ANY_ORIGIN_BEARER_ROUTES,
+    listed_origins=allowed_origins,
+)
+
+
+# An auth refusal the client must tell apart by more than its status (the
+# teacher web's TOTP screen on `mfa_required`, a retry on `auth_unavailable`):
+# `{"detail": <German>, "code": <code>}`.
+app.add_exception_handler(CodedHTTPException, coded_http_exception_handler)
+
 
 app.include_router(health_router)
 app.include_router(version_router)
@@ -1133,9 +1027,8 @@ app.include_router(datasets_router)
 app.include_router(policies_router)
 app.include_router(admin_router)
 app.include_router(workflows_router)
-app.include_router(jetson_router)
-app.include_router(jetson_teacher_router)
 app.include_router(inference_router)
+app.include_router(pi_tickets_router)
 
 
 # ─── Background tasks ───────────────────────────────────────────────────
@@ -1158,19 +1051,6 @@ async def _start_dataset_sweep() -> None:
         logger.info("dataset_sweep: HF_TOKEN not set, loop not started")
         return
     _asyncio.create_task(_dataset_sweep_loop())
-
-
-@app.on_event("startup")
-async def _start_jetson_sweep() -> None:
-    """Migration 019: auto-release classroom-Jetson locks whose student
-    heartbeat is older than 5 minutes. Pairs with the agent's transition
-    watcher to recover from browser crashes / abandoned sessions."""
-    import asyncio as _asyncio
-
-    if os.environ.get("JETSON_SWEEPER_DISABLED") == "1":
-        logger.info("jetson_sweep: disabled via env")
-        return
-    _asyncio.create_task(_jetson_sweep_loop())
 
 
 @app.on_event("startup")
@@ -1246,6 +1126,36 @@ _BACKGROUND_TASKS: set = set()
 def _keep_task(task) -> None:
     _BACKGROUND_TASKS.add(task)
     task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+
+@app.on_event("startup")
+async def _start_platform_identity() -> None:
+    """SA-08 (2026-11-13): the platform HF_TOKEN's own account is a reserved
+    namespace no student may claim. Resolved by the Hub's whoami (and read back
+    from migration 059's table) off the event loop; a task nothing awaits.
+    PLATFORM_IDENTITY_DISABLED=1 for unit tests."""
+    import asyncio as _asyncio
+
+    if os.environ.get("PLATFORM_IDENTITY_DISABLED") == "1":
+        return
+    from app.services import platform_identity as _platform_identity
+
+    _keep_task(_asyncio.create_task(_platform_identity.platform_identity_loop()))
+
+
+@app.on_event("startup")
+async def _start_jwks_refresh() -> None:
+    """API hardening (2026-11-10): the signing keys of the access tokens are
+    fetched off the event loop at boot and every ``jwt_auth.JWKS_REFRESH_S``, so
+    the first request finds them cached. A task nothing awaits: neither the
+    startup nor ``/health`` waits for Supabase. Not started under
+    ``AUTH_VERIFY_MODE=remote`` (Supabase checks every token itself then)."""
+    import asyncio as _asyncio
+
+    if _jwt_auth.verify_mode() != "local":
+        logger.warning("AUTH_VERIFY_MODE=remote: every access token is checked by Supabase Auth (rollback)")
+        return
+    _keep_task(_asyncio.create_task(_jwt_auth.refresh_loop()))
 
 
 @app.on_event("startup")

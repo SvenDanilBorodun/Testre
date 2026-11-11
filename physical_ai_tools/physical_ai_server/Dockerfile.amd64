@@ -85,7 +85,7 @@ RUN python3 -m pip uninstall -y torchcodec 2>/dev/null || true && \
 # numpy 2.x the rgb8/bgr8 color-conversion path used by recording + inference
 # SEGFAULTS on the first camera frame. Must be a separate --force-reinstall RUN:
 # numpy<2 is unsatisfiable in the same resolve as lerobot's numpy>=2.
-# Mirrored in Dockerfile.arm64 + the thin-overlay cross-arch floor.
+# Mirrored in Dockerfile.arm64cpu + the thin-overlay cross-arch floor.
 RUN pip install --no-cache-dir --force-reinstall "numpy==1.26.4" && \
     python3 -c "import numpy; assert numpy.__version__.startswith('1.'), numpy.__version__; print('numpy floor', numpy.__version__)"
 

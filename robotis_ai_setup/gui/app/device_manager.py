@@ -1162,7 +1162,7 @@ def scan_cameras() -> list[CameraDevice]:
     WSL via usbipd — they are captured natively and streamed into the container
     (see camera_bridge.py + CLAUDE.md "native camera capture bridge").
 
-    usb_cam path (Jetson / native Linux, or EDUBOTICS_CAMERA_SOURCE=usb_cam):
+    usb_cam path (native Linux, or EDUBOTICS_CAMERA_SOURCE=usb_cam):
       1. self_heal_wsl_serial() loads uvcvideo (+ udev + USB-Serial mods)
       2. attach_cameras_to_wsl() auto-attaches Windows-visible webcams that
          have a usbipd policy (set up by configure_usbipd.ps1)

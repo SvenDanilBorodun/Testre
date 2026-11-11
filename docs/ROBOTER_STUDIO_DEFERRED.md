@@ -48,7 +48,7 @@ Python overlay must register the handlers, otherwise every call returns
 | 2.6 | MEDIUM | `BreakpointList` rebinds the SVG click listener on every breakpoint toggle (dep includes `breakpoints` array). Use a ref so the listener is bound once. | `physical_ai_manager/src/components/Workshop/BreakpointList.jsx:88-92` |
 | 2.7 | MEDIUM | `RunControls` IK warnings effect attaches warnings via `setWarningText` but never clears them. Old warnings persist on blocks across runs. | `physical_ai_manager/src/components/Workshop/RunControls.jsx:51-63` |
 | 2.8 | MEDIUM | `setActiveTutorial({id: null})` doesn't clear `restrictedBlocks` inside the reducer — relies on a follow-up dispatch from SkillmapPlayer. If the component unmounts in the same tick, the toolbox stays restricted. Clear in the reducer. | `physical_ai_manager/src/features/workshop/workshopSlice.js:setActiveTutorial` |
-| 2.9 | MEDIUM | PDF export button — `jsPDF` + `html-to-image` are in `package.json` but no button or generator is wired. Plan §6.6 specified it. | `ToolbarButtons.jsx` + new `pseudoCodeDeGenerator.js` |
+| 2.9 | MEDIUM | PDF export button — no button or generator is wired. Plan §6.6 specified it. `jsPDF` was removed from `package.json` 2026-11-09 (unused, with known advisories); `html-to-image` is still listed and still unused. A PDF export brings its own reviewed dependency. | `ToolbarButtons.jsx` + new `pseudoCodeDeGenerator.js` |
 | 2.10 | **REMOVED (P4 2026-06-28)** | **Won't do — named-object AprilTag grasping superseded this.** The `edubotics_detect_color` colour-detection block was deleted in P4. (Was: LAB colour debug overlay on the camera feed.) | n/a |
 | 2.11 | LOW | Toolbar `Ctrl+Shift+E` keyboard shortcut for export mentioned in a comment but never wired. | `physical_ai_manager/src/components/Workshop/ToolbarButtons.jsx:79` |
 | 2.12 | LOW | Cloud-only mode (`?cloud=1`) doesn't short-circuit WorkshopPage — it tries to call ROS services and the wizard never loads. Add a banner: "Roboter Studio benötigt eine Roboter-Verbindung." | `physical_ai_manager/src/pages/WorkshopPage.js` |
@@ -126,7 +126,7 @@ Python overlay must register the handlers, otherwise every call returns
 | 7.2 | **REMOVED (P4 2026-06-28)** | **Won't do — named-object AprilTag grasping superseded this.** The YOLOX/D-FINE detector path (incl. `onnxruntime` + the YOLOX-tiny ONNX download) was removed from the server Dockerfile in P4. (Was: bake a D-FINE-N ONNX into the image.) | n/a |
 | 7.3 | LOW | CLAUDE.md §14 drift table still lists `0.8.2` for `package.json` — we bumped to `0.9.0`. Update. | `Testre/CLAUDE.md` |
 | 7.4 | LOW | CLAUDE.md §13.6 "Ask before:" list should mention applying Supabase migrations — they're irreversible (well, with rollback files, but mid-deploy is a moment of risk). | `Testre/CLAUDE.md` |
-| 7.5 | LOW | Plan §6.6 PDF export — `jsPDF` and `html-to-image` are in package.json deps but no code uses them yet. Remove until needed, or implement. | `package.json` |
+| 7.5 | LOW | Plan §6.6 PDF export — `jsPDF` removed 2026-11-09 (no importer; 2.5.2 had known advisories). `html-to-image` is still in package.json with no importer: remove until needed, or implement. | `package.json` |
 | 7.6 | **REMOVED (P4 2026-06-28)** | **Won't do — named-object AprilTag grasping superseded this.** The cloud-vision path (`vision_app.py`) was deleted in P4. (Was: reconcile the cloud-vision cost estimate across files.) | n/a |
 
 ---

@@ -1,11 +1,8 @@
 /*
- * Copyright 2026 EduBotics
+ * Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * Proprietary and confidential. Licensed under the EduBotics End-User
+ * Licence Agreement; see LICENSE at the repository root.
  */
 
 // THE icon table: one semantic name per meaning, one Lucide component each
@@ -21,13 +18,10 @@
 
 import {
   LuActivity,
-  LuAlarmClock,
   LuArrowLeft,
   LuArrowRight,
   LuArrowRightLeft,
-  LuArrowUp,
   LuBookOpen,
-  LuBookmark,
   LuBox,
   LuBug,
   LuCamera,
@@ -36,8 +30,6 @@ import {
   LuChevronDown,
   LuChevronLeft,
   LuChevronRight,
-  LuChevronsLeft,
-  LuChevronsRight,
   LuChevronUp,
   LuCircle,
   LuCircleAlert,
@@ -62,7 +54,6 @@ import {
   LuFileDown,
   LuFileText,
   LuFileUp,
-  LuFlame,
   LuFolder,
   LuFolderOpen,
   LuGamepad2,
@@ -78,7 +69,6 @@ import {
   LuHouse,
   LuInfo,
   LuKeyRound,
-  LuLink,
   LuList,
   LuListFilter,
   LuLoaderCircle,
@@ -121,7 +111,6 @@ import {
   LuTrash2,
   LuTriangleAlert,
   LuUndo2,
-  LuUnlink,
   LuUnplug,
   LuUsers,
   LuVideo,
@@ -196,9 +185,6 @@ export const ICONS = Object.freeze({
   chevronLeft: LuChevronLeft,
   chevronRight: LuChevronRight,
   chevronUp: LuChevronUp,
-  chevronsLeft: LuChevronsLeft,
-  chevronsRight: LuChevronsRight,
-  arrowUp: LuArrowUp,
   // The collision modal's picture: where the obstacle should go (CollisionModal.js).
   arrowRight: LuArrowRight,
   enterKey: LuCornerDownLeft,
@@ -224,7 +210,6 @@ export const ICONS = Object.freeze({
   folder: LuFolder,
   folderOpen: LuFolderOpen,
   home: LuHouse,
-  bookmark: LuBookmark,
   star: LuStar,
   database: LuDatabase,
   cloud: LuCloud,
@@ -236,11 +221,7 @@ export const ICONS = Object.freeze({
   settings: LuSettings,
   logout: LuLogOut,
   key: LuKeyRound,
-  link: LuLink,
-  unlink: LuUnlink,
   unplugged: LuUnplug,
-  alarm: LuAlarmClock,
-  flame: LuFlame,
   zap: LuZap,
   construction: LuConstruction,
   users: LuUsers,

@@ -1,7 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 //
 // The page layout (spec §3.12, review V2-1): the page is the `rec` size
 // container; the problem banner and the action bar are ONE footer group, a
@@ -23,7 +23,6 @@ import tasksReducer, { setHeartbeatStatus, setTaskStatus } from '../../../featur
 import uiReducer from '../../../features/ui/uiSlice';
 import rosReducer from '../../../features/ros/rosSlice';
 import trainingReducer from '../../../features/training/trainingSlice';
-import jetsonReducer from '../../../store/jetsonSlice';
 import TaskPhase from '../../../constants/taskPhases';
 import RecordPage from '../../../pages/RecordPage';
 
@@ -113,7 +112,7 @@ describe('record.css', () => {
 describe('the rendered page', () => {
   it('the stage, then ONE footer with the banner slot and the action bar, in the left column; the cards on the right', () => {
     const store = configureStore({
-      reducer: { tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer, jetson: jetsonReducer },
+      reducer: { tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer },
     });
     store.dispatch(setHeartbeatStatus('connected'));
     store.dispatch(setTaskStatus({ phase: TaskPhase.READY, running: false, topicReceived: true, robotType: 'omx_f' }));
@@ -142,7 +141,7 @@ describe('the rendered page', () => {
 describe('the narrow page scrolls back to the stage when a session starts', () => {
   it('Start from a scrolled page brings .rec-main to the top; staying in READY does not', () => {
     const store = configureStore({
-      reducer: { tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer, jetson: jetsonReducer },
+      reducer: { tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer },
     });
     store.dispatch(setHeartbeatStatus('connected'));
     store.dispatch(setTaskStatus({ phase: TaskPhase.READY, running: false, topicReceived: true, robotType: 'omx_f' }));

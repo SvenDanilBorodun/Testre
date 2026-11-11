@@ -6,8 +6,8 @@ wrapper), because the Pi runs Docker Engine directly. The image-digest
 pre-check is flipped from ``linux/amd64`` to ``linux/arm64`` in BOTH the
 legacy single-digest probe (``_get_remote_manifest_digest``) and the
 set-membership machinery (``_parse_digest_candidates`` /
-``_get_remote_digest_candidates``), reusing the arm64 twins the Jetson
-agent already carries.
+``_get_remote_digest_candidates``), reusing the arm64 twins the retired
+Jetson agent carried.
 
 Two lifecycle laws distinguish this from the GUI:
 
@@ -22,8 +22,8 @@ Two lifecycle laws distinguish this from the GUI:
      The graceful ``stop`` (SIGTERM) still lets ``open_manipulator``'s
      entrypoint run its torque-disable trap before exit (Rule §2 preserved).
 
-The compose driver runs with a SCRUBBED environment (like the Jetson
-agent) so the systemd unit's ``EDUBOTICS_AGENT_TOKEN`` / secrets never leak
+The compose driver runs with a SCRUBBED environment (like the retired
+Jetson agent) so the systemd unit's ``EDUBOTICS_AGENT_TOKEN`` / secrets never leak
 into container processes; compose reads every ``${VAR}`` from ``--env-file``.
 """
 
@@ -37,7 +37,7 @@ import subprocess
 import time
 from typing import Optional
 
-from . import config_generator
+from . import config_generator, robot_key
 from .constants import (
     ALL_IMAGES,
     COMPOSE_FILE,
@@ -92,7 +92,7 @@ EDUBOTICS_DATA_VOLUME_SUFFIXES = (
     "edubotics_calib",
 )
 
-# Per-attempt pull timeout. Larger than the Jetson's 180 s default because the
+# Per-attempt pull timeout. Larger than the retired Jetson agent's 180 s because the
 # arm64 opi server image is one ~5-6 GB layer that a slow classroom link needs
 # minutes to fetch; `docker pull` resumes from cached layers on retry so a
 # timeout-then-retry is cheap. Override with EDUBOTICS_PULL_ATTEMPT_TIMEOUT_S.
@@ -365,7 +365,7 @@ def _pull_one_image(
     ``_reset_dockerd`` on stall): on the Pi dockerd is a systemd service SHARED
     with the always-on manager, so restarting it would drop the wizard the
     student is looking at. Instead we rely on ``docker pull`` resuming from
-    cached layers on retry (cheap) — the Jetson agent's proven native approach.
+    cached layers on retry (cheap) — the retired Jetson agent's proven native approach.
 
     ``retry_gate``: optional predicate consulted BEFORE every retry (never before
     the first attempt). Returning False ends the loop immediately — the caller's
@@ -614,7 +614,7 @@ def get_last_pull_status() -> dict:
 def check_for_updates(log=None, missing_out: Optional[list] = None) -> bool:
     """Refresh the opi images to the pinned tag on GHCR (Docker Hub fallback).
 
-    Same three-layer defence as the GUI/Jetson: offline short-circuit, arm64
+    Same three-layer defence as the GUI: offline short-circuit, arm64
     manifest-digest pre-check (set membership — skip a pull when the local
     RepoDigest is already in the registry's candidate set), and last-pull
     persistence for the freshness banner. Per-image failures are non-fatal.
@@ -914,8 +914,14 @@ def _compose_up(*services: str, log=None, timeout: int = 180) -> bool:
     ``--no-deps`` keeps compose's dependency resolution away from services we
     aren't naming (so recreating the robot tier never touches the running
     manager, and vice-versa). The health-gated ``depends_on`` BETWEEN the two
-    robot-tier services still applies when both are named."""
+    robot-tier services still applies when both are named.
+
+    Before physical_ai_server comes up, the host directory its compose
+    bind-mounts for the token key is created (VB-03, ``robot_key.ensure_dir``):
+    /run is a tmpfs, and a fielded Pi that self-updated has none yet."""
     log = log or (lambda _m: None)
+    if "physical_ai_server" in services:
+        robot_key.ensure_dir(log=log)
     cmd = _compose("up", "-d", "--force-recreate", "--no-deps", *services)
     try:
         result = subprocess.run(
@@ -1069,19 +1075,30 @@ def start_robot_tier(log=None) -> bool:
     return _compose_up(*_ROBOT_TIER, log=log, timeout=DOCKER_STARTUP_TIMEOUT + 180)
 
 
+# How long the graceful `compose stop` of the robot tier may take. Compose stops
+# physical_ai_server before open_manipulator, each within its stop_grace_period;
+# physical_ai_server's is 50 s since launch plan step 8 (2026-11-10), because it
+# finalizes a running recording before it exits. A timed-out `stop` is followed
+# by `rm -f`, which SIGKILLs whatever still runs — so this must never be the
+# shorter bound. tests/test_recording_stop_budget.py holds it above the graces.
+ROBOT_TIER_STOP_TIMEOUT_S = 120
+
+
 def stop_robot_tier(log=None) -> bool:
     """Stop + remove ONLY the robot-tier containers. NEVER ``compose down`` —
     the ros_net network + the always-on manager must survive (``down`` deletes
     ros_net and severs the agent's gateway listener). The graceful ``stop``
     (SIGTERM) lets open_manipulator's entrypoint run its torque-disable trap
-    before exit (Rule §2). Idempotent — a no-op when nothing is present."""
+    before exit (Rule §2) and physical_ai_server finalize a running recording
+    (launch plan step 8). Idempotent — a no-op when nothing is present."""
     log = log or (lambda _m: None)
     ok = True
-    for action in (["stop", *_ROBOT_TIER], ["rm", "-f", *_ROBOT_TIER]):
+    for action, timeout in ((["stop", *_ROBOT_TIER], ROBOT_TIER_STOP_TIMEOUT_S),
+                            (["rm", "-f", *_ROBOT_TIER], 60)):
         try:
             subprocess.run(
                 _compose(*action),
-                capture_output=True, text=True, timeout=60, env=_scrubbed_env(),
+                capture_output=True, text=True, timeout=timeout, env=_scrubbed_env(),
             )
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
             log(f"Docker Compose Fehler: {e}")

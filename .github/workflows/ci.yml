@@ -27,8 +27,10 @@ permissions:
 jobs:
   python-tests:
     runs-on: ubuntu-latest
-    # main alone needed 14 of 15 minutes; the Cloud-Inferenz suites add about one.
-    timeout-minutes: 25
+    # 45: measured p50 12.8 / p90 18.0 / max 20.2 min on 4-vCPU public runners
+    # (Sept–Nov 2026). A private repository's runners have 2 vCPU / 8 GB and the
+    # pytest suites are CPU-bound, so 25 would cut a slow run short.
+    timeout-minutes: 45
     env:
       # test_code_insert_cases.py compiles the insertion fixture with javac
       # ($JAVA_HOME_21_X64 on this runner): a lost JDK fails, never skips.
@@ -49,12 +51,16 @@ jobs:
           python-version: "3.12"
       - name: Install test dependencies
         run: |
-          python -m pip install --upgrade pip
-          # pyyaml: the validator jobs below. numpy + opencv-contrib-python-headless
+          python -m pip install pip==26.3
+          # EVERY package below is pinned (2026-11-10; tests/test_ci_supply_chain_pins.py):
+          # unpinned, numpy and opencv had floated to 2.5.4 and 5.0.0.93 while the
+          # server image ships 1.26.4 and 4.10.0.84, so the suites ran against a
+          # stack no robot has. pyyaml: the validator jobs below. numpy + opencv-contrib-python-headless
           # + pytest: the Roboter Studio workflow/IK test suite (pure-Python, no
           # ROS — the workflow modules import pupil_apriltags/rclpy lazily;
           # calibration uses cv2.aruco which is the contrib build; headless
-          # avoids GUI libs on the runner). cryptography: the cloud API's
+          # avoids GUI libs on the runner) — numpy and opencv equal the server
+          # image's (docker/physical_ai_server/Dockerfile). cryptography: the cloud API's
           # AES-GCM token envelope (042); pinned equal to its requirements.txt.
           # pyarrow + av + huggingface_hub: Daten 2.0 (spec §H8) — the versions the
           # server image ships (2.26.0), so the deps-free and pytest suites import
@@ -67,10 +73,12 @@ jobs:
           # boto3 + botocore: managed training (spec §4.12, FR-11) — the cloud API's
           # test_r2_client.py proves the presigned PUT's signed headers with real botocore;
           # pinned equal to cloud_training_api/requirements.txt.
-          python -m pip install pyyaml pytest numpy opencv-contrib-python-headless cryptography==49.0.0 \
+          # PyJWT: the cloud API verifies access tokens locally (2026-11-10,
+          # services/jwt_auth.py); its tests sign real ES256 tokens.
+          python -m pip install pyyaml==6.0.3 pytest==9.2.0 numpy==1.26.4 opencv-contrib-python-headless==4.10.0.84 cryptography==49.0.0 \
             pyarrow==25.0.0 av==15.1.0 huggingface_hub==1.23.0 \
             fastapi==0.115.12 httpx==0.28.1 aiohttp==3.14.1 "uvicorn[standard]==0.34.2" \
-            boto3==1.43.107 botocore==1.43.107
+            boto3==1.43.107 botocore==1.43.107 "PyJWT[crypto]==2.15.1"
       - name: Syntax-check Python modules
         # ZERO-FILE FLOOR, the repo's standing rule for scan-based guards (the
         # four ps_* guards and the three lockstep tests all carry one).
@@ -110,11 +118,11 @@ jobs:
           cd robotis_ai_setup
           python -m unittest discover -s tests -v
 
-      - name: Cloud API unit tests (workgroups + dataset sweep + jetson)
+      - name: Cloud API unit tests
         # Tests stub fastapi/supabase/huggingface_hub via sys.modules so
         # they run without the heavy deps. They cover the workgroup
-        # helper, dataset-sweep parsers, audit-table fallback logic,
-        # and (migration 019) the jetson route helpers + lock sweeper.
+        # helper, dataset-sweep parsers, audit-table fallback logic, the
+        # routes, the boot schema probe and the migration SQL fences.
         # Integration tests against a real Supabase branch are a
         # follow-up when test infrastructure is in place — see plan
         # Part 5 §3 (concurrency check).
@@ -143,15 +151,6 @@ jobs:
           cd robotis_ai_setup/modal_inference
           python -m pytest tests -q
 
-      - name: Jetson agent unit tests (migration 019 client side)
-        # Cross-platform — every subprocess/socket/Cloud-API call is
-        # mocked, so this runs on the same ubuntu-latest runner as the
-        # rest. Catches regressions in the F67/F68/F69 auto-pull port,
-        # the docker manifest parsing, and the compose image discovery.
-        run: |
-          cd robotis_ai_setup/jetson_agent
-          python -m unittest discover -s tests -v
-
       - name: Orange Pi agent unit tests (Phase 2 host-side lifecycle)
         # Cross-platform — every subprocess/docker/socket/HTTP call is
         # mocked (deps-free), so this runs on the same ubuntu-latest runner
@@ -162,8 +161,7 @@ jobs:
         # pi_agent/tests has NO __init__.py — it follows the GUI-tests
         # convention (each test file does its own sys.path.insert of
         # robotis_ai_setup, then imports via the `pi_agent.` package), which is
-        # why `discover` works here without a package marker. (jetson_agent/tests
-        # DOES have __init__.py; pi_agent deliberately does not.)
+        # why `discover` works here without a package marker.
         run: |
           cd robotis_ai_setup/pi_agent
           python -m unittest discover -s tests -v
@@ -180,6 +178,32 @@ jobs:
         run: |
           cd physical_ai_tools/physical_ai_server
           python -m pytest test/ -q
+
+      - name: The Pi firewall in a real kernel (as root, SA-05)
+        # VB-05 (2026-11-15): tests/test_pi_firewall_netns.py builds three
+        # network namespaces and runs pi_agent/firewall.py's rules in netfilter
+        # itself — SA-05's only behavioural proof. It needs root, so the
+        # unprivileged "Unit tests" step above skips it; GitHub's runners give
+        # passwordless sudo, so it runs here a second time as root. LAST in the
+        # job (a root process must not leave files the later steps would trip
+        # over; no bytecode is written). EDUBOTICS_REQUIRE_NETNS=1 turns a skip
+        # into a failure, the way EDUBOTICS_REQUIRE_JAVAC treats a lost JDK, and
+        # the output is checked for a skip and for a test that actually ran.
+        run: |
+          set -euo pipefail
+          cd robotis_ai_setup
+          if ! out=$(sudo -E env "PATH=$PATH" EDUBOTICS_REQUIRE_NETNS=1 PYTHONDONTWRITEBYTECODE=1 \
+                python -m unittest discover -s tests -p test_pi_firewall_netns.py -v 2>&1); then
+            echo "$out"
+            exit 1
+          fi
+          echo "$out"
+          if printf '%s\n' "$out" | grep -Eq 'skipped( |=)'; then
+            echo "::error::test_pi_firewall_netns.py skipped as root"
+            exit 1
+          fi
+          printf '%s\n' "$out" | grep -Eq '^Ran [1-9][0-9]* tests? in ' \
+            || { echo "::error::test_pi_firewall_netns.py ran no test"; exit 1; }
 
   shell-lint:
     runs-on: ubuntu-latest
@@ -199,7 +223,6 @@ jobs:
             robotis_ai_setup/docker/open_manipulator/entrypoint_omx.sh \
             robotis_ai_setup/wsl_rootfs/build_rootfs.sh \
             robotis_ai_setup/wsl_rootfs/start-dockerd.sh \
-            robotis_ai_setup/jetson_agent/setup.sh \
             robotis_ai_setup/pi_agent/setup.sh \
             robotis_ai_setup/pi_agent/systemd/edubotics-pi-firstboot.sh \
             physical_ai_tools/physical_ai_manager/scripts/railway-deploy.sh
@@ -246,13 +269,19 @@ jobs:
           echo "rootfs-version-guard OK"
 
   base-version-guard:
-    # The self-built server BASE images are NOT built by CI. No workflow sets
-    # BUILD_BASE_ARM64 or BUILD_BASE_OPI — a maintainer hand-builds each base
-    # once (`BUILD_BASE_OPI=1 PLATFORM=opi ./build-images.sh`) and pushes it,
-    # and every CI build thereafter just resolves the already-PUBLISHED tag
-    # pinned in build-images.sh via `docker manifest inspect`.
+    # The two self-built Orange Pi BASE images are NOT built by CI. No workflow
+    # sets BUILD_BASE_OPI or BUILD_BASE_OPI_OMX — a maintainer hand-builds a base
+    # once (`BUILD_BASE_OPI=1 PLATFORM=opi ./build-images.sh` for the CPU server
+    # base from Dockerfile.arm64cpu, `BUILD_BASE_OPI_OMX=1 PLATFORM=opi
+    # ./build-images.sh` for the open_manipulator base from
+    # open_manipulator/docker/Dockerfile) and pushes it, and every CI build
+    # thereafter just resolves the already-PUBLISHED tag pinned in
+    # build-images.sh (PAS_BASE_IMAGE / OMX_BASE_IMAGE in its opi case) via
+    # `docker manifest inspect`. (amd64 pulls ROBOTIS's published
+    # open_manipulator base, so an edit to that Dockerfile never reaches amd64
+    # either.)
     #
-    # So editing Dockerfile.arm64cpu / Dockerfile.arm64 does nothing on its own
+    # So editing either base Dockerfile does nothing on its own
     # — and does it QUIETLY. The release goes green while shipping the previous
     # base, and the edit looks landed because the file is in git. Rule §5 sends
     # people into exactly these files to bump LeRobot pins, which is what makes
@@ -321,10 +350,12 @@ jobs:
           }
 
           # The tag pinned for a base repo, read out of build-images.sh at a
-          # given ref. Empty when the assignment is absent/renamed.
+          # given ref: `pin_tag <ref> <VARIABLE> <repo>` reads the
+          # `<VARIABLE>=...<repo>:<tag>` assignment. Empty when the assignment
+          # is absent/renamed.
           pin_tag() {
             git show "$1:$BUILD_SH" 2>/dev/null \
-              | sed -nE "s|^[[:space:]]*PAS_BASE_IMAGE=.*/$2:([A-Za-z0-9._-]+).*|\1|p" \
+              | sed -nE "s|^[[:space:]]*$2=.*/$3:([A-Za-z0-9._-]+).*|\1|p" \
               | head -1
           }
 
@@ -337,32 +368,34 @@ jobs:
           # below fails loudly rather than silently passing.
           pin_moved() {
             local before after
-            before="$(pin_tag "$BASE" "$1")"
-            after="$(pin_tag HEAD "$1")"
+            before="$(pin_tag "$BASE" "$1" "$2")"
+            after="$(pin_tag HEAD "$1" "$2")"
             [ -n "$after" ] && [ "$before" != "$after" ]
           }
 
           rc=0
           check() {
-            local dockerfile="$1" base_repo="$2" rebuild_cmd="$3"
+            local dockerfile="$1" pin_var="$2" base_repo="$3" rebuild_cmd="$4"
             if ! has_code_change "$dockerfile"; then
               echo "OK: ${dockerfile} — no non-comment changes, nothing to enforce."
               return 0
             fi
-            if pin_moved "$base_repo"; then
+            if pin_moved "$pin_var" "$base_repo"; then
               echo "OK: ${dockerfile} changed AND its ${base_repo} pin moved."
               return 0
             fi
-            echo "::error file=${dockerfile}::${dockerfile} changed, but the ${base_repo} tag in ${BUILD_SH} did not. This base is NOT built by CI — the build resolves the tag already published in the registry, so your edit would ship NOTHING while the release still goes green. Rebuild and push the base with '${rebuild_cmd}', then bump PAS_BASE_IMAGE to the new tag in this same commit. Comment-only edits are exempt."
+            echo "::error file=${dockerfile}::${dockerfile} changed, but the ${base_repo} tag in ${BUILD_SH} did not. This base is NOT built by CI — the build resolves the tag already published in the registry, so your edit would ship NOTHING while the release still goes green. Rebuild and push the base with '${rebuild_cmd}', then bump ${pin_var} to the new tag in this same commit. Comment-only edits are exempt."
             rc=1
           }
 
           check physical_ai_tools/physical_ai_server/Dockerfile.arm64cpu \
-                physical-ai-server-opi-base \
+                PAS_BASE_IMAGE physical-ai-server-opi-base \
                 'BUILD_BASE_OPI=1 PLATFORM=opi ./build-images.sh'
-          check physical_ai_tools/physical_ai_server/Dockerfile.arm64 \
-                physical-ai-server-jetson-base \
-                'BUILD_BASE_ARM64=1 PLATFORM=arm64 ./build-images.sh'
+          # The Orange Pi's open_manipulator base; its repo keeps the
+          # historical name open-manipulator-jetson-base (build-images.sh).
+          check open_manipulator/docker/Dockerfile \
+                OMX_BASE_IMAGE open-manipulator-jetson-base \
+                'BUILD_BASE_OPI_OMX=1 PLATFORM=opi ./build-images.sh'
 
           [ "$rc" = "0" ] || exit 1
           echo "base-version-guard OK"
@@ -525,24 +558,10 @@ jobs:
             echo "::error::physical_ai_manager healthcheck still references localhost — busybox wget AAAA-first regression"
             exit 1
           fi
-      - name: docker compose config (Jetson)
-        # Migration 019: the Jetson agent ships its own compose file.
-        # Same kind of validation — parses YAML, expands env, asserts
-        # service-shape. The Jetson compose has no GPU layer because
-        # the Orin Nano's integrated GPU goes through `runtime: nvidia`
-        # which the YAML declares directly.
-        run: |
-          cd robotis_ai_setup/jetson_agent
-          cat > .env <<'EOF'
-          REGISTRY=nettername
-          EDUBOTICS_HF_TOKEN=ci_test
-          ROS_DOMAIN_ID=42
-          EOF
-          docker compose --env-file .env -f docker-compose.jetson.yml config > /dev/null
       - name: docker compose config (Orange Pi)
-        # Phase 2: the Orange Pi 5 Pro agent ships a THIRD compose file — a
-        # three-way merge of the student + Jetson composes plus the always-on
-        # physical-ai-manager-opi service. It lives in the SAME docker/
+        # Phase 2: the Orange Pi 5 Pro agent ships its own compose file — the
+        # student compose's services plus the always-on physical-ai-manager-opi
+        # service. It lives in the SAME docker/
         # directory as the student compose, so its ./physical_ai_server/.s6-keep
         # bind and the .env-driven references resolve exactly as the student
         # file does. Native ARM64: no `runtime: nvidia`, no GPU layer. Same
@@ -711,11 +730,11 @@ jobs:
     # hardcoded default forever. See finding #1 in the 2026-05-22 audit.
     #
     # READ THE SCOPE CAREFULLY — it is weaker than it looks, and the gap is
-    # not theoretical. "Forwarded" is a UNION over all four compose files
+    # not theoretical. "Forwarded" is a UNION over all three compose files
     # (see the `forwarded=` grep below), reduced with `comm`. So this job
     # proves a key is forwarded SOMEWHERE. It cannot see:
     #   * a key present on ONE target only — the student compose satisfies
-    #     it for the Orange Pi and the Jetson alike; and
+    #     it for the Orange Pi too; and
     #   * a key on the WRONG SERVICE of the right file — compose injects a
     #     variable only into the service whose `environment:` lists it.
     # Both shipped at once: EDUBOTICS_ROBOT_TYPE sat on the opi compose but
@@ -729,14 +748,12 @@ jobs:
     # below. Neither replaces the other: this one is keyed off what the
     # SOURCES read (so a new env name cannot be forgotten by every compose at
     # once), that one is keyed off what the student compose FORWARDS (so the
-    # Pi cannot fall behind Windows). Widening this one to per-file would
-    # demand a Jetson parity audit nobody has scoped — hence the split.
+    # Pi cannot fall behind Windows).
     #
-    # KNOWN RESIDUAL of that split, measured: a name forwarded ONLY by the
-    # Jetson or gpu compose satisfies this job (it is in the union) AND
-    # compose-env-parity (absent from student and opi alike, so they agree).
-    # Such a key reaches neither Windows nor the Pi. Nothing today is in that
-    # state; closing it means gating the Jetson, i.e. that audit.
+    # KNOWN RESIDUAL of that split: a name forwarded ONLY by the gpu compose
+    # satisfies this job (it is in the union) AND compose-env-parity (absent
+    # from student and opi alike, so they agree). Such a key reaches neither
+    # Windows nor the Pi. Nothing today is in that state.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -775,7 +792,7 @@ jobs:
           fi
           # The same names must appear on the LEFT of an `=` inside any
           # `environment:` list in any compose file we ship. This is a
-          # UNION across the four files and it is deliberately NOT
+          # UNION across the three files and it is deliberately NOT
           # per-target: a name reaching only one compose passes here. See
           # the job comment — `compose-env-parity` is the per-target check.
           # Uses POSIX [[:space:]] for portability across GNU + BSD sed.
@@ -784,7 +801,6 @@ jobs:
                 robotis_ai_setup/docker/docker-compose.yml \
                 robotis_ai_setup/docker/docker-compose.gpu.yml \
                 robotis_ai_setup/docker/docker-compose.opi.yml \
-                robotis_ai_setup/jetson_agent/docker-compose.jetson.yml \
               2>/dev/null \
               | sed -E 's/^[[:space:]]*-[[:space:]]*//;s/=.*//' \
               | sort -u
@@ -803,7 +819,7 @@ jobs:
 
   compose-env-parity:
     # The per-TARGET, per-SERVICE half that `env-forwarding-guard` above
-    # structurally cannot provide: it unions all four compose files, so a
+    # structurally cannot provide: it unions all three compose files, so a
     # key present on one target satisfies it for every target, and a key on
     # the wrong service of the right file satisfies it too. Both happened at
     # once and shipped — an Orange Pi ran the OMX Dynamixel bringup against
@@ -812,11 +828,10 @@ jobs:
     # guard stays green with all six keys deleted from the opi compose.
     #
     # Compares docker-compose.yml against docker-compose.opi.yml service by
-    # service. The Jetson compose is deliberately NOT a target (a smaller,
-    # legitimately different product surface); the shipped pi_agent twin is
-    # deliberately not re-checked (byte-identical, already fenced by
-    # pi-compose-twin-guard here and by release.yml::pi-agent-tarball on the
-    # built artifact). Both decisions are argued in the script's docstring.
+    # service. The shipped pi_agent twin is deliberately not re-checked
+    # (byte-identical, already fenced by pi-compose-twin-guard here and by
+    # release.yml::pi-agent-tarball on the built artifact), as the script's
+    # docstring argues.
     #
     # Gates on KEY PRESENCE; value differences are `::notice` only, because
     # one legitimate value divergence exists and must stay (the opi compose
@@ -1018,12 +1033,14 @@ jobs:
         # and `.remote.aio(...)`. An SDK rename of either symbol would slip
         # past the modal_app import sweep (decoration-time only). Pull in just
         # enough cloud_training_api deps to materialise the route module and
-        # prove the Modal SDK call sites still parse.
+        # prove the Modal SDK call sites still parse. PyJWT + cryptography: every
+        # route imports app.auth, which verifies access tokens locally (2026-11-10);
+        # pinned equal to cloud_training_api/requirements.txt.
         run: |
           python -m pip install --quiet \
             'fastapi==0.115.12' 'pydantic==2.11.3' 'supabase==2.15.1' \
             'httpx==0.28.1' 'python-dotenv==1.1.0' 'huggingface_hub>=0.25.0' \
-            'boto3==1.43.107' 'botocore==1.43.107'
+            'boto3==1.43.107' 'botocore==1.43.107' 'cryptography==49.0.0' 'PyJWT[crypto]==2.15.1'
           export SUPABASE_URL=http://ci.test
           export SUPABASE_SERVICE_ROLE_KEY=ci-fake
           export MODAL_TOKEN_ID=ci-fake
@@ -1084,6 +1101,49 @@ jobs:
               fi
               echo "OK: '$needle' present"
           done
+      - name: Assert the image serves its CSP and the bundle names no Google font host
+        run: |
+          # F-46: report-only by default, enforced with EDUBOTICS_CSP_ENFORCE=1,
+          # the policy built from the bundle's own two URLs (Dockerfile.web).
+          # F-27: the fonts are self-hosted.
+          set -eu
+          for enforce in '' 1; do
+            cid=$(docker run -d -e EDUBOTICS_CSP_ENFORCE="$enforce" -p 127.0.0.1:18080:8080 edubotics-teacher-web-validate)
+            for _ in $(seq 1 30); do
+              curl -fsS -o /dev/null http://127.0.0.1:18080/ 2>/dev/null && break
+              sleep 1
+            done
+            headers=$(curl -fsS -D - -o /dev/null http://127.0.0.1:18080/ | tr 'A-Z' 'a-z')
+            report=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/csp-report' \
+              --data '{"csp-report":{"violated-directive":"ci-probe"}}' http://127.0.0.1:18080/csp-report)
+            # VB-06: refused requests (another method, a body over 16 KB) log no line.
+            refused_get=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/csp-report)
+            refused_big=$(head -c 20000 /dev/zero | tr '\0' a | curl -sS -o /dev/null -w '%{http_code}' -X POST \
+              -H 'Content-Type: application/csp-report' --data-binary @- http://127.0.0.1:18080/csp-report)
+            [ "$refused_get" = 403 ]
+            [ "$refused_big" = 413 ]
+            sleep 1
+            logs=$(docker logs "$cid" 2>&1)
+            docker rm -f "$cid" >/dev/null
+            echo "$headers" | grep -F "connect-src 'self' https://ci_validate.api.example https://ci_validate.supabase.co wss://ci_validate.supabase.co;"
+            # (`! cmd` would not trip `set -e`, hence the explicit ifs.)
+            if [ -n "$enforce" ]; then
+              want='content-security-policy: '; other='content-security-policy-report-only: '
+            else
+              want='content-security-policy-report-only: '; other='content-security-policy: '
+            fi
+            echo "$headers" | grep -F "$want"
+            if echo "$headers" | grep -q -F "$other"; then echo "FAIL: both CSP headers"; exit 1; fi
+            [ "$report" = 204 ]
+            echo "$logs" | grep -F 'csp-report {\"csp-report\":{\"violated-directive\":\"ci-probe\"}}'
+            if echo "$logs" | grep -Eq ' csp-report ?$'; then echo "FAIL: an empty csp-report line"; exit 1; fi
+            [ "$(echo "$logs" | grep -cE '^[0-9][0-9T:+.-]* csp-report ')" = 1 ]
+          done
+          if docker run --rm --entrypoint sh edubotics-teacher-web-validate -c \
+               "grep -r -l -E 'fonts\.(googleapis|gstatic)\.com' /usr/share/nginx/html"; then
+            echo "FAIL: the bundle names a Google font host"
+            exit 1
+          fi
 
   manager-build-validate:
     # Catches the white-screen regression that shipped on 4 published
@@ -1372,18 +1432,31 @@ jobs:
           sudo apt-get install -y nginx-light gettext-base
       - name: nginx -t on web template
         run: |
-          # Render the template with a concrete $PORT (the only var the
-          # template references). Drop our config into sites-enabled and
-          # let nginx validate it the way it would at container start.
-          # Catches bad add_header syntax, missing semicolons, malformed
-          # location blocks etc. before they break the Railway web deploy.
+          # Render the template the way the image does: $PORT, plus the two CSP
+          # variables exported by the shipped nginx.web.csp.envsh from a policy
+          # the shipped scripts/csp-policy.mjs builds (Dockerfile.web), in both
+          # modes (report-only by default, enforced with EDUBOTICS_CSP_ENFORCE=1).
+          # Drop the config into sites-enabled and let nginx validate it the way
+          # it would at container start. Catches bad add_header syntax, missing
+          # semicolons, malformed location blocks etc. before they break the
+          # Railway web deploy.
           export PORT=8080
-          envsubst '$PORT' \
-            < physical_ai_tools/physical_ai_manager/nginx.web.conf.template \
-            > /tmp/nginx.web.conf
+          REACT_APP_SUPABASE_URL=https://CI_VALIDATE.supabase.co \
+          REACT_APP_CLOUD_API_URL=https://CI_VALIDATE.api.example \
+            node physical_ai_tools/physical_ai_manager/scripts/csp-policy.mjs > /tmp/csp-policy.txt
           sudo rm -f /etc/nginx/sites-enabled/default
-          sudo cp /tmp/nginx.web.conf /etc/nginx/sites-enabled/edubotics-web.conf
-          sudo nginx -t
+          for enforce in 0 1; do
+            (
+              export EDUBOTICS_CSP_POLICY_FILE=/tmp/csp-policy.txt EDUBOTICS_CSP_ENFORCE="$enforce"
+              . physical_ai_tools/physical_ai_manager/nginx.web.csp.envsh
+              envsubst '$PORT $EDUBOTICS_CSP_HEADER $EDUBOTICS_CSP_POLICY' \
+                < physical_ai_tools/physical_ai_manager/nginx.web.conf.template \
+                > /tmp/nginx.web.conf
+            )
+            grep -q 'add_header Content-Security-Policy' /tmp/nginx.web.conf
+            sudo cp /tmp/nginx.web.conf /etc/nginx/sites-enabled/edubotics-web.conf
+            sudo nginx -t
+          done
       - name: nginx -t on student template
         run: |
           # The student-mode nginx.conf is plain (no PORT envsubst), so
@@ -1467,6 +1540,47 @@ jobs:
         # are comparisons, not bindings, so they are structurally excluded
         # and stay English on purpose. `# english-ok` is the escape hatch.
         run: python3 .github/scripts/german_detail_lint.py
+
+  migrations-replay:
+    # Security audit SA-10 (2026-11-13): Supabase's default privileges grant
+    # every new table, sequence and function to anon and authenticated, so a
+    # migration that forgets a REVOKE re-opens a PostgREST read, write or RPC
+    # path silently (046, 047, 054 and 055 each closed one after the fact).
+    # This job replays EVERY migration in timestamp order into a plain
+    # PostgreSQL 16 with Supabase's roles, auth/storage stand-ins, the live
+    # default privileges and the live storage drift
+    # (.github/scripts/supabase_replay_stub.sql), then fails on any request-role
+    # privilege outside robotis_ai_setup/supabase/request_role_allowlist.json
+    # (column reads, writes, EXECUTE), any write policy for a request role, any
+    # storage policy for one, any public bucket, and any default privilege that
+    # grants a request role or PUBLIC anything. --teeth-before also runs the
+    # check right before 057 and requires it to FAIL there.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16.15@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: postgres
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: psql is on the runner
+        run: psql --version
+      - name: Replay every migration and judge the request roles' privileges
+        run: python3 .github/scripts/supabase_request_role_check.py --teeth-before 20261113120000
 
   enum-parity:
     # The TaskPhase/TaskCommand wire ints are hand-duplicated across FOUR
@@ -1560,8 +1674,11 @@ jobs:
     # Node setup, action pins and `npm ci` are copied from react-lint above so
     # the two React jobs cannot drift on toolchain: same node 22, same npm cache
     # keyed on the same lockfile.
+    #
+    # 20: measured p90 4.4 / max 4.7 min on 4-vCPU public runners; vitest's
+    # worker pool follows the core count, and private runners have 2 vCPU.
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:

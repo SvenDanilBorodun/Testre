@@ -1,11 +1,11 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 //
 // The STUDENT/MACHINE key registry for browser storage, and the scrub half of
-// sign-out. The whole sign-out sequence — Jetson release, this scrub, the
-// Supabase revoke, the `session/signedOut` broadcast — lives in
+// sign-out. The whole sign-out sequence — the cloud session's end, this scrub,
+// the Supabase revoke, the `session/signedOut` broadcast — lives in
 // `utils/signOut::signOutStudent`; nothing outside it should call
 // `clearStudentScopedStorage` directly.
 //
@@ -173,11 +173,6 @@ export const MACHINE_SCOPED_KEYS = Object.freeze([
  * belongs in STUDENT_SCOPED_KEYS.
  */
 export const IGNORED_STORAGE_KEYS = Object.freeze({
-  'edubotics.jetson.reconnect':
-    'sessionStorage, owned by features/jetson/sessionReset::clearReconnectMarker, '
-    + 'which resetJetsonOnLogout — the FIRST step of signOutStudent — calls. '
-    + 'Student-scoped, but two owners for one key is how one of them quietly '
-    + 'stops being called.',
   __edubotics_version_reload_at:
     'sessionStorage, the loop guard for useVersionCheck’s self-reload. Not '
     + 'student state: clearing it would defeat the guard it exists to be.',
@@ -223,8 +218,7 @@ export const IGNORED_STORAGE_KEYS = Object.freeze({
     + 'by the operative rule it is student-scoped, but it cannot go in '
     + 'STUDENT_SCOPED_KEYS, because clearStudentScopedStorage is a '
     + 'localStorage loop and would silently no-op on it while the test that '
-    + 'seeds keys into localStorage passed. Same reason '
-    + 'edubotics.jetson.reconnect sits here. It does not NEED the sign-out '
+    + 'seeds keys into localStorage passed. It does not NEED the sign-out '
     + 'scrub either: it is per browser session by construction, which for the '
     + 'student surface is the WebView2 window, so the handover it has to '
     + 'survive ends it. The residual — a handover WITHOUT closing that window, '

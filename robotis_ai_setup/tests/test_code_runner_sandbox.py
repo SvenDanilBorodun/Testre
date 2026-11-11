@@ -28,7 +28,6 @@ _STUDENT = _REPO_ROOT / "robotis_ai_setup/docker/docker-compose.yml"
 _OPI = _REPO_ROOT / "robotis_ai_setup/docker/docker-compose.opi.yml"
 _TWIN = _REPO_ROOT / "robotis_ai_setup/pi_agent/docker/docker-compose.opi.yml"
 _GPU = _REPO_ROOT / "robotis_ai_setup/docker/docker-compose.gpu.yml"
-_JETSON = _REPO_ROOT / "robotis_ai_setup/jetson_agent/docker-compose.jetson.yml"
 _RUNNER_LIMITS = _REPO_ROOT / "robotis_ai_setup/docker/code_runner/runner/runner_limits.py"
 
 # (label, compose, the image short name the service must reference)
@@ -37,7 +36,7 @@ _COMPOSES = (
     ("opi", _OPI, "code-runner-opi"),
     ("twin", _TWIN, "code-runner-opi"),
 )
-_EVERY_COMPOSE = (_STUDENT, _GPU, _OPI, _TWIN, _JETSON)
+_EVERY_COMPOSE = (_STUDENT, _GPU, _OPI, _TWIN)
 
 _SERVICE = "code_runner"
 _IPC_VOLUME = "code_runner_ipc"

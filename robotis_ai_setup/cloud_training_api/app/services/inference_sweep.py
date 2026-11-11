@@ -5,7 +5,7 @@ robot never used, expired runs, runs whose page is gone and runs whose Modal
 container stopped reporting — all on the DB clock), then
 `inference_sessions.log_ended_sessions` (the teacher's run rows, only for
 sessions the robot connected to). Every exception is logged by type and the loop
-continues, like the dataset and Jetson sweeps.
+continues, like the dataset sweep.
 
 It never waits for Modal: terminating the ended sessions' Modal sessions is
 `inference_edge.terminate_loop`'s, a task of its own (F-2), so a Modal control

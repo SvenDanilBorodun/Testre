@@ -4,12 +4,9 @@
 -- SELECT), run BY HAND against a fresh LOCAL database — never CI, never the
 -- linked project (it seeds rows).
 --
--- The squashed baseline does NOT replay on a fresh database as shipped
--- (docs/KNOWN-ISSUES.md, „baseline.sql is NOT replayable from scratch"): run
--- it in a SCRATCH copy of supabase/ whose baseline has its one
--- `RENAME COLUMN runpod_job_id` line guarded exactly as
--- 040_code_programs_assertions.sql's header shows, with every migration
--- through 048 applied by `supabase start`, then 047 with psql as `postgres`:
+-- Run it in a SCRATCH copy of supabase/ holding every migration through 048
+-- except 047 (the baseline replays on a fresh database as shipped), applied by
+-- `supabase start`, then 047 with psql as `postgres`:
 --   psql <local db url> -v ON_ERROR_STOP=1 -f supabase/migrations/20261020120000_047_hide_worker_token.sql
 --   psql <local db url> -f supabase/tests/047_hide_worker_token_assertions.sql
 -- The same file passes unchanged after 049 too (049 grants its own columns by
@@ -37,9 +34,9 @@
 \set ON_ERROR_STOP off
 \pset pager off
 
-INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at)
-VALUES ('b4700001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-047@x.test', '', now(), now()),
-       ('b4700002-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's2-047@x.test', '', now(), now())
+INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at, raw_app_meta_data)
+VALUES ('b4700001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-047@x.test', '', now(), now(), '{"edubotics_provisioned": true}'),
+       ('b4700002-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's2-047@x.test', '', now(), now(), '{"edubotics_provisioned": true}')
 ON CONFLICT (id) DO NOTHING;
 UPDATE public.users SET role = 'student' WHERE id IN ('b4700001-0000-0000-0000-000000000001', 'b4700002-0000-0000-0000-000000000002');
 
@@ -55,6 +52,10 @@ CREATE OR REPLACE FUNCTION pg_temp.claims_s1() RETURNS void LANGUAGE sql AS $$
   SELECT set_config('request.jwt.claim.sub', 'b4700001-0000-0000-0000-000000000001', true),
          set_config('request.jwt.claims', '{"sub":"b4700001-0000-0000-0000-000000000001","role":"authenticated"}', true);
 $$;
+-- T4-T7 call it after SET LOCAL ROLE authenticated. Since 057 a function postgres
+-- creates (pg_temp included) carries no EXECUTE for PUBLIC, so the helper is
+-- granted explicitly (before 057 the grant changes nothing).
+GRANT EXECUTE ON FUNCTION pg_temp.claims_s1() TO authenticated;
 
 \echo '=== T1 neither request role can read trainings.worker_token ==='
 SELECT CASE WHEN NOT has_column_privilege('anon', 'public.trainings', 'worker_token', 'SELECT')

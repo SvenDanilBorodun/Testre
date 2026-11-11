@@ -59,7 +59,7 @@ def _rendered():
 
 def test_every_sentence_is_german_without_transliteration_token_or_url():
     texts = _rendered()
-    assert len(texts) == 37          # 29 constants + 8 rendered helpers
+    assert len(texts) == 41          # 33 constants + 8 rendered helpers (4 since VC-06)
     for name, text in texts.items():
         assert text and text == text.strip(), name
         assert not _LINT.TRANSLITERATIONS.search(text), (name, text)
@@ -95,6 +95,14 @@ def test_the_spec_sentences_verbatim():
         'Bitte prüfen und erneut starten.')
     assert t.state_dim_de(7, 6) == 'Das Modell erwartet 7 Gelenkwerte, der Roboter hat 6.'
     assert t.action_dim_de(7, 6) == 'Das Modell liefert 7 Gelenkwerte, der Roboter erwartet 6.'
+    # verification round C (VC-06): the tokens in the robot envelope
+    assert t.ENC_STALE_DE == 'Der Roboter wurde inzwischen neu gestartet. Bitte starte die Inferenz noch einmal.'
+    assert t.ENC_BAD_DE == ('Die verschlüsselte Cloud-Sitzung konnte auf dem Roboter nicht gelesen werden. '
+                            'Bitte starte die Inferenz neu.')
+    assert t.ENC_REPLAYED_DE == ('Diese Cloud-Sitzung wurde schon einmal an den Roboter übertragen und gilt '
+                                 'kein zweites Mal. Bitte starte die Inferenz neu.')
+    assert t.ENC_UNSUPPORTED_DE == ('Dieser Roboter kann die Cloud-Sitzung nicht verschlüsselt annehmen. '
+                                    'Bitte die Roboter-Software aktualisieren.')
 
 
 def test_stall_sentence_renders_the_clamped_value():

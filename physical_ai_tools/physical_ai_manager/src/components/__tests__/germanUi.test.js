@@ -1,7 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 
 // Review round 1 (owner decision R1-O2): the data tools and panels this PR
 // touched are German all through — not only the lines the icon work changed.
@@ -21,15 +21,11 @@ import { describe, expect, it } from 'vitest';
 const SRC = path.resolve(__dirname, '../..');
 
 export const GERMAN_FILES = Object.freeze([
-  'components/CompactSystemStatus.js',
   'components/DatasetSelector.js',
   // The per-student Hugging-Face-Token card on the Startseite and its table of
   // sentences (the JSX itself carries none: every string comes from the table).
   'components/Home/HfTokenCard.jsx',
-  'components/FileBrowser.js',
-  'components/FileBrowserModal.js',
   'components/ModelWeightSelector.js',
-  'components/PolicyDownloadModal.js',
   // Aufnahme 2.0 (spec §3.15): every component of the new page. Their words
   // come from the page, so most of the scan falls on components/Record/model/
   // recordCopy.js; what these files still write themselves is judged here.
@@ -50,7 +46,6 @@ export const GERMAN_FILES = Object.freeze([
   'components/Record/StageViewSwitch.jsx',
   'components/Record/TaskCard.jsx',
   'components/Record/model/recordCopy.js',
-  'components/SystemStatus.js',
   // The robot pictures (robot-picture round): their labels are German, their words come from recordCopy.
   'components/icons/RobotGlyph.jsx',
   'components/TagInput.js',
@@ -115,6 +110,11 @@ export const GERMAN_FILES = Object.freeze([
   'features/editDataset/renderProbe.js',
   'pages/EditDatasetPage.js',
   'pages/TrainingPage.js',
+  // GDPR Art. 17 deletion requests (launch plan step 5): the student's notice,
+  // the teacher/admin queue and the one table of their sentences.
+  'components/DeletionRequestNotice.jsx',
+  'components/teacher/DeletionRequestList.js',
+  'utils/deletionRequest.js',
 ]);
 
 const ENGLISH = /\b(the|and|please|select|selected|selectable|failed|failed to|loading|load|cancel|browse|directory|folder|file|merge|output|add|remove|refresh|empty|found|detected|usage|used|free|total|user|dataset|datasets|model|instruction|parent|home|current|path|already|exists|choose|different|existing|more|only|navigation|disabled|repository name|cannot|must|characters|letters|numbers|configuration|type|local|full|will|be|saved|switch|while|in progress|memory|storage|almost|high|very|consider|closing|applications|cleaning)\b/i;

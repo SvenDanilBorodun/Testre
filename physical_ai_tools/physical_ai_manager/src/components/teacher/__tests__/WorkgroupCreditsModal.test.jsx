@@ -1,7 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 
 // A group's training hours (credit system v2, spec §10.4/§10.6): the modal's
 // tiles, the delta changes with a request_id each (never an absolute amount),
@@ -53,7 +53,6 @@ vi.mock('../../../services/teacherApi', () => ({
   changeStudentHours: vi.fn(),
   getStudentCreditHistory: vi.fn(),
 }));
-vi.mock('../JetsonSection', () => ({ __esModule: true, default: () => null }));
 vi.mock('../../../pages/teacher/WorkflowTemplatesPage', () => ({ __esModule: true, default: () => null }));
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;

@@ -233,7 +233,7 @@ WEBVIEW_PROFILE_DIR = _resolve_webview_profile_dir()
 # bridge") and streamed as JPEG over a localhost TCP socket into the
 # open_manipulator container's camera_ingest_node.py, which republishes them as
 # CompressedImage on /<role>/image_raw/compressed. usb_cam is used only on the
-# native-Linux / Jetson path (no GUI).
+# native-Linux path (no GUI).
 CAMERA_INGEST_HOST = os.environ.get("EDUBOTICS_CAMERA_INGEST_HOST", "127.0.0.1")
 PORT_CAMERA_INGEST = int(os.environ.get("EDUBOTICS_CAMERA_INGEST_PORT", "5557"))
 # cam_id index -> role. MUST match the container's EDUBOTICS_CAMERA_NAMES order
@@ -250,7 +250,7 @@ CAMERA_HEIGHT = int(os.environ.get("EDUBOTICS_CAMERA_HEIGHT", "480"))
 # task_info.fps. NOTE: this value is now only the *nominal* target — it sets the
 # DSHOW-rollback CAP_PROP_FPS request; on the MSMF path it is informational (the
 # sender no longer throttles to it). To record at a LOWER fps, change the
-# recorder/UI fps (task_info.fps), NOT this. The Jetson / usb_cam path uses the
+# recorder/UI fps (task_info.fps), NOT this. The usb_cam path uses the
 # compose EDUBOTICS_CAMERA_FRAMERATE (real native USB host), independent of this.
 CAMERA_FRAMERATE = float(os.environ.get("EDUBOTICS_CAMERA_FRAMERATE", "30.0"))
 CAMERA_JPEG_QUALITY = int(os.environ.get("EDUBOTICS_CAMERA_JPEG_QUALITY", "80"))

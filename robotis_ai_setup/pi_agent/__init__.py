@@ -7,7 +7,8 @@ browser-served React "System" window drives through the manager's
 ``/api/system`` reverse proxy.
 
 It is a faithful port of the platform-neutral GUI brain merged with the
-Jetson agent's systemd/scrubbed-env/arm64-digest skeleton, with every
+systemd/scrubbed-env/arm64-digest skeleton of the classroom Jetson's agent
+(retired and deleted 2026-11-09), with every
 Windows/WSL2 artifact shed (no usbipd, no ``wsl -d`` tunnelling, no
 MSMF capture bridge, no WebView2, no PowerShell/UAC repair flows).
 

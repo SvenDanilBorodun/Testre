@@ -1,7 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 
 // The Aufnahme countdown tick (spec §3.7): 700 Hz sine, 80 ms, gain 0.15 with
 // a 10 ms release; muted by the existing „Ton" key, read on every call.

@@ -20,7 +20,6 @@ members keep historical visibility (lifecycle policy, see plan).
 from __future__ import annotations
 
 import logging
-import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from huggingface_hub import HfApi
@@ -28,7 +27,7 @@ from huggingface_hub.utils import RepositoryNotFoundError
 from pydantic import BaseModel, Field, field_validator
 
 from app.auth import get_current_user, get_user_profile
-from app.services.hf_identity import is_denied_author
+from app.services.hf_identity import is_denied_author, namespace_of, proven_hf_username
 from app.services.supabase_client import get_supabase
 
 logger = logging.getLogger(__name__)
@@ -116,22 +115,6 @@ def _serialize(row: dict, *, viewer_id: str) -> DatasetResponse:
     )
 
 
-def _hf_repo_exists(repo_id: str) -> bool:
-    """Best-effort HF dataset existence check.
-
-    Returns True on a real 200, False on RepositoryNotFoundError.
-    Transient errors (network, rate limit, 5xx) raise so the caller can
-    surface them as 502 rather than silently registering a non-existent
-    repo. Token is optional — public datasets resolve without auth.
-    """
-    api = HfApi(token=os.environ.get("HF_TOKEN", ""))
-    try:
-        api.dataset_info(repo_id)
-        return True
-    except RepositoryNotFoundError:
-        return False
-
-
 def _hf_repo_author(repo_id: str) -> str | None:
     """Return the HF author (owner) of a dataset repo or None on failure.
 
@@ -146,7 +129,11 @@ def _hf_repo_author(repo_id: str) -> str | None:
     org-namespaced repos and that org might not match the first slash
     component.
     """
-    api = HfApi(token=os.environ.get("HF_TOKEN", ""))
+    # SA-08: ANONYMOUS (token=False). The platform token can read repositories
+    # no student owns (the organisation's private datasets, whatever its own
+    # account sees); with it this lookup was an existence oracle for them. A
+    # student's own private dataset was never readable by it either.
+    api = HfApi(token=False)
     try:
         info = api.dataset_info(repo_id)
     except RepositoryNotFoundError:
@@ -163,24 +150,23 @@ def _hf_repo_author(repo_id: str) -> str | None:
     return None
 
 
+_NOT_YOURS_DE = (
+    "Dieses Dataset gehört nicht zu deinem HuggingFace-Konto. "
+    "Du kannst nur eigene Datasets registrieren."
+)
+
+
 def _map_register_dataset_error(exc: Exception) -> HTTPException:
     """Convert Postgres SQLSTATEs from register_dataset_safe to HTTP.
 
-    Mirrors the _map_pg_error helper in routes/jetson.py. Migration 026
-    raises:
+    Migration 026 raises:
       P0034 → 403  HF-author anchor mismatch (the IDOR block)
       P0002 → 404  user row not found (auth.users / public.users skew)
     Anything else surfaces as a 500 so an operator notices.
     """
     msg = str(exc)
     if "P0034" in msg:
-        return HTTPException(
-            status_code=403,
-            detail=(
-                "Dieses Dataset gehört nicht zu deinem HuggingFace-Konto. "
-                "Du kannst nur eigene Datasets registrieren."
-            ),
-        )
+        return HTTPException(status_code=403, detail=_NOT_YOURS_DE)
     if "P0002" in msg:
         return HTTPException(
             status_code=404,
@@ -271,6 +257,13 @@ def register_dataset(
     and create two rows with different HF authors (the V1 audit MEDIUM,
     deferred — see migration 026 header).
     """
+    # SA-08: the platform's organisation, the platform token's own account and
+    # the upstream example namespaces are never a student's — refused before any
+    # Hub call (no oracle) and again on the canonical author below; migration
+    # 059's datasets trigger is the database floor.
+    if is_denied_author(namespace_of(payload.hf_repo_id)):
+        raise HTTPException(status_code=403, detail=_NOT_YOURS_DE)
+
     # Validate the HF repo exists AND fetch its canonical author. The
     # author check is the IDOR fix: pre-check we accepted any repo a
     # student typed, so a student could register `peer-username/peer-
@@ -300,6 +293,8 @@ def register_dataset(
                 "nicht gefunden."
             ),
         )
+    if is_denied_author(repo_author):
+        raise HTTPException(status_code=403, detail=_NOT_YOURS_DE)
 
     profile = get_user_profile(str(user.id))
     workgroup_id = profile.get("workgroup_id")
@@ -363,25 +358,37 @@ def sync_datasets(user=Depends(get_current_user)) -> DatasetSyncResult:
     so the author anchor is set/enforced and a peer's repo can never be pulled
     in once the anchor exists.
 
-    hf_username must be linked first: since migration 042 it is set from the
-    student's stored token (PUT /me/hf-token writes the name Hugging Face
-    reported for it); PATCH /me is the self-asserted path for an account
-    without a stored token. Returns the discovery tallies so the UI can say
-    "N neue Datensätze synchronisiert".
+    The namespace is the PROVEN name only (SA-08, 2026-11-13): the account
+    Hugging Face reported for the student's own stored token
+    (``user_hf_credentials.hf_username``, written by PUT /me/hf-token). Without
+    a stored token there is nothing to sync (400), and the listing is anonymous,
+    so only public datasets are found. Returns the discovery tallies so the UI
+    can say "N neue Datensätze synchronisiert".
     """
     profile = get_user_profile(str(user.id))
-    hf_username = profile.get("hf_username")
+    supabase = get_supabase()
+    # SA-08: only the PROVEN name — the account Hugging Face reported for the
+    # student's own stored token — drives discovery. users.hf_username alone may
+    # be a legacy self-asserted value (PATCH /me before 2026-11-13).
+    try:
+        hf_username = proven_hf_username(supabase, str(user.id))
+    except Exception as exc:
+        logger.warning("sync_datasets: proven name lookup failed for user=%s: %s", user.id, type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="Dein Hugging-Face-Konto konnte gerade nicht gelesen werden. Bitte gleich erneut versuchen.",
+        ) from None
     if not hf_username:
         raise HTTPException(
             status_code=400,
             detail=(
-                "Bitte zuerst deine HuggingFace-Benutzer-ID verknüpfen, dann "
-                "erneut synchronisieren."
+                "Bitte speichere zuerst dein Hugging-Face-Token auf der "
+                "Startseite, dann erneut synchronisieren."
             ),
         )
     if is_denied_author(hf_username):
-        # A student's hf_username should never be an upstream/system account;
-        # refuse rather than pull hundreds of example datasets into the registry.
+        # Never a student's: an upstream example namespace, the platform's
+        # organisation or the platform token's own account.
         raise HTTPException(
             status_code=400,
             detail=(
@@ -390,7 +397,9 @@ def sync_datasets(user=Depends(get_current_user)) -> DatasetSyncResult:
             ),
         )
 
-    api = HfApi(token=os.environ.get("HF_TOKEN", ""))
+    # SA-08: ANONYMOUS listing — public datasets only. With the platform token
+    # this listed every private dataset that token can see under that author.
+    api = HfApi(token=False)
     try:
         hf_datasets = list(api.list_datasets(author=hf_username, limit=500))
     except Exception as exc:
@@ -405,7 +414,6 @@ def sync_datasets(user=Depends(get_current_user)) -> DatasetSyncResult:
             ),
         )
 
-    supabase = get_supabase()
     already = {
         r["hf_repo_id"]
         for r in (
@@ -427,7 +435,7 @@ def sync_datasets(user=Depends(get_current_user)) -> DatasetSyncResult:
             continue
         # Defensive: only register repos actually owned by the caller's author
         # (list_datasets(author=...) should already guarantee this).
-        if repo_id.split("/", 1)[0] != hf_username:
+        if repo_id.split("/", 1)[0].lower() != hf_username.lower():
             continue
         total_found += 1
         if repo_id in already:

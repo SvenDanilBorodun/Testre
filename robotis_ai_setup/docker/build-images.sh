@@ -39,22 +39,22 @@ set -euo pipefail
 # without this script needing two logins. Override REGISTRY for a private build.
 REGISTRY=${REGISTRY:-nettername}
 BUILD_BASE=${BUILD_BASE:-0}
-# Platform selector: amd64 (default, current behaviour), arm64 (classroom
-# Jetson), or opi (Orange Pi 5 Pro — Rockchip RK3588S, arm64, NO CUDA).
-# Multi-arch (PLATFORM=both) deliberately not in v1 — invoke the
-# script twice if you need both. See docs/arm64_base/README.md for the
-# one-time base-image build steps (both the Jetson bases and the opi CPU base).
+# Platform selector: amd64 (default, the Windows student PC) or opi (Orange
+# Pi 5 Pro — Rockchip RK3588S, arm64, NO CUDA). Invoke the script once per
+# platform. See docs/arm64_base/README.md for the one-time base-image build
+# steps. (The arm64 classroom-Jetson flavor was retired on 2026-11-09.)
 PLATFORM=${PLATFORM:-amd64}
-# When PLATFORM=arm64, pull our self-built arm64 bases instead of building
-# them locally. Set BUILD_BASE_ARM64=1 to (re)build them — takes ~30-40 min
-# each via QEMU on a Mac, much faster on a real arm64 host.
-BUILD_BASE_ARM64=${BUILD_BASE_ARM64:-0}
 # When PLATFORM=opi, pull our self-built CPU server base instead of building
 # it. Set BUILD_BASE_OPI=1 to (re)build it from Dockerfile.arm64cpu (plain
-# PyPI, CPU-only torch — see docs/arm64_base/README.md). The opi
-# open_manipulator base REUSES the Jetson OMX base (it is CUDA/L4T-free), so
-# there is no separate opi OMX base build.
+# PyPI, CPU-only torch — see docs/arm64_base/README.md).
 BUILD_BASE_OPI=${BUILD_BASE_OPI:-0}
+# When PLATFORM=opi, pull our self-built open_manipulator arm64 base instead of
+# building it. Set BUILD_BASE_OPI_OMX=1 to (re)build it from the upstream
+# open_manipulator/docker/Dockerfile (FROM ros:jazzy-ros-base, CUDA/L4T-free).
+# Its repo keeps its historical name, open-manipulator-jetson-base: it was first
+# built for the retired Jetson flavor, and renaming it would need a manual
+# rebuild + push before any release could resolve it.
+BUILD_BASE_OPI_OMX=${BUILD_BASE_OPI_OMX:-0}
 
 case "$PLATFORM" in
     amd64)
@@ -72,49 +72,27 @@ case "$PLATFORM" in
         # legacy names so students' auto-pull keeps working.
         OMX_OUT_REPO="${REGISTRY}/open-manipulator"
         PAS_OUT_REPO="${REGISTRY}/physical-ai-server"
-        # Manager (React+nginx) output repo — built on amd64 + opi, skipped on
-        # arm64/Jetson (empty). See the manager build block below.
+        # Manager (React+nginx) output repo. See the manager build block below.
         MANAGER_OUT_REPO="${REGISTRY}/physical-ai-manager"
-        # Roboter Studio code sandbox (docker/code_runner) — amd64 + opi only,
-        # empty on arm64/Jetson (the Roboter-Studio tab is jetsonIncompatible).
+        # Roboter Studio code sandbox (docker/code_runner).
         RUNNER_OUT_REPO="${REGISTRY}/code-runner"
-        DOCKER_BUILDX_ARGS=""
-        ;;
-    arm64)
-        # v2.3.0 follow-up: separate repos for the Jetson arm64 images
-        # so the "dont touch our EduBotics images" rule is honoured —
-        # the classroom Jetson stack publishes to ${REGISTRY}/*-jetson*
-        # while the student amd64 stack keeps publishing to
-        # ${REGISTRY}/* (no -jetson suffix). Bumping the Jetson image
-        # set can no longer regress amd64 students, and a docker push
-        # to one set can never collide with the other.
-        OMX_BASE_IMAGE="${REGISTRY}/open-manipulator-jetson-base:4.1.4"
-        PAS_BASE_IMAGE="${REGISTRY}/physical-ai-server-jetson-base:0.8.2"
-        # Single canonical tag — the repo name already indicates arm64/Jetson.
-        IMAGE_TAG_SUFFIX="latest"
-        # Output repo names for the thin layer Jetson images.
-        OMX_OUT_REPO="${REGISTRY}/open-manipulator-jetson"
-        PAS_OUT_REPO="${REGISTRY}/physical-ai-server-jetson"
-        # No manager on the Jetson — the React SPA stays on student PCs and
-        # connects to the Jetson rosbridge via the proxy.
-        MANAGER_OUT_REPO=""
-        # No code runner on the Jetson either: the Roboter-Studio tab is
-        # jetsonIncompatible, so a Jetson runner would ship something no
-        # student can reach. Empty == the runner build block is skipped.
-        RUNNER_OUT_REPO=""
-        # buildx with --push bypasses Docker Desktop's dual-image-store gotcha
-        # (CLAUDE.md §13.4.bis). On a Linux maintainer host with native arm64
-        # this is also the only sane way to push the right manifest digests.
-        DOCKER_BUILDX_ARGS="--platform linux/arm64 --push"
         ;;
     opi)
         # Orange Pi 5 Pro (Rockchip RK3588S — arm64, NO CUDA — ever). Publishes
-        # the full student stack (INCLUDING the manager, unlike arm64) to a
-        # dedicated *-opi repo set so it can never regress amd64 students or the
-        # Jetson set. The open_manipulator base REUSES the Jetson OMX base —
-        # verified CUDA/L4T-free (open_manipulator/docker/Dockerfile is FROM
-        # ros:jazzy-ros-base) — so there is NO separate opi OMX base. The SERVER
-        # base is a NEW plain-PyPI CPU base built from Dockerfile.arm64cpu.
+        # the full student stack (manager and code runner included) to a
+        # dedicated *-opi repo set so it can never regress amd64 students. The
+        # open_manipulator base is our arm64 build of the upstream
+        # open_manipulator/docker/Dockerfile (FROM ros:jazzy-ros-base,
+        # CUDA/L4T-free; BUILD_BASE_OPI_OMX=1 rebuilds it). Its repo keeps the
+        # historical name open-manipulator-jetson-base (see BUILD_BASE_OPI_OMX
+        # above). The SERVER base is a plain-PyPI CPU base built from
+        # Dockerfile.arm64cpu.
+        # BASE TAG BUMP RULE (enforced by ci.yml::base-version-guard): this tag
+        # MUST move in the same commit as any non-comment edit to
+        # open_manipulator/docker/Dockerfile. No workflow sets
+        # BUILD_BASE_OPI_OMX, so an edited Dockerfile against an unchanged tag
+        # resolves the OLD published base. Rebuild+push it with
+        # `BUILD_BASE_OPI_OMX=1 PLATFORM=opi ./build-images.sh` first.
         OMX_BASE_IMAGE="${REGISTRY}/open-manipulator-jetson-base:4.1.4"
         # BASE TAG BUMP RULE (enforced by ci.yml::base-version-guard): this tag
         # MUST move in the same commit as any non-comment edit to
@@ -132,15 +110,12 @@ case "$PLATFORM" in
         PAS_OUT_REPO="${REGISTRY}/physical-ai-server-opi"
         MANAGER_OUT_REPO="${REGISTRY}/physical-ai-manager-opi"
         RUNNER_OUT_REPO="${REGISTRY}/code-runner-opi"
-        # opi's thin server image builds --load then FLATTENs (on arm64), so it
-        # does NOT ride the arm64 --push path; DOCKER_BUILDX_ARGS is unused for
-        # opi. The per-image opi buildx calls below name their flags explicitly
-        # (--platform linux/arm64 --load, then a push loop; the BASE build is
-        # the one exception that uses --push, since it is not flattened).
-        DOCKER_BUILDX_ARGS=""
+        # The per-image opi buildx calls below name their flags explicitly
+        # (--platform linux/arm64 --load, then a push loop; the two BASE builds
+        # are the exceptions that use --push, since a base is not flattened).
         ;;
     *)
-        echo "ERROR: PLATFORM='${PLATFORM}' — expected 'amd64', 'arm64', or 'opi'." >&2
+        echo "ERROR: PLATFORM='${PLATFORM}' — expected 'amd64' or 'opi'." >&2
         exit 1
         ;;
 esac
@@ -183,8 +158,7 @@ OCI_LABELS=(
 # the build LOUDLY. Called for amd64 (reclaims the SLIM_CUDA whiteouts) AND opi
 # (Orange Pi — SLIM_CUDA is a no-op there since the CPU base ships no CUDA, but the
 # flatten still collapses layer overhead and, critically, re-imports the rootfs with
-# the RIGHT arch label). The arm64/Jetson build never calls this and KEEPS its GPU
-# torch. The pushed AND bundle-saved image are this same flattened image, so the
+# the RIGHT arch label). The pushed AND bundle-saved image are this same flattened image, so the
 # GUI's manifest-digest sidecar gate stays consistent (see docs/plans).
 #
 # $2 is the target platform (linux/amd64 or linux/arm64) — passed to BOTH
@@ -314,13 +288,12 @@ for dir in "$OPEN_MANIPULATOR_DIR" "$PHYSICAL_AI_TOOLS_DIR"; do
     fi
 done
 
-# ── Cleanup trap (registered BEFORE either platform branch) ──
-# Both PLATFORM=amd64 (manager build + interfaces staging) and
-# PLATFORM=arm64 (interfaces staging only) write transient files into
-# the working tree. The trap MUST run on EITHER path — registering it
-# inside the amd64 conditional, like the previous revision did, leaked
-# physical_ai_server/interfaces/ into the source tree on every arm64
-# build. Each cleanup branch is no-op when its variable is empty.
+# ── Cleanup trap (registered BEFORE any platform branch) ──
+# Every platform writes transient files into the working tree (the interfaces
+# and package staging). The trap MUST run on every path — registering it inside
+# one platform's conditional, as an earlier revision did, leaked
+# physical_ai_server/interfaces/ into the source tree on the other platform's
+# builds. Each cleanup branch is no-op when its variable is empty.
 INTERFACES_STAGING=""
 PKG_STAGING=""
 _build_cleanup() {
@@ -336,14 +309,7 @@ trap _build_cleanup EXIT
 # ── Image 1: physical_ai_manager (React + nginx) ──
 # Built for amd64 (the Windows student PC) AND opi (the Orange Pi serves the
 # React SPA itself, from an arm64 twin image with the /api/system reverse proxy
-# baked in — see physical_ai_manager/Dockerfile.opi). The Jetson does NOT run
-# the manager (React stays on the student PC and connects to the Jetson
-# rosbridge via the proxy), so arm64 builds skip this image entirely.
-if [ "$PLATFORM" = "arm64" ]; then
-    echo ""
-    echo ">> PLATFORM=arm64 — skipping physical-ai-manager build (manager stays on amd64 student PCs)"
-fi
-if [ "$PLATFORM" = "amd64" ] || [ "$PLATFORM" = "opi" ]; then
+# baked in — see physical_ai_manager/Dockerfile.opi).
 echo ""
 echo ">> Building physical_ai_manager..."
 # Cloud training env vars are baked into the React build. These MUST be set —
@@ -458,36 +424,20 @@ if ! docker run --rm --platform "$MANAGER_PLATFORM" --entrypoint sh "$_smoke_ima
     exit 1
 fi
 echo "   OK: ${MANAGER_OUT_REPO} built (smoke-tested)"
-fi  # end manager build block (amd64 + opi)
 
 # ── Image 2a: physical_ai_server base ──
 # amd64: ROBOTIS publishes the base on Docker Hub → just pull.
-# arm64: ROBOTIS does NOT publish an arm64 variant. Either pull our own
-#        previously-built nettername/physical-ai-server-base:arm64-0.8.2,
-#        or build it now from physical_ai_tools/physical_ai_server/
-#        Dockerfile.arm64 (~30-40 min on QEMU, faster on native arm64).
-if [ "$PLATFORM" = "arm64" ] && [ "$BUILD_BASE_ARM64" = "1" ]; then
-    echo ""
-    echo ">> Building physical_ai_server arm64 base ${PAS_BASE_IMAGE} from upstream sources..."
-    # CONTEXT MUST be physical_ai_tools/ (NOT physical_ai_server/).
-    # The Dockerfile.arm64 COPYs from `docker/s6-agent/` and
-    # `docker/s6-services/` which live one directory UP from the
-    # Dockerfile itself. A context of physical_ai_server/ produces
-    # "/docker/s6-services/common/ros2_service_finish.sh: not found".
-    docker buildx build $DOCKER_BUILDX_ARGS --no-cache --pull \
-        "${OCI_LABELS[@]}" \
-        -t "${PAS_BASE_IMAGE}" \
-        -f "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_server/Dockerfile.arm64" \
-        "${PHYSICAL_AI_TOOLS_DIR}/"
-    echo "   OK: ${PAS_BASE_IMAGE} built + pushed"
-elif [ "$PLATFORM" = "opi" ] && [ "$BUILD_BASE_OPI" = "1" ]; then
+# opi:   ROBOTIS does NOT publish an arm64 variant. Either pull our own
+#        previously-built CPU base, or build it now (BUILD_BASE_OPI=1).
+if [ "$PLATFORM" = "opi" ] && [ "$BUILD_BASE_OPI" = "1" ]; then
     echo ""
     echo ">> Building physical_ai_server opi CPU base ${PAS_BASE_IMAGE} from upstream sources..."
     # opi CPU base: FROM ros:jazzy-ros-base (stock arm64), plain PyPI, torch
-    # 2.7.0 CPU wheels — NO CUDA/L4T. Same context caveat as the arm64 base
-    # (physical_ai_tools/, so the Dockerfile.arm64cpu COPYs from docker/s6-*
-    # resolve). Built --push (like the arm64 base): a BASE image is never
-    # flattened, so it does not need to land in the local daemon.
+    # 2.7.0 CPU wheels — NO CUDA/L4T. CONTEXT MUST be physical_ai_tools/ (NOT
+    # physical_ai_server/): Dockerfile.arm64cpu COPYs from `docker/s6-agent/`
+    # and `docker/s6-services/`, one directory UP from the Dockerfile itself.
+    # Built --push: a BASE image is never flattened, so it does not need to
+    # land in the local daemon.
     docker buildx build --platform linux/arm64 --push --no-cache --pull \
         "${OCI_LABELS[@]}" \
         -t "${PAS_BASE_IMAGE}" \
@@ -498,14 +448,11 @@ else
     echo ""
     echo ">> Resolving physical_ai_server base ${PAS_BASE_IMAGE}..."
     # docker manifest inspect queries the registry directly — works for amd64
-    # (ROBOTIS Docker Hub), arm64 and opi (our registry) even when the local
-    # daemon has no matching manifest cached.
+    # (ROBOTIS Docker Hub) and opi (our registry) even when the local daemon
+    # has no matching manifest cached.
     if ! docker manifest inspect "${PAS_BASE_IMAGE}" >/dev/null 2>&1; then
         echo "ERROR: ${PAS_BASE_IMAGE} not found in registry."
-        if [ "$PLATFORM" = "arm64" ]; then
-            echo "       Run BUILD_BASE_ARM64=1 PLATFORM=arm64 ${0##*/} to build + push it."
-            echo "       See docs/arm64_base/README.md for the one-time setup."
-        elif [ "$PLATFORM" = "opi" ]; then
+        if [ "$PLATFORM" = "opi" ]; then
             echo "       Run BUILD_BASE_OPI=1 PLATFORM=opi ${0##*/} to build + push it."
             echo "       See docs/arm64_base/README.md for the one-time setup."
         fi
@@ -552,7 +499,6 @@ mkdir -p "${PKG_STAGING}"
 cp -a "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_server/." "${PKG_STAGING}/"
 rm -rf "${PKG_STAGING}/test" \
        "${PKG_STAGING}/Dockerfile.amd64" \
-       "${PKG_STAGING}/Dockerfile.arm64" \
        "${PKG_STAGING}/Dockerfile.arm64cpu" \
        "${PKG_STAGING}/CHANGELOG.rst"
 find "${PKG_STAGING}" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
@@ -566,17 +512,9 @@ fi
 echo ""
 echo ">> Building physical_ai_server thin layer (patches + interface rebuild)..."
 # Pass BASE_IMAGE so the parameterised FROM resolves to the right
-# architecture (arm64 uses our self-built base; amd64 uses the ROBOTIS
-# base via the Dockerfile default). For arm64, the buildx --push flag
-# bypasses the Docker Desktop dual-store gotcha (CLAUDE.md §13.4.bis).
-if [ "$PLATFORM" = "arm64" ]; then
-    docker buildx build $DOCKER_BUILDX_ARGS --no-cache --pull \
-        "${OCI_LABELS[@]}" \
-        --build-arg BASE_IMAGE="${PAS_BASE_IMAGE}" \
-        -t "${PAS_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
-        -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
-        "${SCRIPT_DIR}/physical_ai_server/"
-elif [ "$PLATFORM" = "opi" ]; then
+# architecture (opi uses our self-built CPU base; amd64 uses the ROBOTIS
+# base via the Dockerfile default).
+if [ "$PLATFORM" = "opi" ]; then
     # opi mirrors the amd64 --load→flatten→push structure, but on arm64. Build
     # to the local daemon (--load) so flatten_image can collapse the layers,
     # then push in the per-image loop below. SLIM_CUDA=0 (the Dockerfile
@@ -608,9 +546,7 @@ else
     # hosts where the default builder would target arm64; harmless on
     # native Linux/amd64.
     # TORCH_EXPECT_CPU=1: after the SLIM_CUDA swap this image MUST be on
-    # torch 2.7.0+cpu. arm64/Jetson passes neither arg (both default 0) — it
-    # legitimately keeps its GPU torch, so its gate asserts the 2.7.x version
-    # only, not the channel.
+    # torch 2.7.0+cpu.
     docker buildx build --platform linux/amd64 --load --no-cache --pull \
         "${OCI_LABELS[@]}" \
         --build-arg BASE_IMAGE="${PAS_BASE_IMAGE}" \
@@ -624,7 +560,7 @@ echo "   OK: physical-ai-server built (with patches)"
 
 # Flatten to reclaim the whiteout-hidden bytes (CUDA on amd64; layer overhead +
 # arch-label correction on opi) and to collapse the layers into a single
-# import. The arm64/Jetson image keeps GPU torch and is NEVER flattened.
+# import.
 if [ "$PLATFORM" = "amd64" ]; then
     echo ""
     echo ">> CUDA-slim: flattening physical-ai-server (amd64) to reclaim CUDA bytes..."
@@ -638,13 +574,13 @@ fi
 # ── Image 3: open_manipulator base ──
 # amd64: ROBOTIS publishes amd64-4.1.4; pull from Docker Hub by default,
 #        or set BUILD_BASE=1 to rebuild from upstream source (~40 min).
-# arm64: ROBOTIS does NOT publish arm64. Either pull our previously-
-#        built nettername/open-manipulator-base:arm64-4.1.4, or set
-#        BUILD_BASE_ARM64=1 to build it now from upstream sources.
-if [ "$PLATFORM" = "arm64" ] && [ "$BUILD_BASE_ARM64" = "1" ]; then
+# opi:   ROBOTIS does NOT publish arm64. Either pull our previously-built
+#        arm64 base, or set BUILD_BASE_OPI_OMX=1 to build it now from the
+#        upstream sources (--push, like the server base).
+if [ "$PLATFORM" = "opi" ] && [ "$BUILD_BASE_OPI_OMX" = "1" ]; then
     echo ""
     echo ">> Building open_manipulator arm64 base ${OMX_BASE_IMAGE} from upstream sources..."
-    docker buildx build $DOCKER_BUILDX_ARGS --no-cache --pull \
+    docker buildx build --platform linux/arm64 --push --no-cache --pull \
         "${OCI_LABELS[@]}" \
         -t "${OMX_BASE_IMAGE}" \
         -f "${OPEN_MANIPULATOR_DIR}/docker/Dockerfile" \
@@ -666,14 +602,8 @@ else
     echo ">> Resolving open_manipulator base ${OMX_BASE_IMAGE}..."
     if ! docker manifest inspect "${OMX_BASE_IMAGE}" >/dev/null 2>&1; then
         echo "ERROR: ${OMX_BASE_IMAGE} not found in registry."
-        if [ "$PLATFORM" = "arm64" ]; then
-            echo "       Run BUILD_BASE_ARM64=1 PLATFORM=arm64 ${0##*/} to build + push it."
-            echo "       See docs/arm64_base/README.md for the one-time setup."
-        elif [ "$PLATFORM" = "opi" ]; then
-            # opi has NO dedicated OMX base — it REUSES the Jetson OMX base
-            # (CUDA/L4T-free). Build it via the arm64/Jetson path once.
-            echo "       The opi flavor REUSES the Jetson open_manipulator base."
-            echo "       Run BUILD_BASE_ARM64=1 PLATFORM=arm64 ${0##*/} to build + push it."
+        if [ "$PLATFORM" = "opi" ]; then
+            echo "       Run BUILD_BASE_OPI_OMX=1 PLATFORM=opi ${0##*/} to build + push it."
             echo "       See docs/arm64_base/README.md for the one-time setup."
         fi
         exit 1
@@ -684,14 +614,7 @@ fi
 # ── Image 4: open_manipulator thin layer (entrypoint + identify_arm) ──
 echo ""
 echo ">> Building open_manipulator thin layer..."
-if [ "$PLATFORM" = "arm64" ]; then
-    docker buildx build $DOCKER_BUILDX_ARGS --no-cache --pull \
-        "${OCI_LABELS[@]}" \
-        --build-arg BASE_IMAGE="${OMX_BASE_IMAGE}" \
-        -t "${OMX_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
-        -f "${SCRIPT_DIR}/open_manipulator/Dockerfile" \
-        "${SCRIPT_DIR}/open_manipulator/"
-elif [ "$PLATFORM" = "opi" ]; then
+if [ "$PLATFORM" = "opi" ]; then
     # opi: --load into the local daemon so the push loop below uploads the
     # exact bits (same shape as amd64), but on native arm64. The OMX thin
     # layer is NOT flattened (no CUDA to reclaim; it is a small overlay).
@@ -719,9 +642,8 @@ echo "   OK: open-manipulator built"
 # ── Image 5: code_runner (Roboter Studio Python/Java sandbox) ──
 # A PUBLIC base (eclipse-temurin:21-jdk-noble), so there is no self-built base
 # to resolve and nothing here joins Rule §6's manual base-rebuild set. Built
-# --load and pushed in the loop below on amd64 + opi; NEVER on arm64/Jetson
-# (RUNNER_OUT_REPO is empty there — the Roboter-Studio tab is
-# jetsonIncompatible). Not flattened: it has no whiteouts worth reclaiming
+# --load and pushed in the loop below on amd64 + opi. Not flattened: it has
+# no whiteouts worth reclaiming
 # (~0.5 GB, one apt layer over the base). The Dockerfile's own build gates
 # (python >= 3.12 + sys.monitoring, javac -Werror + SmokeMain, the self-test's
 # build rungs) are what prove the image; docker-publish's smoke-test adds the
@@ -751,9 +673,6 @@ fi
 # but we log per-image and emit a clear summary to avoid students pulling a
 # half-updated image set (where e.g. the React bundle is new but the server
 # still has last week's overlays).
-#
-# For PLATFORM=arm64, buildx --push already pushed each image as part of
-# the build step, so this loop is a no-op. We still emit the summary.
 if [ "$PLATFORM" = "amd64" ]; then
     echo ""
     echo ">> Pushing images to ${REGISTRY}..."
@@ -775,13 +694,12 @@ if [ "$PLATFORM" = "amd64" ]; then
             exit 1
         fi
     done
-elif [ "$PLATFORM" = "opi" ]; then
+else
     echo ""
     echo ">> Pushing opi images to ${REGISTRY}..."
     pushed=()
     # opi built all four thin images with --load (server was flattened), so
-    # they live in the local daemon and must be pushed here (the arm64/Jetson
-    # path pushes via buildx --push during the build and skips this loop).
+    # they live in the local daemon and must be pushed here.
     # Repo names derive from the *_OUT_REPO vars (same single-source rule as
     # the amd64 loop above) — no more hardcoded image-name literals.
     for img in "${MANAGER_OUT_REPO##*/}" "${PAS_OUT_REPO##*/}" "${OMX_OUT_REPO##*/}" "${RUNNER_OUT_REPO##*/}"; do
@@ -797,9 +715,6 @@ elif [ "$PLATFORM" = "opi" ]; then
             exit 1
         fi
     done
-else
-    echo ""
-    echo ">> PLATFORM=arm64 — buildx --push already pushed all images."
 fi
 
 echo ""
@@ -809,14 +724,8 @@ echo ""
 echo "Images:"
 echo "  ${OMX_OUT_REPO}:${IMAGE_TAG_SUFFIX}"
 echo "  ${PAS_OUT_REPO}:${IMAGE_TAG_SUFFIX}"
-# MANAGER_OUT_REPO and RUNNER_OUT_REPO are set for amd64 + opi, empty on
-# arm64/Jetson (no manager, no code runner).
-if [ -n "$MANAGER_OUT_REPO" ]; then
-    echo "  ${MANAGER_OUT_REPO}:${IMAGE_TAG_SUFFIX}"
-fi
-if [ -n "$RUNNER_OUT_REPO" ]; then
-    echo "  ${RUNNER_OUT_REPO}:${IMAGE_TAG_SUFFIX}"
-fi
+echo "  ${MANAGER_OUT_REPO}:${IMAGE_TAG_SUFFIX}"
+echo "  ${RUNNER_OUT_REPO}:${IMAGE_TAG_SUFFIX}"
 echo ""
 echo "Platform: ${PLATFORM}"
 echo "Cloud training image is managed by Modal (no Docker Hub push)."

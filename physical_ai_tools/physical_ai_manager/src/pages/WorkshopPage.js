@@ -1,11 +1,8 @@
 /*
- * Copyright 2025 EduBotics
+ * Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * Proprietary and confidential. Licensed under the EduBotics End-User
+ * Licence Agreement; see LICENSE at the repository root.
  */
 
 import React, {
@@ -2129,7 +2126,7 @@ function WorkshopPage({ isActive }) {
               {simMode ? 'Simulator beenden' : 'Test im Simulator'}
             </button>
             {/* Follower-only leader toggle (Windows student rig only; self-hides
-                on Jetson/cloud where the GUI control bridge is absent). */}
+                in cloud mode, where the GUI control bridge is absent). */}
             <LeaderToggle
               isActive={isActive}
               lockedReason={teachOpen ? DE.TEACH_BLOCK_UI_LOCKED : null}

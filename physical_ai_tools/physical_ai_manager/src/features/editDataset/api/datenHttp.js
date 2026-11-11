@@ -1,10 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 
 // The Daten sidecar over the manager's nginx (spec §B3, §B9): read-only
 // GET/HEAD under the same origin's /daten-api/v1, every route but /health
@@ -16,7 +13,9 @@
 //                         in_session / unsupported / unplayable, 503
 //                         overloaded, …)
 //   'sidecar_down'        502 / 504 / no answer at all: nginx could not reach
-//                         the sidecar, or the network failed (§B10)
+//                         the sidecar, or the network failed (§B10); also a
+//                         401 from the Pi's robot login (nginx, not the
+//                         sidecar), which the existing retry then recovers
 //   'http'                any other status without a code
 //
 // The 503 rule (§B8): a JSON request waits out `Retry-After` and tries again;
@@ -24,6 +23,7 @@
 // CLIP_RETRY_DELAY_MS), which learn the status through `classifyMedia`.
 
 import { API_PREFIX, HTTP_ERRORS } from '../datenContract';
+import { noteUnauthorized } from '../../piAuth/piAuth';
 
 export const TOKEN_ERRORS = Object.freeze(['token_invalid', 'token_expired', 'scope']);
 export const THUMB_RETRY_DELAYS_MS = Object.freeze([2000, 4000, 8000]);
@@ -87,6 +87,14 @@ function retryAfterOf(response) {
 async function errorCodeOf(response) {
   const status = response.status;
   if (status === 502 || status === 504) return 'sidecar_down';
+  // The Orange Pi's robot login (nginx in front of the sidecar, 2026-11-10):
+  // no live robot session. Re-check it, and read the answer like a sidecar
+  // that is down for a moment, so the page's existing retry picks the data up
+  // once the session is back (the sidecar itself never answers 401).
+  if (status === 401) {
+    noteUnauthorized();
+    return 'sidecar_down';
+  }
   let code = '';
   try {
     const body = await response.json();

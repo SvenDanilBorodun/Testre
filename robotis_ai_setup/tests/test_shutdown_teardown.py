@@ -8,9 +8,9 @@ used `Popen.terminate()`, which on Windows is `TerminateProcess`: it delivers
 neither WinForms' `FormClosed` nor the DOM's `pagehide`/`beforeunload`. Three
 shipped consequences, one with a direct classroom symptom:
 
-  * `useJetsonConnection` releases the exclusive claim on `pagehide` via
-    `navigator.sendBeacon`, so the lock leaked for the full 5-minute sweeper
-    window and THE NEXT STUDENT WAS REFUSED THE JETSON;
+  * the classroom Jetson's release (retired since 2026-11-09) went out on
+    `pagehide` via `navigator.sendBeacon`, so the lock leaked for the full
+    5-minute sweeper window and THE NEXT STUDENT WAS REFUSED THE JETSON;
   * `JogPanel`'s unmount re-torque never ran, so a hand-guide session could end
     with the follower left limp until the 30 s `_manual_idle_watchdog`;
   * `RecordPanel`'s teardown never ran.
@@ -297,7 +297,7 @@ class TheChildIsAskedToCloseBeforeItIsKilled(_Rig):
         self.assertEqual(
             self.posted, [proc.pid],
             'nothing asked the webview child to close — every browser-side '
-            'teardown hook (the Jetson release beacon, JogPanel’s re-torque) '
+            'teardown hook (JogPanel’s re-torque, the cloud run’s pagehide stop) '
             'is dead again')
 
     def test_a_child_that_closes_itself_is_NOT_terminated(self):
@@ -595,8 +595,8 @@ class StoppingTheEnvironmentAlsoClosesTheBrowserWindow(unittest.TestCase):
         """Ordering, so the graceful close still has a live rosbridge.
 
         `destroy_all` posts WM_CLOSE and gives the DOM a moment; JogPanel's
-        unmount re-torque is a rosbridge service call, and the Jetson release
-        beacon is an HTTPS POST. Tearing the containers down first would make
+        unmount re-torque is a rosbridge service call, and the cloud run's
+        pagehide stop is one too. Tearing the containers down first would make
         the re-torque unreachable — the exact teardown the graceful close
         exists to deliver.
         """
@@ -664,6 +664,132 @@ class StoppingTheEnvironmentAlsoClosesTheBrowserWindow(unittest.TestCase):
             'was intended, update this enumeration and say why; if it was not, '
             'a path that ends a session is handing the next student the '
             'previous one\'s window and live session')
+
+
+class TheRecordingSourcesOutliveTheContainers(unittest.TestCase):
+    """VA-07 (2026-11-12): „Umgebung stoppen" and closing the GUI stop the
+    containers BEFORE the camera bridge and the phone receiver.
+
+    The native cameras and the phone are recording SOURCES. Stopped first, they
+    went silent while physical_ai_server still ran, and SOURCE_STOPPED_S (2 s)
+    later the server ended the recording like „Beenden" — finalize AND an
+    upload — which the stack going down then killed mid-flight, and the
+    Protokoll read „Aufnahme beendet: Kamera …" for a teacher's stop. In this
+    order the server is stopped while its sources still flow, so launch plan
+    step 8's shutdown finalize (no upload) ends the session. The :8769 bridge
+    and the browser window still go first: neither feeds the recording, and
+    the window's graceful close needs the live rosbridge.
+
+    Executed, not grepped: the shipped methods run against recording doubles."""
+
+    def _owner(self, rec, *, cloud_only=False, running=True):
+        def note(name):
+            return lambda *a, **k: rec.append(name)
+
+        return types.SimpleNamespace(
+            btn_stop=types.SimpleNamespace(config=lambda **kw: None),
+            btn_open_browser=types.SimpleNamespace(config=lambda **kw: None),
+            root=types.SimpleNamespace(after=lambda _d, fn=None, *a: None, destroy=note('root.destroy')),
+            progress=types.SimpleNamespace(start=lambda *a: None, stop=lambda *a: None),
+            _set_status=lambda *a: None,
+            _log=lambda *a: None,
+            _stop_camera_previews=note('previews'),
+            _stop_camera_bridge=note('camera_bridge'),
+            _stop_camera_health_poll=note('health_poll'),
+            _stop_phone_server=note('phone_server'),
+            _stop_rs_control_server=note('rs_control'),
+            _update_start_button=lambda: None,
+            cloud_only=types.SimpleNamespace(get=lambda: cloud_only),
+            gpu_available=False,
+            running=running,
+        )
+
+    def _ns(self, rec):
+        def note(name):
+            return lambda *a, **k: rec.append(name)
+
+        class _SyncThread:
+            def __init__(self, target=None, daemon=None):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+        return {
+            'threading': types.SimpleNamespace(Thread=_SyncThread),
+            'tk': types.SimpleNamespace(DISABLED='disabled', NORMAL='normal'),
+            'webview_window': types.SimpleNamespace(destroy_all=note('webview')),
+            'docker_manager': types.SimpleNamespace(
+                stop_containers=note('containers'),
+                stop_cloud_only=note('containers'),
+                stop_keepalive=note('keepalive'),
+                any_container_running=lambda: True),
+            'messagebox': types.SimpleNamespace(askyesno=lambda *a, **k: True),
+        }
+
+    @staticmethod
+    def _load(name, ns):
+        """The shipped method by its AST span (``_on_close`` is the class's
+        last method, so `_load_method`'s next-``def`` cut would run into the
+        module code after it)."""
+        src = _GUI_APP_SRC.read_text(encoding='utf-8')
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name and node.col_offset == 4:
+                lines = src.splitlines()[node.lineno - 1:node.end_lineno]
+                exec(compile(textwrap.dedent('\n'.join(lines)), str(_GUI_APP_SRC), 'exec'), ns)  # noqa: S102
+                return ns[name]
+        raise AssertionError(f'{name} not found — this test is stale')
+
+    def _check(self, order):
+        containers = order.index('containers')
+        for first in ('rs_control', 'webview', 'health_poll'):
+            self.assertLess(order.index(first), containers, order)
+        for source in ('camera_bridge', 'phone_server'):
+            self.assertGreater(
+                order.index(source), containers,
+                f'{source} stops before the containers: the recording loses its '
+                f'source and ends with an upload the stop then kills ({order})')
+        self.assertEqual(order.count('camera_bridge'), 1, order)
+        self.assertEqual(order.count('phone_server'), 1, order)
+
+    def test_stopping_the_environment(self):
+        for cloud_only in (False, True):
+            with self.subTest(cloud_only=cloud_only):
+                rec = []
+                method = self._load('_stop_environment', self._ns(rec))
+                method(self._owner(rec, cloud_only=cloud_only))
+                self._check(rec)
+                self.assertEqual(rec[-1], 'keepalive', rec)
+
+    def test_closing_the_gui(self):
+        for cloud_only in (False, True):
+            with self.subTest(cloud_only=cloud_only):
+                rec = []
+                method = self._load('_on_close', self._ns(rec))
+                method(self._owner(rec, cloud_only=cloud_only))
+                self._check(rec)
+                self.assertEqual(rec[-1], 'root.destroy', rec)
+
+    def test_closing_the_gui_with_no_stack_still_stops_the_bridge(self):
+        rec = []
+        ns = self._ns(rec)
+        ns['docker_manager'].any_container_running = lambda: False
+        method = self._load('_on_close', ns)
+        method(self._owner(rec, running=False))
+        self.assertNotIn('containers', rec)
+        for name in ('camera_bridge', 'phone_server', 'rs_control', 'webview', 'keepalive'):
+            self.assertIn(name, rec)
+
+    def test_the_budget_that_makes_the_order_safe(self):
+        """The bridge waits for a stop that may take the whole compose budget
+        (STACK_STOP_TIMEOUT_S, 120 s) — what the server's finalize needs."""
+        src = (_GUI_APP_SRC.parent / 'docker_manager.py').read_text(encoding='utf-8')
+        values = [node.value.value for node in ast.parse(src).body
+                  if isinstance(node, ast.Assign)
+                  and any(getattr(t, 'id', None) == 'STACK_STOP_TIMEOUT_S' for t in node.targets)]
+        self.assertEqual(len(values), 1)
+        self.assertGreaterEqual(values[0], 120)
 
 
 class TheSCANPathClosesTheChildToo(unittest.TestCase):
@@ -735,8 +861,8 @@ class TheSCANPathClosesTheChildToo(unittest.TestCase):
         """Same ordering rule `_stop_environment` keeps, same reason.
 
         `destroy_all` posts WM_CLOSE and gives the DOM a moment; JogPanel's
-        unmount re-torque is a rosbridge service call and the Jetson release
-        beacon is an HTTPS POST, so tearing the containers down first makes the
+        unmount re-torque is a rosbridge service call and so is the cloud run's
+        pagehide stop, so tearing the containers down first makes the
         teardown the graceful close exists to deliver unreachable.
         """
         code = ast.unparse(self.do_scan)
@@ -746,7 +872,7 @@ class TheSCANPathClosesTheChildToo(unittest.TestCase):
             code.index('webview_window.destroy_all()'),
             code.index('docker_manager.ensure_environment_stopped'),
             'the containers are torn down before the child is asked to close, '
-            'so JogPanel\'s re-torque and the Jetson release beacon have no '
+            'so JogPanel\'s re-torque and the cloud run\'s pagehide stop have no '
             'rosbridge left to reach')
 
     def test_a_failing_close_does_not_abort_the_scan(self):

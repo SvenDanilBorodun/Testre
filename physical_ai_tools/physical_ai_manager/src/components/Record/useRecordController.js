@@ -1,10 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 
 // The Aufnahme page's one logic hook (spec §3.7). The page composes
 // presentational components from what this returns; every decision — which
@@ -162,8 +159,8 @@ export default function useRecordController({ isActive = true } = {}) {
   const activation = useRobotActivation({ enabled: connected }).status;
   // Why Start is off for the student's OWN Hugging-Face token, or null. A
   // primitive from tolerant selectors: null without the feature's slice (test
-  // stores), while the account or the robot has not answered, and under a
-  // claimed Jetson — unknown never blocks.
+  // stores) and while the account or the robot has not answered — unknown
+  // never blocks.
   const hfTokenBlock = useSelector(selectHfStartBlock);
   // ... and, when the account state answers nothing usable (or the student is
   // signed in through the offline escape), a NON-blocking hint that names the

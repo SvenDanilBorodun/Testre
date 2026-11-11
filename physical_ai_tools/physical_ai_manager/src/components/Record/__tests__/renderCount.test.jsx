@@ -1,7 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 //
 // Review V2-2: the Aufnahme page re-rendered ~60 times a second while a task
 // ran — every /task/status tick replaces the whole taskStatus object, and the
@@ -23,13 +23,16 @@ import tasksReducer, {
   recordIntent, setHeartbeatStatus, setTaskInfo, setTaskStatus,
 } from '../../../features/tasks/taskSlice';
 import uiReducer, { moveToPage } from '../../../features/ui/uiSlice';
-import rosReducer, { setRosbridgeUrl } from '../../../features/ros/rosSlice';
+import rosReducer from '../../../features/ros/rosSlice';
 import { resetDatenStateForTests } from '../../../features/editDataset/hooks/useDatenState';
 import trainingReducer from '../../../features/training/trainingSlice';
-import jetsonReducer from '../../../store/jetsonSlice';
 import PageType from '../../../constants/pageType';
 import TaskPhase from '../../../constants/taskPhases';
 import RecordPage from '../../../pages/RecordPage';
+
+// The rosbridge URL a test needs, set the way the store is first built (the app
+// itself derives it from the page's host, features/ros/rosSlice::setRosHost).
+const rosWithUrl = (url) => ({ ...rosReducer(undefined, { type: '@@init' }), rosbridgeUrl: url });
 
 let mockHeaderDraws = 0;
 vi.mock('../RecordHeader', () => ({
@@ -102,7 +105,7 @@ function GreedyShell() {
 describe('the Aufnahme page does not re-render per tick (V2-2)', () => {
   it('30 identical running ticks under a shell that reads the whole taskStatus: no page render', () => {
     const store = configureStore({
-      reducer: { tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer, jetson: jetsonReducer },
+      reducer: { tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer },
     });
     store.dispatch(moveToPage(PageType.RECORD));
     store.dispatch(setTaskInfo({ taskName: 'Würfel', taskInstruction: ['Greife.'], userId: 'schule-A' }));
@@ -140,12 +143,12 @@ describe('the Aufnahme page does not re-render per tick (V2-2)', () => {
     resetDatenStateForTests();
     mockTopics.length = 0;
     const store = configureStore({
-      reducer: { tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer, jetson: jetsonReducer },
+      reducer: { tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer },
+      preloadedState: { ros: rosWithUrl('ws://robot/rosbridge') },
     });
     store.dispatch(moveToPage(PageType.RECORD));
     store.dispatch(setTaskInfo({ taskName: 'Würfel', taskInstruction: ['Greife.'], userId: 'schule-A' }));
     store.dispatch(setHeartbeatStatus('connected'));
-    store.dispatch(setRosbridgeUrl('ws://robot/rosbridge'));
     store.dispatch(setTaskStatus({
       robotType: 'omx_f', robotProfile: 'omx_full', capabilities: CAPS, topicReceived: true,
       running: false, taskType: '', phase: TaskPhase.READY, receivedAt: performance.now(), receivedWallMs: Date.now(),

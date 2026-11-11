@@ -43,7 +43,6 @@ case "$KIND" in
     cp -a "${REPO}/." /tmp/parity_repo/
     rm -rf /tmp/parity_repo/test \
            /tmp/parity_repo/Dockerfile.amd64 \
-           /tmp/parity_repo/Dockerfile.arm64 \
            /tmp/parity_repo/Dockerfile.arm64cpu \
            /tmp/parity_repo/CHANGELOG.rst
     strip_pyc /tmp/parity_repo

@@ -25,12 +25,9 @@
 -- pg_blocking_pids shows that call blocked by this session, commits, then reads
 -- the other call's result.
 --
--- The squashed baseline does NOT replay on a fresh database as shipped
--- (docs/KNOWN-ISSUES.md, „baseline.sql is NOT replayable from scratch"): run it in
--- a SCRATCH copy of supabase/ whose baseline has its one
--- `RENAME COLUMN runpod_job_id` line guarded exactly as
--- 040_code_programs_assertions.sql's header shows, with 052 moved OUT of the
--- copy's migrations/ (so `supabase start` applies every migration through 051),
+-- Run it in a SCRATCH copy of supabase/ with 052 and every later migration moved
+-- OUT of the copy's migrations/ (so `supabase start` applies every migration
+-- through 051; the baseline replays on a fresh database as shipped),
 -- and with its own project_id and ports in config.toml. Then, as `postgres`:
 --   1. psql <local db url> -v seed=1 -f supabase/tests/052_credit_ledger_assertions.sql
 --      (BEFORE 052: the pre-052 world — old credits on the old columns, managed
@@ -144,9 +141,9 @@
 -- one cancel_requested, an unmanaged legacy row, a finished one and a group row.
 -- =====================================================================================
 \set ON_ERROR_STOP on
-INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at)
+INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at, raw_app_meta_data)
 SELECT ('c0520000-0000-0000-0000-0000000000' || n)::uuid, '00000000-0000-0000-0000-000000000000', 'authenticated',
-       'authenticated', n || '-052@x.test', '', now(), now()
+       'authenticated', n || '-052@x.test', '', now(), now(), '{"edubotics_provisioned": true}'
   FROM unnest(ARRAY['a0','f1','f2','f3','51','52','53','54','55','56']) AS n;
 UPDATE public.users SET role = 'admin' WHERE id = 'c0520000-0000-0000-0000-0000000000a0';
 UPDATE public.users SET role = 'teacher', training_credits = 20
@@ -244,9 +241,9 @@ CREATE OR REPLACE FUNCTION pg_temp.identity_ok() RETURNS boolean LANGUAGE sql AS
 -- a post-052 user (the profile row comes from 052-independent handle_new_user)
 CREATE OR REPLACE FUNCTION pg_temp.mk_user(n text, r text, cls text) RETURNS uuid LANGUAGE plpgsql AS $$
 BEGIN
-  INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at)
+  INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at, raw_app_meta_data)
   VALUES (pg_temp.u(n), '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', n || '-052@x.test', '',
-          now(), now());
+          now(), now(), '{"edubotics_provisioned": true}');
   UPDATE public.users SET role = r::public.user_role, classroom_id = CASE WHEN cls IS NULL THEN NULL ELSE pg_temp.u(cls) END
    WHERE id = pg_temp.u(n);
   RETURN pg_temp.u(n);

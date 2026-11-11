@@ -41,3 +41,10 @@ robotis_ai_setup/modal_training/training-lock.txt    text eol=lf
 *.jpg                 binary
 *.ico                 binary
 *.exe                 binary
+
+# Byte-identical copies of node_modules/blockly/media (blocklyMedia.test.js
+# compares them): never let a Windows checkout rewrite the SVGs line endings.
+physical_ai_tools/physical_ai_manager/public/blockly-media/** binary
+
+# Sourced by nginx:alpine's entrypoint (a POSIX shell refuses a CR).
+*.envsh               text eol=lf

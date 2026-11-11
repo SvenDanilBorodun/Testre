@@ -4,12 +4,8 @@
 -- public.tutorial_progress), run BY HAND against a fresh LOCAL database —
 -- never CI, never the linked project (it seeds rows).
 --
--- The squashed baseline does NOT replay on a fresh database as shipped
--- (docs/KNOWN-ISSUES.md, „baseline.sql is NOT replayable from scratch"): run
--- it in a SCRATCH copy of supabase/ whose baseline has its one
--- `RENAME COLUMN runpod_job_id` line guarded exactly as
--- 040_code_programs_assertions.sql's header shows, with every migration
--- through 046, then
+-- Run it in a SCRATCH copy of supabase/ holding every migration through 046
+-- (the baseline replays on a fresh database as shipped), then
 --   supabase start   (in the scratch copy; it applies the migrations)
 --   psql <local db url> < supabase/tests/046_close_direct_student_writes_assertions.sql
 -- (2026-10-04 it was run against a real `supabase start` stack, Postgres 17,
@@ -39,8 +35,8 @@
 \set ON_ERROR_STOP off
 \pset pager off
 
-INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at)
-VALUES ('b4600001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-046@x.test', '', now(), now())
+INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at, raw_app_meta_data)
+VALUES ('b4600001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-046@x.test', '', now(), now(), '{"edubotics_provisioned": true}')
 ON CONFLICT (id) DO NOTHING;
 
 -- one own row per table, seeded as the table owner (RLS does not apply to it)

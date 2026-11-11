@@ -1,13 +1,10 @@
 #!/bin/bash
 set -e
 
-# Classroom-Jetson short-circuit: when this container runs on the shared
-# classroom Jetson, only the follower arm is physically connected (the
-# leader stays at the student's desk for recording). Setting
-# EDUBOTICS_FOLLOWER_ONLY=1 skips the leader port wait, the leader
-# launch, the leader-pose read, and the quintic sync — the Jetson agent
-# moves the follower to a safe home pose itself once the container is
-# healthy.
+# Follower-only short-circuit: when only the follower arm is connected
+# (the omx_follower profile, or Roboter Studio's leader switch on an
+# omx_full rig), setting EDUBOTICS_FOLLOWER_ONLY=1 skips the leader port
+# wait, the leader launch, the leader-pose read, and the quintic sync.
 FOLLOWER_ONLY="${EDUBOTICS_FOLLOWER_ONLY:-0}"
 
 # Explicit student activation (2026-09-07). Bringing this container up used to
@@ -127,21 +124,22 @@ export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
 #      cost is ~30 % per camera at 30 Hz, well within budget on the
 #      i5-class student PCs.
 #
-#   2. Classroom Jetson Orin Nano → NATIVE USB host controller (no
-#      WSL bridge). The wire bandwidth is real USB 2.0 isoch, ~25 MB/s
-#      per controller. Two yuyv cameras still fit (18.4 MB/s × 2 fits
-#      across two controllers; usb_cam does no decode → minimal CPU).
+#   2. A NATIVE USB host controller (native Linux, no WSL bridge; measured
+#      on the retired classroom Jetson Orin Nano). The wire bandwidth is
+#      real USB 2.0 isoch, ~25 MB/s per controller. Two yuyv cameras
+#      still fit (18.4 MB/s × 2 fits across two controllers; usb_cam does
+#      no decode → minimal CPU).
 #      mjpeg2rgb would burn ~60 % of one ARM core for no benefit.
 #
 # We therefore default to `mjpeg2rgb` on WSL2 and `yuyv` on real
-# hardware (Jetson, or any non-WSL Linux). The override path is
+# hardware (any non-WSL Linux). The override path is
 # unchanged: setting EDUBOTICS_CAMERA_PIXEL_FORMAT in the compose env
 # (forwarded through docker-compose.yml::environment) wins.
 #
 # Detection method: Microsoft's WSL2 kernel reports a build string
 # containing `microsoft` (case-insensitive). `uname -r` examples:
 #   WSL2:   "5.15.167.4-microsoft-standard-WSL2"
-#   Jetson: "5.15.148-tegra"
+#   native: "5.15.148-tegra" (the retired Jetson's kernel)
 # We grep case-insensitive to defend against future Microsoft kernel
 # string drift (e.g. "Microsoft" capitalised). Falls back to the
 # compose default (yuyv) if uname fails for any reason.
@@ -164,7 +162,7 @@ export EDUBOTICS_HOST_USB_BRIDGE
 #   capture at ~6-10 Hz per camera (per-device isochronous latency,
 #   benchmarked 2026-05-23) and that traffic also jitters the 100 Hz
 #   Dynamixel reads. Moving cameras off the bridge fixes both.
-# usb_cam: in-container V4L2 capture (Jetson Orin Nano / native Linux —
+# usb_cam: in-container V4L2 capture (native Linux —
 #   real USB host, no bridge). Preserves the existing behaviour exactly,
 #   including the mjpeg2rgb-vs-yuyv split below.
 # Default follows the detected host bridge (WSL2 ⇒ native_bridge). An
@@ -553,18 +551,12 @@ sys.exit(_exit_code)
         echo "[LAUNCH] Sync complete."
     fi
 elif [ "$FOLLOWER_ONLY" = "1" ]; then
-    # FOLLOWER_ONLY (Roboter Studio on the student PC, and the Jetson): there is
+    # FOLLOWER_ONLY (Roboter Studio on the student PC, the omx_follower profile): there is
     # no leader to sync to, so move the follower to a DETERMINISTIC safe HOME.
     # On the student PC nothing else homes the follower, so without this it
     # would sit at its power-up pose and the first Roboter Studio command would
     # jump from there. HOME must match workflow/handlers/motion.py
     # HOME_JOINTS_RAD + gripper open. Soft: a failed home never kills boot.
-    # (On the Jetson the agent also moves the follower home afterwards. That is
-    # NOT an idempotent confirm, despite what this comment said until
-    # 2026-07-27: the agent drives SAFE_HOME_JOINTS, the deliberately
-    # more-folded +-pi/4 recovery pose, so the student sees two DIFFERENT 3 s
-    # moves. The divergence is intentional and preserved; only the claim that
-    # they are the same was wrong.)
     echo "[LAUNCH] FOLLOWER_ONLY=1 — moving follower to safe HOME (3s smooth trajectory)..."
     python3 -c "
 import rclpy, sys, math
@@ -694,7 +686,7 @@ if [ "$EDUBOTICS_CAMERA_SOURCE" = "native_bridge" ]; then
     PIDS="$PIDS $!"
     echo "[LAUNCH] Camera ingest running — awaiting JPEG frames from the Windows GUI."
 else
-# --- usb_cam path (Jetson Orin Nano / native Linux): in-container V4L2 ---
+# --- usb_cam path (native Linux): in-container V4L2 ---
 #
 # Audit F21: a single `[ -e $device ]` check at the top would race
 # usbipd's WSL forwarding on cold boot — the test fails, [WARN] is
@@ -795,10 +787,11 @@ for i in 1 2; do
     #     hardware does JPEG encode); usb_cam decodes to RGB on the CPU
     #     at roughly 30 %/cam, which the i5-class student PCs handle.
     #     Verified 2026-05-22 on Sven's classroom rig.
-    #   - Native USB host (Jetson Orin Nano, real desktop Linux): default
+    #   - Native USB host (real desktop Linux, an ARM board): default
     #     stays `yuyv` (compose default). Real USB 2.0 isoch fits two
     #     YUYV streams; usb_cam does no decode → minimal CPU. mjpeg2rgb
-    #     would saturate one ARM core on the Jetson for no benefit.
+    #     would saturate one ARM core for no benefit (measured on the
+    #     retired classroom Jetson Orin Nano).
     #
     # `raw_mjpeg` is intentionally NOT a supported value: usb_cam 0.8.1
     # tags the message `encoding="yuv422"` while passing MJPG bytes

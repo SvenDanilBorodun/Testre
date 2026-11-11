@@ -1,11 +1,8 @@
 /*
- * Copyright 2026 EduBotics
+ * Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * Proprietary and confidential. Licensed under the EduBotics End-User
+ * Licence Agreement; see LICENSE at the repository root.
  */
 
 // The fence that keeps emoji and symbol glyphs out of the UI for good (owner
@@ -285,7 +282,6 @@ describe('no icon glyph in the shipped UI (D7)', () => {
 // through components/icons (review round 1, R1-O1).
 export const INLINE_SVG_ALLOWED = Object.freeze({
   'src/components/EbUI.js': 'the EduBotics brand mark (LogoMark), not an icon',
-  'src/components/CompactSystemStatus.js': 'the circular usage gauge, a chart',
   'src/components/Record/PhaseOverlay.jsx':
     'the Aufnahme countdown ring and the reset orbit arrow (illustrations; the robot pictures are PhasePicture\'s renders)',
   'src/components/Workshop/SimScene.jsx': 'the 2D simulator scene',

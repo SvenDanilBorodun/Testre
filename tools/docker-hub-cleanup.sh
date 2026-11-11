@@ -42,8 +42,6 @@ PROD_REPOS=(
   open-manipulator
   physical-ai-server
   physical-ai-manager
-  open-manipulator-jetson
-  physical-ai-server-jetson
 )
 
 # ── Argument parsing ──

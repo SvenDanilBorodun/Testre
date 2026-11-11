@@ -6,7 +6,7 @@ the Railway deploy with a named cause instead. PostgREST resolves an RPC on
 (name, argument-name set), so the two new RPCs name EXACTLY 050's parameters,
 and their values hit training id 0 / a dummy user, which never exist, so each
 answers P0049 / P0002 and writes nothing (proven through PostgREST on a local
-stack, §16 P5). The 23 / 23 / 56 totals are pinned in ``test_schema_probe_040.py``. Migration
+stack, §16 P5). The 22 / 22 / 45 totals are pinned in ``test_schema_probe_040.py``. Migration
 052 widened start_continuation_safe (p_max_hours) and finish_training (p_charge_waiver); both
 probes name 052's shape, which keeps 050's parameters as a subset.
 """

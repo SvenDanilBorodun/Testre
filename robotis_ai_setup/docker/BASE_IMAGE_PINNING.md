@@ -12,7 +12,7 @@
 
 ### Bases we BUILD OURSELVES (pinned in `build-images.sh`, **not built by CI**)
 
-These three were missing from this table entirely, which is backwards: they are
+These were missing from this table entirely, which is backwards: they are
 the pins most likely to be wrong, because **no workflow builds them**. A
 maintainer hand-runs `BUILD_BASE_*=1 ./build-images.sh` once and pushes; every
 CI build thereafter only *resolves* the tag below via `docker manifest inspect`.
@@ -22,15 +22,17 @@ OLD base, green and silent (`ci.yml::base-version-guard` is the fence).
 | Base image (tag pinned in `build-images.sh`) | Built from | Trigger |
 |---|---|---|
 | `${REGISTRY}/physical-ai-server-opi-base:0.8.2-opi2` | `physical_ai_tools/physical_ai_server/Dockerfile.arm64cpu` | `BUILD_BASE_OPI=1 PLATFORM=opi` |
-| `${REGISTRY}/physical-ai-server-jetson-base:0.8.2` | `physical_ai_tools/physical_ai_server/Dockerfile.arm64` | `BUILD_BASE_ARM64=1 PLATFORM=arm64` |
-| `${REGISTRY}/open-manipulator-jetson-base:4.1.4` | `open_manipulator/docker/Dockerfile` | `BUILD_BASE_ARM64=1 PLATFORM=arm64` (opi REUSES this one — it is CUDA/L4T-free) |
+| `${REGISTRY}/open-manipulator-jetson-base:4.1.4` | `open_manipulator/docker/Dockerfile` | `BUILD_BASE_OPI_OMX=1 PLATFORM=opi` (the Orange Pi's arm base, CUDA/L4T-free; the repo keeps the name it got when it was first built for the classroom Jetson, retired 2026-11-09 — do not delete it) |
+
+The Jetson server base (`physical-ai-server-jetson-base`, from the deleted
+`Dockerfile.arm64`) went with the Jetson on 2026-11-09; nothing builds or
+resolves it any more.
 
 ### The upstream `FROM`s those self-built bases are cut from
 
 | Base Dockerfile | `FROM` |
 |---|---|
 | `Dockerfile.amd64` | `robotis/ros:jazzy-ros-base-torch2.7.0-cuda12.8.0` |
-| `Dockerfile.arm64` | `robotis/ros:jazzy-ros-base-torch2.7.0-cuda12.8.0` |
 | `Dockerfile.arm64cpu` | `ros:jazzy-ros-base` (stock, Docker Official) |
 
 `./bump-upstream-digests.sh` reports every row above (it parses the tags out of
@@ -61,10 +63,10 @@ When you intentionally want to use a newer ROBOTIS base image:
    PR-build image before merging.
 6. If everything works, merge and let CI publish.
 
-## How to change a base we BUILD (`Dockerfile.amd64` / `.arm64` / `.arm64cpu`)
+## How to change a base we BUILD (`Dockerfile.arm64cpu`, the opi OMX base)
 
 **Step 4 above does not apply here — "CI builds the new image" is FALSE for
-these three.** Grep `.github/` for `BUILD_BASE_OPI` and you find nothing. If you
+these.** Grep `.github/` for `BUILD_BASE_OPI` and you find nothing. If you
 only push the source edit, CI resolves the previously-published tag, the build
 succeeds, the smoke tests pass, and your change ships nowhere.
 
@@ -73,8 +75,8 @@ succeeds, the smoke tests pass, and your change ships nowhere.
    ```bash
    cd robotis_ai_setup/docker
    export SUPABASE_URL=... SUPABASE_ANON_KEY=... CLOUD_API_URL=...   # required: the manager builds first
-   BUILD_BASE_OPI=1   PLATFORM=opi   ./build-images.sh   # Dockerfile.arm64cpu
-   BUILD_BASE_ARM64=1 PLATFORM=arm64 ./build-images.sh   # Dockerfile.arm64 (+ the OMX Jetson base)
+   BUILD_BASE_OPI=1     PLATFORM=opi ./build-images.sh   # Dockerfile.arm64cpu
+   BUILD_BASE_OPI_OMX=1 PLATFORM=opi ./build-images.sh   # the opi open_manipulator base
    ```
 3. Bump the matching `PAS_BASE_IMAGE` tag in `build-images.sh` **in the same
    commit** — `ci.yml::base-version-guard` enforces exactly this (comment-only

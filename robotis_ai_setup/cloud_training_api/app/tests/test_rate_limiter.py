@@ -47,8 +47,8 @@ class TestRateLimiterMemoryCap(unittest.TestCase):
         rl._MAX_KEYS_PER_BUCKET = 5  # shrink for the test
         for i in range(100):
             # Each forged token / spoofed IP is a distinct key.
-            rl.check("POST:/jetson/", f"jwt:{i}", limit=10, window_s=60.0)
-        bucket = rl._buckets["POST:/jetson/"]
+            rl.check("POST:/workflows", f"jwt:{i}", limit=10, window_s=60.0)
+        bucket = rl._buckets["POST:/workflows"]
         self.assertLessEqual(len(bucket), 5)
         # The most-recently-seen keys are retained; the oldest evicted.
         self.assertIn("jwt:99", bucket)

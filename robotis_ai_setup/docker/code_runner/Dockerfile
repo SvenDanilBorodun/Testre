@@ -1,8 +1,7 @@
 # code-runner — the sandbox that runs a student's Python or Java program
 # beside physical_ai_server (Roboter Studio text programs). One image per
 # platform: `code-runner` (amd64, the student PC) and `code-runner-opi`
-# (arm64, the Orange Pi); no Jetson flavour (the Roboter-Studio tab is
-# jetsonIncompatible).
+# (arm64, the Orange Pi).
 #
 # A PUBLIC base, deliberately: no self-built base, so nothing here joins
 # Rule §6's manual base-rebuild set. python3 comes from noble's apt (3.12.3,

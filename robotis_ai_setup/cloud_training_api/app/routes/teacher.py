@@ -23,6 +23,10 @@ from pydantic import BaseModel, Field
 
 from app.auth import get_current_teacher, get_user_profile
 from app.services import credit_texts_de as credit_texts
+from app.services import deletion_requests
+from app.services import passwords
+from app.services import provisioning
+from app.services.hf_identity import is_org_repo, namespace_of, proven_hf_username
 from app.services.supabase_client import get_supabase
 from app.services.usernames import synthetic_email, validate_username
 from app.validators.workflow import validate_blockly_json
@@ -48,7 +52,9 @@ class ClassroomRename(BaseModel):
 
 class StudentCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=32)
-    password: str = Field(..., min_length=6, max_length=128)
+    # Checked by hand (services/passwords.py, ≥ 8 for students since 2026-11-10):
+    # pydantic's 422 is English and echoes the password back.
+    password: str
     full_name: str = Field(..., min_length=1, max_length=100)
     initial_credits: int = Field(default=0, ge=0, le=1000)
 
@@ -59,7 +65,7 @@ class StudentPatch(BaseModel):
 
 
 class PasswordReset(BaseModel):
-    new_password: str = Field(..., min_length=6, max_length=128)
+    new_password: str  # checked by hand, see StudentCreate.password
 
 
 class ClassroomSummary(BaseModel):
@@ -87,6 +93,9 @@ class StudentSummary(BaseModel):
     # (credit_assign refuses a grouped student, P0023).
     workgroup_id: str | None = None
     workgroup_name: str | None = None
+    # GDPR Art. 17 (launch plan step 5): set while the student's deletion request
+    # is open, so the roster can show it; the queue is GET /deletion-requests.
+    deletion_requested_at: str | None = None
 
 
 class TrainingSummary(BaseModel):
@@ -412,6 +421,7 @@ def _student_summary(
         classroom_id=row.get("classroom_id"),
         workgroup_id=workgroup_id,
         workgroup_name=workgroup_name,
+        deletion_requested_at=row.get("deletion_requested_at"),
     )
 
 
@@ -419,7 +429,7 @@ def _student_summary(
 
 
 @router.get("/classrooms", response_model=list[ClassroomSummary])
-async def list_classrooms(teacher=Depends(get_current_teacher)):
+def list_classrooms(teacher=Depends(get_current_teacher)):
     supabase = get_supabase()
     classrooms = (
         supabase.table("classrooms")
@@ -459,7 +469,7 @@ async def list_classrooms(teacher=Depends(get_current_teacher)):
 
 
 @router.post("/classrooms", response_model=ClassroomSummary)
-async def create_classroom(req: ClassroomCreate, teacher=Depends(get_current_teacher)):
+def create_classroom(req: ClassroomCreate, teacher=Depends(get_current_teacher)):
     supabase = get_supabase()
     try:
         result = (
@@ -481,12 +491,12 @@ async def create_classroom(req: ClassroomCreate, teacher=Depends(get_current_tea
 
 
 @router.get("/classrooms/{classroom_id}", response_model=ClassroomDetail)
-async def get_classroom(classroom_id: str, teacher=Depends(get_current_teacher)):
+def get_classroom(classroom_id: str, teacher=Depends(get_current_teacher)):
     c = _assert_classroom_owned(teacher["id"], classroom_id)
     supabase = get_supabase()
     students_raw = (
         supabase.table("users")
-        .select("id, username, full_name, classroom_id, workgroup_id")
+        .select("id, username, full_name, classroom_id, workgroup_id, deletion_requested_at")
         .eq("classroom_id", classroom_id)
         .eq("role", "student")
         .order("full_name", desc=False)
@@ -521,7 +531,7 @@ async def get_classroom(classroom_id: str, teacher=Depends(get_current_teacher))
 
 
 @router.get("/classrooms/{classroom_id}/workflow-templates", response_model=list[WorkflowTemplateSummary])
-async def list_workflow_templates(
+def list_workflow_templates(
     classroom_id: str,
     teacher=Depends(get_current_teacher),
     limit: int = Query(DEFAULT_LIST_LIMIT, ge=1, le=MAX_LIST_LIMIT),
@@ -542,7 +552,7 @@ async def list_workflow_templates(
 
 
 @router.post("/classrooms/{classroom_id}/workflow-templates", response_model=WorkflowTemplateSummary)
-async def create_workflow_template(
+def create_workflow_template(
     classroom_id: str,
     payload: WorkflowTemplateCreate,
     teacher=Depends(get_current_teacher),
@@ -577,7 +587,7 @@ async def create_workflow_template(
 
 
 @router.delete("/classrooms/{classroom_id}/workflow-templates/{template_id}")
-async def delete_workflow_template(
+def delete_workflow_template(
     classroom_id: str,
     template_id: str,
     teacher=Depends(get_current_teacher),
@@ -589,7 +599,7 @@ async def delete_workflow_template(
 
 
 @router.patch("/classrooms/{classroom_id}", response_model=ClassroomSummary)
-async def rename_classroom(
+def rename_classroom(
     classroom_id: str,
     req: ClassroomRename,
     teacher=Depends(get_current_teacher),
@@ -625,7 +635,7 @@ async def rename_classroom(
 
 
 @router.delete("/classrooms/{classroom_id}")
-async def delete_classroom(classroom_id: str, teacher=Depends(get_current_teacher)):
+def delete_classroom(classroom_id: str, teacher=Depends(get_current_teacher)):
     _assert_classroom_owned(teacher["id"], classroom_id)
     supabase = get_supabase()
     count_res = (
@@ -663,7 +673,7 @@ async def delete_classroom(classroom_id: str, teacher=Depends(get_current_teache
 
 
 @router.post("/classrooms/{classroom_id}/students", response_model=StudentSummary)
-async def create_student(
+def create_student(
     classroom_id: str,
     req: StudentCreate,
     teacher=Depends(get_current_teacher),
@@ -675,6 +685,9 @@ async def create_student(
         username = validate_username(req.username)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    refusal = passwords.password_error_de(req.password, "student")
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
 
     existing = (
         supabase.table("users").select("id").eq("username", username).execute()
@@ -684,14 +697,14 @@ async def create_student(
 
     email = synthetic_email(username)
     try:
+        # 058: the marker only the service role can set; a new account without
+        # it is refused by the database (self-registration).
         created = supabase.auth.admin.create_user(
-            {
-                "email": email,
-                "password": req.password,
-                "email_confirm": True,
-            }
+            provisioning.new_account_attributes(email, req.password)
         )
     except Exception as e:
+        if passwords.is_weak_password_error(e):
+            raise HTTPException(status_code=400, detail=passwords.WEAK_PASSWORD_DE)
         msg = str(e).lower()
         if "already" in msg or "exists" in msg or "duplicate" in msg:
             raise HTTPException(status_code=409, detail="Benutzername bereits vergeben")
@@ -759,7 +772,7 @@ async def create_student(
 
 
 @router.patch("/students/{student_id}", response_model=StudentSummary)
-async def patch_student(
+def patch_student(
     student_id: str,
     req: StudentPatch,
     teacher=Depends(get_current_teacher),
@@ -796,36 +809,61 @@ async def patch_student(
     return _student_summary(row)
 
 
+# SA-08 (2026-11-13): why a repo the student's rows name is NOT erased. Each is
+# reported to the teacher (never silently dropped): the endpoint must not claim
+# an erasure it did not perform.
+_KEEP_OWN_NAMESPACE_DE = (
+    "Nicht gelöscht: liegt im eigenen Hugging-Face-Konto der Schülerin bzw. des "
+    "Schülers. Die Plattform löscht dort nichts – bitte dort löschen lassen."
+)
+_KEEP_NOT_PROVEN_DE = "Nicht gelöscht: gehört nicht nachweislich zu diesem Konto."
+_KEEP_ORG_DATASET_DE = (
+    "Nicht gelöscht: Datensätze der EduBotics-Organisation werden nie "
+    "automatisch gelöscht."
+)
+_KEEP_SHARED_MODEL_DE = (
+    "Nicht gelöscht: dieses Modell gehört auch zu einem anderen Training oder "
+    "Datensatz."
+)
+
+
 def _enumerate_student_hf_artifacts(
     student_id: str,
-) -> tuple[list[tuple[str, str]], bool]:
-    """READ-ONLY: which HF repos would an erasure delete, and can we tell?
+) -> tuple[list[tuple[str, str, str | None]], bool]:
+    """READ-ONLY: which HF repos an erasure deletes, which it keeps, and can we tell?
 
     Split out of ``_delete_student_hf_artifacts`` on 2026-08-31 so that
     ``delete_student`` can ask the question BEFORE it deletes the auth user.
-    This touches ``trainings`` and ``datasets`` and nothing else — no
-    HuggingFace call, no write — so running it first is free, and running it
-    on a student who then turns out not to be deletable costs nothing.
+    It reads ``user_hf_credentials``, ``trainings`` and ``datasets`` and nothing
+    else — no HuggingFace call, no write — so running it first is free.
 
-    Returns ``(candidates, registry_readable)``.
+    SA-08 (2026-11-13): erasure reaches only what is PROVABLY the student's, and
+    the platform ``HF_TOKEN`` acts only inside the platform's organisation:
 
-    ``candidates`` are deduplicated ``(repo_id, repo_type)`` pairs in erasure
-    order — registry datasets FIRST, because those are the ones the old
-    trainings-only enumeration could never see (a recording never used for
-    training has no ``trainings`` row at all, which is the whole point of a
-    GDPR erasure on a student who only ever recorded). Workgroup-shared
-    datasets are already removed (migration 011: siblings still depend on
-    them, and the teacher can delete those by hand from HF Hub).
+      * DELETED (the only repos ever handed to ``delete_repo``): model repos in
+        the organisation (``hf_identity.HF_ORG``) that the platform published
+        for THIS student's own trainings — the ``model_name`` of a ``trainings``
+        row of the student without a ``workgroup_id`` — unless any OTHER user's
+        ``trainings`` row or any ``datasets`` row names the same repo;
+      * KEPT and reported with ``_KEEP_OWN_NAMESPACE_DE``: repos in the student's
+        own PROVEN namespace (the account Hugging Face reported for their stored
+        token). The platform token may not act on a student's namespace, and
+        does not own it anyway;
+      * KEPT and reported: a dataset in the organisation (never deleted), a
+        shared organisation model, and every repo in any other namespace —
+        among them everything a self-asserted or forged ``users.hf_username``
+        (``EduBotics-Solutions`` included) could have pulled into the registry.
 
-    ``registry_readable`` is False when the ``datasets`` query failed. That is
-    not merely "we enumerated less" — the registry is the ONLY source of the
-    shared-repo skip list, so with it unreadable every dataset named by a
-    surviving ``trainings`` row looks unshared. Measured 2026-08-08: answering
-    that query 503 made a group-shared repo observably reach ``delete_repo``.
-    Both callers fail closed on it — ``delete_student`` refuses the whole
-    request with 503 while the student still exists, and
-    ``_delete_student_hf_artifacts`` refuses the dataset half and names each
-    repo it refused.
+    Returns ``(entries, registry_readable)``. ``entries`` are deduplicated
+    ``(repo_id, repo_type, keep_reason)`` triples in erasure order (registry
+    datasets first, then trainings-derived repos); ``keep_reason`` is None for a
+    repo to delete. Workgroup-shared datasets are left out entirely (migration
+    011: siblings still depend on them).
+
+    ``registry_readable`` is False when any of the reads failed — the
+    ``datasets`` registry is the only source of the shared-repo skip list, the
+    proven name decides what is the student's, and the cross-references decide
+    whether a model is the student's alone. Both callers fail closed on it.
     """
     supabase = get_supabase()
     rows = (
@@ -835,11 +873,10 @@ def _enumerate_student_hf_artifacts(
         .execute()
     ).data or []
 
-    # Build the set of HF repos that are shared with a group. We must
-    # NOT delete these because group siblings still need them.
     shared_dataset_repos: set[str] = set()
     registry_repos: list[str] = []
     registry_readable = True
+    proven: str | None = None
     try:
         ds_rows = (
             supabase.table("datasets")
@@ -855,13 +892,12 @@ def _enumerate_student_hf_artifacts(
                 shared_dataset_repos.add(repo)
             else:
                 registry_repos.append(repo)
+        proven = proven_hf_username(supabase, student_id)
     except Exception as e:
         registry_readable = False
-        logger.warning("Dataset registry query failed during HF cleanup: %s", e)
+        logger.warning("Dataset registry query failed during HF cleanup: %s", type(e).__name__)
 
-    ordered: list[tuple[str, str]] = [
-        (repo, "dataset") for repo in registry_repos
-    ]
+    ordered: list[tuple[str, str]] = [(repo, "dataset") for repo in registry_repos]
     for row in rows:
         # Skip trainings that are part of a shared workgroup pool.
         if row.get("workgroup_id"):
@@ -869,7 +905,33 @@ def _enumerate_student_hf_artifacts(
         ordered.append((row.get("model_name"), "model"))
         ordered.append((row.get("dataset_name"), "dataset"))
 
-    candidates: list[tuple[str, str]] = []
+    # The organisation models this student's own trainings name: deletable only
+    # when nobody else's training and no datasets row names them too.
+    org_models = sorted({r for r, t in ordered if t == "model" and r and is_org_repo(r)})
+    shared_models: set[str] = set()
+    if org_models:
+        try:
+            others = (
+                supabase.table("trainings")
+                .select("user_id, model_name")
+                .in_("model_name", org_models)
+                .execute()
+            ).data or []
+            shared_models |= {o.get("model_name") for o in others
+                              if str(o.get("user_id")) != str(student_id)}
+            named = (
+                supabase.table("datasets")
+                .select("hf_repo_id")
+                .in_("hf_repo_id", org_models)
+                .execute()
+            ).data or []
+            shared_models |= {n.get("hf_repo_id") for n in named}
+        except Exception as e:
+            registry_readable = False
+            logger.warning("Model cross-reference query failed during HF cleanup: %s", type(e).__name__)
+
+    proven_l = proven.lower() if proven else None
+    entries: list[tuple[str, str, str | None]] = []
     seen: set[tuple[str, str]] = set()
     for repo_id, repo_type in ordered:
         if not repo_id or (repo_id, repo_type) in seen:
@@ -881,15 +943,34 @@ def _enumerate_student_hf_artifacts(
                 repo_id,
             )
             continue
-        candidates.append((repo_id, repo_type))
-    return candidates, registry_readable
+        owner = (namespace_of(repo_id) or "").lower()
+        if is_org_repo(repo_id):
+            if repo_type != "model":
+                keep = _KEEP_ORG_DATASET_DE
+            elif repo_id in shared_models or not registry_readable:
+                keep = _KEEP_SHARED_MODEL_DE
+            else:
+                keep = None
+        elif proven_l and owner == proven_l:
+            keep = _KEEP_OWN_NAMESPACE_DE
+        else:
+            keep = _KEEP_NOT_PROVEN_DE
+        entries.append((repo_id, repo_type, keep))
+    return entries, registry_readable
 
 
 def _delete_student_hf_artifacts(
     student_id: str,
-    enumeration: tuple[list[tuple[str, str]], bool] | None = None,
+    enumeration: tuple[list[tuple[str, str, str | None]], bool] | None = None,
 ) -> tuple[list[dict], int]:
     """Best-effort deletion of HuggingFace repos owned by the student.
+
+    SA-08 (2026-11-13): only an organisation MODEL the platform published for
+    this student's own trainings is ever handed to ``delete_repo`` (the
+    enumeration decides; a belt below refuses anything else). Every other repo
+    the student's rows name — their own namespace, the organisation's datasets,
+    any other namespace — is reported in ``failures`` with its German reason and
+    no Hub call. The text below is the history of this function.
 
     GDPR Art. 17: when a student account is deleted, the personal data
     they generated must be erased. The Modal worker uploads trained
@@ -972,6 +1053,13 @@ def _delete_student_hf_artifacts(
             ),
         })
 
+    # SA-08: every repo the enumeration KEEPS is reported, without any Hub call
+    # (the platform token never acts outside the organisation).
+    for repo_id, repo_type, keep in candidates:
+        if keep is not None:
+            failures.append({"repo_id": repo_id, "repo_type": repo_type, "reason": keep})
+    candidates = [(r, t, k) for r, t, k in candidates if k is None]
+
     if not candidates:
         # Nothing enumerable. That is HONEST only when the student genuinely
         # registered nothing: a recording is discoverable here only if it
@@ -989,26 +1077,11 @@ def _delete_student_hf_artifacts(
 
     api = HfApi(token=hf_token)
     attempted = 0
-    for repo_id, repo_type in candidates:
-        if repo_type == "dataset" and not registry_readable:
-            # Fail CLOSED, and NAME the repo. The generic "?" entry above says
-            # why; without this per-repo entry the teacher is warned in a way
-            # that never mentions the datasets, so a sibling group's data would
-            # go missing invisibly. Models are unaffected: a pooled training is
-            # already skipped by its own row's workgroup_id, which does not come
-            # from the datasets query.
-            logger.warning(
-                "Refusing to delete HF dataset %s — shared-repo skip list "
-                "unavailable (datasets registry unreadable)",
-                repo_id,
-            )
-            failures.append({
-                "repo_id": repo_id, "repo_type": repo_type,
-                "reason": (
-                    "Nicht gelöscht: unbekannt, ob dieser Datensatz mit einer "
-                    "Arbeitsgruppe geteilt ist."
-                ),
-            })
+    for repo_id, repo_type, _keep in candidates:
+        if repo_type != "model" or not is_org_repo(repo_id):
+            # Belt to the enumeration: the platform token deletes only an
+            # organisation MODEL (SA-08). Never reached through the enumerator.
+            failures.append({"repo_id": repo_id, "repo_type": repo_type, "reason": _KEEP_NOT_PROVEN_DE})
             continue
         # Counted BEFORE the call: a repo that was already gone
         # (RepositoryNotFoundError) and a repo that 403s were both genuinely
@@ -1039,9 +1112,22 @@ def _delete_student_hf_artifacts(
 
 
 @router.delete("/students/{student_id}")
-async def delete_student(student_id: str, teacher=Depends(get_current_teacher)):
+def delete_student(student_id: str, teacher=Depends(get_current_teacher)):
     _assert_student_owned(teacher["id"], student_id)
+    return erase_student_account(student_id)
 
+
+def erase_student_account(student_id: str) -> dict:
+    """BLOCKING: delete a student's account and attempt the HuggingFace erasure.
+
+    The whole deletion, shared by ``DELETE /teacher/students/{id}``, a teacher's
+    confirmation of a deletion request (``confirm_deletion_request`` below) and the
+    admin's (``routes/admin.py::confirm_deletion_request``). It asserts nothing:
+    every caller has proven its right to the student first (Rule §4). Answers one
+    of the five outcomes below (503 and 500 raised; 200 with
+    ``hf_erasure_complete`` true, or false with ``hf_failures`` and a German
+    ``detail``).
+    """
     # ORDER MATTERS HERE, and until 2026-08-31 it was wrong in a way that made
     # a lawful Art. 17 request destructive AND unfinishable:
     #
@@ -1141,26 +1227,112 @@ async def delete_student(student_id: str, teacher=Depends(get_current_teacher)):
     return {"ok": True, "hf_erasure_complete": True}
 
 
+# ---------- Deletion requests (GDPR Art. 17, launch plan step 5) ----------
+
+
+class DeletionRequestSummary(BaseModel):
+    student_id: str
+    username: str | None = None
+    full_name: str | None = None
+    classroom_id: str | None = None
+    classroom_name: str | None = None
+    requested_at: str
+    # Art. 12(3): one calendar month after the request (services/deletion_requests.py).
+    due_by: str | None = None
+
+
+@router.get("/deletion-requests", response_model=list[DeletionRequestSummary])
+def list_deletion_requests(teacher=Depends(get_current_teacher)):
+    """The open deletion requests of the students in the caller's OWN classrooms,
+    oldest (most urgent) first.
+
+    Rule §4: no id comes from the request; both queries are scoped by the
+    JWT-verified teacher (the classrooms by ``teacher_id``, the students by those
+    classrooms). A student without a classroom is the admin's to confirm
+    (``GET /admin/deletion-requests`` lists every open request)."""
+    supabase = get_supabase()
+    try:
+        classrooms = (
+            supabase.table("classrooms").select("id, name").eq("teacher_id", teacher["id"]).execute()
+        ).data or []
+        if not classrooms:
+            return []
+        names = {c["id"]: c.get("name") for c in classrooms}
+        rows = (
+            supabase.table("users")
+            .select("id, username, full_name, classroom_id, deletion_requested_at")
+            .in_("classroom_id", list(names))
+            .eq("role", "student")
+            .not_.is_("deletion_requested_at", "null")
+            .order("deletion_requested_at", desc=False)
+            .execute()
+        ).data or []
+    except Exception as exc:
+        logger.warning("deletion-request list failed for teacher=%s: %s", teacher["id"], type(exc).__name__)
+        raise HTTPException(status_code=500, detail=deletion_requests.LIST_FAILED_DE) from None
+    return [
+        DeletionRequestSummary(
+            student_id=r["id"],
+            username=r.get("username"),
+            full_name=r.get("full_name"),
+            classroom_id=r.get("classroom_id"),
+            classroom_name=names.get(r.get("classroom_id")),
+            requested_at=r["deletion_requested_at"],
+            due_by=deletion_requests.due_by(r["deletion_requested_at"]),
+        )
+        for r in rows
+        if r.get("deletion_requested_at") and r.get("classroom_id") in names
+    ]
+
+
+def open_deletion_request(user_id: str) -> str | None:
+    """BLOCKING: the user's open request time, or None (no row, or no request)."""
+    rows = (
+        get_supabase().table("users").select("deletion_requested_at").eq("id", user_id).execute()
+    ).data or []
+    return rows[0].get("deletion_requested_at") if rows else None
+
+
+@router.post("/deletion-requests/{student_id}/confirm")
+def confirm_deletion_request(student_id: str, teacher=Depends(get_current_teacher)):
+    """The teacher carries out a student's deletion request (owner decision
+    „Teacher confirms"): the same full deletion as ``DELETE /students/{id}``, with
+    its five outcomes, but only while the request is still OPEN — a request the
+    student withdrew while the dialog was up is refused with 409 and nothing is
+    deleted. (The check runs before the deletion's read-only enumeration; a
+    withdrawal in those milliseconds is the accepted residual.)"""
+    _assert_student_owned(teacher["id"], student_id)
+    if not open_deletion_request(student_id):
+        raise HTTPException(status_code=409, detail=deletion_requests.NOT_OPEN_DE)
+    logger.info("deletion request of student=%s confirmed by teacher=%s", student_id, teacher["id"])
+    return erase_student_account(student_id)
+
+
 @router.post("/students/{student_id}/password")
-async def reset_student_password(
+def reset_student_password(
     student_id: str,
     req: PasswordReset,
     teacher=Depends(get_current_teacher),
 ):
     _assert_student_owned(teacher["id"], student_id)
+    refusal = passwords.password_error_de(req.new_password, "student")
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
     supabase = get_supabase()
     try:
         supabase.auth.admin.update_user_by_id(
             student_id, {"password": req.new_password}
         )
     except Exception as e:
+        if passwords.is_weak_password_error(e):
+            raise HTTPException(status_code=400, detail=passwords.WEAK_PASSWORD_DE)
         logger.error("reset_student_password failed: %s", e)
         raise HTTPException(status_code=500, detail="Passwort konnte nicht gesetzt werden")
     return {"ok": True}
 
 
 @router.post("/students/{student_id}/credits", response_model=CreditsResponse)
-async def adjust_credits(
+def adjust_credits(
     student_id: str,
     body: dict | None = Body(default=None),
     teacher=Depends(get_current_teacher),
@@ -1174,7 +1346,7 @@ async def adjust_credits(
 
 
 @router.get("/students/{student_id}/credit-history")
-async def student_credit_history(
+def student_credit_history(
     student_id: str,
     before: int | None = Query(default=None),
     limit: int | None = Query(default=None),
@@ -1187,7 +1359,7 @@ async def student_credit_history(
 
 
 @router.get("/credit-history")
-async def own_credit_history(
+def own_credit_history(
     before: int | None = Query(default=None),
     limit: int | None = Query(default=None),
     teacher=Depends(get_current_teacher),
@@ -1200,10 +1372,12 @@ async def own_credit_history(
 async def stop_student_training(student_id: str, training_id: int, teacher=Depends(get_current_teacher)):
     """„Training stoppen" (decision 13): the student's own „Abbrechen" path (§8.4) with
     the teacher's role. A training of another student is the same German 404 (P0002)."""
+    import asyncio
+
     from app.services import stop_actions
     from app.services import training_texts_de as texts
 
-    _assert_student_owned(teacher["id"], student_id)
+    await asyncio.to_thread(_assert_student_owned, teacher["id"], student_id)
     return await stop_actions.stop(training_id, owner=student_id, actor=teacher["id"], role="teacher",
                                    note=texts.S32)
 
@@ -1216,12 +1390,12 @@ async def student_training_stop_preview(student_id: str, training_id: int,
 
     from app.routes.training import read_stop_preview
 
-    _assert_student_owned(teacher["id"], student_id)
+    await asyncio.to_thread(_assert_student_owned, teacher["id"], student_id)
     return await asyncio.to_thread(read_stop_preview, training_id, student_id)
 
 
 @router.get("/students/{student_id}/trainings", response_model=list[TrainingSummary])
-async def list_student_trainings(
+def list_student_trainings(
     student_id: str,
     teacher=Depends(get_current_teacher),
 ):
@@ -1270,7 +1444,7 @@ class TrainingCheckpoints(BaseModel):
     "/students/{student_id}/trainings/{training_id}/checkpoints",
     response_model=TrainingCheckpoints,
 )
-async def list_training_checkpoints(
+def list_training_checkpoints(
     student_id: str,
     training_id: int,
     teacher=Depends(get_current_teacher),
@@ -1298,7 +1472,10 @@ async def list_training_checkpoints(
         steps = cached[1]
     else:
         try:
-            files = HfApi(token=os.environ.get("HF_TOKEN") or None).list_repo_files(
+            # SA-08: the platform token only on an organisation repo; any other
+            # model name (a legacy row) is read anonymously.
+            platform = (os.environ.get("HF_TOKEN") or None) if is_org_repo(model_name) else False
+            files = HfApi(token=platform).list_repo_files(
                 model_name, repo_type="model")
         except Exception:
             raise HTTPException(
@@ -1317,7 +1494,7 @@ async def list_training_checkpoints(
         training_id=training_id, model_name=model_name, steps=steps)
 
 
-# ---------- Jetson inference run records (leLab-comparison PR-5b) ----------
+# ---------- Inference run records (leLab-comparison PR-5b, Cloud-Inferenz 048) ----------
 
 
 class InferenceRunSummary(BaseModel):
@@ -1328,8 +1505,9 @@ class InferenceRunSummary(BaseModel):
     exit_reason: str
     error_message_de: str
     created_at: str
-    # Migration 048: 'jetson' (the classroom Jetson) or 'cloud' (Cloud-Inferenz,
-    # written by the session sweep). Teachers READ their students' cloud runs;
+    # Migration 048: 'cloud' (Cloud-Inferenz, written by the session sweep) or
+    # 'jetson' (a run on the retired classroom Jetson, written before migration
+    # 053; those rows stay readable). Teachers READ their students' cloud runs;
     # they cannot start one (students only, owner A-Q4).
     backend: str = "jetson"
 
@@ -1338,11 +1516,11 @@ class InferenceRunSummary(BaseModel):
     "/students/{student_id}/inference-runs",
     response_model=list[InferenceRunSummary],
 )
-async def list_student_inference_runs(
+def list_student_inference_runs(
     student_id: str,
     teacher=Depends(get_current_teacher),
 ):
-    """Compact inference run records (classroom Jetson and Cloud-Inferenz) for failure forensics."""
+    """Compact inference run records (Cloud-Inferenz; older rows from the retired classroom Jetson) for failure forensics."""
     _assert_student_owned(teacher["id"], student_id)
     supabase = get_supabase()
     result = (
@@ -1406,7 +1584,7 @@ class StudentSubmissionDocument(StudentSubmissionSummary):
     "/students/{student_id}/workflows",
     response_model=list[StudentWorkflowSummary],
 )
-async def list_student_workflows(
+def list_student_workflows(
     student_id: str,
     teacher=Depends(get_current_teacher),
 ):
@@ -1429,7 +1607,7 @@ async def list_student_workflows(
     "/students/{student_id}/workflows/{workflow_id}",
     response_model=StudentWorkflowDocument,
 )
-async def get_student_workflow(
+def get_student_workflow(
     student_id: str,
     workflow_id: str,
     teacher=Depends(get_current_teacher),
@@ -1454,7 +1632,7 @@ async def get_student_workflow(
     "/students/{student_id}/submissions",
     response_model=list[StudentSubmissionSummary],
 )
-async def list_student_submissions(
+def list_student_submissions(
     student_id: str,
     teacher=Depends(get_current_teacher),
 ):
@@ -1476,7 +1654,7 @@ async def list_student_submissions(
     "/students/{student_id}/submissions/{submission_id}",
     response_model=StudentSubmissionDocument,
 )
-async def get_student_submission(
+def get_student_submission(
     student_id: str,
     submission_id: str,
     teacher=Depends(get_current_teacher),
@@ -1582,7 +1760,7 @@ def _assert_workgroup_in_classroom(
     "/classrooms/{classroom_id}/progress-entries",
     response_model=list[ProgressEntrySummary],
 )
-async def list_progress_entries(
+def list_progress_entries(
     classroom_id: str,
     student_id: str | None = None,
     workgroup_id: str | None = None,
@@ -1621,7 +1799,7 @@ async def list_progress_entries(
     "/classrooms/{classroom_id}/progress-entries",
     response_model=ProgressEntrySummary,
 )
-async def create_progress_entry(
+def create_progress_entry(
     classroom_id: str,
     req: ProgressEntryCreate,
     teacher=Depends(get_current_teacher),
@@ -1672,7 +1850,7 @@ async def create_progress_entry(
 @router.patch(
     "/progress-entries/{entry_id}", response_model=ProgressEntrySummary
 )
-async def patch_progress_entry(
+def patch_progress_entry(
     entry_id: str,
     req: ProgressEntryPatch,
     teacher=Depends(get_current_teacher),
@@ -1693,7 +1871,7 @@ async def patch_progress_entry(
 
 
 @router.delete("/progress-entries/{entry_id}")
-async def delete_progress_entry(
+def delete_progress_entry(
     entry_id: str, teacher=Depends(get_current_teacher)
 ):
     _assert_entry_owned(teacher["id"], entry_id)

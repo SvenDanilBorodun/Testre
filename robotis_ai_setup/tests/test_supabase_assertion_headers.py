@@ -4,12 +4,14 @@ compares against that number, so it must be the number of distinct PASS
 labels the file can emit (2026-09-27 review round, n4: the 041 file said 20
 and emitted 21). Deliberately stdlib-only.
 
-The header's run instructions must work too (review round 2, ni5/ni6): the
-squashed baseline does not replay on a fresh database as shipped, so every
-header names the one-line patch and docs/KNOWN-ISSUES.md, and the guard the
-040 header prints must still name the one baseline line it replaces; the 041
-header names the two 040 assertions 041 breaks by design (T4b, T8), measured
-on a local stack at 040 and at 041.
+The header's run instructions must work too (review round 2, ni5/ni6). Until
+2026-11-10 the squashed baseline did not replay on a fresh database (its
+migration-005 body renamed a runpod_job_id column its own CREATE TABLE never
+declares), and every header carried a hand patch for that line. The baseline now
+guards the rename, so the file replays as shipped (measured: 000 → 053 on
+PostgreSQL 16, and through `supabase db push` 2.122.0), and no header may ask
+for a patched copy any more. The 041 header names the two 040 assertions 041
+breaks by design (T4b, T8), measured on a local stack at 040 and at 041.
 """
 
 import pathlib
@@ -21,7 +23,7 @@ _TESTS = _SUPABASE / 'tests'
 _BASELINE = _SUPABASE / 'migrations' / '00000000000000_baseline.sql'
 _EXPECTED_RE = re.compile(r'^-- Expected: (\d+) PASS\b', re.M)
 _LABEL_RE = re.compile(r'PASS (T\d+[a-z]?)\b')
-_UNGUARDED = 'ALTER TABLE public.trainings RENAME COLUMN runpod_job_id TO cloud_job_id;'
+_RENAME = 'ALTER TABLE public.trainings RENAME COLUMN runpod_job_id TO cloud_job_id;'
 
 
 def _header(text: str) -> str:
@@ -47,24 +49,33 @@ class AssertionHeaders(unittest.TestCase):
                              f'{path.name}: header says {match.group(1)}, the file emits '
                              f'{len(labels)} distinct PASS labels')
 
-    def test_every_header_names_the_baseline_patch_and_known_issues(self):
+    def test_no_header_asks_for_a_patched_baseline(self):
         for path in sorted(_TESTS.glob('*_assertions.sql')):
             header = _header(path.read_text(encoding='utf-8'))
             with self.subTest(file=path.name):
-                self.assertIn('docs/KNOWN-ISSUES.md', header)
-                self.assertIn('runpod_job_id', header)
-                self.assertIn('SCRATCH copy', header)
-                # A bare `db reset` on the shipped baseline is exactly what fails.
-                self.assertNotIn('db reset --local', header)
+                # The workaround text of the unreplayable baseline, in any of its spellings.
+                self.assertNotIn('runpod_job_id', header)
+                self.assertNotIn('guarded exactly as', header)
+                self.assertNotIn('NOT replay', header)
+                self.assertNotIn('not replay', header)
+                # Each header still says how its migrations get applied.
+                self.assertTrue('supabase start' in header or 'psql' in header, header[:200])
 
-    def test_the_printed_guard_still_replaces_the_one_baseline_line(self):
-        header = _header((_TESTS / '040_code_programs_assertions.sql').read_text(encoding='utf-8'))
-        self.assertIn(_UNGUARDED, header)
-        self.assertIn("column_name='runpod_job_id'", header)
+    def test_the_baseline_replays_its_005_rename_guarded(self):
         baseline = _BASELINE.read_text(encoding='utf-8')
-        # Exactly one unguarded line to replace; once the baseline itself is
-        # fixed, this fails and the headers' patch paragraph goes.
-        self.assertEqual(baseline.count(_UNGUARDED), 1)
+        # The rename is still there for a database that has the old column...
+        self.assertEqual(baseline.count(_RENAME), 1)
+        # ...but never as a top-level statement: on a fresh database the
+        # CREATE TABLE above it already declares cloud_job_id, and the bare
+        # statement failed with 'column "runpod_job_id" does not exist'.
+        bare = [ln for ln in baseline.splitlines() if ln.startswith(_RENAME)]
+        self.assertEqual(bare, [], 'the 005 rename runs unguarded again')
+        section = baseline[baseline.index('BEGIN: 005_cloud_job_id.sql'):baseline.index('END: 005_cloud_job_id.sql')]
+        block = section[section.index('DO $$'):section.index('END $$;')]
+        self.assertIn(_RENAME, block)
+        self.assertIn("column_name = 'runpod_job_id'", block)
+        self.assertIn("column_name = 'cloud_job_id'", block)
+        self.assertLess(block.index("column_name = 'runpod_job_id'"), block.index(_RENAME))
 
     def test_the_050_header_names_the_049_assertions_050_breaks(self):
         header = _header((_TESTS / '050_training_continuation_assertions.sql').read_text(encoding='utf-8'))

@@ -137,8 +137,19 @@ class TestOriginCheck(unittest.TestCase):
         h.headers = {"Origin": origin}
         return h._origin_allowed()
 
-    def test_empty_origin_allowed(self):
-        self.assertTrue(self._origin_allowed(""))
+    def test_empty_origin_refused(self):
+        """SA-21 (2026-11-13): every browser POST carries an Origin, so an
+        Origin-less POST is another local process (or another Windows user on
+        a shared PC). It may not restart the arm container."""
+        self.assertFalse(self._origin_allowed(""))
+
+    def test_a_missing_origin_header_is_refused_too(self):
+        srv = RoboterStudioControlServer(
+            on_set_mode=lambda fo, log: (True, "ok"), get_status=lambda: {})
+        handler_cls = srv._make_handler()
+        h = handler_cls.__new__(handler_cls)
+        h.headers = {}
+        self.assertFalse(h._origin_allowed())
 
     def test_localhost_allowed(self):
         # The origins the app really sends. The SPA is served from
@@ -210,6 +221,47 @@ class TestOriginCheck(unittest.TestCase):
                          {"localhost", "127.0.0.1"})
         self.assertEqual(set(rsc._ALLOWED_ORIGIN_SCHEMES), {"http", "https"})
         self.assertEqual(set(rsc._ALLOWED_ORIGIN_PORTS), {None, 80})
+
+
+
+class TestEmptyOriginOverTheWire(unittest.TestCase):
+    """SA-21 (2026-11-13), through a real socket: a local process that POSTs
+    without an Origin restarts nothing; the SPA's Origin still works."""
+
+    def setUp(self):
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        self.calls = []
+        self.srv = RoboterStudioControlServer(
+            on_set_mode=lambda fo, log: (self.calls.append(fo) or (True, "ok")),
+            get_status=lambda: {"follower_only": False}, port=port)
+        self.assertTrue(self.srv.start())
+        self.addCleanup(self.srv.stop)
+        self.base = f"http://127.0.0.1:{port}"
+
+    def post(self, path, origin):
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(self.base + path, data=b"", method="POST")
+        if origin is not None:
+            req.add_header("Origin", origin)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    def test_no_origin_is_refused_and_nothing_restarts(self):
+        self.assertEqual(self.post("/roboter-studio/leader-disable", None), 403)
+        self.assertEqual(self.post("/roboter-studio/leader-disable", ""), 403)
+        self.assertEqual(self.calls, [])
+
+    def test_the_spa_origin_still_switches(self):
+        self.assertEqual(self.post("/roboter-studio/leader-disable", "http://localhost"), 200)
+        self.assertEqual(self.calls, [True])
 
 
 if __name__ == "__main__":

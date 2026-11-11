@@ -31,9 +31,8 @@
 #     always-on wizard host; code_runner, the fourth, arrived 2026-09-21 in
 #     lockstep with the student file), the ${EDUBOTICS_BIND_HOST}-driven port
 #     bindings (the agent's `.env` regenerate maps EDUBOTICS_LAN_OPEN onto
-#     0.0.0.0 vs 127.0.0.1) — with ONE deliberate exception, the debug
-#     :9090/:8080 publishes, which are loopback-PINNED because rosbridge is
-#     unauthenticated (see the physical_ai_server ports block) — the
+#     0.0.0.0 vs 127.0.0.1; physical_ai_server publishes NOTHING since
+#     SA-05, see its block), the
 #     pinned-but-configurable ros_net IPAM
 #     block (the /api/system reverse proxy targets the gateway
 #     deterministically), and EDUBOTICS_CAMERA_SOURCE pinned to usb_cam.
@@ -321,6 +320,15 @@ services:
         condition: service_healthy
     tty: true
     restart: "no"
+    # Launch plan step 8 (2026-11-10): an environment stop during a recording
+    # finalizes the session (its saved episodes survive, nothing is uploaded)
+    # before the node exits. The node waits for that at most 30 s, the launch
+    # SIGKILLs it 40 s after its SIGINT (sigterm_timeout 10 + sigkill_timeout 30,
+    # physical_ai_server.launch.py); docker's default 10 s would SIGKILL a
+    # finalize on a slow Pi. The grace is a ceiling, not a wait: a node with
+    # nothing to finalize exits as soon as it gets its SIGINT.
+    # robotis_ai_setup/tests/test_recording_stop_budget.py holds the chain.
+    stop_grace_period: 50s
     cap_add:
       - SYS_NICE
     ulimits:
@@ -329,46 +337,28 @@ services:
       memlock: 2147483648
     networks:
       - ros_net
-    ports:
-      # DEBUG ONLY since the port-80 consolidation: the React app reaches
-      # rosbridge + web_video_server SAME-ORIGIN through the manager nginx
-      # (/rosbridge + /video/ in nginx.opi.conf.template, proxied
-      # container-to-container over ros_net) so a school firewall only ever
-      # has to pass port 80. Nothing the student uses reads these publishes.
-      #
-      # LOOPBACK-PINNED, DELIBERATELY NOT ${EDUBOTICS_BIND_HOST}. This is the
-      # ONE ports entry on the Pi that does not follow that variable, and the
-      # divergence is the security property — do not "harmonise" it with the
-      # manager block below.
-      #
-      # An earlier revision of this comment claimed "Unpublishing 8080/9090
-      # hardens nothing" because the proxy already carries the LAN. That was
-      # REFUTED BY EXECUTION (2026-08-08): rosbridge_server 2.7.0's
-      # `check_origin` is literally `return True`, so with these ports on
-      # 0.0.0.0 a handshake carrying `Origin: http://evil.example` straight to
-      # :9090 returns 101 and yields a working session — measured by
-      # publishing to /leader/joint_trajectory from that session and reading
-      # the move back with `ros2 topic echo` inside this container. Any web
-      # page a student had open could drive the arm. That made the manager's
-      # own `location = /rosbridge` Origin gate unreachable by an attacker who
-      # simply skips it, i.e. the same "the proxy would be theatre" reasoning
-      # the student compose records for its own removed publishes.
-      #
-      # LAN_OPEN still drives the MANAGER's :80 (see its ports block) and MUST
-      # keep doing so — =0 is kiosk mode with a local monitor, never a
-      # hardening knob, and forcing it would make every Pi unreachable.
-      #
-      # DEBUG SURVIVES, over the transport it should always have used: `ssh
-      # -L 9090:127.0.0.1:9090 <pi>` then wscat/ros2 from the laptop. What is
-      # gone is the un-tunnelled LAN fallback if the nginx proxy ever breaks;
-      # the repair surface for that is the always-on manager wizard plus ssh,
-      # not an unauthenticated arm-command port on the school network.
-      #
-      # The healthcheck below is unaffected — it probes 127.0.0.1:9090 from
-      # INSIDE this container, and nginx reaches rosbridge as
-      # `physical_ai_server:9090` over ros_net. Neither reads a host publish.
-      - "127.0.0.1:8080:8080"
-      - "127.0.0.1:9090:9090"
+    # NO host publish (SA-05, 2026-11-13). The React app reaches rosbridge,
+    # web_video_server and the dataset sidecar SAME-ORIGIN through the manager
+    # nginx (/rosbridge, /video/stream, /daten-api/ in nginx.opi.conf.template,
+    # proxied container-to-container over ros_net and gated by the robot login),
+    # so a school firewall only ever passes port 80 and nothing here needs a
+    # host port.
+    #
+    # The `127.0.0.1:9090` / `127.0.0.1:8080` debug publishes that used to sit
+    # here are GONE, and they must not come back: Docker before 28.0 (the Pi
+    # pins 27.5.1) installs a DOCKER-chain ACCEPT for a published container
+    # port whatever host address it is bound to, so a LAN host that routes the
+    # ros_net subnet via the Pi could reach rosbridge (`check_origin` is
+    # literally `return True`) and web_video_server WITHOUT passing nginx or the
+    # robot login (security audit SA-05; not measured on a Pi yet, rig gate in
+    # docs/KNOWN-ISSUES.md). The agent's firewall step (pi_agent/firewall.py)
+    # also drops such routed packets; the two are independent layers.
+    #
+    # Debugging uses `docker exec -it physical_ai_server bash` (ros2 CLI inside
+    # the container), or a LOCAL compose override file on the Pi that is never
+    # shipped. The healthcheck below probes 127.0.0.1:9090 from INSIDE this
+    # container, and nginx reaches rosbridge as `physical_ai_server:9090` over
+    # ros_net; neither reads a host publish.
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
       # Per-student Hugging Face token (042): the SPA pushes it over /register_hf_user
@@ -604,6 +594,20 @@ services:
       # runner.sock (0600). No depends_on on the runner: without it every
       # code run is refused in German and Blockly is untouched.
       - code_runner_ipc:/run/edubotics/code
+      # The robot's PUBLIC token key for the pi-agent (verification round B,
+      # VB-03, 2026-11-15). The node writes /run/edubotics-robot-key/
+      # hf_token_key.json at its start (hf_token_crypto.write_key_file); the
+      # agent serves it behind the robot login (GET /api/system/robot-key), and
+      # the Pi's page encrypts the student's Hugging Face token ONLY for that
+      # key — a rosbridge session can forge /edubotics/hf_token_state, but not
+      # this file. A host path under /run (tmpfs: gone after a reboot, like the
+      # node's key). The agent creates the directory before every robot-tier
+      # `up` (docker_manager._compose_up → robot_key.ensure_dir), so a fielded
+      # Pi gets it with its next self-update; were it missing anyway, Docker
+      # creates it root-owned, which the agent (root) reads too. The student
+      # (Windows) compose has no such mount: there the page keeps the topic's
+      # key on loopback. tests/test_robot_key_file_lockstep.py holds the path.
+      - /run/edubotics-robot-key:/run/edubotics-robot-key
     tmpfs:
       # The per-student Hugging Face token slot ($HF_TOKEN_PATH above). A tmpfs
       # survives a node respawn (same container) but vanishes with the container,

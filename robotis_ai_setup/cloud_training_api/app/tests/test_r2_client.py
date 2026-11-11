@@ -1,4 +1,4 @@
-"""r2_client against REAL botocore (spec §3.4, FR-11: CI installs boto3/botocore 1.43.107).
+"""r2_client against REAL botocore (spec §3.4, FR-11: CI installs the boto3/botocore that requirements.txt pins).
 
 A presigned PUT signs exactly content-length;content-type;host;x-amz-checksum-sha256
 (the manifest's SHA-256) and never Content-MD5: R2 refuses Content-MD5 together with
@@ -20,7 +20,9 @@ import importlib.util
 import io
 import json
 import os
+import re
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
@@ -30,8 +32,20 @@ _HAVE_BOTO = importlib.util.find_spec("boto3") is not None and importlib.util.fi
 ENV = {"R2_ENDPOINT_URL": "https://0123456789abcdef.eu.r2.cloudflarestorage.com", "R2_ACCESS_KEY_ID": "test-access-key",
        "R2_SECRET_ACCESS_KEY": "test-secret", "R2_BUCKET": "edubotics-train"}
 
+REQUIREMENTS = Path(__file__).resolve().parents[2] / "requirements.txt"
+
+
+def _shipped(name: str) -> str:
+    """The version the API ships (requirements.txt, which Dependabot may move);
+    tests/test_ci_supply_chain_pins.py holds ci.yml's installs equal to it."""
+    (version,) = re.findall(rf"^{re.escape(name)}==([0-9][0-9A-Za-z.]*)$",
+                            REQUIREMENTS.read_text(encoding="utf-8"), re.M)
+    return version
+
+
 if not _HAVE_BOTO and os.environ.get("GITHUB_ACTIONS") == "true":
-    raise ImportError("boto3/botocore 1.43.107 must be installed in CI (ci.yml python-tests, FR-11)")
+    raise ImportError("boto3/botocore at the versions requirements.txt pins must be installed in CI "
+                      "(ci.yml python-tests, FR-11)")
 
 
 class KeyLayout(unittest.TestCase):
@@ -89,7 +103,7 @@ class RealBotocore(unittest.TestCase):
         import boto3
         import botocore
 
-        self.assertEqual((boto3.__version__, botocore.__version__), ("1.43.107", "1.43.107"))
+        self.assertEqual((boto3.__version__, botocore.__version__), (_shipped("boto3"), _shipped("botocore")))
 
     def test_the_client_settings(self):
         c = r2_client._client()

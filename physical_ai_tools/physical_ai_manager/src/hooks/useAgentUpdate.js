@@ -1,7 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 //
 // Shared pi-agent update driver — the ACK-early POST /api/system/update + the
 // 404-tolerant status poll, factored out of SystemPage so the System window
@@ -14,6 +14,7 @@
 // reloads the SPA on the new buildId once the manager is back.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { noteUnauthorized } from '../features/piAuth/piAuth';
 
 // Same-origin agent fetch (mirrors SystemPage.sysFetch). One connection through
 // the opi manager's nginx reverse proxy (trailing-slash proxy_pass strips the
@@ -25,6 +26,8 @@ async function sysFetch(path, { method = 'GET', body } = {}) {
     opts.body = JSON.stringify(body);
   }
   const res = await fetch(`/api/system${path}`, opts);
+  // The robot login: a 401 means the session is gone — re-check it.
+  if (res.status === 401) noteUnauthorized();
   let data = {};
   try {
     data = await res.json();

@@ -65,3 +65,12 @@ fccbeb9287d684040604fbebded142f5dd3dd5ce:.gitleaksignore:generic-api-key:52
 #    The commit lives only on that pushed branch, but CI's full-history scan reads
 #    every fetched ref, so it failed every PR until this line (measured 2026-11-01).
 c4e72e2e8cc7df6559225f46e008b983687d8ec3:robotis_ai_setup/tests/test_servo_station_cloud.py:generic-api-key:28
+#
+# 8. Orange Pi robot login (launch plan step 3, 2026-11-09): the real-nginx
+#    login test sent RFC 6455 section 1.3's public sample Sec-WebSocket-Key
+#    ("the sample nonce", base64) as a literal. Not a credential;
+#    generic-api-key false positive. The file now builds the value at run time
+#    (`_WEBSOCKET_SAMPLE_KEY`), but CI's full-history scan still reads the
+#    commit that added the literal (measured 2026-11-12 with the pinned 8.28.0:
+#    1 leak before this line, 0 after).
+7cf0a70d205da63ced63af656d1c065d3d59779d:robotis_ai_setup/tests/test_pi_login_nginx.py:generic-api-key:239

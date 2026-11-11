@@ -7,9 +7,9 @@ dependency in the agent's self-update path).
 Two update surfaces exist on the Pi and they are deliberately kept separate:
 
   * **Container images** (`*-opi:latest`) update through
-    ``docker_manager``'s arm64 digest set-membership pre-check (the jetson
-    twins of ``_get_remote_digest_candidates`` / ``_parse_digest_candidates``,
-    ``jetson_agent/agent.py:210-283``) — NOT here. This module never inspects
+    ``docker_manager``'s arm64 digest set-membership pre-check
+    (``_get_remote_digest_candidates`` / ``_parse_digest_candidates``) — NOT
+    here. This module never inspects
     image digests.
   * **The agent itself** updates from a SHA-256-verified GitHub-Release
     tarball (``edubotics-pi-agent.tar.gz``), which is what this module

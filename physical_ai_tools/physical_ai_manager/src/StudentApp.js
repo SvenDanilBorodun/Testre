@@ -1,4 +1,5 @@
-// Copyright 2025 EduBotics
+// Copyright 2025 ROBOTIS CO., LTD.
+// Modifications copyright 2026 Sven Danil Borodun (EduBotics)
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,6 +29,9 @@ import SystemPage from './pages/SystemPage';
 import LoginForm from './components/LoginForm';
 import CollisionModal from './components/CollisionModal';
 import PiUpdateGate from './components/PiUpdateGate';
+import PiClaimScreen from './components/PiClaimScreen';
+import PiLoginNotice from './components/PiLoginNotice';
+import DeletionRequestNotice from './components/DeletionRequestNotice';
 import StartupGate from './components/StartupGate';
 import { Avatar, LogoMark } from './components/EbUI';
 import { BrandMark } from './components/sucher';
@@ -41,7 +45,6 @@ import { useHeartbeatWatchdog } from './hooks/useHeartbeatWatchdog';
 import rosConnectionManager from './utils/rosConnectionManager';
 import { shallowEqual, useDispatch, useSelector } from 'react-redux';
 import { setRosHost } from './features/ros/rosSlice';
-import { clearCapabilities } from './features/tasks/taskSlice';
 import { moveToPage } from './features/ui/uiSlice';
 import PageType from './constants/pageType';
 import { supabase } from './lib/supabaseClient';
@@ -60,6 +63,13 @@ import {
 import { isCapabilityVisible, robotGateDecision } from './utils/navGating';
 import { studentAuthGateDecision } from './utils/authGate';
 import { usePiMode } from './utils/piMode';
+import {
+  ensurePiSession,
+  piLoginOf,
+  setPiAccessToken,
+  startPiAuth,
+  usePiAuth,
+} from './features/piAuth/piAuth';
 import Icon from './components/icons/Icon';
 import { releasePointerFocus } from './components/Record/ActionBar';
 
@@ -89,43 +99,47 @@ function StudentApp() {
   // below, which only fires once the profile actually loaded.
   const isAuthenticated = useSelector((state) => state.auth.isAuthenticated);
   const isAuthLoading = useSelector((state) => state.auth.isLoading);
-  // True iff the student currently holds the lock on the classroom Jetson
-  // (state.jetson.status === 'connected'). When set, Aufnahme + Roboter
-  // Studio are filtered out of the sidebar (see navItems below) because
-  // those tabs need the LOCAL rosbridge — which the Jetson connection has
-  // overridden.
-  const jetsonConnected = useSelector((state) => state.jetson.status === 'connected');
-
-  // On classroom-Jetson RELEASE (connected → not connected) the rosbridge
-  // re-points back to the LOCAL rig. Clear the capability manifest + profile so
-  // the nav capability filter — skipped only WHILE connected, and re-activated
-  // the instant this flag flips false — never runs against the Jetson's stale
-  // omx_follower caps (which would wrongly hide Aufnahme/Daten/Training until the
-  // local idle identity tick re-delivers, ~2-3 s; indefinitely on a degraded
-  // local rig). Null caps hide NOTHING, so every tab stays visible during the
-  // re-handshake window. Belt-and-suspenders with the hook's
-  // do-not-adopt-caps-while-jetson guard.
-  const prevJetsonConnectedRef = useRef(jetsonConnected);
-  useEffect(() => {
-    if (prevJetsonConnectedRef.current && !jetsonConnected) {
-      dispatch(clearCapabilities());
-    }
-    prevJetsonConnectedRef.current = jetsonConnected;
-  }, [jetsonConnected, dispatch]);
   const cloudOnly = isCloudOnlyMode();
   // Orange Pi: the System tab (the in-browser setup wizard) is revealed once the
-  // baked /pi-mode.json marker resolves — progressive reveal, exactly like the
-  // Jetson-gated tabs.
+  // baked /pi-mode.json marker resolves (progressive reveal).
   const { piMode, piModeResolved } = usePiMode();
   const currentRosHost = useSelector((state) => state.ros.rosHost);
 
+  // Orange Pi ROBOT LOGIN (features/piAuth, 2026-11-10). Every robot transport
+  // on a Pi needs a robot session the agent mints for an EduBotics login, so on
+  // a Pi: start the login, hand it the Supabase token on every change (a new
+  // token re-exchanges), and gate the rosbridge connection on it. Declared
+  // BEFORE the rosbridge seed below on purpose: effects run in order, so the
+  // gate is in place before the first URL that can open a socket exists.
+  // Off a Pi none of this runs and nothing changes.
+  const piAuth = usePiAuth();
+  const piLogin = piMode ? piLoginOf(piAuth) : 'none';
+  const sessionAccessToken = useSelector((state) => state.auth.session?.access_token ?? null);
+  const authLoadingForPi = useSelector((state) => state.auth.isLoading);
+  useEffect(() => {
+    if (!piModeResolved || !piMode) return undefined;
+    startPiAuth();
+    rosConnectionManager.setConnectGate(ensurePiSession);
+    return () => rosConnectionManager.setConnectGate(null);
+  }, [piMode, piModeResolved]);
+  useEffect(() => {
+    if (!piModeResolved || !piMode) return;
+    setPiAccessToken(sessionAccessToken, { resolved: !authLoadingForPi });
+  }, [piMode, piModeResolved, sessionAccessToken, authLoadingForPi]);
+  // On a Pi that requires the robot login, ANY account may use the robot,
+  // the System tab included (owner decision 2), and a teacher or admin is who
+  // claims an unclaimed one (decision 3). So the student app's wrong-role
+  // bounce is off there; the pages other than System still say why a teacher
+  // account sees nothing (blockRoleMismatch below).
+  const piLoginActive = piMode && (piLogin === 'required' || piLogin === 'unclaimed');
+  const piLoginActiveRef = useRef(piLoginActive);
+  piLoginActiveRef.current = piLoginActive;
+
   // Initialise the local rosbridge host ONCE, not on every render. The
   // previous body-level `dispatch(setRosHost(...))` ran every render and
-  // setRosHost overwrites both rosHost AND rosbridgeUrl (rosSlice:31-34),
-  // which clobbered the Jetson URL back to localhost the instant any
-  // Redux state changed. Net result: Jetson connection couldn't survive
-  // a single re-render. Now we only seed the local host when it isn't
-  // yet set and the student isn't currently routing to a Jetson.
+  // setRosHost overwrites both rosHost AND rosbridgeUrl, so the URL was
+  // rewritten on every Redux change. Now we only seed the local host when it
+  // isn't yet set.
   //
   // Gated on piModeResolved. This gate was added when setRosHost derived
   // the rosbridge URL Pi-aware (same-origin /rosbridge proxy vs direct
@@ -143,10 +157,9 @@ function StudentApp() {
   useEffect(() => {
     if (cloudOnly) return;
     if (!piModeResolved) return;
-    if (jetsonConnected) return;
     if (currentRosHost === defaultRosHost) return;
     dispatch(setRosHost(defaultRosHost));
-  }, [cloudOnly, piModeResolved, jetsonConnected, currentRosHost, defaultRosHost, dispatch]);
+  }, [cloudOnly, piModeResolved, currentRosHost, defaultRosHost, dispatch]);
 
   const page = useSelector((state) => state.ui.currentPage);
   const robotType = useSelector((state) => state.tasks.taskStatus.robotType);
@@ -261,7 +274,7 @@ function StudentApp() {
   // tab's "Erneut versuchen" button calls) is shared.
   const handleProfile = useCallback(
     (me) => {
-      if (me.role !== 'student') {
+      if (me.role !== 'student' && !piLoginActiveRef.current) {
         toast.error(
           'Dieses Konto ist für die Web-App. Bitte nutze die Lehrer-URL.',
           { duration: 6000 }
@@ -279,7 +292,7 @@ function StudentApp() {
   // Keeps the robot's token slot equal to the signed-in student's account:
   // reads GET /me/hf-token, subscribes to the robot's slot state and pushes or
   // clears the token (never stored here). Inert until the profile has loaded;
-  // off in cloud-only mode and while a classroom Jetson is claimed. When the
+  // off in cloud-only mode. When the
   // robot first holds exactly this student's token the Benutzer-ID list can be
   // loaded, so it hands `reloadHfUsers` over for that moment.
   useHfTokenSync({ onRobotTokenReady: reloadHfUsers });
@@ -405,51 +418,34 @@ function StudentApp() {
   // here would tear down freshly-mounted stream components in
   // sibling subtrees (the bug §F27 calls out).
 
-  // When the student is connected to a classroom Jetson, the rosbridge
-  // URL points at the Jetson — so Aufnahme (needs leader-arm teleop) and
-  // Roboter Studio (needs Workshop services not present on Jetson) would
-  // both fail. We hide them with the same mechanism cloud-only mode uses:
-  // mark them as `jetsonIncompatible` and filter out when the Jetson lock
-  // is held.
-  //
-  // Inferenz is intentionally NOT `hardwareOnly` — v2.3.0 added the
-  // classroom Jetson as a remote inference target, so a cloud-only
-  // student (no local follower) still has a viable Inferenz path via
-  // claim → Jetson runs the policy. The JetsonAvailabilityChip on the
-  // page gracefully renders the "Kein Klassen-Jetson in diesem Raum"
-  // state when no Jetson is paired, so it's safe to leave the tab
-  // visible even in environments with no robot at all.
-  // Each tab carries its `capabilityKey`; the third filter below hides a tab
-  // only when the server capability manifest sets that key to an explicit
+  // `hardwareOnly` tabs need the local robot and are hidden in cloud-only
+  // mode. Inferenz is one of them: it runs the model „In der Cloud" while the
+  // arm stays at THIS robot, so `?cloud=1` (no robot) has nothing to drive.
+  // Each tab carries its `capabilityKey`; the capability filter below hides a
+  // tab only when the server capability manifest sets that key to an explicit
   // `false` (omx_follower hides Aufnahme/Daten/Training). Unknown/null caps
-  // hide NOTHING, and the whole capability filter is SKIPPED in Jetson mode
-  // (D9) — caps describe the LOCAL rig, so Training stays visible on a Jetson.
+  // hide NOTHING.
   const navItems = [
     { key: PageType.HOME, label: 'Start', icon: 'home', onClick: handleHomePageNavigation },
-    { key: PageType.RECORD, label: 'Aufnahme', icon: 'video', onClick: handleRecordPageNavigation, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'recordable' },
+    { key: PageType.RECORD, label: 'Aufnahme', icon: 'video', onClick: handleRecordPageNavigation, hardwareOnly: true, capabilityKey: 'recordable' },
     { key: PageType.TRAINING, label: 'Training', icon: 'chart', onClick: handleTrainingPageNavigation, capabilityKey: 'trainable' },
-    // Inferenz carries NO capabilityKey — it is ALWAYS visible (documented
-    // invariant): hiding it would also hide the classroom-Jetson claim UI that a
-    // cloud/follower-only student needs. v1_studio is inferable=false, yet the
-    // tab MUST stay so that student can still claim a classroom Jetson; its local
-    // inference start is refused downstream (no-GPU gate), not by this nav filter.
-    // The capability filter must never gate it.
-    { key: PageType.INFERENCE, label: 'Inferenz', icon: 'cpu', onClick: handleInferencePageNavigation },
+    // Inferenz carries NO capabilityKey: on a robot that cannot run models
+    // (v1_studio, inferable=false) the cloud panel says so in German instead of
+    // the tab vanishing.
+    { key: PageType.INFERENCE, label: 'Inferenz', icon: 'cpu', onClick: handleInferencePageNavigation, hardwareOnly: true },
     // Daten 2.0 (spec §G1): the robot's datasets — nothing to show in cloud
     // mode (`hardwareOnly`), the mockup's database icon.
-    { key: PageType.EDIT_DATASET, label: 'Daten', icon: 'database', onClick: handleEditDatasetPageNavigation, sep: true, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'editable' },
-    { key: PageType.WORKSHOP, label: 'Roboter Studio', icon: 'blocks', onClick: handleWorkshopPageNavigation, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'roboter_studio' },
+    { key: PageType.EDIT_DATASET, label: 'Daten', icon: 'database', onClick: handleEditDatasetPageNavigation, sep: true, hardwareOnly: true, capabilityKey: 'editable' },
+    { key: PageType.WORKSHOP, label: 'Roboter Studio', icon: 'blocks', onClick: handleWorkshopPageNavigation, hardwareOnly: true, capabilityKey: 'roboter_studio' },
     // Pi-only: the in-browser setup wizard (arms/cameras/token, Umgebung
     // starten, Update, Reset, Protokoll, Netzwerk-Check). Not hardwareOnly
-    // (its own „Cloud-Modus" checkbox handles that) and not jetsonIncompatible
-    // (it controls the Pi itself, independent of a Jetson claim). It carries no
+    // (its own „Cloud-Modus" checkbox handles that). It carries no
     // capabilityKey, so isCapabilityVisible always keeps it — the piMode filter
     // is its sole gate.
     { key: PageType.SYSTEM, label: 'System', icon: 'settings', onClick: handleSystemPageNavigation, sep: true, piOnly: true },
   ]
     .filter((n) => !cloudOnly || !n.hardwareOnly)
-    .filter((n) => !jetsonConnected || !n.jetsonIncompatible)
-    .filter((n) => isCapabilityVisible(n, { jetsonConnected, caps }))
+    .filter((n) => isCapabilityVisible(n, { caps }))
     .filter((n) => piMode || !n.piOnly);
 
   // Who is signed in. On a shared Windows account this is the only answer to
@@ -478,7 +474,8 @@ function StudentApp() {
     ? `Abmelden (${identity})`
     : 'Abmelden';
 
-  const blockRoleMismatch = profileLoaded && role && role !== 'student';
+  const blockRoleMismatch = profileLoaded && role && role !== 'student'
+    && !(piLoginActive && page === PageType.SYSTEM);
 
   const authGate = studentAuthGateDecision({
     isAuthLoading,
@@ -486,6 +483,7 @@ function StudentApp() {
     offlineOverride,
     piMode,
     page,
+    piLogin,
   });
 
   return (
@@ -615,22 +613,37 @@ function StudentApp() {
                 sessionScope.test.js pins by exact count lives in the rail or
                 the mobile header, both outside <main>. */}
         <main className="flex-1 flex flex-col min-h-0 min-w-0 relative overflow-hidden">
+          <PiLoginNotice piMode={piMode} />
+          {/* An open GDPR deletion request (launch plan step 5): when, by when,
+              and the withdrawal. Only once the student is through the gate. */}
+          {authGate === 'app' && <DeletionRequestNotice />}
           {authGate === 'loading' ? (
             <div className="flex items-center justify-center h-full">
               <div className="text-[var(--ink-3)] text-lg">Laden…</div>
             </div>
+          ) : authGate === 'claim' ? (
+            <PiClaimScreen />
           ) : authGate === 'login' ? (
             <LoginForm
               subtitle="Anmelden, um mit deinem Roboter zu arbeiten"
-              footerHint="Noch kein Konto? Bitte frag deine Lehrkraft."
-              onOfflineContinue={() => setOfflineOverride(true)}
+              footerHint={
+                piLogin === 'required'
+                  ? 'Noch kein Konto? Bitte frag deine Lehrkraft. Dieser Roboter braucht eine Anmeldung mit Internetverbindung.'
+                  : 'Noch kein Konto? Bitte frag deine Lehrkraft.'
+              }
+              // No escape on a Pi that requires the robot login: without a
+              // login every robot transport refuses (utils/authGate).
+              onOfflineContinue={
+                piMode && piLogin === 'required' ? null : () => setOfflineOverride(true)
+              }
             />
           ) : blockRoleMismatch ? (
             <div className="flex flex-col items-center justify-center h-full p-10 text-center">
               <h2 className="text-xl font-bold text-[var(--ink)] mb-2">Falsches Konto</h2>
               <p className="text-[var(--ink-3)] max-w-md">
-                Dieses Konto ist für die Web-App gedacht. Bitte melde dich mit einem
-                Schüler-Konto auf diesem Gerät an.
+                {piLoginActive
+                  ? 'Mit einem Lehrkräfte- oder Admin-Konto ist an diesem Roboter nur das System-Fenster nutzbar. Für Aufnahme, Training und Roboter Studio bitte mit einem Schüler-Konto anmelden.'
+                  : 'Dieses Konto ist für die Web-App gedacht. Bitte melde dich mit einem Schüler-Konto auf diesem Gerät an.'}
               </p>
             </div>
           ) : page === PageType.HOME ? (

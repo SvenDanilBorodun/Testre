@@ -21,6 +21,7 @@ export's keys are pinned in test_me_export.py.
 from __future__ import annotations
 
 import ast
+import asyncio
 import importlib.util
 import os
 import uuid
@@ -172,9 +173,13 @@ class RouteBase(unittest.IsolatedAsyncioTestCase):
         for cm in reversed(self._cms):
             cm.__exit__(None, None, None)
 
-    async def refused(self, coro):
+    async def refused(self, call):
+        """``call`` is a coroutine (an async route) or a zero-argument callable (a
+        plain ``def`` route since 2026-11-10, test_event_loop_not_blocked.py)."""
         with self.assertRaises(HTTPException) as ctx:
-            await coro
+            result = call() if callable(call) else call
+            if asyncio.iscoroutine(result):
+                await result
         return ctx.exception.status_code, ctx.exception.detail
 
 
@@ -252,7 +257,7 @@ class Start(StartBase):
         # MANAGED_ACT_CAP_S=3600: the start asks for at most 1 hour (cap_hours(), never a literal 3)
         with patch.object(D, "SETTINGS", settings(TRAINING_DISPATCH="managed", MANAGED_ACT_CAP_S="3600")):
             resp = dump(await self.start())
-            q = dump(await route.get_quota(user=USER))
+            q = dump(route.get_quota(user=USER))
         (call,) = self.db.calls("start_training_safe")
         self.assertEqual((call["p_max_hours"], resp["reserved_hours"]), (1, 1))
         self.assertEqual(q["max_hours_per_training"], 1)
@@ -266,7 +271,7 @@ class Start(StartBase):
 
 class Quota(StartBase):
     async def quota(self):
-        return dump(await route.get_quota(user=USER))
+        return dump(route.get_quota(user=USER))
 
     async def test_the_shape_with_the_legacy_keys(self):
         self.db.hours[("student", "u-1")] = 7
@@ -359,7 +364,7 @@ class StopOutcomes(RouteBase):
 
 class TeacherHours(RouteBase):
     async def change(self, delta, sid=STUDENT, **body):
-        resp = await teacher_route.adjust_credits(sid, body={"delta": delta, **body}, teacher=T_)
+        resp = teacher_route.adjust_credits(sid, body={"delta": delta, **body}, teacher=T_)
         return dump(resp)
 
     async def test_assign_and_reclaim(self):
@@ -382,8 +387,8 @@ class TeacherHours(RouteBase):
                  ({"delta": 3, "request_id": "nope"}, (400, C.CREDIT_CHANGE_FAILED_DE))]
         for body, want in cases:
             with self.subTest(body=body):
-                self.assertEqual(await self.refused(teacher_route.adjust_credits(STUDENT, body=body, teacher=T_)), want)
-        self.assertEqual(await self.refused(teacher_route.adjust_credits(STUDENT, body=None, teacher=T_)),
+                self.assertEqual(await self.refused(lambda: teacher_route.adjust_credits(STUDENT, body=body, teacher=T_)), want)
+        self.assertEqual(await self.refused(lambda: teacher_route.adjust_credits(STUDENT, body=None, teacher=T_)),
                          (400, C.CREDIT_CHANGE_FAILED_DE))
         self.assertEqual(self.db.calls("credit_assign") + self.db.calls("credit_reclaim"), [])
 
@@ -395,16 +400,17 @@ class TeacherHours(RouteBase):
         for code, want in cases.items():
             with self.subTest(code=code):
                 self.db.errors["credit_assign"] = [PgError(code)]
-                self.assertEqual(await self.refused(teacher_route.adjust_credits(STUDENT, body={"delta": 1},
+                self.assertEqual(await self.refused(lambda: teacher_route.adjust_credits(STUDENT, body={"delta": 1},
                                                                                  teacher=T_)), want)
 
     async def test_a_foreign_student_is_the_german_404_everywhere(self):
-        for coro in (teacher_route.adjust_credits(FOREIGN_STUDENT, body={"delta": 1}, teacher=T_),
-                     teacher_route.student_credit_history(FOREIGN_STUDENT, before=None, limit=None, teacher=T_),
-                     teacher_route.stop_student_training(FOREIGN_STUDENT, 1, teacher=T_),
-                     teacher_route.student_training_stop_preview(FOREIGN_STUDENT, 1, teacher=T_)):
-            self.assertEqual(await self.refused(coro), (404, "Klassenzimmer nicht gefunden"))
-        self.assertEqual(await self.refused(teacher_route.adjust_credits("nobody", body={"delta": 1}, teacher=T_)),
+        for call in (lambda: teacher_route.adjust_credits(FOREIGN_STUDENT, body={"delta": 1}, teacher=T_),
+                     lambda: teacher_route.student_credit_history(FOREIGN_STUDENT, before=None, limit=None,
+                                                                  teacher=T_),
+                     lambda: teacher_route.stop_student_training(FOREIGN_STUDENT, 1, teacher=T_),
+                     lambda: teacher_route.student_training_stop_preview(FOREIGN_STUDENT, 1, teacher=T_)):
+            self.assertEqual(await self.refused(call), (404, "Klassenzimmer nicht gefunden"))
+        self.assertEqual(await self.refused(lambda: teacher_route.adjust_credits("nobody", body={"delta": 1}, teacher=T_)),
                          (404, C.STUDENT_NOT_FOUND_DE))
         self.assertEqual([n for n, _ in self.db.rpcs], [], "no RPC before the assert")
 
@@ -425,7 +431,7 @@ class TeacherHistory(RouteBase):
         self.db.tables["training_start_refusals"].append(
             {"id": 1, "at": "t", "user_id": STUDENT, "role": "student", "request_kind": "start", "code": "no_hours",
              "model_type": "act"})
-        out = await teacher_route.student_credit_history(STUDENT, before=None, limit=None, teacher=T_)
+        out = teacher_route.student_credit_history(STUDENT, before=None, limit=None, teacher=T_)
         self.assertEqual(set(out), {"entries", "refusals"})
         self.assertEqual([e["id"] for e in out["entries"]], [4, 3, 2, 1], "newest first, only this student")
         by_id = {e["id"]: e for e in out["entries"]}
@@ -447,15 +453,15 @@ class TeacherHistory(RouteBase):
 
     async def test_paging_and_the_own_pool(self):
         self.db.ledger += [ledger_row(i, "grant", 10, to=("teacher", TEACHER), actor_role="admin") for i in (1, 2, 3)]
-        out = await teacher_route.own_credit_history(before=3, limit=500, teacher=T_)
+        out = teacher_route.own_credit_history(before=3, limit=500, teacher=T_)
         self.assertEqual([e["id"] for e in out["entries"]], [2, 1])
         (call,) = self.db.calls("credit_history")
         self.assertEqual((call["p_scope"], call["p_id"], call["p_before"], call["p_limit"]), ("teacher", TEACHER, 3, 200))
         self.assertEqual(out["refusals"], [], "refusals only for a student's history")
-        self.assertEqual(await self.refused(teacher_route.own_credit_history(before="x", limit=None, teacher=T_)),
+        self.assertEqual(await self.refused(lambda: teacher_route.own_credit_history(before="x", limit=None, teacher=T_)),
                          (400, C.HISTORY_FAILED_DE))
         self.db.errors["credit_history"] = [RuntimeError("down")]
-        self.assertEqual(await self.refused(teacher_route.own_credit_history(before=None, limit=None, teacher=T_)),
+        self.assertEqual(await self.refused(lambda: teacher_route.own_credit_history(before=None, limit=None, teacher=T_)),
                          (500, C.HISTORY_FAILED_DE))
 
 
@@ -505,44 +511,44 @@ class TeacherStop(RouteBase):
 
 class WorkgroupHours(RouteBase):
     async def test_assign_to_a_group_and_the_foreign_404(self):
-        out = dump(await wg_route.adjust_workgroup_credits(GROUP, body={"delta": 6}, teacher=T_))
+        out = dump(wg_route.adjust_workgroup_credits(GROUP, body={"delta": 6}, teacher=T_))
         (call,) = self.db.calls("credit_assign")
         self.assertEqual((call["p_target_kind"], call["p_target_id"], call["p_hours"]), ("group", GROUP, 6))
         self.assertEqual(out["new_amount"], 6)
-        self.assertEqual(await self.refused(wg_route.adjust_workgroup_credits(FOREIGN_GROUP, body={"delta": 6},
+        self.assertEqual(await self.refused(lambda: wg_route.adjust_workgroup_credits(FOREIGN_GROUP, body={"delta": 6},
                                                                               teacher=T_)),
                          (404, "Arbeitsgruppe nicht gefunden"))
         self.db.errors["credit_reclaim"] = [PgError("P0066")]
-        self.assertEqual(await self.refused(wg_route.adjust_workgroup_credits(GROUP, body={"delta": -1}, teacher=T_)),
+        self.assertEqual(await self.refused(lambda: wg_route.adjust_workgroup_credits(GROUP, body={"delta": -1}, teacher=T_)),
                          (404, C.WORKGROUP_NOT_FOUND_DE))
 
     async def test_the_member_limit(self):
-        self.assertEqual(await wg_route.set_member_limit(GROUP, body={"hours": 4}, teacher=T_),
+        self.assertEqual(wg_route.set_member_limit(GROUP, body={"hours": 4}, teacher=T_),
                          {"member_limit_hours": 4})
-        self.assertEqual(await wg_route.set_member_limit(GROUP, body={"hours": None}, teacher=T_),
+        self.assertEqual(wg_route.set_member_limit(GROUP, body={"hours": None}, teacher=T_),
                          {"member_limit_hours": None})
         self.assertEqual([c["p_hours"] for c in self.db.calls("credit_set_member_limit")], [4, None])
         for body in ({"hours": 0}, {"hours": 1001}, {"hours": "4"}, {"hours": True}, {}, None):
             with self.subTest(body=body):
-                self.assertEqual(await self.refused(wg_route.set_member_limit(GROUP, body=body, teacher=T_)),
+                self.assertEqual(await self.refused(lambda: wg_route.set_member_limit(GROUP, body=body, teacher=T_)),
                                  (400, C.LIMIT_RANGE_DE))
         for code, want in (("22023", (400, C.LIMIT_RANGE_DE)), ("P0066", (404, C.WORKGROUP_NOT_FOUND_DE)),
                            ("XX000", (500, C.CREDIT_CHANGE_FAILED_DE))):
             self.db.errors["credit_set_member_limit"] = [PgError(code)]
-            self.assertEqual(await self.refused(wg_route.set_member_limit(GROUP, body={"hours": 2}, teacher=T_)), want)
-        self.assertEqual(await self.refused(wg_route.set_member_limit(FOREIGN_GROUP, body={"hours": 2}, teacher=T_)),
+            self.assertEqual(await self.refused(lambda: wg_route.set_member_limit(GROUP, body={"hours": 2}, teacher=T_)), want)
+        self.assertEqual(await self.refused(lambda: wg_route.set_member_limit(FOREIGN_GROUP, body={"hours": 2}, teacher=T_)),
                          (404, "Arbeitsgruppe nicht gefunden"))
 
     async def test_a_foreign_groups_history_is_the_german_404(self):
         self.db.ledger.append(ledger_row(1, "assign", 4, frm=("teacher", OTHER_TEACHER), to=("group", FOREIGN_GROUP)))
-        self.assertEqual(await self.refused(wg_route.workgroup_credit_history(FOREIGN_GROUP, before=None, limit=None,
+        self.assertEqual(await self.refused(lambda: wg_route.workgroup_credit_history(FOREIGN_GROUP, before=None, limit=None,
                                                                               teacher=T_)),
                          (404, "Arbeitsgruppe nicht gefunden"))
         self.assertEqual(self.db.calls("credit_history"), [], "nothing is read before the assert")
 
     async def test_the_group_history_carries_limit_changes(self):
         self.db.ledger.append(ledger_row(1, "limit_change", 0, to=("group", GROUP), meta={"old": None, "new": 4}))
-        out = await wg_route.workgroup_credit_history(GROUP, before=None, limit=None, teacher=T_)
+        out = wg_route.workgroup_credit_history(GROUP, before=None, limit=None, teacher=T_)
         (e,) = out["entries"]
         self.assertEqual((e["kind"], e["limit_old"], e["limit_new"], e["account"]), ("limit_change", None, 4, "group"))
         self.assertEqual(self.db.calls("credit_history")[0]["p_scope"], "group")
@@ -555,7 +561,7 @@ class WorkgroupHours(RouteBase):
 
 class AdminPool(RouteBase):
     async def change(self, delta, tid=TEACHER, **body):
-        return await admin_route.change_teacher_credits(tid, body={"delta": delta, **body}, admin=A_)
+        return admin_route.change_teacher_credits(tid, body={"delta": delta, **body}, admin=A_)
 
     async def test_grant_and_revoke_answer_the_free_pool(self):
         self.assertEqual(await self.change(10, reason="  Schuljahr  ", request_id=REQ),
@@ -573,9 +579,9 @@ class AdminPool(RouteBase):
                  ({"delta": 1, "request_id": "r"}, (400, C.CREDIT_CHANGE_FAILED_DE))]
         for body, want in cases:
             with self.subTest(body=body):
-                self.assertEqual(await self.refused(admin_route.change_teacher_credits(TEACHER, body=body, admin=A_)),
+                self.assertEqual(await self.refused(lambda: admin_route.change_teacher_credits(TEACHER, body=body, admin=A_)),
                                  want)
-        self.assertEqual(await self.refused(admin_route.change_teacher_credits(TEACHER, body=None, admin=A_)),
+        self.assertEqual(await self.refused(lambda: admin_route.change_teacher_credits(TEACHER, body=None, admin=A_)),
                          (400, C.ADMIN_DELTA_RANGE_DE))
         self.assertEqual(await self.refused(self.change(1, tid="not-a-uuid")), (404, C.TEACHER_NOT_FOUND_DE))
         self.assertEqual(self.db.calls("credit_admin_grant"), [])
@@ -611,7 +617,7 @@ class AdminCompensation(RouteBase):
     BODY = {"target_kind": "student", "target_id": STUDENT, "hours": 3, "reason": "GPU-Ausfall"}
 
     async def grant(self, **over):
-        return await admin_route.compensate(body={**self.BODY, **over}, admin=A_)
+        return admin_route.compensate(body={**self.BODY, **over}, admin=A_)
 
     async def test_a_compensation_and_its_reason_in_the_teachers_history(self):
         out = await self.grant(training_id=12, request_id=REQ, reason="  GPU-Ausfall  ")
@@ -622,7 +628,7 @@ class AdminCompensation(RouteBase):
         # the ledger row the function wrote reaches the teacher with its reason
         self.db.ledger.append(ledger_row(1, "compensate", 3, to=("student", STUDENT), actor_id=ADMIN,
                                          actor_role="admin", reason_id=1, reason=call["p_reason"], training_id=12))
-        hist = await teacher_route.student_credit_history(STUDENT, before=None, limit=None, teacher=T_)
+        hist = teacher_route.student_credit_history(STUDENT, before=None, limit=None, teacher=T_)
         self.assertEqual((hist["entries"][0]["reason"], hist["entries"][0]["kind"]), ("GPU-Ausfall", "compensate"))
 
     async def test_every_validation_sentence_in_order(self):
@@ -644,7 +650,7 @@ class AdminCompensation(RouteBase):
         for over, want in cases:
             with self.subTest(over=over):
                 self.assertEqual(await self.refused(self.grant(**over)), want)
-        self.assertEqual(await self.refused(admin_route.compensate(body=None, admin=A_)),
+        self.assertEqual(await self.refused(lambda: admin_route.compensate(body=None, admin=A_)),
                          (400, C.COMPENSATION_TARGET_KIND_DE))
         self.assertEqual(self.db.calls("credit_admin_compensate"), [])
 
@@ -664,25 +670,25 @@ class AdminCompensation(RouteBase):
 class AdminReadsAndReasons(RouteBase):
     async def test_erase_a_reason(self):
         for rid in ("abc", "0", "-3"):
-            self.assertEqual(await self.refused(admin_route.erase_reason(rid, admin=A_)), (404, C.REASON_NOT_FOUND_DE))
-        self.assertEqual(await admin_route.erase_reason("5", admin=A_), {"erased": True})
-        self.assertEqual(await admin_route.erase_reason("5", admin=A_), {"erased": False})
+            self.assertEqual(await self.refused(lambda: admin_route.erase_reason(rid, admin=A_)), (404, C.REASON_NOT_FOUND_DE))
+        self.assertEqual(admin_route.erase_reason("5", admin=A_), {"erased": True})
+        self.assertEqual(admin_route.erase_reason("5", admin=A_), {"erased": False})
         self.assertEqual(self.db.calls("credit_erase_reason")[0], {"p_admin_id": ADMIN, "p_reason_id": 5})
 
     async def test_the_admin_history_carries_the_ids_a_compensation_needs(self):
         self.db.ledger.append(ledger_row(1, "charge", 2, frm=("group", GROUP), member_id=STUDENT, training_id=None,
                                          actor_role="system", reason_id=None))
-        out = await admin_route.admin_credit_history(scope=None, teacher_id=None, before=None, limit=None, admin=A_)
+        out = admin_route.admin_credit_history(scope=None, teacher_id=None, before=None, limit=None, admin=A_)
         (e,) = out["entries"]
         self.assertEqual((e["account_kind"], e["account_id"], e["member_id"], e["actor_role"], e["reason_id"]),
                          ("group", GROUP, STUDENT, "system", None))
-        await admin_route.admin_credit_history(scope="teacher_all", teacher_id=TEACHER, before=None, limit=None,
+        admin_route.admin_credit_history(scope="teacher_all", teacher_id=TEACHER, before=None, limit=None,
                                                admin=A_)
         self.assertEqual(self.db.calls("credit_history")[-1]["p_scope"], "teacher_all")
-        self.assertEqual(await self.refused(admin_route.admin_credit_history(scope="student", teacher_id=None,
+        self.assertEqual(await self.refused(lambda: admin_route.admin_credit_history(scope="student", teacher_id=None,
                                                                              before=None, limit=None, admin=A_)),
                          (400, C.HISTORY_FAILED_DE))
-        self.assertEqual(await self.refused(admin_route.admin_credit_history(scope="teacher_all", teacher_id="x",
+        self.assertEqual(await self.refused(lambda: admin_route.admin_credit_history(scope="teacher_all", teacher_id="x",
                                                                              before=None, limit=None, admin=A_)),
                          (404, C.TEACHER_NOT_FOUND_DE))
 
@@ -691,10 +697,10 @@ class AdminReadsAndReasons(RouteBase):
         for i, uid in enumerate((STUDENT, TEACHER, STUDENT), start=1):
             rows.append({"id": i, "at": f"t{i}", "user_id": uid, "role": "student", "request_kind": "start",
                          "code": "no_hours", "model_type": "act"})
-        out = await admin_route.admin_refusals(user_id=STUDENT, limit=None, admin=A_)
+        out = admin_route.admin_refusals(user_id=STUDENT, limit=None, admin=A_)
         self.assertEqual([r["id"] for r in out["refusals"]], [3, 1])
-        self.assertEqual(await admin_route.admin_refusals(user_id="not-a-uuid", limit=None, admin=A_), {"refusals": []})
-        self.assertEqual(len((await admin_route.admin_refusals(user_id=None, limit=None, admin=A_))["refusals"]), 3)
+        self.assertEqual(admin_route.admin_refusals(user_id="not-a-uuid", limit=None, admin=A_), {"refusals": []})
+        self.assertEqual(len((admin_route.admin_refusals(user_id=None, limit=None, admin=A_))["refusals"]), 3)
 
     async def test_the_teacher_summary_carries_compensated(self):
         self.db.summary[TEACHER] = {"o_free": 5, "o_assigned_free": 3, "o_assigned_reserved": 2, "o_spent": 9,
@@ -704,7 +710,7 @@ class AdminReadsAndReasons(RouteBase):
                           "group_count": 1, "group_credits_total": 2, "hours_spent": 9, "compensated": 4})
         self.db.tables["credit_ledger"].append({"to_id": TEACHER, "to_kind": "teacher", "kind": "migrate",
                                                 "meta": {"old_credits": 30}})
-        rows = [dump(r) for r in await admin_route.list_teachers(admin=A_)]
+        rows = [dump(r) for r in admin_route.list_teachers(admin=A_)]
         me = next(r for r in rows if r["id"] == TEACHER)
         self.assertEqual((me["compensated"], me["hours_spent"], me["old_credits"], me["pool_available"]), (4, 9, 30, 5))
 
@@ -724,11 +730,17 @@ class AdminOnly(unittest.IsolatedAsyncioTestCase):
             with self.subTest(role=role), patch.object(self.auth, "get_user_profile",
                                                        lambda uid, role=role: {"id": uid, "role": role}):
                 with self.assertRaises(HTTPException) as ctx:
-                    await self.auth.get_current_admin(user=SimpleNamespace(id="u"))
+                    await self.auth.get_current_admin(user=SimpleNamespace(id="u", aal="aal2"))
                 self.assertEqual((ctx.exception.status_code, ctx.exception.detail),
                                  (403, "Nur für Administratoren erlaubt."))
         with patch.object(self.auth, "get_user_profile", lambda uid: {"id": uid, "role": "admin"}):
-            self.assertEqual((await self.auth.get_current_admin(user=SimpleNamespace(id="a")))["role"], "admin")
+            # 2026-11-10: an admin route needs a two-factor session (aal2).
+            with self.assertRaises(HTTPException) as ctx:
+                await self.auth.get_current_admin(user=SimpleNamespace(id="a", aal="aal1"))
+            self.assertEqual((ctx.exception.status_code, getattr(ctx.exception, "code", None)),
+                             (403, "mfa_required"))
+            admin = SimpleNamespace(id="a", aal="aal2", claims={"session_id": "s-1"})
+            self.assertEqual((await self.auth.get_current_admin(user=admin))["role"], "admin")
 
     def test_every_credit_route_of_admin_py_depends_on_get_current_admin(self):
         with open(os.path.join(APP, "routes", "admin.py"), encoding="utf-8") as fh:
@@ -736,7 +748,7 @@ class AdminOnly(unittest.IsolatedAsyncioTestCase):
         names = {"change_teacher_credits", "compensate", "erase_reason", "admin_credit_history", "admin_refusals"}
         seen = set()
         for node in ast.walk(tree):
-            if isinstance(node, ast.AsyncFunctionDef) and node.name in names:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names:
                 seen.add(node.name)
                 defaults = [ast.unparse(d) for d in node.args.defaults + node.args.kw_defaults if d is not None]
                 self.assertIn("Depends(get_current_admin)", defaults, node.name)

@@ -59,7 +59,7 @@ Feetech (v1_studio)
     the floor pre-check, the torque-on retry ladder and the single-writer
     trajectory rail; publishing a home trajectory at it from outside would walk
     straight past all four.
-Follower-only OMX (omx_follower, Jetson, a flipped omx_full)
+Follower-only OMX (omx_follower, a flipped omx_full)
     3 s quintic to HOME, then a soft arrival check.
 OMX with a leader
     HOME, then read the leader pose (BOUNDED — the entrypoint's version could
@@ -119,8 +119,8 @@ JOINTS = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1']
 
 #: Follower HOME. MUST stay equal to workflow/handlers/motion.py
 #: HOME_JOINTS_RAD + gripper open — this is the ±pi/2 boot/workflow family, NOT
-#: the deliberately more-folded ±pi/4 collision/Jetson safe home
-#: (collision_monitor.SAFE_HOME_ARM, jetson_agent SAFE_HOME_JOINTS). Two HOME
+#: the deliberately more-folded ±pi/4 collision safe home
+#: (collision_monitor.SAFE_HOME_ARM). Two HOME
 #: families exist on purpose; reconciling them is an ask-first safety change.
 HOME_JOINTS_RAD = [0.0, -1.5707963267948966, 1.5707963267948966, 0.0, 0.0, 0.8]
 

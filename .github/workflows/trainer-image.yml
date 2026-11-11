@@ -39,7 +39,10 @@ jobs:
   build:
     name: Build, smoke-test and push the trainer image
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 90: measured p50 12.0 / p90 12.8 / max 19.2 min on 4-vCPU public runners
+    # (Sept–Nov 2026); a private repository's runners have 2 vCPU / 8 GB, so the
+    # CUDA wheel install and the 12 GB layer push take up to about twice as long.
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write   # push to ghcr.io with GITHUB_TOKEN

@@ -1455,6 +1455,15 @@ def ensure_environment_stopped(log=None) -> bool:
     return True
 
 
+# How long `compose down` may take before the GUI gives up waiting. Compose stops
+# the services one after another (manager → physical_ai_server → open_manipulator),
+# each within its stop_grace_period; physical_ai_server's is 50 s since launch plan
+# step 8 (2026-11-10), because it finalizes a running recording before it exits.
+# 60 s could cut that worst case short while the containers still stop.
+# tests/test_recording_stop_budget.py holds this above the sum of the graces.
+STACK_STOP_TIMEOUT_S = 120
+
+
 def stop_containers(gpu: bool = False) -> bool:
     """Stop all containers via docker compose down."""
     cmd = _docker_cmd(
@@ -1464,7 +1473,7 @@ def stop_containers(gpu: bool = False) -> bool:
     try:
         result = subprocess.run(
             cmd,
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=STACK_STOP_TIMEOUT_S,
             **_SUBPROCESS_KWARGS,
         )
         return result.returncode == 0

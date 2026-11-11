@@ -1,10 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 
 // Every German sentence of the per-student Hugging-Face-Token feature (the
 // Startseite card and the channel to the robot), in one flat table.
@@ -86,7 +83,6 @@ export const HF_TOKEN_COPY = Object.freeze({
     'Ein anderes Konto hat sein Token auf diesen Roboter gelegt. Drücke „Erneut übertragen“, wenn du wieder dran bist.',
   'card.failedNote':
     'Das Token konnte nicht auf den Roboter übertragen werden. Prüfe die Verbindung und versuche es erneut.',
-  'card.jetsonNote': 'Der Klassen-Jetson nutzt ein eigenes Token. Dein Token bleibt gespeichert.',
   'card.errorGeneric': 'Das hat nicht geklappt. Bitte versuche es noch einmal.',
   'card.removeError': 'Das Token konnte nicht entfernt werden. Bitte versuche es noch einmal.',
 
@@ -95,6 +91,34 @@ export const HF_TOKEN_COPY = Object.freeze({
   'robot.noLink': 'Keine Verbindung zum Roboter.',
   'robot.timeout': 'Der Roboter hat nicht rechtzeitig geantwortet.',
   'robot.failed': 'Der Roboter hat das Token nicht angenommen.',
+  // 2026-11-13: the token travels encrypted for the robot's key (hfTokenCrypto).
+  'robot.needsUpdate':
+    'Dieser Roboter kann das Token nicht verschlüsselt empfangen, deshalb wird es nicht übertragen. '
+    + 'Bitte die Roboter-Software im System-Fenster aktualisieren („Aktualisieren“).',
+  'robot.encryptFailed':
+    'Das Token konnte in diesem Browser nicht verschlüsselt werden. Bitte einen aktuellen Browser '
+    + 'verwenden.',
+  // 2026-11-14: the encryption is a lazy chunk (hfTokenSeal.js); a page whose
+  // chunk did not load needs a reload, not another browser.
+  'robot.sealUnavailable':
+    'Die Verschlüsselung für das Token konnte nicht geladen werden. Bitte die Seite neu laden.',
+  // 2026-11-15 (VB-03): on a Pi the key comes from the agent, and the topic
+  // must name the same one.
+  'robot.keyMismatch':
+    'Der Roboter meldet zwei verschiedene Schlüssel für das Token, deshalb wird es nicht übertragen. '
+    + 'Bitte in ein paar Sekunden erneut versuchen. Bleibt es dabei, bitte die Lehrkraft informieren: '
+    + 'Jemand im Netzwerk könnte die Verbindung zum Roboter stören.',
+  'robot.keyUnavailable':
+    'Der Roboter hat seinen Schlüssel für das Token noch nicht bereitgestellt, deshalb wird es nicht '
+    + 'übertragen. Bitte in ein paar Sekunden erneut versuchen; hilft das nicht, die Umgebung im '
+    + 'System-Fenster neu starten.',
+  // 2026-11-15 (verification round C, VC-01/VC-03): the agent that serves the
+  // robot's key did not answer at all, and a push dropped by a clear.
+  'robot.agentUnreachable':
+    'Der Roboter antwortet gerade nicht auf die Frage nach seinem Schlüssel, deshalb wird das Token '
+    + 'nicht übertragen. Bitte die Verbindung zum Roboter prüfen und in ein paar Sekunden erneut versuchen.',
+  'robot.superseded':
+    'Das Token wurde nicht übertragen, weil es gerade vom Roboter entfernt wird.',
 });
 
 /** The sentence for `key`; an unknown key is a programming error, never shown. */

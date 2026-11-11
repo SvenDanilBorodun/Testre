@@ -1,5 +1,5 @@
-# Compose stack run inside the EduBotics WSL distro on student PCs (amd64)
-# and on the classroom Jetson (arm64; via the -jetson images per service).
+# Compose stack run inside the EduBotics WSL distro on student PCs (amd64).
+# The Orange Pi runs its own twin, docker-compose.opi.yml.
 # Image tags are resolved from ${IMAGE_TAG:-latest}; the GUI updates the
 # tag via versions.env. See docs/deploy/PIPELINE.md for the build pipeline.
 #
@@ -38,7 +38,7 @@ services:
       # so the JPEG stream from the Windows GUI is reachable at localhost:5557
       # via the WSL2 NAT localhost-forwarder, but never exposed to the school
       # LAN. Only used when EDUBOTICS_CAMERA_SOURCE=native_bridge (WSL2 student
-      # path); harmless on the Jetson (the GUI simply never connects).
+      # path); harmless elsewhere (the GUI simply never connects).
       - "127.0.0.1:5557:5557"
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
@@ -120,7 +120,7 @@ services:
       # the container. The healthcheck below gates its 2nd-camera topic probe on
       # CAMERA_NAME_2 being non-empty, and entrypoint_omx.sh's usb_cam loop keeps
       # its own internal `:-scene` fallback + the `CAMERA_DEVICE_2` empty-skip, so
-      # the 2-camera classroom/Jetson path (which always sets both names) is
+      # the 2-camera path (which always sets both names) is
       # unchanged. camera_ingest_node.py keys off EDUBOTICS_CAMERA_NAMES, not this.
       - CAMERA_NAME_2=${CAMERA_NAME_2:-}
       # Camera tuning knobs. Without these, entrypoint_omx.sh's
@@ -129,9 +129,9 @@ services:
       # ${VAR} interpolation operates on the YAML only — the container
       # runtime env is whatever this list specifies.
       #
-      # The default here (`yuyv`) is the safe choice for the Jetson
-      # Orin Nano classroom target, which runs on a native USB host
-      # controller and has the bandwidth budget. The student-PC path
+      # The default here (`yuyv`) is the safe choice for a native USB
+      # host controller (native Linux), which has the bandwidth budget.
+      # The student-PC path
       # (WSL2 vhci_hcd) cannot sustain 2×YUYV at 640×480×30 — both
       # cameras crash with `VIDIOC_DQBUF: Select timeout` inside ~5 s.
       # entrypoint_omx.sh detects the WSL2 kernel via `uname -r` and
@@ -154,9 +154,9 @@ services:
       # job stays green. Empty default = auto-detect.
       - EDUBOTICS_HOST_USB_BRIDGE=${EDUBOTICS_HOST_USB_BRIDGE:-}
       # Follower-only mode: student PCs default to 0 (both arms physically
-      # present); the classroom Jetson agent's compose file sets it to 1
-      # because the leader stays at the student's desk. Listed here so
-      # the env-forwarding-guard CI job stays green.
+      # present); the GUI's Roboter-Studio leader switch and the
+      # omx_follower profile set it to 1. Listed here so the
+      # env-forwarding-guard CI job stays green.
       - EDUBOTICS_FOLLOWER_ONLY=${EDUBOTICS_FOLLOWER_ONLY:-0}
       # Explicit student activation (2026-09-07). With this ON (the default)
       # NOTHING moves the arm at container start: entrypoint_omx.sh skips its
@@ -172,8 +172,8 @@ services:
       # Camera capture source. native_bridge = cameras captured natively on
       # the Windows host and streamed in over TCP (WSL2 student path —
       # camera_ingest_node.py republishes them; usbipd cannot sustain UVC at
-      # 30 Hz). usb_cam = in-container V4L2 over usbipd/native USB (Jetson /
-      # native Linux). Empty = auto-detect in entrypoint_omx.sh (WSL2 kernel
+      # 30 Hz). usb_cam = in-container V4L2 over usbipd/native USB (the Orange
+      # Pi / native Linux). Empty = auto-detect in entrypoint_omx.sh (WSL2 kernel
       # ⇒ native_bridge). The GUI writes `native_bridge` explicitly into the
       # student .env so the healthcheck below can branch on it. Setting
       # `usb_cam` is the one-variable rollback to the old usbipd camera path.
@@ -229,6 +229,15 @@ services:
         condition: service_healthy
     tty: true
     restart: "no"
+    # Launch plan step 8 (2026-11-10): an environment stop during a recording
+    # finalizes the session (its saved episodes survive, nothing is uploaded)
+    # before the node exits. The node waits for that at most 30 s, the launch
+    # SIGKILLs it 40 s after its SIGINT (sigterm_timeout 10 + sigkill_timeout 30,
+    # physical_ai_server.launch.py); docker's default 10 s would SIGKILL a
+    # finalize on a slow Pi. The grace is a ceiling, not a wait: a node with
+    # nothing to finalize exits as soon as it gets its SIGINT.
+    # robotis_ai_setup/tests/test_recording_stop_budget.py holds the chain.
+    stop_grace_period: 50s
     cap_add:
       - SYS_NICE
     ulimits:

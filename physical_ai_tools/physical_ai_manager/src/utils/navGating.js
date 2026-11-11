@@ -6,13 +6,9 @@
 // Capability filter for a sidebar nav item. An item is hidden ONLY when its
 // `capabilityKey` is EXPLICITLY false in the server capability manifest.
 // Unknown/null caps (pre-first-tick, cloud mode, a pre-capability server image)
-// hide NOTHING. In Jetson mode the filter is SKIPPED entirely (D9) —
-// capabilities describe the LOCAL rig, and the Jetson keeps its own dedicated
-// `jetsonIncompatible` filter, so Training must stay visible there exactly as
-// today.
-export function isCapabilityVisible(navItem, { jetsonConnected, caps }) {
+// hide NOTHING.
+export function isCapabilityVisible(navItem, { caps }) {
   return (
-    jetsonConnected ||
     !caps ||
     !navItem.capabilityKey ||
     caps[navItem.capabilityKey] !== false

@@ -1,10 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 
 // The Inferenz page's cloud session (spec §6.5; D2/D4/D28/D31). A module-level
 // controller, read by hooks/useCloudInferenceSession through useSyncExternalStore.
@@ -132,11 +129,6 @@ export function subscribe(fn) {
 /** useSyncExternalStore's getSnapshot: a new object on every change, never a token. */
 export function getSnapshot() {
   return state;
-}
-
-/** A run (not a reservation) is in progress: the TargetSwitch is locked. */
-export function isLiveRun(snapshot = state) {
-  return BUSY_PHASES.has(snapshot.phase);
 }
 
 /** A reserve (or its automatic retry) runs: the model list is locked (owner, round 2). */

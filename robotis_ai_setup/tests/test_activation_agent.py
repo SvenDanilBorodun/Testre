@@ -381,7 +381,7 @@ class TestHomeConstantNoDrift(unittest.TestCase):
 
     def test_home_is_the_boot_family_not_the_collision_safe_home(self):
         """Two HOME families exist on purpose: ±pi/2 here, the more-folded
-        ±pi/4 for collision recovery and the Jetson. Reconciling them is an
+        ±pi/4 for collision recovery. Reconciling them is an
         ask-first safety change, so this pins which one the agent drives."""
         self.assertAlmostEqual(_N['HOME_JOINTS_RAD'][1], -math.pi / 2, places=12)
         self.assertAlmostEqual(_N['HOME_JOINTS_RAD'][2], math.pi / 2, places=12)

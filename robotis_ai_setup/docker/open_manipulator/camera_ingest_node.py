@@ -14,7 +14,7 @@ frames over a localhost TCP socket into this node, which republishes them as
 downstream consumer (LeRobot recorder, inference, web_video_server browser
 preview, Roboter Studio CV) is unchanged — only the publisher changed.
 
-usb_cam is still used on the native-Linux / Jetson path (real USB host, no
+usb_cam is still used on the native-Linux path (real USB host, no
 bridge); the entrypoint selects between the two via EDUBOTICS_CAMERA_SOURCE.
 
 Wire protocol (GUI = client, this node = server)

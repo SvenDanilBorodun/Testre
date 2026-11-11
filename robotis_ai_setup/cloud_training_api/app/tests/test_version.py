@@ -84,6 +84,9 @@ _VERSION_ENV_KEYS = (
     "PI_AGENT_SHA256",
     "RAILWAY_GIT_COMMIT_SHA",
     "BUILD_COMMIT",
+    "LEGAL_IMPRESSUM_URL",
+    "LEGAL_DATENSCHUTZ_URL",
+    "LEGAL_NUTZUNGSBEDINGUNGEN_URL",
 )
 
 _GOOD_SHA = "a" * 64
@@ -116,13 +119,78 @@ class TestVersionExeFields(unittest.TestCase):
             "https://github.com/owner/repo/releases/download/v2.12.3/EduBotics_Setup.exe",
         )
 
-    def test_explicit_download_url_wins(self):
-        body = _call(
-            GUI_VERSION="2.12.3",
-            GUI_RELEASE_REPO="owner/repo",
-            GUI_DOWNLOAD_URL="https://example.test/custom.exe",
-        )
-        self.assertEqual(body["download_url"], "https://example.test/custom.exe")
+    def test_an_explicit_release_asset_of_the_repo_wins(self):
+        # The exact shape release.yml W6 sets (another tag than GUI_VERSION is
+        # allowed: the operator may pin an asset by hand).
+        for url in ("https://github.com/owner/repo/releases/download/v2.12.3/EduBotics_Setup.exe",
+                    "https://github.com/Owner/Repo/releases/download/v2.12.2/EduBotics_Setup.exe"):
+            with self.subTest(url=url):
+                body = _call(GUI_VERSION="2.12.3", GUI_RELEASE_REPO="owner/repo", GUI_DOWNLOAD_URL=url)
+                self.assertEqual(body["download_url"], url)
+
+
+class TestSa01TheUpdateChannelIsPinnedToTheReleaseRepo(unittest.TestCase):
+    """SA-01 (2026-11-13): GUI_DOWNLOAD_URL used to win verbatim, so the update
+    could point at any host — the first updater read it from a PUBLIC Supabase
+    Storage bucket every signed-in user could upload into. An override is now
+    served only as a release asset of GUI_RELEASE_REPO on github.com."""
+
+    DERIVED = "https://github.com/owner/repo/releases/download/v2.12.3/EduBotics_Setup.exe"
+    BAD_URLS = (
+        "https://fnnbysrjkfugsqzwcksd.supabase.co/storage/v1/object/public/releases/EduBotics_Setup.exe",
+        "https://example.test/custom.exe",
+        "http://github.com/owner/repo/releases/download/v2.12.3/EduBotics_Setup.exe",
+        "https://github.com/other/repo/releases/download/v2.12.3/EduBotics_Setup.exe",
+        "https://github.com/owner/repo-fork/releases/download/v2.12.3/EduBotics_Setup.exe",
+        "https://github.com.evil.test/owner/repo/releases/download/v2.12.3/EduBotics_Setup.exe",
+        "https://github.com@evil.test/owner/repo/releases/download/v2.12.3/EduBotics_Setup.exe",
+        "https://github.com:8443/owner/repo/releases/download/v2.12.3/EduBotics_Setup.exe",
+        "https://github.com/owner/repo/releases/download/v2.12.3/EduBotics_Setup.exe?x=1",
+        "https://github.com/owner/repo/releases/download/v2.12.3/EduBotics_Setup.exe#x",
+        "https://github.com/owner/repo/releases/download/../../evil/EduBotics_Setup.exe",
+        "https://github.com/owner/repo/releases/download/v2.12.3/x/EduBotics_Setup.exe",
+        "https://github.com/owner/repo/archive/v2.12.3/EduBotics_Setup.exe",
+        "https://github.com/owner/repo/releases/download/v2.12.3/",
+        "javascript:alert(1)",
+    )
+
+    def setUp(self):
+        ver._warned.clear()
+
+    def test_any_other_url_is_ignored_and_the_derived_one_served(self):
+        for url in self.BAD_URLS:
+            with self.subTest(url=url):
+                body = _call(GUI_VERSION="2.12.3", GUI_RELEASE_REPO="owner/repo", GUI_DOWNLOAD_URL=url)
+                self.assertEqual(body["download_url"], self.DERIVED)
+
+    def test_without_a_valid_repo_nothing_is_served(self):
+        url = "https://github.com/owner/repo/releases/download/v2.12.3/EduBotics_Setup.exe"
+        for repo in ({}, {"GUI_RELEASE_REPO": "not a repo"},
+                     {"GUI_RELEASE_REPO": "owner/.."}, {"GUI_RELEASE_REPO": "-owner/repo"},
+                     {"GUI_RELEASE_REPO": "owner/repo/extra"},
+                     {"GUI_RELEASE_REPO": "evil.test/x"}):
+            with self.subTest(repo=repo):
+                body = _call(GUI_VERSION="2.12.3", GUI_DOWNLOAD_URL=url, **repo)
+                self.assertIsNone(body["download_url"])
+                self.assertIsNone(body["pi_agent_download_url"])
+
+    def test_one_warning_per_process_naming_no_value(self):
+        bad = self.BAD_URLS[0]
+        with self.assertLogs(ver.logger, level="WARNING") as logs:
+            for _ in range(3):
+                _call(GUI_VERSION="2.12.3", GUI_RELEASE_REPO="owner/repo", GUI_DOWNLOAD_URL=bad)
+            _call(GUI_VERSION="2.12.3", GUI_RELEASE_REPO="evil.test/x")
+            _call(GUI_VERSION="2.12.3", GUI_RELEASE_REPO="evil.test/x")
+        self.assertEqual(len(logs.output), 2, logs.output)
+        for line in logs.output:
+            self.assertNotIn("supabase", line)
+            self.assertNotIn("evil", line)
+
+    def test_the_release_workflow_sets_exactly_the_accepted_shape(self):
+        root = os.path.dirname(os.path.dirname(APP_PARENT))  # the repository root
+        wf = open(os.path.join(root, ".github", "workflows", "release.yml"), encoding="utf-8").read()
+        self.assertIn('DOWNLOAD_URL="https://github.com/${GIT_REPO}/releases/download/${TAG}/EduBotics_Setup.exe"', wf)
+        self.assertIn('railway variable set "GUI_RELEASE_REPO=${GIT_REPO}"', wf)
 
     def test_installer_sha_malformed_is_none(self):
         self.assertIsNone(_call(GUI_INSTALLER_SHA256="not-a-hash")["installer_sha256"])
@@ -198,6 +266,44 @@ class TestVersionPiAgentFields(unittest.TestCase):
         self.assertEqual(body["installer_sha256"], _GOOD_SHA)
         self.assertEqual(body["pi_agent_sha256"], _OTHER_SHA)
         self.assertEqual(body["commit"], "cafe1234")
+
+
+_LEGAL_KEYS = ("legal_impressum_url", "legal_datenschutz_url", "legal_nutzungsbedingungen_url")
+
+
+class TestVersionLegalLinks(unittest.TestCase):
+    """Launch plan step 4 (2026-11-11): the three legal links, additive keys
+    every surface reads (app/services/legal_links.py)."""
+
+    def test_keys_are_always_present_and_null_when_unset(self):
+        body = _call()
+        for key in _LEGAL_KEYS:
+            self.assertIn(key, body)
+            self.assertIsNone(body[key])
+        self.assertTrue(all(body[k] is None for k in _LEGAL_KEYS))
+
+    def test_each_set_address_is_served_on_its_own_key(self):
+        body = _call(
+            LEGAL_IMPRESSUM_URL="https://edubotics.example/impressum",
+            LEGAL_NUTZUNGSBEDINGUNGEN_URL=" https://edubotics.example/agb#schule ",
+        )
+        self.assertEqual(body["legal_impressum_url"], "https://edubotics.example/impressum")
+        self.assertIsNone(body["legal_datenschutz_url"])
+        self.assertEqual(body["legal_nutzungsbedingungen_url"], "https://edubotics.example/agb#schule")
+
+    def test_an_address_the_boot_would_refuse_is_never_served(self):
+        body = _call(LEGAL_DATENSCHUTZ_URL="http://edubotics.example/datenschutz")
+        self.assertIsNone(body["legal_datenschutz_url"])
+        body = _call(LEGAL_DATENSCHUTZ_URL="javascript:alert(1)")
+        self.assertIsNone(body["legal_datenschutz_url"])
+
+    def test_the_older_keys_are_unchanged(self):
+        body = _call()
+        self.assertEqual(
+            set(body),
+            {"version", "download_url", "installer_sha256", "commit", "pi_agent_download_url", "pi_agent_sha256",
+             *_LEGAL_KEYS},
+        )
 
 
 if __name__ == "__main__":

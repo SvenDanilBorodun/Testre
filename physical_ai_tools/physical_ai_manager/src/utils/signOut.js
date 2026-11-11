@@ -1,7 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 //
 // THE sign-out. One thunk, every caller, no ordering for anyone to get wrong.
 //
@@ -20,11 +20,11 @@
 // state the previous student's browser can re-establish while the sign-out is
 // still in flight; hence the second scrub after both.
 //
-//   1. `resetJetsonOnLogout` FIRST, and it is the ONE step that must precede
-//      the revoke for a reason of its own: the beacon-style Jetson release is
-//      authenticated with the JWT step 4 revokes. Skipping it leaks the
-//      classroom-Jetson lock for the full 5-minute sweeper window. The token is
-//      read out of `getState()` before anything resets, so step 2 cannot
+//   1. `endCloudInferenceOnLogout` FIRST, and it is the ONE step that must
+//      precede the revoke for a reason of its own: the keepalive
+//      `POST /inference/sessions/{id}/end` that ends a reserved or running
+//      cloud session is authenticated with the JWT step 4 revokes. The token
+//      is read out of `getState()` before anything resets, so step 2 cannot
 //      invalidate it.
 //   2. `session/signedOut` — the in-memory half, and the half that was missing.
 //      `clearStudentScopedStorage` deletes `edubotics_userId` from
@@ -52,11 +52,19 @@
 //      the scope. So a reported failure sweeps the key itself.
 //   5. the robot's token slot clear is awaited (bounded) — see below — and the
 //      scrub runs AGAIN, for whatever the two await windows re-persisted.
+//   6. Orange Pi only: the ROBOT session ends (features/piAuth,
+//      `endPiSessionOnLogout`, a keepalive POST that survives the reload, NOT
+//      awaited). It is the last remote step on purpose: the token-slot clear of
+//      step 5 runs over rosbridge, and if that websocket has to be re-opened
+//      its gate needs the robot session still alive. Ending it any earlier
+//      would let a dropped socket keep the previous student's token on the
+//      robot. Its local half — this browser treats the robot as locked — is
+//      synchronous, so nothing in this document can still use the session.
 //
 // THE ROBOT'S TOKEN SLOT. The student's Hugging-Face token lives in ONE slot on
 // the robot (features/hfToken/robotChannel), and the next student at a shared PC
-// must not find it there. The clear is STARTED right after the Jetson reset and
-// before anything else, so it overlaps the revoke instead of adding to it; it is
+// must not find it there. The clear is STARTED right after the cloud session's
+// end and before anything else, so it overlaps the revoke instead of adding to it; it is
 // AWAITED only after the revoke, for at most CLEAR_BOUND_MS (2 s), and every
 // failure is swallowed — a robot that is gone, busy (recording or uploading) or
 // slow must never keep a student signed in. A clear the robot refused because
@@ -64,9 +72,7 @@
 // (physical_ai_server.py::_apply_pending_hf_token_clear); a clear that never
 // reached the robot leaves the token in the slot until the next login
 // reconciles it, and Aufnahme refuses Start until the robot holds the NEW
-// student's token. Skipped while a classroom
-// Jetson is claimed: its rosbridge is the Jetson proxy, which keeps its own
-// token and is never sent a personal one.
+// student's token.
 //
 // Step 2 is ONE action every slice answers for itself
 // (`features/session/sessionActions`), not a list of resets kept here: a list
@@ -78,18 +84,17 @@
 
 import { supabase } from '../lib/supabaseClient';
 import { signedOut } from '../features/session/sessionActions';
-import { resetJetsonOnLogout } from '../features/jetson/sessionReset';
 import { endCloudInferenceOnLogout } from '../features/cloudInference/controller';
 import { CLEAR_BOUND_MS, clearRobotHfToken } from '../features/hfToken/robotChannel';
 import { forgetVormachenCopy } from '../components/Workshop/code/vormachenClipboard';
+import { endPiSessionOnLogout } from '../features/piAuth/piAuth';
 import { clearStudentScopedStorage, clearSupabaseSessionKeys } from './sessionScope';
 
 // Begin clearing the robot's token slot and hand back a promise that NEVER
 // rejects. `clearRobotHfToken` already promises that; the guard exists because
 // this promise is created long before it is awaited (across the revoke), and a
 // rejection with no handler attached yet is an unhandled-rejection event.
-function startRobotTokenClear(jetsonClaimed) {
-  if (jetsonClaimed) return Promise.resolve(false);
+function startRobotTokenClear() {
   try {
     return Promise.resolve(clearRobotHfToken()).catch(() => false);
   } catch (_) {
@@ -100,9 +105,9 @@ function startRobotTokenClear(jetsonClaimed) {
 /**
  * Drop every scrap of the signed-in student and end the session.
  *
- * A redux THUNK: the access token and the claimed Jetson id come from
- * `getState()` rather than being threaded through by each of the five call
- * sites — three of which used to get one or both of them wrong or omit them.
+ * A redux THUNK: the access token comes from `getState()` rather than being
+ * threaded through by each call site — several of which used to get it wrong
+ * or omit it.
  *
  * The teacher web uses it too. The student-scoped resets are no-ops for a
  * teacher, and the shared-browser-profile argument applies there just as much:
@@ -122,18 +127,13 @@ function startRobotTokenClear(jetsonClaimed) {
 export const signOutStudent = ({ reload = true } = {}) => async (dispatch, getState) => {
   const state = getState() || {};
   const accessToken = state.auth?.session?.access_token ?? null;
-  const jetsonId = state.jetson?.jetsonId ?? null;
-  // CLAIMED, not merely discovered: `jetsonId` is also set for an available or
-  // busy classroom Jetson this student never connected to.
-  const jetsonClaimed = state.jetson?.status === 'connected';
 
-  resetJetsonOnLogout(dispatch, accessToken, jetsonId);
-  // Cloud-Inferenz: end a reserved or running cloud session with the same
+  // Cloud-Inferenz: end a reserved or running cloud session with the
   // still-valid JWT (a keepalive POST …/end) and reset the module-level
   // controller synchronously, so the next student finds no session of ours.
   endCloudInferenceOnLogout(accessToken);
   // Started now, awaited after the revoke (see „THE ROBOT'S TOKEN SLOT").
-  const hfClear = startRobotTokenClear(jetsonClaimed);
+  const hfClear = startRobotTokenClear();
   dispatch(signedOut());
   // The one piece of student content held in module memory instead of a
   // slice: the lines Vormachen last put on the clipboard (review round 5,
@@ -172,6 +172,14 @@ export const signOutStudent = ({ reload = true } = {}) => async (dispatch, getSt
   // `removeItem` calls; reasoning about which callers are still alive does not
   // stay correct.
   clearStudentScopedStorage();
+  // Step 6 (Orange Pi): end the ROBOT session — after the token-slot clear,
+  // which may have needed it to re-open rosbridge. Keepalive, never awaited,
+  // never throws; a no-op off a Pi.
+  try {
+    endPiSessionOnLogout();
+  } catch (_) {
+    /* the sign-out never fails on the robot's account */
+  }
 
   if (!reload) return;
   // The blunt-but-complete step, and the reason the broadcast does not have to

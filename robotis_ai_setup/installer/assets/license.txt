@@ -1,21 +1,163 @@
-EduBotics Setup - Lizenzvereinbarung
+EduBotics – Endnutzer-Lizenzvertrag (EULA)
+Stand: 9. November 2026
 
-Copyright 2025 EduBotics
+Lizenzgeber:
+  [Anbieter – wird nach Klärung der Rechtsform ergänzt] (EduBotics)
+  [Anschrift – wird ergänzt]
+  E-Mail: [Kontakt-E-Mail – wird ergänzt]
 
-Lizenziert unter der Apache License, Version 2.0 (die "Lizenz");
-Sie dürfen diese Software nur in Übereinstimmung mit der Lizenz verwenden.
-Eine Kopie der Lizenz finden Sie unter
+Bitte lesen Sie diesen Vertrag vollständig, bevor Sie die Software
+installieren. Mit der Annahme dieses Vertrags und der Installation
+erklären Sie sich mit diesen Bedingungen einverstanden. Sind Sie nicht
+einverstanden, brechen Sie die Installation bitte ab.
 
-    http://www.apache.org/licenses/LICENSE-2.0
 
-Sofern nicht durch geltendes Recht vorgeschrieben oder schriftlich vereinbart,
-wird die unter der Lizenz vertriebene Software "WIE BESEHEN" und OHNE
-GEWÄHRLEISTUNGEN ODER BEDINGUNGEN JEGLICHER ART bereitgestellt.
+1. Gegenstand
 
-Dieses Installationsprogramm richtet folgende Komponenten auf Ihrem System ein:
-  - WSL2 (Windows Subsystem für Linux)
-  - Docker Desktop
-  - usbipd-win (USB/IP-Gerätefreigabe)
-  - EduBotics Docker-Images
+1.1 „Software“ ist die EduBotics-Software in allen Teilen und Fassungen,
+    insbesondere dieses Installationsprogramm, die Windows-Anwendung
+    „EduBotics“, die von EduBotics bereitgestellten Docker-Images, die
+    Web-Oberfläche, der Orange-Pi-Agent sowie alle Updates, die über die
+    automatische Aktualisierung bereitgestellt werden.
 
-Mit der Installation stimmen Sie den jeweiligen Lizenzen dieser Komponenten zu.
+1.2 Die Software enthält Bestandteile Dritter, die unter eigenen,
+    teilweise quelloffenen Lizenzen stehen (Abschnitt 5).
+
+
+2. Nutzungsrecht
+
+2.1 EduBotics räumt Ihnen das einfache, nicht übertragbare und nicht
+    unterlizenzierbare Recht ein, die Software zum Betrieb von
+    EduBotics-Robotern und der zugehörigen Cloud-Dienste zu installieren
+    und zu nutzen.
+
+2.2 Ist der Lizenznehmer eine Schule oder eine andere
+    Bildungseinrichtung, dürfen deren Lehrkräfte, Schülerinnen und
+    Schüler die Software auf den Geräten der Einrichtung im Rahmen des
+    Unterrichts nutzen.
+
+2.3 Die Software wird lizenziert, nicht verkauft. Alle Rechte, die in
+    diesem Vertrag nicht ausdrücklich eingeräumt werden, verbleiben bei
+    EduBotics.
+
+
+3. Einschränkungen
+
+    Soweit nicht zwingendes Recht (insbesondere §§ 69d und 69e des
+    Urheberrechtsgesetzes) es erlaubt, dürfen Sie die Software nicht
+
+    a) über das für die vertragsgemäße Nutzung Erforderliche hinaus
+       vervielfältigen,
+    b) verbreiten, vermieten, verleihen, öffentlich zugänglich machen
+       oder Dritten auf andere Weise überlassen,
+    c) bearbeiten, übersetzen, dekompilieren, disassemblieren oder auf
+       andere Weise ihren Quellcode zu ermitteln versuchen,
+    d) Urheberrechtsvermerke, Lizenzhinweise oder Kennzeichnungen
+       entfernen oder verändern.
+
+    Rechte, die Ihnen die Lizenzen der Bestandteile Dritter (Abschnitt 5)
+    gewähren, bleiben unberührt.
+
+
+4. Cloud-Dienste, Konten und Updates
+
+4.1 Einige Funktionen (Anmeldung, KI-Training, Cloud-Inferenz,
+    Datensätze) nutzen Cloud-Dienste von EduBotics und seinen
+    Dienstleistern. Für die Verarbeitung personenbezogener Daten gilt
+    die Datenschutzerklärung von EduBotics.
+
+4.2 EduBotics bemüht sich um eine hohe Verfügbarkeit der Cloud-Dienste,
+    schuldet aber keine ununterbrochene Verfügbarkeit. Wartung, Störungen
+    bei Dienstleistern und die Weiterentwicklung können zu
+    Unterbrechungen führen.
+
+4.3 Die Software sucht selbständig nach Updates und installiert sie.
+    Updates können Funktionen ändern, ergänzen oder entfernen, soweit
+    dies für Sie zumutbar ist.
+
+
+5. Bestandteile Dritter
+
+    Die Software enthält und installiert Komponenten Dritter, unter
+    anderem Ubuntu, Docker Engine, ROS 2, LeRobot sowie zahlreiche
+    Python- und JavaScript-Bibliotheken. Für diese Komponenten gelten
+    ausschließlich ihre eigenen Lizenzen; räumen diese Ihnen
+    weitergehende Rechte ein als dieser Vertrag, gehen sie vor.
+    Bestandteile, die auf Software der ROBOTIS Co., Ltd. beruhen, stehen
+    unter der Apache License 2.0.
+
+    Die Liste dieser Komponenten, die Lizenztexte und das Angebot zur
+    Herausgabe des Quellcodes der Bestandteile unter GPL oder LGPL
+    finden Sie in der Datei THIRD_PARTY_NOTICES.txt im
+    Installationsordner. Das Installationsprogramm lädt außerdem
+    usbipd-win von dessen offizieller Bezugsquelle; usbipd-win steht
+    unter der GNU General Public License, Version 3.
+
+
+6. Sicherheit beim Betrieb von Robotern
+
+    Roboterarme können sich unerwartet bewegen. Betreiben Sie die Roboter
+    nur unter der Aufsicht einer verantwortlichen Person, halten Sie
+    Hände, Haare und Gegenstände aus dem Arbeitsbereich fern und beachten
+    Sie die Sicherheitshinweise der Anleitung. Die Software ersetzt keine
+    Aufsicht.
+
+
+7. Gewährleistung
+
+    Für Mängel der Software gelten die gesetzlichen Vorschriften. Wird
+    die Software unentgeltlich überlassen, haftet EduBotics für Sach- und
+    Rechtsmängel nur, wenn EduBotics den Mangel arglistig verschwiegen
+    hat (§§ 523, 524 BGB).
+
+
+8. Haftung
+
+8.1 EduBotics haftet unbeschränkt bei Vorsatz und grober Fahrlässigkeit,
+    für Schäden aus der Verletzung des Lebens, des Körpers oder der
+    Gesundheit, nach dem Produkthaftungsgesetz sowie im Umfang einer
+    übernommenen Garantie.
+
+8.2 Bei leicht fahrlässiger Verletzung einer wesentlichen
+    Vertragspflicht – einer Pflicht, deren Erfüllung die ordnungsgemäße
+    Durchführung des Vertrags überhaupt erst ermöglicht und auf deren
+    Einhaltung Sie regelmäßig vertrauen dürfen – ist die Haftung auf den
+    vertragstypischen, vorhersehbaren Schaden begrenzt.
+
+8.3 Im Übrigen ist die Haftung für leichte Fahrlässigkeit
+    ausgeschlossen.
+
+8.4 Für den Verlust von Daten haftet EduBotics nur bis zu dem Aufwand,
+    der bei regelmäßiger und gefahrentsprechender Datensicherung für
+    ihre Wiederherstellung erforderlich gewesen wäre. Ziffer 8.1 bleibt
+    unberührt.
+
+
+9. Laufzeit und Beendigung
+
+    Das Nutzungsrecht ist zeitlich nicht begrenzt. Es endet
+    automatisch, wenn Sie wesentlich gegen diesen Vertrag verstoßen.
+    Nach seinem Ende ist die Software zu deinstallieren. Die Abschnitte
+    5, 8 und 10 gelten fort.
+
+
+10. Schlussbestimmungen
+
+10.1 Es gilt das Recht der Bundesrepublik Deutschland unter Ausschluss
+     des UN-Kaufrechts. Zwingende Verbraucherschutzvorschriften des
+     Staates, in dem ein Verbraucher seinen gewöhnlichen Aufenthalt hat,
+     bleiben unberührt.
+
+10.2 Ist der Lizenznehmer Kaufmann, eine juristische Person des
+     öffentlichen Rechts oder ein öffentlich-rechtliches Sondervermögen,
+     ist Gerichtsstand der Sitz des Lizenzgebers.
+
+10.3 Ist eine Bestimmung dieses Vertrags unwirksam, bleibt der Vertrag
+     im Übrigen wirksam; an die Stelle der unwirksamen Bestimmung treten
+     die gesetzlichen Vorschriften (§ 306 BGB).
+
+10.4 Fragen zu diesem Vertrag richten Sie bitte an
+     [Kontakt-E-Mail – wird ergänzt].
+
+
+© 2025–2026 [Anbieter – wird nach Klärung der Rechtsform ergänzt] (EduBotics). Alle Rechte vorbehalten.

@@ -393,6 +393,17 @@ class TheSyncDownload(D14Case):
         self.assertTrue(self.dm._start_abandoned)
         self.assertEqual((self.opened, self.created, self.warning()), ([], [], ''))
 
+    def test_a_shutdown_while_it_runs_cancels_it_silently(self):
+        # Launch plan step 8: the node going down while the Start waits for its
+        # sync download ends the wait like STOP (no dataset for that session).
+        answers = []
+        self.inject(None, on_poll=lambda n: n == 3 and answers.append(self.dm.end_for_shutdown()))
+        self.assertFalse(self.check())
+        self.assertEqual(answers, [MOD.DataManager.SHUTDOWN_NO_DATASET])
+        self.assertTrue(self.handle.cancelled)
+        self.assertTrue(self.dm._start_abandoned)
+        self.assertEqual((self.opened, self.created, self.warning()), ([], [], ''))
+
     def test_without_daten_the_start_is_refused(self):
         self.dm._sync_download = None
         self.assert_refused(texts().SYNC_DOWNLOAD_FAILED_DE)
@@ -487,6 +498,17 @@ class TheLease(D14Case):
         self.dm._dataset_lease = lambda root: 'upload'
         threading.Timer(0.1, lambda: self.dm.request_end('finish')).start()
         self.assertFalse(self.check())
+        self.assertTrue(self.dm._start_abandoned)
+        self.assertEqual((self.opened, self.created, self.warning(), self.hub.calls), ([], [], '', []))
+
+    def test_a_shutdown_while_waiting_abandons_the_start_silently(self):
+        # Launch plan step 8: the node going down while the Start waits for an
+        # upload of this dataset ends the wait like STOP.
+        self.dm._dataset_lease = lambda root: 'upload'
+        answers = []
+        threading.Timer(0.1, lambda: answers.append(self.dm.end_for_shutdown())).start()
+        self.assertFalse(self.check())
+        self.assertEqual(answers, [MOD.DataManager.SHUTDOWN_NO_DATASET])
         self.assertTrue(self.dm._start_abandoned)
         self.assertEqual((self.opened, self.created, self.warning(), self.hub.calls), ([], [], '', []))
 

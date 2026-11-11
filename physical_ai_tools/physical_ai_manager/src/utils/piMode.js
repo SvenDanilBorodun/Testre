@@ -1,7 +1,7 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 //
 // Orange Pi „Pi mode" detection + live agent health.
 //
@@ -14,7 +14,10 @@
 //      flavor. On a NON-Pi image the SPA catch-all answers `/pi-mode.json` with
 //      200 + index.html, so we require a VALID JSON parse of `{pi:true}` (the
 //      same defensive guard `useVersionCheck` uses against the `/version.json`
-//      fallthrough) — a 200-HTML body must NOT flip Pi mode.
+//      fallthrough) — a 200-HTML body must NOT flip Pi mode. The marker only
+//      ever ADDS Pi mode to a loopback page (a kiosk browser on the Pi): a
+//      page whose own host is not loopback is a Pi's whatever the marker
+//      answered (verification round C, VC-01; utils/pageHost.js).
 //
 //   2. `agentStatus` — the live `/api/system/status` snapshot, probed with
 //      BACKOFF (never one-shot): the pi-agent binds its gateway listener only
@@ -35,6 +38,8 @@ import React, {
   useMemo,
   useState,
 } from 'react';
+import { noteUnauthorized, PI_AUTH_PHASE, usePiAuth } from '../features/piAuth/piAuth';
+import { isLoopbackPage } from './pageHost';
 
 // ── module-level cache ───────────────────────────────────────────────────────
 //
@@ -88,20 +93,16 @@ export function rsControlBase(piMode) {
 //     docker-compose.yml and nginx.conf carries an Origin allowlist on
 //     /rosbridge, so the only route in is same-origin from our own page.
 //
-// The `-opi` compose still declares :9090/:8080, but as a LOOPBACK-PINNED
-// DEBUG path only (`127.0.0.1:9090:9090`) — reachable via
-// `ssh -L 9090:127.0.0.1:9090 <pi>` and not from the LAN. The un-tunnelled LAN
+// The `-opi` compose publishes neither :9090 nor :8080 on the host (SA-05,
+// 2026-11-13; the loopback debug publishes were removed, debugging is
+// `docker exec`). The un-tunnelled LAN
 // ROLLBACK half was deleted in 4d1b046: while those publishes were LAN-bound,
 // rosbridge_server 2.7.0's `check_origin` (literally `return True`) made the
 // nginx Origin gate skippable rather than defeatable. The student compose
 // publishes neither port at all.
 //
 // Both functions keep their `piMode` parameter purely so the four call sites
-// and their tests need no churn — it no longer selects behaviour. The Jetson
-// path is untouched by either: `useJetsonConnection` dispatches an explicit
-// `ws://<ip>:9091` through `setRosbridgeUrl` (a passthrough reducer) and
-// ImageGridCell renders Jetson frames from a rosbridge topic subscription
-// rather than from `videoStreamBase`.
+// and their tests need no churn — it no longer selects behaviour.
 
 /**
  * Local rosbridge WebSocket URL — always the same-origin nginx proxy
@@ -193,6 +194,9 @@ export async function fetchAgentStatus() {
       cache: 'no-store',
       ...(ctrl ? { signal: ctrl.signal } : {}),
     });
+    // 401: the robot login (2026-11-10) — no robot session in this browser
+    // (yet). Not a healthy answer; tell the login so it re-checks.
+    if (res.status === 401) noteUnauthorized();
     if (!res.ok) return null;
     const json = await res.json();
     return json && typeof json === 'object' ? json : null;
@@ -228,11 +232,17 @@ export function PiModeProvider({ children }) {
   const [agentStatus, setAgentStatus] = useState(null);
   const [agentReachable, setAgentReachable] = useState(false);
 
-  // 1) Resolve the static marker exactly once at boot.
+  // 1) Resolve the static marker exactly once at boot. The marker fails to
+  //    non-Pi, but only a LOOPBACK page may end up non-Pi (verification round
+  //    C, VC-01): the Windows GUI opens exactly http://localhost/ and the
+  //    student nginx serves no other Host, so a page anywhere else is a Pi's,
+  //    and the robot login, its session hygiene and the sign-out's logout must
+  //    run there even when the marker did not answer (utils/pageHost.js).
   useEffect(() => {
     let cancelled = false;
-    fetchPiMarker().then((isPi) => {
+    fetchPiMarker().then((marker) => {
       if (cancelled) return;
+      const isPi = marker || !isLoopbackPage();
       _piModeCache = isPi;
       setPiMode(isPi);
       setPiModeResolved(true);
@@ -287,6 +297,13 @@ export function PiModeProvider({ children }) {
     }
     return status;
   }, []);
+
+  // The robot login just produced a session: /status answers now, so read it at
+  // once instead of waiting out the backoff that the 401s before it built up.
+  const piAuthPhase = usePiAuth().phase;
+  useEffect(() => {
+    if (piMode && piAuthPhase === PI_AUTH_PHASE.SESSION) refreshAgentStatus();
+  }, [piMode, piAuthPhase, refreshAgentStatus]);
 
   const value = useMemo(
     () => ({ piMode, piModeResolved, agentStatus, agentReachable, refreshAgentStatus }),

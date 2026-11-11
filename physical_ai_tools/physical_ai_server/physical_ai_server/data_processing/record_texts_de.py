@@ -1,18 +1,9 @@
 #!/usr/bin/env python3
 #
-# Copyright 2026 EduBotics
+# Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Proprietary and confidential. Licensed under the EduBotics End-User
+# Licence Agreement; see LICENSE at the repository root.
 
 """Every German sentence of the recording path added in Aufnahme 2.0 round 5.
 
@@ -236,6 +227,18 @@ HF_TOKEN_SHAPE_DE = ('Das ist kein gültiges Hugging-Face-Token. Es beginnt mit 
                      'keine Leerzeichen.')
 HF_TOKEN_UNSUPPORTED_DE = 'Dieser Roboter verwendet ein eigenes Token und nimmt kein persönliches an.'
 HF_TOKEN_WRITE_FAILED_DE = 'Das Token konnte nicht auf dem Roboter gespeichert werden.'
+# 2026-11-13: the token arrives ENCRYPTED for the robot's ephemeral key
+# (data_processing/hf_token_crypto.py). The robot restarted since the page read
+# its key (another key id), the ciphertext does not decrypt, or this node has no
+# key at all. The SPA sends again with the key the next state message carries.
+HF_TOKEN_ENC_STALE_DE = ('Der Roboter wurde inzwischen neu gestartet. Das Token wird gleich noch '
+                         'einmal übertragen.')
+HF_TOKEN_ENC_BAD_DE = 'Das verschlüsselte Token konnte auf dem Roboter nicht gelesen werden.'
+# Verification round C (VC-05): an encrypted value is opened at most once.
+HF_TOKEN_ENC_REPLAYED_DE = ('Diese verschlüsselte Übertragung wurde schon einmal angenommen und gilt '
+                            'kein zweites Mal. Bitte das Token erneut übertragen.')
+HF_TOKEN_ENC_UNSUPPORTED_DE = ('Dieser Roboter kann kein verschlüsseltes Token annehmen. Bitte die '
+                               'Roboter-Software aktualisieren.')
 
 RESUME_FPS_DE = ('Der Datensatz „{name}“ wurde mit {d} Bildern pro Sekunde aufgenommen. '
                  'Stell unter „Erweitert“ {d} Bilder pro Sekunde ein oder wähle einen neuen '

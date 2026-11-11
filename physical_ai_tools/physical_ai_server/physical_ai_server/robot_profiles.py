@@ -1,18 +1,9 @@
 #!/usr/bin/env python3
 #
-# Copyright 2026 EduBotics
+# Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Proprietary and confidential. Licensed under the EduBotics End-User
+# Licence Agreement; see LICENSE at the repository root.
 """ArmProfile registry — the server-side source of truth for a robot type.
 
 ``EDUBOTICS_ROBOT_TYPE`` (a MANAGED ``.env`` key hardset by the GUI at
@@ -64,8 +55,7 @@ _logger = logging.getLogger(__name__)
 # module in the SAME commit (a HOME/gripper change is ask-first, Rule §2).
 _OMX_HOME_JOINTS_RAD = (0.0, -math.pi / 2, math.pi / 2, 0.0, 0.0)
 # SEPARATE, more-folded safe-home pose (±pi/4). UNCONSUMED seam data this round:
-# collision_monitor.SAFE_HOME_ARM, jetson_agent.SAFE_HOME_JOINTS and
-# entrypoint_omx.sh keep their OWN hardcoded copies (the ±pi/2 vs ±pi/4
+# collision_monitor.SAFE_HOME_ARM keeps its OWN hardcoded copy (the ±pi/2 vs ±pi/4
 # divergence is preserved byte-identical, not reconciled — a recovery-pose
 # change is ask-first). Carried so a future arm can supply its own.
 _OMX_SAFE_HOME_ARM_RAD = (0.0, -0.785398, 0.785398, 0.0, 0.0)

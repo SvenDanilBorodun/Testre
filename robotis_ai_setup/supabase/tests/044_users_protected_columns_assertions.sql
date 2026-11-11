@@ -3,12 +3,8 @@
 -- HAND against a fresh LOCAL database — never CI, never the linked project (it
 -- seeds rows).
 --
--- The squashed baseline does NOT replay on a fresh database as shipped
--- (docs/KNOWN-ISSUES.md, „baseline.sql is NOT replayable from scratch"): run
--- it in a SCRATCH copy of supabase/ whose baseline has its one
--- `RENAME COLUMN runpod_job_id` line guarded exactly as
--- 040_code_programs_assertions.sql's header shows, with every migration
--- through 045, then
+-- Run it in a SCRATCH copy of supabase/ holding every migration through 045
+-- (the baseline replays on a fresh database as shipped), then
 --   supabase start   (in the scratch copy; it applies the migrations)
 --   psql <local db url> < supabase/tests/044_users_protected_columns_assertions.sql
 -- (2026-10-04 it was run against public.ecr.aws/supabase/postgres:17.6.1.106
@@ -22,6 +18,13 @@
 -- file on a fresh reset), counted 2026-11-01 in fix round 3: 15 PASS, 1 FAIL (T15)
 -- and 0 ERROR. The 2026-10-28 and both earlier 2026-11-01 measurements reported the
 -- same numbers.
+-- 055 BREAKS this file's T7 and T8 by design: T7 proves full_name was still the
+-- student's own and T8 that a student's write of unchanged values went through,
+-- and 055 takes every write privilege on public.users from the request roles
+-- (the guard stays, rule 1 widened to the whole row). Its refusals T2-T6 still
+-- PASS (42501, now from the missing privilege). Measured 2026-11-11 (PostgreSQL
+-- 16, every migration through 054 applied by psql, then 055): 13 PASS, 3 FAIL
+-- (T7, T8, T15) and 0 ERROR; at 054 the same run prints 15 PASS, 1 FAIL (T15).
 -- Counted with stdout and stderr captured apart: PASS/FAIL = the file's own result
 -- lines on stdout plus its PASS/FAIL NOTICEs, ERROR = stderr's
 -- `psql:<file>:<n>: ERROR:` lines; psql's echo of a failing statement (LINE n:,
@@ -31,9 +34,9 @@
 \set ON_ERROR_STOP off
 \pset pager off
 
-INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at)
-VALUES ('b4400001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-044@x.test', '', now(), now()),
-       ('b4400002-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 't1-044@x.test', '', now(), now())
+INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, created_at, updated_at, raw_app_meta_data)
+VALUES ('b4400001-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 's1-044@x.test', '', now(), now(), '{"edubotics_provisioned": true}'),
+       ('b4400002-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 't1-044@x.test', '', now(), now(), '{"edubotics_provisioned": true}')
 ON CONFLICT (id) DO NOTHING;
 
 -- a teacher with a pool and a classroom, the student in it (for T15)

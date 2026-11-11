@@ -50,3 +50,14 @@ export const resetTeacherPassword = (token, teacherId, newPassword) =>
 
 export const deleteTeacher = (token, teacherId) =>
   apiRequest(`/admin/teachers/${teacherId}`, 'DELETE', token);
+
+// GDPR Art. 17 (launch plan step 5): every open deletion request, students' and
+// teachers', oldest first: [{user_id, role, username, full_name, classroom_id,
+// classroom_name, teacher_name, requested_at, due_by}].
+export const listAllDeletionRequests = (token) =>
+  apiRequest('/admin/deletion-requests', 'GET', token);
+
+// A student's: the teacher's full deletion (five outcomes); a teacher's:
+// DELETE /admin/teachers' rule (409 while classrooms exist).
+export const confirmAnyDeletionRequest = (token, userId) =>
+  apiRequest(`/admin/deletion-requests/${encodeURIComponent(userId)}/confirm`, 'POST', token);

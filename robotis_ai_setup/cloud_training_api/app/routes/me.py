@@ -1,14 +1,15 @@
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from app.auth import get_current_profile, get_user_profile
-from app.services import hf_credentials
-from app.services.hf_identity import is_denied_author, normalize_hf_username
+from app.auth import get_current_profile
+from app.services import deletion_requests
 from app.services.modal_client import cancel_training_job
 from app.services.supabase_client import get_supabase
 from app.services.workgroups import resolve_visible_workgroup_ids
@@ -75,9 +76,10 @@ class MyProfile(BaseModel):
     username: str | None
     full_name: str | None
     # Migration 030: the student's linked HuggingFace username (Benutzer-ID).
-    # The anchor for dataset discovery. Since migration 042 it is set from the
-    # stored token's whoami (PROVEN) when the student saves a token; PATCH /me
-    # stays as the self-asserted path for an account without a stored token.
+    # Since migration 042 it is set from the stored token's whoami (PROVEN)
+    # when the student saves a token, and since SA-08 (2026-11-13) only then:
+    # PATCH /me refuses every body, and discovery and deletion act only on the
+    # proven name (user_hf_credentials.hf_username).
     hf_username: str | None = None
     classroom_id: str | None
     workgroup_id: str | None = None
@@ -95,6 +97,11 @@ class MyProfile(BaseModel):
     group_credits_total: int | None = None
     # 052 (C's gap 1): the admin's compensations into this teacher's accounts, ever.
     compensated: int | None = None
+    # GDPR Art. 17 (launch plan step 5): set while the caller's deletion request is
+    # open (the student SPA shows it and offers the withdrawal); the deadline is
+    # Art. 12(3)'s one month (services/deletion_requests.py).
+    deletion_requested_at: str | None = None
+    deletion_due_by: str | None = None
 
 
 def _build_my_profile(profile: dict) -> MyProfile:
@@ -111,6 +118,8 @@ def _build_my_profile(profile: dict) -> MyProfile:
         "classroom_id": profile.get("classroom_id"),
         "workgroup_id": profile.get("workgroup_id"),
         "training_credits": 0,
+        "deletion_requested_at": profile.get("deletion_requested_at"),
+        "deletion_due_by": deletion_requests.due_by(profile.get("deletion_requested_at")),
     }
     supabase = get_supabase()
 
@@ -152,126 +161,97 @@ def _build_my_profile(profile: dict) -> MyProfile:
 
 
 @router.get("", response_model=MyProfile)
-async def read_me(profile=Depends(get_current_profile)):
+def read_me(profile=Depends(get_current_profile)):
     return _build_my_profile(profile)
 
 
-class HfUsernameUpdate(BaseModel):
-    hf_username: str = Field(..., min_length=1, max_length=96)
+# SA-08 (2026-11-13): the Hugging Face account name is set ONLY by proof — the
+# token save (PUT /me/hf-token: the Hub's whoami of the student's own token,
+# store_user_hf_credential). The sentence every refusal of PATCH /me answers.
+HF_USERNAME_BY_TOKEN_ONLY_DE = (
+    "Deine Hugging-Face-Benutzer-ID wird nur über dein Hugging-Face-Token "
+    "festgelegt. Speichere dein Token auf der Startseite – die Benutzer-ID "
+    "übernimmt EduBotics dann von Hugging Face."
+)
 
 
-def _proven_name_conflict() -> HTTPException:
-    return HTTPException(
-        status_code=409,
-        detail=(
-            "Dein Hugging-Face-Konto ist über dein gespeichertes Token "
-            "festgelegt. Entferne zuerst das Token auf der Startseite, wenn "
-            "du ein anderes Konto verwenden möchtest."
-        ),
-    )
+@router.patch("")
+def update_me(body: Any = Body(default=None), profile=Depends(get_current_profile)):
+    """Refused: ``users.hf_username`` is written only by proof (SA-08).
 
-
-@router.patch("", response_model=MyProfile)
-async def update_me(
-    body: HfUsernameUpdate, profile=Depends(get_current_profile)
-):
-    """Link (or update) the caller's HuggingFace username (Benutzer-ID).
-
-    Self-only: the row is keyed to the JWT-verified profile id, never to a
-    body field (Rule §4). Since migration 042 the React app no longer calls
-    this automatically: the account name comes from the stored token's
-    whoami (routes/hf_token.py). This route remains for old clients and for an
-    account WITHOUT a stored token, and answers 409 once one exists (the name
-    is proven then and must not drift from the token the robot uploads with).
-    The `has_credential` check below is the friendly early answer; the
-    guarantee is the database's (migration 044's users trigger raises P0044
-    for any hf_username change that differs from a stored credential's name),
-    so a token saved between the check and the UPDATE still ends in the 409.
-    The value is the SOLE anchor the dataset_sweep + POST /datasets/sync
-    use to discover this student's datasets, so it is format-validated and
-    deny-listed against upstream/system namespaces.
+    Until 2026-11-13 this route let a student SELF-ASSERT a Hugging Face
+    username when no token was stored, and that name drove POST /datasets/sync,
+    the dataset sweep and a teacher's deletion of the student's repos with the
+    platform token — so ``hf_username = "EduBotics-Solutions"`` listed the
+    organisation's private datasets and a later deletion could have erased them.
+    The only writer is now the token save (PUT /me/hf-token), which sets the name
+    Hugging Face reports for the student's own token in the same transaction
+    (store_user_hf_credential); the service role's administrative paths keep
+    theirs. Every body is refused with one German 400, a change and a clearing
+    alike: no shipped client sends this request (the SPA's patchMyHfUsername is
+    deprecated and unused, the teacher web, the Orange Pi agent and the Windows
+    GUI never call it), discovery and deletion act only on the PROVEN name, so a
+    name no credential backs drives nothing and leaving it costs nothing, and a
+    route that never writes cannot be raced or mis-validated. The body is read
+    untyped so FastAPI never answers its English 422 with the input echoed.
     """
-    cleaned = normalize_hf_username(body.hf_username)
-    if cleaned is None:
-        raise HTTPException(
-            status_code=400, detail="Ungültige HuggingFace-Benutzer-ID."
-        )
-    if is_denied_author(cleaned):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Diese Benutzer-ID ist nicht zulässig (System- oder "
-                "Beispielkonto)."
-            ),
-        )
-    supabase = get_supabase()
-    # Migration 042: once a stored token has PROVEN the account name, the
-    # self-asserted PATCH must not overwrite it (the name and the token the
-    # robot uploads with would drift apart). The student removes the token
-    # first. `has_credential` reads only through `.select().eq().execute()`.
-    try:
-        has_token = hf_credentials.has_credential(supabase, profile["id"])
-    except Exception as exc:
-        logger.error(
-            "hf credential lookup failed in PATCH /me for user=%s: %s",
-            profile["id"], type(exc).__name__,
-        )
-        raise HTTPException(
-            status_code=500,
-            detail="Benutzer-ID konnte nicht gespeichert werden.",
-        ) from None
-    if has_token:
-        raise _proven_name_conflict()
-    try:
-        result = (
-            supabase.table("users")
-            .update({"hf_username": cleaned})
-            .eq("id", profile["id"])
-            .execute()
-        )
-        if not result.data:
-            raise RuntimeError("update returned no rows")
-    except Exception as exc:
-        if "P0044" in str(exc):
-            # A token was stored between the check above and this UPDATE.
-            raise _proven_name_conflict() from None
-        logger.error(
-            "hf_username update failed for user=%s: %s", profile["id"], exc
-        )
-        raise HTTPException(
-            status_code=500,
-            detail="Benutzer-ID konnte nicht gespeichert werden.",
-        ) from exc
-    # Re-fetch so the response reflects the persisted value alongside the rest
-    # of the profile (group name, credits, quota).
-    fresh = get_user_profile(str(profile["id"]))
-    return _build_my_profile(fresh)
+    raise HTTPException(status_code=400, detail=HF_USERNAME_BY_TOKEN_ONLY_DE)
 
 
 @router.get("/export")
-async def export_my_data(profile=Depends(get_current_profile)):
+def export_my_data(profile=Depends(get_current_profile)):
     """GDPR/DSGVO Art. 15 — download everything we have on this user.
 
-    Returns the user's profile, every training row, the audit trail of
-    workgroup memberships, every workflow they authored, every dataset
-    they registered, and the progress entries that apply to them. Does
-    NOT include HuggingFace dataset/model contents — those live on HF
-    and the user already has direct access to them under their HF
-    account.
+    Every table that holds a row about the caller, each read with an explicit
+    column list (never ``select("*")``: a later column is exported only once
+    somebody decided it is about the caller and not a credential) and scoped to
+    the caller's OWN rows by the JWT-verified id (Rule §4; the route takes no id):
 
-    Workgroup-aware (migration 011): the audit table workgroup_memberships
-    is itself personal data and must be exportable. Group-scoped progress
-    entries are personal data the moment a teacher writes one against a
-    group the student is/was in.
+      * ``profile`` — every column of the caller's ``public.users`` row;
+      * ``auth_account`` — what Supabase Auth keeps (e-mail, creation, last
+        sign-in, confirmation, MFA factor kinds), best effort with a German
+        ``auth_account_note`` when it cannot be read;
+      * ``credit_account`` + ``credit_ledger`` + ``training_start_refusals``
+        (052) — the caller's own hour account and its history, no other
+        person's id;
+      * ``trainings`` (every column but ``worker_token``) with ``attempts``;
+      * ``workgroup_memberships`` (current and past, migration 011);
+      * ``workflows``, ``workflow_versions`` (``saved_by_me`` instead of a
+        classmate's id), ``workflow_trajectories`` (034, the recorded
+        „Bewegungen"), ``workflow_submissions`` (040, „Abgeben");
+      * ``datasets`` (the registry; the recordings themselves live on Hugging
+        Face, where the student owns them);
+      * ``tutorial_progress``;
+      * ``inference_sessions`` (048, Cloud-Inferenz — never the connect token's
+        hash, the connection id, the Modal session id or the sealed edge token)
+        and ``inference_runs`` (the teacher's log of them);
+      * ``hf_credential`` (042) — the stored token's account name, kind and
+        timestamps, never the ciphertext, its fingerprint or its hint;
+      * the progress notes that apply to the caller (a teacher: the notes in
+        their classrooms; a student: the notes about them, about their
+        classroom and about every group they are or were in).
+
+    Not here: checkpoint manifests and attempt internals (technical data about a
+    model, not about a person), the Supabase Auth audit log (IP addresses; not
+    reachable through the API — the operator answers such a request by hand),
+    and the recordings on the robot's own disk (the Daten tab shows them).
     """
     supabase = get_supabase()
     uid = profile["id"]
+    role = profile.get("role")
+    own_row = (
+        supabase.table("users").select(_EXPORT_PROFILE_COLUMNS).eq("id", uid).execute()
+    ).data or []
     bundle: dict = {
         "exported_at": datetime.now(timezone.utc).isoformat(),
-        "profile": profile,
+        "profile": own_row[0] if own_row else {k: profile.get(k) for k in _EXPORT_PROFILE_KEYS},
     }
+    bundle["auth_account"], note = _export_auth_account(supabase, uid)
+    if note:
+        bundle["auth_account_note"] = note
     # 052 (§8.6, §13): the caller's view of the hour ledger and the refused starts.
-    bundle["credit_ledger"] = _export_ledger(supabase, uid, profile.get("role"))
+    bundle["credit_account"] = _export_credit_account(supabase, uid, role)
+    bundle["credit_ledger"] = _export_ledger(supabase, uid, role)
     bundle["training_start_refusals"] = (
         supabase.table("training_start_refusals").select("at, request_kind, code, model_type")
         .eq("user_id", uid).order("id", desc=True).execute()
@@ -287,117 +267,104 @@ async def export_my_data(profile=Depends(get_current_profile)):
         t["attempts"] = attempts.get(t["id"], []) if t.get("managed") else []
 
     # Workgroup memberships audit — current + past, per GDPR Art. 15.
-    memberships = (
-        supabase.table("workgroup_memberships")
-        .select("*")
-        .eq("user_id", uid)
-        .execute()
-    )
-    bundle["workgroup_memberships"] = memberships.data or []
+    bundle["workgroup_memberships"] = (
+        supabase.table("workgroup_memberships").select("workgroup_id, user_id, joined_at, left_at")
+        .eq("user_id", uid).execute()
+    ).data or []
 
     # Workflows the user authored. Stored in our DB even when the
     # Blockly JSON references upstream blocks; the JSON itself is the
     # personal-data part (a student's classroom assignment solution).
-    workflows = (
-        supabase.table("workflows")
-        .select("*")
-        .eq("owner_user_id", uid)
-        .execute()
-    )
-    bundle["workflows"] = workflows.data or []
+    bundle["workflows"] = (
+        supabase.table("workflows").select(_EXPORT_WORKFLOW_COLUMNS).eq("owner_user_id", uid).execute()
+    ).data or []
 
     # Dataset registry rows the user owns. We do NOT pull HF Hub
     # contents — the user has direct access via their HF account.
-    datasets = (
-        supabase.table("datasets")
-        .select("*")
-        .eq("owner_user_id", uid)
-        .execute()
-    )
-    bundle["datasets"] = datasets.data or []
+    bundle["datasets"] = (
+        supabase.table("datasets").select(_EXPORT_DATASET_COLUMNS).eq("owner_user_id", uid).execute()
+    ).data or []
 
     # Roboter Studio Phase-2/3 personal data added in migrations 015/016.
     # Both tables are personal data under GDPR Art. 15 the moment a
     # student authors a workflow or completes a tutorial step. Audit
     # round-3 §L — without these the export is incomplete.
-    workflow_ids = [w.get("id") for w in (bundle["workflows"] or []) if w.get("id")]
+    workflow_ids = [w.get("id") for w in bundle["workflows"] if w.get("id")]
+    bundle["workflow_versions"] = []
     if workflow_ids:
-        try:
-            versions = (
-                supabase.table("workflow_versions")
-                .select("*")
-                .in_("workflow_id", workflow_ids)
-                .execute()
-            )
-            bundle["workflow_versions"] = versions.data or []
-        except Exception:
-            # Migration 015 not deployed yet on this stack — keep the
-            # export usable.
-            bundle["workflow_versions"] = []
-    else:
-        bundle["workflow_versions"] = []
+        # A group sibling may have saved a version of the caller's workflow:
+        # whose id that was is not the caller's data, so only "was it me".
+        for v in (
+            supabase.table("workflow_versions").select(_EXPORT_VERSION_COLUMNS)
+            .in_("workflow_id", workflow_ids).execute()
+        ).data or []:
+            saved_by = v.pop("saved_by", None)
+            v["saved_by_me"] = saved_by is not None and str(saved_by) == str(uid)
+            bundle["workflow_versions"].append(v)
 
-    try:
-        tutorial_progress = (
-            supabase.table("tutorial_progress")
-            .select("*")
-            .eq("user_id", uid)
-            .execute()
-        )
-        bundle["tutorial_progress"] = tutorial_progress.data or []
-    except Exception:
-        bundle["tutorial_progress"] = []
+    bundle["tutorial_progress"] = (
+        supabase.table("tutorial_progress").select("tutorial_id, current_step, completed_at, updated_at")
+        .eq("user_id", uid).execute()
+    ).data or []
 
-    if profile["role"] == "teacher":
-        classrooms = (
-            supabase.table("classrooms").select("*").eq("teacher_id", uid).execute()
-        )
-        bundle["classrooms"] = classrooms.data or []
-        entries = (
-            supabase.table("progress_entries")
-            .select("*")
-            .in_(
-                "classroom_id",
-                [c["id"] for c in bundle["classrooms"]] or [""],
-            )
-            .execute()
-        )
-        bundle["progress_entries"] = entries.data or []
-    elif profile["role"] == "student":
+    # Launch plan step 5 (F-56): the tables the export used to miss.
+    bundle["workflow_trajectories"] = (
+        supabase.table("workflow_trajectories").select(_EXPORT_TRAJECTORY_COLUMNS)
+        .eq("owner_user_id", uid).execute()
+    ).data or []
+    bundle["workflow_submissions"] = (
+        supabase.table("workflow_submissions").select(_EXPORT_SUBMISSION_COLUMNS)
+        .eq("student_user_id", uid).execute()
+    ).data or []
+    bundle["inference_sessions"] = (
+        supabase.table("inference_sessions").select(_EXPORT_INFERENCE_SESSION_COLUMNS)
+        .eq("user_id", uid).execute()
+    ).data or []
+    bundle["inference_runs"] = (
+        supabase.table("inference_runs").select(_EXPORT_INFERENCE_RUN_COLUMNS)
+        .eq("student_user_id", uid).execute()
+    ).data or []
+    credential = (
+        supabase.table("user_hf_credentials").select(_EXPORT_HF_CREDENTIAL_COLUMNS)
+        .eq("user_id", uid).execute()
+    ).data or []
+    bundle["hf_credential"] = credential[0] if credential else None
+
+    if role == "teacher":
+        bundle["classrooms"] = (
+            supabase.table("classrooms").select("id, name, created_at").eq("teacher_id", uid).execute()
+        ).data or []
+        bundle["progress_entries"] = (
+            supabase.table("progress_entries").select(_EXPORT_PROGRESS_COLUMNS)
+            .in_("classroom_id", [c["id"] for c in bundle["classrooms"]] or [""]).execute()
+        ).data or []
+    elif role == "student":
         # GDPR Art. 15: a student has the right to receive every piece of
         # personal data we hold about them — including the per-student
         # notes their teacher writes (student_id == uid) AND the
         # class-wide notes that apply to them by virtue of belonging to
         # the classroom (student_id IS NULL, classroom_id = theirs).
-        student_entries = (
-            supabase.table("progress_entries")
-            .select("*")
-            .eq("student_id", uid)
-            .execute()
-        )
-        bundle["progress_entries"] = student_entries.data or []
+        bundle["progress_entries"] = (
+            supabase.table("progress_entries").select(_EXPORT_PROGRESS_COLUMNS)
+            .eq("student_id", uid).execute()
+        ).data or []
 
         if profile.get("classroom_id"):
-            class_entries = (
-                supabase.table("progress_entries")
-                .select("*")
+            bundle["classroom_progress_entries"] = (
+                supabase.table("progress_entries").select(_EXPORT_PROGRESS_COLUMNS)
                 .eq("classroom_id", profile["classroom_id"])
                 .is_("student_id", "null")
                 .is_("workgroup_id", "null")
                 .execute()
-            )
-            bundle["classroom_progress_entries"] = class_entries.data or []
+            ).data or []
 
         # Group-scoped entries for any group the student is or was in.
         visible_groups = resolve_visible_workgroup_ids(uid)
         if visible_groups:
-            group_entries = (
-                supabase.table("progress_entries")
-                .select("*")
-                .in_("workgroup_id", visible_groups)
-                .execute()
-            )
-            bundle["workgroup_progress_entries"] = group_entries.data or []
+            bundle["workgroup_progress_entries"] = (
+                supabase.table("progress_entries").select(_EXPORT_PROGRESS_COLUMNS)
+                .in_("workgroup_id", visible_groups).execute()
+            ).data or []
 
     filename = f"edubotics-export-{uid}.json"
     return JSONResponse(
@@ -407,6 +374,101 @@ async def export_my_data(profile=Depends(get_current_profile)):
             "Cache-Control": "no-store",
         },
     )
+
+
+# The export's column lists (launch plan step 5). Each names every column of its
+# table EXCEPT a credential or another person's id; app/tests/test_me_export.py
+# compares each with the table's columns from the migrations.
+_EXPORT_PROFILE_KEYS = (
+    "id", "email", "role", "username", "full_name", "classroom_id", "workgroup_id", "created_by",
+    "created_at", "deletion_requested_at", "hf_username", "training_credits",
+    "vision_quota_per_term", "vision_used_per_term",
+)
+_EXPORT_PROFILE_COLUMNS = ", ".join(_EXPORT_PROFILE_KEYS)
+_EXPORT_WORKFLOW_COLUMNS = (
+    "id, owner_user_id, classroom_id, workgroup_id, name, description, is_template, blockly_json, "
+    "code_language, code_files, sim_scene, created_at, updated_at"
+)
+_EXPORT_VERSION_COLUMNS = "id, workflow_id, note, blockly_json, code_language, code_files, created_at, saved_by"
+_EXPORT_DATASET_COLUMNS = (
+    "id, owner_user_id, workgroup_id, hf_repo_id, name, description, episode_count, total_frames, fps, "
+    "robot_type, created_at, updated_at, discovered_via_sweep"
+)
+_EXPORT_TRAJECTORY_COLUMNS = (
+    "id, workflow_id, owner_user_id, name, robot_profile, samples, point_count, duration_s, fps, "
+    "created_at, updated_at"
+)
+_EXPORT_SUBMISSION_COLUMNS = (
+    "id, workflow_id, student_user_id, classroom_id, name, code_language, code_files, blockly_json, "
+    "sim_scene, note, submitted_at"
+)
+# Never token_hash, conn_id, modal_session_id or edge_token_enc (048's credentials).
+_EXPORT_INFERENCE_SESSION_COLUMNS = (
+    "id, user_id, classroom_id, workgroup_id, training_id, model_repo, model_revision, policy_type, "
+    "status, session_s, created_at, reserve_until, edge_attached_at, connected_at, client_heartbeat_at, "
+    "last_server_heartbeat_at, max_end_at, ended_at, end_reason, active_seconds, stats, "
+    "edge_terminated_at, run_logged_at"
+)
+_EXPORT_INFERENCE_RUN_COLUMNS = (
+    "id, student_user_id, classroom_id, policy_repo, backend, started_at, duration_s, exit_reason, "
+    "error_message_de, created_at"
+)
+# Never token_ciphertext, token_fp or token_hint (042: a credential and pieces of it).
+_EXPORT_HF_CREDENTIAL_COLUMNS = "hf_username, token_role, validated_at, created_at, updated_at"
+_EXPORT_PROGRESS_COLUMNS = "id, classroom_id, student_id, workgroup_id, entry_date, note, created_at, updated_at"
+# Never parent_teacher_id (the funding teacher's id is not the caller's data).
+_EXPORT_CREDIT_ACCOUNT_COLUMNS = "kind, free, reserved, spent, member_hour_limit, closed_at, created_at"
+AUTH_ACCOUNT_UNREADABLE_DE = (
+    "Die Anmeldedaten (Supabase Auth) konnten gerade nicht gelesen werden. Bitte den Export "
+    "später erneut herunterladen."
+)
+_AUTH_ACCOUNT_FIELDS = ("email", "created_at", "updated_at", "last_sign_in_at", "email_confirmed_at",
+                        "confirmed_at")
+
+
+def _plain(value):
+    """A JSON-safe copy of an auth field (datetimes as ISO text)."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value if isinstance(value, (str, int, float, bool)) or value is None else str(value)
+
+
+def _export_auth_account(supabase, uid: str) -> tuple[dict | None, str | None]:
+    """What Supabase Auth keeps about the caller (``auth.admin.get_user_by_id``,
+    service role): the fields above plus each MFA factor's kind, name, status and
+    creation — never a factor id or secret. Best effort: on any failure the
+    export still answers, with a German note instead of the block."""
+    try:
+        user = getattr(supabase.auth.admin.get_user_by_id(uid), "user", None)
+    except Exception as exc:  # noqa: BLE001 - the export must not fail on Auth
+        logger.warning("export: auth account read failed for user=%s: %s", uid, type(exc).__name__)
+        return None, AUTH_ACCOUNT_UNREADABLE_DE
+    if user is None or str(getattr(user, "id", uid)) != str(uid):
+        return None, AUTH_ACCOUNT_UNREADABLE_DE
+    out = {f: _plain(getattr(user, f, None)) for f in _AUTH_ACCOUNT_FIELDS}
+    out["mfa_factors"] = [
+        {
+            "factor_type": _plain(getattr(f, "factor_type", None)),
+            "friendly_name": _plain(getattr(f, "friendly_name", None)),
+            "status": _plain(getattr(f, "status", None)),
+            "created_at": _plain(getattr(f, "created_at", None)),
+        }
+        for f in (getattr(user, "factors", None) or [])
+    ]
+    return out, None
+
+
+def _export_credit_account(supabase, uid: str, role) -> dict | None:
+    """The caller's own hour account (052): free, reserved, spent, its closing time;
+    a grouped student's hours live in the group's account, which is not theirs."""
+    kind = {"student": "student", "teacher": "teacher"}.get(role)
+    if kind is None:
+        return None
+    rows = (
+        supabase.table("credit_accounts").select(_EXPORT_CREDIT_ACCOUNT_COLUMNS)
+        .eq("kind", kind).eq("owner_id", uid).execute()
+    ).data or []
+    return rows[0] if rows else None
 
 
 def _export_ledger(supabase, uid: str, role) -> list:
@@ -445,10 +507,12 @@ async def _cancel_managed_for_deletion(supabase, training_id: int, uid: str) -> 
     from app.services import training_dispatch
 
     try:
-        data = supabase.rpc(
-            "cancel_request_training", {"p_training_id": training_id, "p_user_id": uid,
-                                        "p_actor_role": "student"}
-        ).execute().data
+        data = (await asyncio.to_thread(
+            supabase.rpc(
+                "cancel_request_training", {"p_training_id": training_id, "p_user_id": uid,
+                                            "p_actor_role": "student"}
+            ).execute
+        )).data
     except Exception as exc:
         code = training_dispatch.pg_code(exc)
         if code in ("P0050", "P0051", "P0002"):
@@ -464,10 +528,12 @@ async def _cancel_managed_for_deletion(supabase, training_id: int, uid: str) -> 
     except Exception as exc:  # best effort: the reaper ends a pod no active row owns
         logger.warning("/me/delete: stopping training %s failed: %s", training_id, type(exc).__name__)
     try:
-        supabase.rpc(
-            "complete_cancel_training",
-            {"p_training_id": training_id, "p_final": "canceled", "p_message": None},
-        ).execute()
+        await asyncio.to_thread(
+            supabase.rpc(
+                "complete_cancel_training",
+                {"p_training_id": training_id, "p_final": "canceled", "p_message": None},
+            ).execute
+        )
     except Exception as exc:
         logger.warning("/me/delete: complete_cancel_training failed for %s: %s", training_id, type(exc).__name__)
         return False
@@ -479,16 +545,20 @@ async def delete_my_account(profile=Depends(get_current_profile)):
     """GDPR/DSGVO Art. 17 — account deletion request.
 
     Students and teachers can call this; admins can't self-delete (would
-    lock out the platform). Current behavior is *request tracking* only
-    — actual deletion is an admin responsibility per the runbook, because
-    it spans Supabase Auth, HF repos, and container-local caches.
+    lock out the platform). This records a REQUEST; nothing is deleted here.
+    The teacher of the student's classroom lists the open requests and
+    confirms one (``routes/teacher.py::confirm_deletion_request``), which runs
+    the full deletion; the admin sees every open request (a teacher's own
+    included) and may confirm too (``routes/admin.py``). The requester may
+    withdraw an open request (``POST /me/delete/withdraw``).
 
     Side effects:
       1. Cancels any running/queued training the user owns so credits and
          GPU stop burning while the request sits in the admin queue.
-      2. Records deletion_requested_at on the users row. If that write
-         fails the endpoint returns 500 — silently returning success
-         used to mean an admin would never see the request.
+      2. Records deletion_requested_at on the users row (the FIRST request's
+         time: asking again keeps it, so the Art. 12(3) deadline does not
+         move). If that write fails the endpoint returns 500 — silently
+         returning success used to mean nobody would ever see the request.
       3. Deletes the caller's stored Hugging Face token (user_hf_credentials,
          migration 042), best effort: a failure is logged by class and never
          blocks the request.
@@ -514,12 +584,12 @@ async def delete_my_account(profile=Depends(get_current_profile)):
     # Migration 023: include 'cancel_requested' so a row stuck mid-cancel
     # at account-deletion time is also force-closed. Deletion is the user's
     # decision — we don't retry Modal here, we just close the row out.
-    active = (
+    active = await asyncio.to_thread(
         supabase.table("trainings")
         .select("id, cloud_job_id, managed")
         .eq("user_id", uid)
         .in_("status", ["queued", "running", "cancel_requested"])
-        .execute()
+        .execute
     )
     cancelled_ids: list = []
     for row in active.data or []:
@@ -539,13 +609,15 @@ async def delete_my_account(profile=Depends(get_current_profile)):
                     row["id"], exc,
                 )
         try:
-            supabase.table("trainings").update(
-                {
-                    "status": "canceled",
-                    "terminated_at": datetime.now(timezone.utc).isoformat(),
-                    "error_message": "Automatisch abgebrochen: Kontolöschung angefordert.",
-                }
-            ).eq("id", row["id"]).execute()
+            await asyncio.to_thread(
+                supabase.table("trainings").update(
+                    {
+                        "status": "canceled",
+                        "terminated_at": datetime.now(timezone.utc).isoformat(),
+                        "error_message": "Automatisch abgebrochen: Kontolöschung angefordert.",
+                    }
+                ).eq("id", row["id"]).execute
+            )
             cancelled_ids.append(row["id"])
         except Exception as exc:
             logger.warning(
@@ -562,14 +634,18 @@ async def delete_my_account(profile=Depends(get_current_profile)):
     if profile.get("workgroup_id"):
         wg_id = profile["workgroup_id"]
         try:
-            supabase.table("users").update({"workgroup_id": None}).eq(
-                "id", uid
-            ).execute()
-            supabase.table("workgroup_memberships").update(
-                {"left_at": datetime.now(timezone.utc).isoformat()}
-            ).eq("workgroup_id", wg_id).eq("user_id", uid).is_(
-                "left_at", "null"
-            ).execute()
+            await asyncio.to_thread(
+                supabase.table("users").update({"workgroup_id": None}).eq(
+                    "id", uid
+                ).execute
+            )
+            await asyncio.to_thread(
+                supabase.table("workgroup_memberships").update(
+                    {"left_at": datetime.now(timezone.utc).isoformat()}
+                ).eq("workgroup_id", wg_id).eq("user_id", uid).is_(
+                    "left_at", "null"
+                ).execute
+            )
             logger.info(
                 "Workgroup disengagement on /me/delete: user=%s group=%s",
                 uid, wg_id,
@@ -588,8 +664,8 @@ async def delete_my_account(profile=Depends(get_current_profile)):
     #     what really took effect.
     hf_token_removed = False
     try:
-        removed_rows = (
-            supabase.table("user_hf_credentials").delete().eq("user_id", uid).execute()
+        removed_rows = await asyncio.to_thread(
+            supabase.table("user_hf_credentials").delete().eq("user_id", uid).execute
         )
         hf_token_removed = bool(getattr(removed_rows, "data", None))
     except Exception as exc:
@@ -602,15 +678,29 @@ async def delete_my_account(profile=Depends(get_current_profile)):
     #    column exists; a failure here is a real DB / network error and
     #    must be surfaced — silently returning success used to mean an
     #    admin would never see the request.
+    #    The FIRST request time is kept (launch plan step 5): Art. 12(3)'s
+    #    one-month deadline runs from when the request arrived, so asking
+    #    again must not move it. Hence the conditional write, then a re-read
+    #    when it matched nothing (an earlier request is already open).
     try:
-        result = (
+        now_iso = datetime.now(timezone.utc).isoformat()
+        result = await asyncio.to_thread(
             supabase.table("users")
-            .update({"deletion_requested_at": datetime.now(timezone.utc).isoformat()})
+            .update({"deletion_requested_at": now_iso})
             .eq("id", uid)
-            .execute()
+            .is_("deletion_requested_at", "null")
+            .execute
         )
-        if not result.data:
-            raise RuntimeError("update returned no rows")
+        written = result.data or []
+        if written:
+            requested_at = written[0].get("deletion_requested_at") or now_iso
+        else:
+            rows = (await asyncio.to_thread(
+                supabase.table("users").select("deletion_requested_at").eq("id", uid).execute
+            )).data or []
+            requested_at = rows[0].get("deletion_requested_at") if rows else None
+        if not requested_at:
+            raise RuntimeError("no request time recorded")
     except Exception as exc:
         logger.error("delete_my_account write failed for %s: %s", uid, exc)
         return JSONResponse(
@@ -634,34 +724,83 @@ async def delete_my_account(profile=Depends(get_current_profile)):
         if hf_token_removed
         else ""
     )
+    due_by = deletion_requests.due_by(requested_at)
+    due_date = deletion_requests.parse_timestamp(due_by)
+    due_note = (
+        f" Nach der DSGVO muss das spätestens bis zum {due_date:%d.%m.%Y} geschehen."
+        if due_date is not None
+        else ""
+    )
     return {
         "status": "requested",
         "canceled_trainings": cancelled_ids,
         "hf_token_removed": hf_token_removed,
+        # The FIRST request's time and its Art. 12(3) deadline (launch plan step 5).
+        "requested_at": requested_at,
+        "due_by": due_by,
         # German (Rule §1 — this is read by a student) and HONEST about what
         # just happened. The previous English text said an administrator "will
         # process it within 30 days", which overstated the mechanism twice
-        # over: nothing here deletes anything, and NOTHING DRAINS THIS QUEUE
-        # — there is no sweeper, no cron, no admin surface that lists
-        # `deletion_requested_at`. Only a manual `DELETE /teacher/students/{id}`
-        # erases data, and even that cannot reach repos in the student's own
+        # over: nothing here deletes anything, and until 2026-11-11 nothing
+        # drained this queue. Since launch plan step 5 the teacher of the
+        # student's classroom lists the open requests and confirms one
+        # (routes/teacher.py::confirm_deletion_request, the admin as the
+        # backstop), which runs the full `DELETE /teacher/students/{id}`
+        # deletion — and even that cannot reach repos in the student's own
         # HuggingFace namespace (the platform token does not own them; see
         # teacher.py::_delete_student_hf_artifacts). Telling a minor their data
         # is scheduled for erasure when it is not is the worst version of this
-        # defect, so the wording now describes a REQUEST and names the actions
-        # that actually took effect.
+        # defect, so the wording describes a REQUEST, names who carries it out
+        # and names the actions that actually took effect.
         "deletion_performed": False,
         "message": (
             "Die Löschanfrage wurde gespeichert. Wichtig: Es wurden noch "
             "KEINE Daten gelöscht — die Anfrage muss von einer Lehrkraft oder "
-            "einem Administrator manuell ausgeführt werden. Sofort wirksam "
+            "einem Administrator bestätigt und ausgeführt werden."
+            f"{due_note} Sofort wirksam "
             f"sind: {len(cancelled_ids)} laufende Training(s) wurden "
             "abgebrochen und die Arbeitsgruppen-Zuordnung wurde aufgehoben."
             f"{token_note} "
             "Aufnahmen im eigenen HuggingFace-Konto müssen dort selbst "
-            "gelöscht werden. Über „Meine Daten exportieren“ kann jederzeit "
-            "eine Kopie heruntergeladen werden."
+            "gelöscht werden. Solange die Anfrage offen ist, kannst du sie "
+            "zurückziehen."
         ),
+    }
+
+
+@router.post("/delete/withdraw")
+def withdraw_deletion_request(profile=Depends(get_current_profile)):
+    """Withdraw the caller's own OPEN deletion request (launch plan step 5).
+
+    Self-only: the row is the JWT-verified caller's, never a body field
+    (Rule §4). It clears ``users.deletion_requested_at`` through the service
+    role (055 refuses that write to the request roles, so it goes through here
+    and nowhere else) and changes nothing else: what took effect when the request
+    was filed (canceled trainings, the workgroup left, the stored token removed)
+    stays as it is, and the answer says so. No open request is an idempotent
+    ``withdrawn: false``. A request a teacher already carried out has no account
+    left to call this with (401)."""
+    if profile["role"] == "admin":
+        raise HTTPException(status_code=400, detail=deletion_requests.ADMIN_CANNOT_REQUEST_DE)
+    uid = profile["id"]
+    try:
+        result = (
+            get_supabase()
+            .table("users")
+            .update({"deletion_requested_at": None})
+            .eq("id", uid)
+            .not_.is_("deletion_requested_at", "null")
+            .execute()
+        )
+    except Exception as exc:
+        logger.error("deletion-request withdrawal failed for user=%s: %s", uid, type(exc).__name__)
+        raise HTTPException(status_code=500, detail=deletion_requests.WITHDRAW_FAILED_DE) from None
+    withdrawn = bool(result.data)
+    if withdrawn:
+        logger.info("deletion request withdrawn by user=%s role=%s", uid, profile["role"])
+    return {
+        "withdrawn": withdrawn,
+        "message": deletion_requests.WITHDRAWN_DE if withdrawn else deletion_requests.NOTHING_TO_WITHDRAW_DE,
     }
 
 
@@ -695,7 +834,7 @@ def _valid_tutorial_id(tid: str) -> bool:
 
 
 @router.get("/tutorial-progress", response_model=list[TutorialProgress])
-async def list_tutorial_progress(
+def list_tutorial_progress(
     profile=Depends(get_current_profile),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
@@ -720,7 +859,7 @@ async def list_tutorial_progress(
 
 
 @router.patch("/tutorial-progress/{tutorial_id}", response_model=TutorialProgress)
-async def update_tutorial_progress_endpoint(
+def update_tutorial_progress_endpoint(
     tutorial_id: str,
     body: TutorialProgressUpdate,
     profile=Depends(get_current_profile),
@@ -797,7 +936,7 @@ def _group_member(row: dict, me_id: str) -> dict:
 
 
 @router.get("/group-members", response_model=GroupMembers)
-async def read_my_group_members(profile=Depends(get_current_profile)):
+def read_my_group_members(profile=Depends(get_current_profile)):
     """The members of the CALLER's current workgroup (any role).
 
     Rule §4: the workgroup comes from the caller's own profile (resolved from

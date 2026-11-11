@@ -22,6 +22,13 @@ source-gap re-record (two redos, the third kept), and the official discard's
 duration. Round 6 adds a FINISH that lands while the official discard after
 „Wiederholen“ holds the recorder lock: accepted at once (queued) and applied
 at the release, ending the session with the discarded take dropped.
+Launch plan step 8 (2026-11-10) adds the environment stop: a child process
+records under a real rclpy MultiThreadedExecutor set up exactly like the node's
+main() (SIGINT to SIG_DFL before rclpy.init), is sent SIGINT (the launch's
+first shutdown signal) or SIGTERM after 2 saved episodes with a third take
+running, and finalizes through the node's own helper (recording_shutdown) in
+its finally: LeRobot loads exactly the 2 episodes, the crash marker is gone, no
+streaming temp file is left, and the next session resumes the dataset.
 Exit code 0 = all scenarios passed.
 
 Robust on a slow or noisy runner by construction:
@@ -704,6 +711,168 @@ def queued_finish_during_discard(attempt):
                           f'count={s.dm._record_episode_count} first_take={first} disk={d}')
 
 
+SHUTDOWN_CHILD_FLAG = '--shutdown-child'
+SHUTDOWN_READY = 'SHUTDOWN_CHILD_READY'
+SHUTDOWN_RESULT = 'SHUTDOWN_CHILD_RESULT '
+SHUTDOWN_EPISODE_S = 1          # TaskInfo.episode_time_s is a uint16
+SHUTDOWN_READY_LIMIT_S = 90.0      # imports + 2 episodes + 10 frames, on a slow runner
+SHUTDOWN_EXIT_LIMIT_S = 60.0
+
+
+def shutdown_child(name):
+    """The child of the shutdown scenarios: the recorder ticked by a 30 Hz
+    timer on a real rclpy MultiThreadedExecutor, the signal setup of the node's
+    main(), and the node's finalize helper in the finally. Prints READY once 2
+    episodes are saved and a third take holds frames, then one RESULT line."""
+    import signal
+
+    import rclpy
+    from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+    from rclpy.executors import MultiThreadedExecutor
+
+    from physical_ai_server.data_processing import recording_shutdown
+
+    signal.signal(signal.SIGINT, signal.SIG_DFL)       # exactly the node's main()
+    rclpy.init()
+    node = rclpy.create_node('record_fsm_smoke_shutdown')
+    s = Session(ROOT, name, warmup=0, episode=SHUTDOWN_EPISODE_S, reset=0, n=5)
+    state = {'owned': True, 'ready': False}
+
+    def _tick():
+        # The node's record tick re-checks that it still owns the session (F5);
+        # the shutdown hook takes it over first.
+        if not state['owned'] or s.completed:
+            return
+        s.tick(paced=False)
+        if (not state['ready'] and s.dm._record_episode_count >= 2
+                and s.dm.get_status() == 'run' and s.dm._buffer_size() >= 10):
+            state['ready'] = True
+            print(SHUTDOWN_READY, flush=True)
+
+    node.create_timer(PERIOD_S, _tick, callback_group=MutuallyExclusiveCallbackGroup())
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
+    outcome = {'verdict': 'never_ran'}
+    try:
+        executor.spin()          # returns once rclpy's handler shut the context down
+    except KeyboardInterrupt:
+        outcome['keyboard_interrupt'] = True        # must not happen (SIG_DFL)
+    finally:
+        state['owned'] = False
+        outcome.update(recording_shutdown.finalize_for_shutdown(
+            s.dm, recording_shutdown.SHUTDOWN_FINALIZE_WAIT_S))
+        outcome['fed'] = s.fed
+        executor.shutdown()
+        node.destroy_node()
+        rclpy.try_shutdown()
+    print(SHUTDOWN_RESULT + json.dumps(outcome), flush=True)
+    # No interpreter teardown: LeRobot's __del__ safety net would finalize there,
+    # which the node cannot count on (a SIGKILL right after its finally, a
+    # reference cycle collected after the modules are gone; the measured
+    # environment stop left an unreadable parquet). What is on disk must come
+    # from the finalize above — without it this scenario fails (checked).
+    os._exit(0)
+
+
+def _shutdown_scenario(sig_name):
+    def body(attempt):
+        import queue
+        import signal
+        import subprocess
+        import threading
+
+        name = f'smoke shutdown {sig_name.lower()} {attempt}'
+        env = dict(os.environ, EDUBOTICS_SMOKE_ROOT=str(ROOT))
+        proc = subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), SHUTDOWN_CHILD_FLAG, name],
+            stdout=subprocess.PIPE, text=True, env=env)
+        lines = queue.Queue()
+
+        def _read_stdout():
+            for out_line in proc.stdout:
+                lines.put(out_line)
+        threading.Thread(target=_read_stdout, daemon=True).start()
+
+        def _next_line(deadline):
+            while time.monotonic() < deadline:
+                try:
+                    return lines.get(timeout=max(0.0, deadline - time.monotonic()))
+                except queue.Empty:
+                    break
+            return None
+
+        deadline = time.monotonic() + SHUTDOWN_READY_LIMIT_S
+        while True:
+            line = _next_line(deadline)
+            if line is None or line.strip() == SHUTDOWN_READY:
+                break
+        if line is None:
+            proc.kill()
+            proc.wait(10)
+            return False, False, f'the child never got 2 episodes saved (exit {proc.returncode})'
+        signalled = time.monotonic()
+        proc.send_signal(getattr(signal, sig_name))
+        try:
+            proc.wait(SHUTDOWN_EXIT_LIMIT_S)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(10)
+            return True, False, f'the child did not exit within {SHUTDOWN_EXIT_LIMIT_S}s of {sig_name}'
+        exit_s = time.monotonic() - signalled
+        result = {}
+        while True:
+            line = _next_line(time.monotonic() + 2.0)
+            if line is None:
+                break
+            if line.startswith(SHUTDOWN_RESULT):
+                result = json.loads(line[len(SHUTDOWN_RESULT):])
+
+        # The parent's own view of the same dataset (no frames recorded here).
+        dm = DataManager(ROOT, 'omx_f', task(name, warmup=0, episode=SHUTDOWN_EPISODE_S,
+                                             reset=0, n=1), upload_callback=None)
+        root = Path(dm._save_path)
+        marker_gone = not dm._session_marker_path().exists()
+        strays = [str(p.relative_to(root)) for p in root.rglob('*_streaming.mp4')]
+        loaded = {}
+        try:
+            from lerobot.datasets.lerobot_dataset import LeRobotDataset
+            ds = LeRobotDataset(dm._save_repo_name, root=root)
+            last = ds[ds.num_frames - 1]
+            loaded = {'episodes': ds.num_episodes, 'frames': ds.num_frames,
+                      'last_scene': tuple(last['observation.images.scene'].shape),
+                      'last_gripper': tuple(last['observation.images.gripper'].shape)}
+        except Exception as e:  # noqa: BLE001 — reported as a failure below
+            loaded = {'error': f'{type(e).__name__}: {e}'}
+        per_episode = int(round(SHUTDOWN_EPISODE_S * FPS))
+
+        # The next session on the same task resumes the finalized dataset (the
+        # D4 compatibility check included) and adds one episode. Unfinalized,
+        # the dataset cannot be opened: the Start is refused (the old defect).
+        resumed_ok, resumed_fed, after = False, 0, {}
+        try:
+            resumed = Session(ROOT, name, warmup=0, episode=SHUTDOWN_EPISODE_S, reset=0, n=1)
+            end = time.monotonic() + 20
+            while not resumed.completed and time.monotonic() < end:
+                resumed.tick()
+            resumed_ok, resumed_fed, after = resumed.completed, resumed.fed, resumed.on_disk()
+        except Exception as e:  # noqa: BLE001 — an AssertionError too: reported as a failure
+            after = {'error': f'{type(e).__name__}: {e}'}
+
+        passed = (proc.returncode == 0 and result.get('verdict') == 'finalized'
+                  and not result.get('keyboard_interrupt') and result.get('saved') == 2
+                  and result.get('fed', 0) > 2 * per_episode       # a third take was running
+                  and loaded.get('episodes') == 2 and loaded.get('frames') == 2 * per_episode
+                  and loaded.get('last_scene') == (3, H, W) and loaded.get('last_gripper') == (3, H, W)
+                  and marker_gone and not strays and exit_s < SHUTDOWN_EXIT_LIMIT_S
+                  and resumed_ok and after.get('episodes') == 3
+                  and after.get('frames') == 2 * per_episode + resumed_fed)
+        return True, passed, (
+            f'{sig_name}: exit={proc.returncode} in {exit_s:.2f}s child={result} '
+            f'loaded={loaded} marker_gone={marker_gone} strays={strays} '
+            f'resumed={resumed_ok} after={after}')
+    return body
+
+
 def main():
     # LeRobot's encoder warnings must reach the frame-drop watch (WARNING).
     logging.getLogger('lerobot.datasets.video_utils').setLevel(logging.WARNING)
@@ -719,9 +888,13 @@ def main():
     scenario('official_discard_timing', official_discard_timing)
     scenario('queued_finish_during_discard', queued_finish_during_discard)
     scenario('frame_drop_rerecord', frame_drop_rerecord)
+    scenario('shutdown_sigint_after_two_episodes', _shutdown_scenario('SIGINT'))
+    scenario('shutdown_sigterm_after_two_episodes', _shutdown_scenario('SIGTERM'))
     print('SMOKE RESULT:', 'PASS' if not FAILURES else f'FAIL {FAILURES}', flush=True)
     return 0 if not FAILURES else 1
 
 
 if __name__ == '__main__':
+    if len(sys.argv) == 3 and sys.argv[1] == SHUTDOWN_CHILD_FLAG:
+        sys.exit(shutdown_child(sys.argv[2]))
     sys.exit(main())

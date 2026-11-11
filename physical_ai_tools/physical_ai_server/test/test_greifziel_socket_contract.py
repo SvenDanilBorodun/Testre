@@ -34,6 +34,7 @@ catalogs. Pure Python + numpy — no container.
 from __future__ import annotations
 
 import math
+import queue
 import threading
 import types
 
@@ -681,29 +682,62 @@ _NOTHING_VISIBLE = 'Kein „Banane" sichtbar'
 _TOO_FAR = '„Banane" gesehen, aber zu weit weg'
 
 
-def _in_other_thread(fn):
-    out = {}
+class _OtherThread:
+    """ONE long-lived helper thread — what a hat thread is for a whole run —
+    that runs each call it is given and hands back the result (or the raised
+    exception). Two calls in it run in the SAME thread.
 
-    def run():
-        try:
-            out['r'] = fn()
-        except BaseException as e:  # noqa: BLE001 — the datum
-            out['r'] = e
+    Two SHORT-LIVED threads must never stand in for one: a new thread gets the
+    ident of a thread joined just before it only when CPython's thread library
+    reuses that thread's stack, and ``find_failure_by_thread`` is keyed by the
+    ident. Measured with two back-to-back start/join threads: reused in 1993 of
+    2000 pairs on an idle 3.12, in 1185 of 2000 while two other threads started
+    and ended meanwhile (as another test's helpers do) — so a check that read a
+    reason a PREVIOUS thread stored passed or failed on that reuse alone."""
 
-    th = threading.Thread(target=run)
-    th.start()
-    th.join(10)
-    assert not th.is_alive()
-    return out.get('r')
+    def __init__(self):
+        self._jobs = queue.Queue()
+        self._thread = threading.Thread(target=self._serve, name='greifziel-other-thread', daemon=True)
+        self._thread.start()
+
+    def _serve(self):
+        while True:
+            job = self._jobs.get()
+            if job is None:
+                return
+            fn, done = job
+            try:
+                done['r'] = fn()
+            except BaseException as e:  # noqa: BLE001 — the datum
+                done['r'] = e
+            done['ev'].set()
+
+    def call(self, fn):
+        done = {'ev': threading.Event()}
+        self._jobs.put((fn, done))
+        assert done['ev'].wait(10), 'the other thread did not answer'
+        return done.get('r')
+
+    def close(self):
+        self._jobs.put(None)
+        self._thread.join(10)
+        assert not self._thread.is_alive()
 
 
-def test_a_find_failure_in_another_thread_does_not_explain_this_threads_empty_socket():
+@pytest.fixture()
+def other_thread():
+    other = _OtherThread()
+    yield other
+    other.close()
+
+
+def test_a_find_failure_in_another_thread_does_not_explain_this_threads_empty_socket(other_thread):
     """Only a hat thread's „finde" failed: the main thread never ran „finde",
     so its empty socket is the PROGRAM's fault — a base ``WorkflowError`` with
     the generic sentence, never that thread's ``GraspSkip`` (47aea6fa: the
     other thread's reason, as a skip a „Solange sichtbar" loop swallows)."""
     ctx = _Ctx(_StubPerception([_det(21, (0.60, 0.0))]))
-    assert _in_other_thread(lambda: pb.find_object(ctx, {'object_type': 'banane'})) is None
+    assert other_thread.call(lambda: pb.find_object(ctx, {'object_type': 'banane'})) is None
     with pytest.raises(WorkflowError) as exc:
         motion.move_above(ctx, {'ziel': None})
     assert not isinstance(exc.value, GraspSkip), str(exc.value)
@@ -711,7 +745,7 @@ def test_a_find_failure_in_another_thread_does_not_explain_this_threads_empty_so
     assert ctx.published == []
 
 
-def test_another_threads_later_find_failure_does_not_erase_this_threads_reason():
+def test_another_threads_later_find_failure_does_not_erase_this_threads_reason(other_thread):
     """Main's „finde" fails (nothing visible), then a hat's „finde" fails for
     another reason (too far) before main's split block runs — the natural order,
     since the hat body holds the motion lock. Main's error carries MAIN's reason
@@ -719,14 +753,15 @@ def test_another_threads_later_find_failure_does_not_erase_this_threads_reason()
     ctx = _Ctx(_StubPerception([]))
     assert pb.find_object(ctx, {'object_type': 'banane'}) is None
     ctx.perception = _StubPerception([_det(21, (0.60, 0.0))])
-    assert _in_other_thread(lambda: pb.find_object(ctx, {'object_type': 'banane'})) is None
+    assert other_thread.call(lambda: pb.find_object(ctx, {'object_type': 'banane'})) is None
     with pytest.raises(GraspSkip) as exc:
         motion.move_above(ctx, {'ziel': None})
     msg = str(exc.value)
     assert _NOTHING_VISIBLE in msg, msg
     assert _TOO_FAR not in msg, msg
-    # The other thread's own reason is still its own.
-    other = _in_other_thread(lambda: motion.move_above(ctx, {'ziel': None}))
+    # The other thread's own reason is still its own: asked in the SAME thread
+    # that looked (a hat thread lives for the whole run).
+    other = other_thread.call(lambda: motion.move_above(ctx, {'ziel': None}))
     assert isinstance(other, GraspSkip), other
     assert _TOO_FAR in str(other), str(other)
     assert ctx.published == []

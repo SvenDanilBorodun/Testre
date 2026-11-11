@@ -73,25 +73,44 @@ jobs:
   deploy:
     name: Railway up (teacher-web)
     needs: [prebuild-validate]
+    # SA-13 (2026-11-13): the production environment's required reviewers
+    # approve this job before it runs (docs/deploy/DEPLOY.md, section 0).
+    environment: production
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    # RAILWAY_TOKEN is set on the steps that call `railway`, never on the job:
+    # nothing that downloads or installs code runs with the token in scope.
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
-      - name: Install Railway CLI via npm
-        # GH runners come with Node.js + npm pre-installed; npm
-        # install is more stable than the curl install script which
-        # uses sudo -v and assumes interactive auth.
+      - name: Install Railway CLI (pinned release binary, SHA-256 checked)
+        # One fixed release asset, verified by hash, installed with no token
+        # in scope. The npm wrapper it replaces fetched the binary in a
+        # postinstall script through floating dependencies while the token sat
+        # in the job env (security review 2026-10-25, P0-2). Bump the version
+        # and the hash together; tests/test_ci_supply_chain_pins.py holds all
+        # four copies of this step equal.
+        env:
+          RAILWAY_CLI_VERSION: "5.71.0"
+          RAILWAY_CLI_SHA256: "2e682fd2ddf8d6fdf9e46d9d99d99646ff0022a6abb0c2bca93011348a269fb9"
         run: |
-          npm install -g @railway/cli
-          railway --version
+          set -euo pipefail
+          dir="${RUNNER_TEMP}/railway-cli"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 -o "$dir/railway.tgz" \
+            "https://github.com/railwayapp/cli/releases/download/v${RAILWAY_CLI_VERSION}/railway-v${RAILWAY_CLI_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          echo "${RAILWAY_CLI_SHA256}  $dir/railway.tgz" | sha256sum -c -
+          tar -xzf "$dir/railway.tgz" -C "$dir" railway
+          chmod +x "$dir/railway"
+          echo "$dir" >> "$GITHUB_PATH"
+          "$dir/railway" --version
       - name: Deploy via the existing script
         # The script handles --path-as-root and --service teacher-web. We just
         # invoke it. It uses `exec railway up` so its exit code IS the deploy
         # result.
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: bash physical_ai_tools/physical_ai_manager/scripts/railway-deploy.sh
 
   health-gate:

@@ -29,10 +29,14 @@ FONT_FAMILY = "Segoe UI"
 TITLE_FONT = (FONT_FAMILY, 18, "bold")
 STATUS_FONT = (FONT_FAMILY, 10)
 HINT_FONT = (FONT_FAMILY, 8)
+LINK_FONT = (FONT_FAMILY, 8, "underline")
 BADGE_FONT = (FONT_FAMILY, 9, "bold")
 LOG_FONT = ("Consolas", 9)
 
 COLOR_HINT = "gray"
+# The legal links under the version line (launch plan step 4, 2026-11-11).
+COLOR_LINK = "#1f5fa8"
+LINK_LABEL = "Link.TLabel"
 COLOR_OK = "#1e8449"
 COLOR_WARN = "#b9770e"
 COLOR_ERROR = "#c0392b"
@@ -64,6 +68,7 @@ def apply_theme(root: tk.Misc) -> "ttk.Style":
     style.configure("Title.TLabel", font=TITLE_FONT)
     style.configure("Status.TLabel", font=STATUS_FONT)
     style.configure("Hint.TLabel", font=HINT_FONT, foreground=COLOR_HINT)
+    style.configure(LINK_LABEL, font=LINK_FONT, foreground=COLOR_LINK)
     style.configure("Bold.TLabel", font=BADGE_FONT)
 
     style.configure(STEP_OK, foreground=COLOR_OK)

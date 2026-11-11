@@ -111,7 +111,7 @@ foreach ($name in $repoNames) {
     # throws transient 502/503 Bad-Gateway errors mid-pull (observed on a German
     # classroom rig); an immediate Docker Hub fallback on a single blip would
     # stampede 30 PCs onto rate-limited Docker Hub (the 100/6h limit this whole
-    # migration exists to escape). The GUI (_pull_one_image) and the Jetson agent
+    # migration exists to escape). The GUI (_pull_one_image) and the Pi agent
     # already retry; match that here. 5s/10s backoff between attempts.
     $pulled = $false
     for ($attempt = 1; $attempt -le 3; $attempt++) {

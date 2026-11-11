@@ -1,7 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
 import { useDispatch, useSelector } from 'react-redux';
-import { createTeacher, listTeachers } from '../../services/adminApi';
+import {
+  confirmAnyDeletionRequest,
+  createTeacher,
+  listAllDeletionRequests,
+  listTeachers,
+} from '../../services/adminApi';
 import {
   setLoading,
   setTeachers,
@@ -9,6 +14,8 @@ import {
 } from '../../features/admin/adminSlice';
 import CreateTeacherModal from '../../components/admin/CreateTeacherModal';
 import TeacherRow from '../../components/admin/TeacherRow';
+import DeletionRequestList from '../../components/teacher/DeletionRequestList';
+import { DELETION_DE, announceStudentDeletion } from '../../utils/deletionRequest';
 import useRefetchOnFocus from '../../hooks/useRefetchOnFocus';
 import {
   Btn,
@@ -20,6 +27,7 @@ import {
   TopBar,
 } from '../../components/EbUI';
 import Icon from '../../components/icons/Icon';
+import LegalLinks from '../../components/LegalLinks';
 
 export default function AdminDashboard({ onLogout }) {
   const dispatch = useDispatch();
@@ -30,6 +38,12 @@ export default function AdminDashboard({ onLogout }) {
   const loading = useSelector((s) => s.admin.loading);
 
   const [showCreate, setShowCreate] = useState(false);
+  // GDPR Art. 17 (launch plan step 5): every open deletion request. The admin is
+  // the backstop: a request whose teacher is gone, an orphaned student's and a
+  // teacher's own would otherwise wait past the one-month deadline.
+  const [deletionRequests, setDeletionRequests] = useState([]);
+  const [deletionLoading, setDeletionLoading] = useState(false);
+  const [deletionError, setDeletionError] = useState(null);
 
   const fetchTeachers = useCallback(async () => {
     if (!token) return;
@@ -49,6 +63,44 @@ export default function AdminDashboard({ onLogout }) {
   }, [fetchTeachers]);
 
   useRefetchOnFocus(fetchTeachers);
+
+  const fetchDeletionRequests = useCallback(async () => {
+    if (!token) return;
+    setDeletionLoading(true);
+    try {
+      const list = await listAllDeletionRequests(token);
+      setDeletionRequests(Array.isArray(list) ? list : []);
+      setDeletionError(null);
+    } catch (err) {
+      if (err?.status === 404) {
+        setDeletionRequests([]);
+        setDeletionError(null);
+      } else {
+        setDeletionError(err?.message || DELETION_DE.loadFailed);
+      }
+    } finally {
+      setDeletionLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    fetchDeletionRequests();
+  }, [fetchDeletionRequests]);
+
+  useRefetchOnFocus(fetchDeletionRequests);
+
+  const handleConfirmDeletion = async (req) => {
+    try {
+      const res = await confirmAnyDeletionRequest(token, req.id);
+      setDeletionRequests((list) => list.filter((r) => r.user_id !== req.id));
+      if (req.role === 'teacher') toast.success(DELETION_DE.teacherDeleted);
+      else announceStudentDeletion(res, toast);
+      fetchTeachers();
+    } catch (err) {
+      toast.error(err?.message || 'Fehler');
+      if (err?.status === 409 || err?.status === 404) fetchDeletionRequests();
+    }
+  };
 
   const handleCreate = async (data) => {
     const created = await createTeacher(token, data);
@@ -156,6 +208,30 @@ export default function AdminDashboard({ onLogout }) {
         )}
 
         <Card
+          title={DELETION_DE.title}
+          subtitle={
+            deletionRequests.length > 0 ? DELETION_DE.openCount(deletionRequests.length) : DELETION_DE.none
+          }
+        >
+          <DeletionRequestList
+            requests={deletionRequests.map((r) => ({
+              id: r.user_id,
+              name: r.full_name || r.username || '—',
+              username: r.username,
+              role: r.role,
+              classroomName: r.classroom_name,
+              teacherName: r.teacher_name,
+              requestedAt: r.requested_at,
+              dueBy: r.due_by,
+            }))}
+            showTeacher
+            loading={deletionLoading}
+            error={deletionError}
+            onConfirm={handleConfirmDeletion}
+          />
+        </Card>
+
+        <Card
           title="Lehrer"
           subtitle={`${teachers.length} ${teachers.length === 1 ? 'Eintrag' : 'Einträge'}`}
           padded={false}
@@ -196,6 +272,9 @@ export default function AdminDashboard({ onLogout }) {
         </Card>
         </div>
       </div>
+
+      {/* Impressum · Datenschutz · Nutzungsbedingungen (launch plan step 4). */}
+      <LegalLinks variant="footer" />
 
       {showCreate && (
         <CreateTeacherModal

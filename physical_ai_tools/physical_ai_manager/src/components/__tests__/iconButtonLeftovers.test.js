@@ -1,13 +1,14 @@
-// Copyright 2026 EduBotics
+// Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Proprietary and confidential. Licensed under the EduBotics End-User
+// Licence Agreement; see LICENSE at the repository root.
 
 // Final review, minors 2 + 3, pinned at the source because both components
 // need a store, a tutorial loader or a modal state machine to render:
 //   * the tutorial's „Vorheriger Schritt" draws the chevron icon, not a typed
-//     arrow (the glyph fence allows ← → as key names, so it cannot see this);
-//   * the policy-download modal's icon-only close button has a German name.
+//     arrow (the glyph fence allows ← → as key names, so it cannot see this).
+// (The second minor, the policy-download modal's close button, went with that
+// modal, 2026-11-09.)
 
 import fs from 'fs';
 import path from 'path';
@@ -18,12 +19,6 @@ test('the tutorial back button draws the chevron icon, not an arrow glyph', () =
   const src = read('Workshop/SkillmapPlayer.jsx');
   expect(src).not.toMatch(/←\s*\{DE\.TUTORIAL_PREV\}/);
   expect(src).toMatch(/<Icon name="chevronLeft"[^>]*\/>\s*\{DE\.TUTORIAL_PREV\}/);
-});
-
-test('the policy-download close button has a German accessible name', () => {
-  const src = read('PolicyDownloadModal.js');
-  const close = src.slice(src.indexOf('onClick={onClose}') - 20, src.indexOf('<Icon name="close"'));
-  expect(close).toMatch(/aria-label="Schließen"/);
 });
 
 // Final review nits: „Aufnahme gestartet!" shows the record SYMBOL (a ring with

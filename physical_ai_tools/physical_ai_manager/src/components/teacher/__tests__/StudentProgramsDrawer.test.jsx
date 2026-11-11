@@ -149,9 +149,14 @@ describe('StudentProgramsDrawer — what the teacher sees', () => {
   test('switching file shows the other one', async () => {
     mount();
     await openPythonProgram();
-    await screen.findByRole('button', { name: 'hilfe.py' });
+    // The viewer is lazy (CodeMirror): wait until it shows the entry file, then
+    // switch. CodeMirror re-renders the other file under the runner's load in
+    // about a second (1.1 s measured on 2026-11-11, beyond findBy's 1 s
+    // default), so the second wait gets real patience; what it asserts is
+    // unchanged.
+    await screen.findByText(/robot\.home\(\)/, {}, { timeout: 5000 });
     await userEvent.click(screen.getByRole('button', { name: 'hilfe.py' }));
-    expect(await screen.findByText(/Größe/)).toBeInTheDocument();
+    expect(await screen.findByText(/Größe/, {}, { timeout: 5000 })).toBeInTheDocument();
   });
 
   test('a Blockly program opens the read-only block preview, not the code view', async () => {

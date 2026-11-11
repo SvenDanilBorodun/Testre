@@ -242,7 +242,7 @@ git push
 
 **Required env vars** (Railway dashboard): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `EDUBOTICS_HF_TOKEN_KEY` (per-student Hugging Face token storage, migration 042: 32 random bytes as standard base64, generate with `python -c "import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())"`; absent, empty or malformed → the API refuses to boot (required since 2026-10-04); optional `EDUBOTICS_HF_TOKEN_KEY_PREVIOUS` for rotation; **set it BEFORE the cloud deploy**; losing it makes every stored token unusable and each student pastes theirs again).
 
-**Production-relevant optional:** `LEGAL_IMPRESSUM_URL`, `LEGAL_DATENSCHUTZ_URL`, `LEGAL_NUTZUNGSBEDINGUNGEN_URL` (the legal links, section 3d; an invalid one stops the boot), `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` + `GUI_RELEASE_REPO` (drives student `.exe` auto-update — normally set automatically by `release.yml` W6 on a `vX.Y.Z` tag; `GUI_DOWNLOAD_URL` is optional and derived from `GUI_VERSION` + `GUI_RELEASE_REPO` when unset; when set it is served only as exactly `https://github.com/<GUI_RELEASE_REPO>/releases/download/<tag>/<asset>`, anything else is ignored with a WARNING), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`, `AUTH_VERIFY_MODE` and `TRUSTED_PROXY_HOPS` (§3c; leave both unset unless §3c says otherwise). (`EDUBOTICS_JETSON_HF_TOKEN`, `SUPABASE_JWT_ALGORITHM` and `SUPABASE_JWT_SECRET` were read only by the retired classroom Jetson's `/jetson/register`; no code reads them since 2026-11-09. Do not just delete them: revoke and rotate first, §4b.)
+**Production-relevant optional:** `LEGAL_IMPRESSUM_URL`, `LEGAL_DATENSCHUTZ_URL`, `LEGAL_NUTZUNGSBEDINGUNGEN_URL` (the legal links, section 3d; an invalid one stops the boot), `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` + `GUI_RELEASE_REPO` (drives student `.exe` auto-update — normally set automatically by `release.yml` W6 on a `vX.Y.Z` tag; `GUI_DOWNLOAD_URL` is optional and derived from `GUI_VERSION` + `GUI_RELEASE_REPO` when unset; when set it is served only as exactly `https://github.com/<GUI_RELEASE_REPO>/releases/download/<tag>/<asset>`, anything else is ignored with a WARNING), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`, `AUTH_VERIFY_MODE`, `CLIENT_IP_SOURCE` and `TRUSTED_PROXY_HOPS` (§3c; leave all three unset unless §3c says otherwise). (`EDUBOTICS_JETSON_HF_TOKEN`, `SUPABASE_JWT_ALGORITHM` and `SUPABASE_JWT_SECRET` were read only by the retired classroom Jetson's `/jetson/register`; no code reads them since 2026-11-09. Do not just delete them: revoke and rotate first, §4b.)
 
 **Never** set `EDUBOTICS_SKIP_SCHEMA_CHECK=1` on Railway.
 
@@ -321,13 +321,23 @@ The API verifies every access token LOCALLY against the project's public
 signing keys (`<SUPABASE_URL>/auth/v1/.well-known/jwks.json`, fetched at boot
 and every 10 minutes); admin routes need a two-factor (TOTP) session; new and
 reset passwords need 12 characters (teachers, admins) or 8 (students). No new
-required variable. Two optional Railway variables, both unset by default:
+required variable. Three optional Railway variables, all unset by default:
 
 - `AUTH_VERIFY_MODE` — `local` (default) or `remote`: the one-variable
   rollback to Supabase's own per-request check. Anything else stops the boot.
-- `TRUSTED_PROXY_HOPS` — how many proxies in front of the API append to
-  `X-Forwarded-For` (default 1, Railway's edge; 1–5, anything else stops the
-  boot). Change it only if the check in step 5 below says so.
+- `CLIENT_IP_SOURCE` (2026-11-11) — where the API reads the client address
+  that every per-address rate limit and the failed-login cap count against:
+  `x-real-ip` (default: the `X-Real-IP` header Railway documents and writes at
+  its edge; a request without one falls back to the `forwarded-for` rule),
+  `forwarded-for` (the `TRUSTED_PROXY_HOPS`-th `X-Forwarded-For` entry from the
+  right, the rule of the merge day), or `forwarded-for-first` (the left-most
+  `X-Forwarded-For` entry; right only behind an edge that overwrites that
+  header). Anything else stops the boot. Change it only if the check in step 5
+  says so; the Railway log names the value in force at every boot („Client
+  address for rate limits: …").
+- `TRUSTED_PROXY_HOPS` — under `forwarded-for` (and as the fallback of
+  `x-real-ip`): how many proxies in front of the API append to
+  `X-Forwarded-For` (default 1; 1–5, anything else stops the boot).
 
 **Owner steps, in this order.** „Before the deploy" means BEFORE THE MERGE to
 `main`: W2 deploys the API on the push that merges (see `MERGE-CHECKLIST.md`, which also covers the W2 → W3
@@ -362,18 +372,40 @@ window and the first-use TOTP enrolment).
    cached" once per boot; a teacher and a student can log in and load their
    pages; `curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer x.y.z'
    https://scintillating-empathy-production-1068.up.railway.app/me` answers 401.
-5. **The client-address check** (from a laptop, not from a school network):
+5. **The client-address check** — after every deploy that changes `app/edge.py`
+   and after every change of `CLIENT_IP_SOURCE` or `TRUSTED_PROXY_HOPS`. From a
+   laptop with ONE public address, not from a school network and not from a
+   cloud machine (a cloud sandbox leaves the internet through a pool of
+   addresses that changes per connection, which hides the answer). Each `curl`
+   opens a NEW connection, which is the point:
    ```bash
-   for i in $(seq 1 35); do curl -s -o /dev/null -w '%{http_code}\n' -H "X-Forwarded-For: 10.0.0.$i" https://scintillating-empathy-production-1068.up.railway.app/inference/usage; done
+   U=https://scintillating-empathy-production-1068.up.railway.app/inference/usage
+   for i in $(seq 1 35); do curl -s -o /dev/null -w '%{http_code} ' "$U"; done; echo
    ```
    The first 30 answers are 401 (no token); from the 31st a 429 must appear
-   despite the rotating header (`GET /inference/usage` allows 30 a minute per
-   client address when no token is sent). Then find the line „Rate limit hit
-   on GET /inference/usage from <ip>" in the Railway log: `<ip>` must be the
-   laptop's public address (`curl -s https://ifconfig.me`). No 429, or a
-   10.0.0.x address there, means the API trusts the client's header (stop and
-   report); a Railway-internal address means more than one proxy hop (set
-   `TRUSTED_PROXY_HOPS` accordingly and repeat).
+   (`GET /inference/usage` allows 30 a minute per client address when no token
+   is sent). Wait a minute, then the same with forged, changing addresses:
+   ```bash
+   for i in $(seq 1 35); do curl -s -o /dev/null -w '%{http_code} ' -H "X-Real-IP: 10.0.0.$i" -H "X-Forwarded-For: 10.0.0.$i" "$U"; done; echo
+   ```
+   Again a 429 from the 31st: Railway's edge replaced both forged headers. The
+   line „Rate limit hit on GET /inference/usage from <ip>" in the Railway log
+   must name the laptop's public address (`curl -s https://ifconfig.me`).
+   - **No 429 in the first run:** the address changes per connection. Measured
+     on 2026-11-11 under the old rule (the right-most `X-Forwarded-For` entry):
+     it is the address of the Railway edge server that took the connection, so
+     35 requests on one kept-alive connection got their 429 and 35 separate
+     connections never did. Set the next `CLIENT_IP_SOURCE` (`x-real-ip` →
+     `forwarded-for-first`) and repeat.
+   - **A 429 in the first run but none in the second:** a forged header reaches
+     the API, and anyone can pick a fresh bucket per request. Set the other
+     `CLIENT_IP_SOURCE` value and repeat.
+   - **Neither value passes both runs:** the per-address limits cannot be
+     trusted on Railway; stop and report (the per-user limits, keyed on the
+     verified token, are unaffected).
+
+   Setting a variable is an ask-first change (`CLAUDE.md`); Railway restarts
+   the API on it, so check `/health` afterwards.
 6. **The first admin login enrols the second factor:** the teacher web shows a
    QR code (and the secret as text) after the password; scan it with an
    authenticator app (Microsoft Authenticator, Google Authenticator, 2FAS)

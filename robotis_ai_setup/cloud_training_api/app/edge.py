@@ -44,11 +44,24 @@ tests read them from its source — and passes them in.
   prefix, teacher, admin and worker routes refused at construction; and no
   answer to an origin ``ALLOWED_ORIGINS`` does not list carries
   ``Access-Control-Allow-Credentials``. Mounted OUTSIDE ``CORSMiddleware``.
-* ``client_ip_from`` — the ``TRUSTED_PROXY_HOPS``-th address from the RIGHT of
-  ``X-Forwarded-For`` (default 1: the address Railway's edge added), never the
-  left-most, which the client writes itself. Fewer entries than hops → the
-  socket peer. Unverified on Railway until the owner's curl check
-  (docs/deploy/DEPLOY.md).
+* ``client_ip`` — the address every IP-keyed bucket and the failed-
+  authentication cap count against, chosen by ``CLIENT_IP_SOURCE``
+  (2026-11-11, after the merge-day measurement on Railway):
+
+  - ``x-real-ip`` (the default): the ``X-Real-IP`` header, the one Railway
+    documents for the client's address and writes at its edge; a missing or
+    malformed one falls back to the ``forwarded-for`` rule.
+  - ``forwarded-for``: the ``TRUSTED_PROXY_HOPS``-th entry from the RIGHT of
+    ``X-Forwarded-For`` (``client_ip_from``). On Railway that is the address of
+    the edge server that took the connection, which changes from connection to
+    connection, so every per-address limit counted per edge server (measured:
+    a 429 only on one kept-alive connection, never across separate ones).
+  - ``forwarded-for-first``: the LEFT-most ``X-Forwarded-For`` entry; correct
+    only behind an edge that overwrites the header, as Railway says its edge
+    does. Kept as a switch, so a correction is a variable, not a release.
+
+  Fewer entries than hops, or nothing parseable → the socket peer.
+  docs/deploy/DEPLOY.md §3c is the curl check that proves the choice.
 """
 
 from __future__ import annotations
@@ -73,6 +86,8 @@ MAX_BODY_BYTES = 1024 * 1024
 BODY_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 TRUSTED_PROXY_HOPS_DEFAULT = 1
 TRUSTED_PROXY_HOPS_MAX = 5
+CLIENT_IP_SOURCES = ("x-real-ip", "forwarded-for", "forwarded-for-first")
+CLIENT_IP_SOURCE_DEFAULT = "x-real-ip"
 AUTH_FAILURE_LIMIT = 60
 AUTH_FAILURE_WINDOW_S = 60.0
 
@@ -100,7 +115,22 @@ def trusted_proxy_hops() -> int:
     return int(raw)
 
 
-def _normalise_ip(text: str) -> str | None:
+def client_ip_source() -> str:
+    """``CLIENT_IP_SOURCE``: where the client address is read (module
+    docstring). One of ``CLIENT_IP_SOURCES``, case and blanks ignored, default
+    ``x-real-ip``; anything else stops the boot (the message names the
+    variable, never the value)."""
+    raw = (os.environ.get("CLIENT_IP_SOURCE") or "").strip().lower()
+    if not raw:
+        return CLIENT_IP_SOURCE_DEFAULT
+    if raw not in CLIENT_IP_SOURCES:
+        raise RuntimeError("CLIENT_IP_SOURCE must be one of: " + ", ".join(CLIENT_IP_SOURCES) + ".")
+    return raw
+
+
+def _normalise_ip(text: str | None) -> str | None:
+    if not text:
+        return None
     value = text.strip()
     if value.startswith("[") and "]" in value:  # "[2001:db8::1]:443"
         value = value[1:value.index("]")]
@@ -124,9 +154,36 @@ def client_ip_from(xff: str | None, peer: str | None, hops: int) -> str:
     return peer or "unknown"
 
 
-def client_ip(request: Request, hops: int) -> str:
+_real_ip_missing_logged = False
+
+
+def client_ip_from_headers(real_ip: str | None, xff: str | None, peer: str | None,
+                           hops: int, source: str = CLIENT_IP_SOURCE_DEFAULT) -> str:
+    """The client address under ``source`` (module docstring), from the raw
+    ``X-Real-IP`` and ``X-Forwarded-For`` values and the socket peer."""
+    global _real_ip_missing_logged
+    if source == "x-real-ip":
+        ip = _normalise_ip(real_ip) if real_ip and "," not in real_ip else None
+        if ip:
+            return ip
+        if not _real_ip_missing_logged:
+            _real_ip_missing_logged = True
+            logger.warning("CLIENT_IP_SOURCE=x-real-ip but a request carried no usable X-Real-IP; "
+                           "falling back to X-Forwarded-For (logged once per process).")
+        return client_ip_from(xff, peer, hops)
+    if source == "forwarded-for-first":
+        if xff:
+            ip = _normalise_ip(xff.split(",", 1)[0])
+            if ip:
+                return ip
+        return peer or "unknown"
+    return client_ip_from(xff, peer, hops)
+
+
+def client_ip(request: Request, hops: int, source: str = CLIENT_IP_SOURCE_DEFAULT) -> str:
     peer = request.client.host if request.client else None
-    return client_ip_from(request.headers.get("x-forwarded-for"), peer, hops)
+    return client_ip_from_headers(request.headers.get("x-real-ip"), request.headers.get("x-forwarded-for"),
+                                  peer, hops, source)
 
 
 def _bearer(request: Request) -> str | None:
@@ -155,7 +212,8 @@ def _hashed(prefix: str, token: str) -> str:
     return prefix + hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
 
 
-def rate_limit_key(request: Request, per_user_prefixes, hops: int) -> str:
+def rate_limit_key(request: Request, per_user_prefixes, hops: int,
+                   source: str = CLIENT_IP_SOURCE_DEFAULT) -> str:
     """The bucket key of one request: ``user:<verified sub>`` on a per-user
     prefix, ``wtok:<hash>`` for a worker token, else the client address."""
     path = request.url.path
@@ -169,7 +227,7 @@ def rate_limit_key(request: Request, per_user_prefixes, hops: int) -> str:
                 return "user:" + sub
             if path.startswith(_WORKER_PREFIX) and _UUID_RE.fullmatch(token):
                 return _hashed("wtok:", token)
-    return client_ip(request, hops)
+    return client_ip(request, hops, source)
 
 
 # ------------------------------------------------------------------ middleware
@@ -213,12 +271,14 @@ class BodySizeLimitMiddleware(BaseHTTPMiddleware):
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, *, rules, per_user_prefixes, limiter: RateLimiter, hops: int):
+    def __init__(self, app, *, rules, per_user_prefixes, limiter: RateLimiter, hops: int,
+                 source: str = CLIENT_IP_SOURCE_DEFAULT):
         super().__init__(app)
         self.rules = list(rules)
         self.per_user_prefixes = tuple(per_user_prefixes)
         self.limiter = limiter
         self.hops = hops
+        self.source = source
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -233,7 +293,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             else:
                 matched = path == prefix or path.startswith(prefix + "/")
             if matched:
-                key = rate_limit_key(request, self.per_user_prefixes, self.hops)
+                key = rate_limit_key(request, self.per_user_prefixes, self.hops, self.source)
                 if not self.limiter.check(f"{rule_method}:{prefix}", key, limit, window):
                     logger.warning("Rate limit hit on %s %s from %s", rule_method, prefix, key)
                     # A Response, never an HTTPException: Starlette does not route a
@@ -245,17 +305,19 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 class AuthFailureLimitMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, *, counter: FailureCounter, hops: int,
-                 limit: int = AUTH_FAILURE_LIMIT, window_s: float = AUTH_FAILURE_WINDOW_S):
+                 limit: int = AUTH_FAILURE_LIMIT, window_s: float = AUTH_FAILURE_WINDOW_S,
+                 source: str = CLIENT_IP_SOURCE_DEFAULT):
         super().__init__(app)
         self.counter = counter
         self.hops = hops
+        self.source = source
         self.limit = int(limit)
         self.window_s = float(window_s)
 
     async def dispatch(self, request: Request, call_next):
         if request.headers.get("authorization") is None:
             return await call_next(request)
-        ip = client_ip(request, self.hops)
+        ip = client_ip(request, self.hops, self.source)
         if self.counter.count(ip, self.window_s) >= self.limit and not _verifies_locally(request):
             return JSONResponse(status_code=429, content={"detail": AUTH_FAILURES_DE})
         response = await call_next(request)

@@ -52,6 +52,24 @@ hand → the live checks.** The database moves only after the API that can run o
 both schemas serves, so there is neither a crash window for the old API nor a
 500 window for account creation.
 
+**Merge-day record (2026-11-11).** Merged as `91a383ea` (#50). W2 approved:
+`/health` named the merge commit with `schema_ok: true`, `/version` unchanged,
+the 401 check passed, `/docs` 404. The client-address check FAILED in a way the
+old text did not foresee: 35 requests on separate connections never got a 429,
+35 on one kept-alive connection did — the right-most `X-Forwarded-For` entry is
+the per-connection address of Railway's edge server (`DEPLOY.md` §3c step 5;
+fixed by `CLIENT_IP_SOURCE`, owner decision: after merge day). W3 approved:
+`/version.json` names the merge commit, the CSP is report-only. The admin
+enrolled TOTP (exactly one verified factor, nothing else). The data 053 and 059
+change was saved read-only beforehand together with a fingerprint of every
+table (kept outside the repository). W1 run by hand (run 67): 053 … 059
+applied; afterwards every table equal to the fingerprint taken right before
+W1, `public.jetsons` and `inference_runs.jetson_id` gone, nothing cleared by
+059, the request roles holding exactly the allowlist's 51 columns and 9
+EXECUTE grants, the anon probes 42501, sign-up `signup_disabled`, the advisor
+without findings beyond the deliberate ones. Still open (owner): the admin
+password of 12+ characters, and section 4 steps 2, 4, 5 and 7.
+
 ### 1. Before the merge, in this order
 
 1. **The project's CURRENT signing key is the ES256 key** (`DEPLOY.md` §3c
@@ -289,6 +307,12 @@ both schemas serves, so there is neither a crash window for the old API nor a
     ```
 14. **Last: TOTP on** (step 2), then merge.
 
+    **2026-11-11:** step 13 done as a read-only copy of the data 053 and 059
+    change (`public.jetsons`, `inference_runs`, `users.hf_username`) plus a
+    row count and hash of every table, outside the repository; step 14 done
+    (the admin's enrolment after W3 worked). The admin password of 12+
+    characters (steps 2 and 11) is deferred by the owner.
+
 ### 2. The merge, then W1 by hand
 
 1. **Merge** (a normal merge, no squash). W2 and W3 start; W1 does not. With
@@ -311,8 +335,9 @@ both schemas serves, so there is neither a crash window for the old API nor a
    M5; W2's own gate compares only the commit): DEPLOY.md §3c step 4 (the
    „JWKS: 1 signing key(s) cached" log line; a teacher and a student log in and
    load their pages; the 401 `curl`) and §3c step 5 (the client-address check
-   that decides `TRUSTED_PROXY_HOPS`: from W2 on, the failed-login cap and the
-   per-address rate limits key on it). If every login answers 401, set
+   that decides `CLIENT_IP_SOURCE`: from W2 on, the failed-login cap and the
+   per-address rate limits key on it; on 2026-11-11 it showed the old rule
+   counting per Railway edge server). If every login answers 401, set
    `AUTH_VERIFY_MODE=remote` on Railway (the one-variable rollback, section 5)
    and stop here.
 3. **Approve W3**, wait for it to go green (its `/version.json` gate), and enrol
@@ -352,14 +377,16 @@ own the account's second factor. Therefore:
 
 ### 4. The live checks after W1
 
-1. **The W1 log** names each migration's self-check: „054 self-check passed",
-   „055 …", „056 …", „057 …", „058 …" and „059 self-check passed" (053 checks
-   itself silently: it raises only on a failure). Expected besides: 057 may
-   print a NOTICE that it may not change `supabase_admin`'s default privileges
-   and a WARNING about `pg_stat_statements` (owner settings,
-   `docs/KNOWN-ISSUES.md`); 059 prints how many forged `hf_username` values it
-   cleared and WARNS when `datasets` rows already name a reserved namespace —
-   review those rows (`docs/KNOWN-ISSUES.md` names the query).
+1. **The W1 log** lists „Applying migration …" for 053 … 059 and ends with
+   „Finished supabase db push". It does NOT show the migrations' own NOTICE and
+   WARNING lines: the Supabase CLI (2.122.0, measured 2026-11-11) prints none of
+   them. Every self-check raises on a failure, which stops the run, so a green
+   run means every self-check passed. What the NOTICEs and WARNINGs would have
+   said is read in the SQL editor instead: 057 leaves `supabase_admin`'s
+   default privileges and the `pg_stat_statements` read through PUBLIC
+   (owner settings, `docs/KNOWN-ISSUES.md`); for 059, count the `users` whose
+   `hf_username` and the `datasets` whose `hf_repo_id` namespace is in
+   `hf_reserved_namespaces` (`lower()` on both sides; review any such row).
 2. **The students' reads through the live PostgREST and Realtime (057)**, with a
    student account on a robot or the cloud-only page: the Training page's live
    chart moves while a training runs (the trainings SELECT and its Realtime

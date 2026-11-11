@@ -229,6 +229,19 @@ RUN set -e && \
 # from ROBOTIS, and an apt python3-cryptography that sros2 may pull in is not a
 # pin), so it is installed pinned here, the cloud API's version; the [CLOUD]
 # gate below proves a full encrypt/decrypt round trip with the shipped module.
+#
+# The amd64 base (Ubuntu 24.04) carries Ubuntu's own python3-cryptography 41.0.7,
+# installed by apt: pip cannot uninstall it („RECORD file not found. Hint: The
+# package was installed by debian"), which failed every amd64 build from #50 on
+# (2026-11-11). So cryptography is installed in its own step: when the
+# cryptography Python finds first has no RECORD (apt's), `--ignore-installed`
+# puts 49.0.0 into /usr/local/lib/python3.12/dist-packages, which sys.path
+# searches BEFORE /usr/lib/python3/dist-packages, and leaves apt's files alone;
+# otherwise (the opi base, or a pip-installed copy) a normal install replaces the
+# pip copy, so no second set of metadata is left behind. `--no-deps` because its
+# one dependency on Python 3.12, cffi>=2.0.0, is installed in the step before.
+# Reproduced and the fix proven on Ubuntu 24.04's own Python 3.12 with apt's
+# python3-cryptography 41.0.7 (2026-11-11).
 ENV CMAKE_POLICY_VERSION_MINIMUM=3.5
 RUN python3 -m pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true && \
     python3 -m pip install --no-cache-dir \
@@ -238,8 +251,14 @@ RUN python3 -m pip uninstall -y opencv-python opencv-python-headless 2>/dev/null
         urdf-parser-py==0.0.4 \
         requests==2.32.3 \
         aiohttp==3.14.1 \
-        cryptography==49.0.0 && \
-    python3 -c "import cv2, pupil_apriltags, requests, aiohttp, cryptography; assert cryptography.__version__ == '49.0.0', cryptography.__version__; print('runtime deps OK:', cv2.__version__)"
+        'cffi>=2.0.0' && \
+    if python3 -c "import importlib.metadata as m, sys; sys.exit(0 if m.distribution('cryptography').read_text('RECORD') is None else 1)" 2>/dev/null; then \
+        echo "cryptography: apt-owned copy found, installing 49.0.0 beside it (--ignore-installed)"; \
+        python3 -m pip install --no-cache-dir --no-deps --ignore-installed cryptography==49.0.0; \
+    else \
+        python3 -m pip install --no-cache-dir --no-deps cryptography==49.0.0; \
+    fi && \
+    python3 -c "import importlib.metadata as m, cv2, pupil_apriltags, requests, aiohttp, cryptography; assert cryptography.__version__ == '49.0.0', cryptography.__version__; assert m.version('cryptography') == '49.0.0', m.version('cryptography'); print('runtime deps OK:', cv2.__version__, 'cryptography', cryptography.__version__)"
 
 # Runtime ROS message deps (NOT an IK install — IK is closed-form pure NumPy,
 # see the urdf-parser-py block below; there is no TRAC-IK / PyKDL / kdl_parser).

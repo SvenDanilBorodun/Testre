@@ -87,11 +87,32 @@ class TheThinDockerfileShipsTheCloudClient(unittest.TestCase):
         run = runs[0]
         self.assertRegex(run, r"\baiohttp==3\.14\.1\b")
         self.assertIn("requests==2.32.3", run)
-        m = re.search(r'python3 -c "import ([^;"]+);', run)
-        self.assertTrue(m, run[-200:])
-        self.assertIn("aiohttp", [n.strip() for n in m.group(1).split(",")])
+        # the step's LAST python3 -c is its assert (the cryptography step's
+        # apt-owned check comes before it, 2026-11-11)
+        imports = re.findall(r'python3 -c "import ([^;"]+);', run)
+        self.assertTrue(imports, run[-200:])
+        self.assertIn("aiohttp", [n.strip() for n in imports[-1].split(",")])
         # exactly one aiohttp pin in the whole file, and it is 3.14.1
         self.assertEqual(re.findall(r"aiohttp==([0-9.]+)", self.code), ["3.14.1"])
+
+    def test_cryptography_goes_beside_apts_copy_only_when_apt_owns_it(self):
+        """The ROBOTIS amd64 base carries apt's python3-cryptography 41.0.7, which pip
+        cannot uninstall (no RECORD): a plain ``pip install cryptography==49.0.0``
+        failed every amd64 build from #50 on (2026-11-11). ``--ignore-installed`` only
+        when the copy Python finds first has no RECORD; a blanket one would leave a
+        second metadata set over a pip copy (the opi base)."""
+        runs = [i for i in _joined_instructions(self.code) if "opencv-contrib-python==4.10.0.84" in i]
+        self.assertEqual(len(runs), 1)
+        run = runs[0]
+        installs = re.findall(r"python3 -m pip install ([^;&]*?)cryptography==49\.0\.0", run)
+        self.assertEqual(len(installs), 2, installs)
+        self.assertEqual(["--ignore-installed" in i for i in installs], [True, False])
+        self.assertTrue(all("--no-deps" in i for i in installs), installs)
+        detect = run.index("read_text('RECORD') is None")
+        self.assertLess(detect, run.index("--ignore-installed"))
+        self.assertLess(run.index("'cffi>=2.0.0'"), detect)  # its one dependency, installed first
+        self.assertEqual(len(re.findall(r"cryptography==[0-9.]+", self.code)), 2)
+        self.assertIn("m.version('cryptography') == '49.0.0'", run)
 
     def test_the_cloud_gate_sits_after_the_node_import_gate(self):
         node = self.code.index("physical_ai_server node module imports OK")

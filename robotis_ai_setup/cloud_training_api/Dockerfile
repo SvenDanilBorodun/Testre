@@ -21,8 +21,14 @@ LABEL org.opencontainers.image.source="https://github.com/SvenDanilBorodun/Testr
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# E1 (2026-11-11): the image installs ONLY the hash-locked file
+# (.github/scripts/python_locks.sh writes it from requirements.txt for this
+# image's interpreter; ci.yml::python-locks fails when the two disagree). Every
+# package, the transitive ones included, is pinned and hash-checked, and only
+# wheels are accepted, so a re-uploaded file or a compromised index changes
+# nothing silently.
+COPY requirements.lock .
+RUN pip install --no-cache-dir --require-hashes --only-binary :all: -r requirements.lock
 
 # VERSION is sourced from the repo root by the railway-deploy workflow
 # (which runs `cp ../../VERSION VERSION` before `railway up`). Without it,

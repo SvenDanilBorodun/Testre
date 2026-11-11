@@ -6,6 +6,10 @@
 # Pins below are the lowest versions we know to support Python 3.14.
 # pythonnet 3.1.0rc0 is a pre-release (only one that supports 3.14 today),
 # so `pip install -r requirements.txt --pre` is required.
+#
+# The release build installs requirements.lock (this file + requirements-build.txt,
+# every package pinned and hash-checked; v2.37.0's versions): after editing this
+# file, run `.github/scripts/python_locks.sh write` (ci.yml::python-locks).
 pywebview>=6.2.1
 pythonnet>=3.1.0rc0
 

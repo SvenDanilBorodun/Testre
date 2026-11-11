@@ -1582,6 +1582,31 @@ jobs:
       - name: Replay every migration and judge the request roles' privileges
         run: python3 .github/scripts/supabase_request_role_check.py --teeth-before 20261113120000
 
+  python-locks:
+    # E1 (2026-11-11): the cloud API image, W2's import probe and the
+    # EduBotics.exe build install ONLY hash-locked files (`pip install
+    # --require-hashes`). Each lock is written by .github/scripts/python_locks.sh
+    # from its input for exactly one interpreter and platform; this job
+    # regenerates every lock (uv keeps the versions a lock already pins) and
+    # fails when one differs, so an input edited without `python_locks.sh
+    # write` (a Dependabot bump of requirements.txt included) stays red until
+    # its lock is regenerated in the same change. uv itself comes from its own
+    # hash-locked file.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Install uv (pinned, hash-checked)
+        run: |
+          python -m pip install --no-cache-dir --require-hashes --only-binary :all: -r .github/scripts/uv-requirements.lock
+      - name: Every lock matches its input
+        run: bash .github/scripts/python_locks.sh check
+
   enum-parity:
     # The TaskPhase/TaskCommand wire ints are hand-duplicated across FOUR
     # sources (SendCommand.srv + TaskStatus.msg on the ROS side,

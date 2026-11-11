@@ -75,9 +75,10 @@ jobs:
           # Use the same requirements as the production image — importing
           # app.main triggers loading of every router module, and any
           # missing transitive dep would silently break the probe with a
-          # confusing ImportError instead of a real schema check.
-          python -m pip install --upgrade pip
-          python -m pip install --quiet -r robotis_ai_setup/cloud_training_api/requirements.txt
+          # confusing ImportError instead of a real schema check. The same
+          # hash-locked file and flags as cloud_training_api/Dockerfile (E1).
+          python -m pip install --quiet --no-cache-dir --require-hashes --only-binary :all: \
+            -r robotis_ai_setup/cloud_training_api/requirements.lock
       - name: Import + probe
         working-directory: robotis_ai_setup/cloud_training_api
         run: |

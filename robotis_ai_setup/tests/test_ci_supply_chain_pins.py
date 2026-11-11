@@ -9,7 +9,9 @@ Pinned here, across every workflow:
   review 2026-10-25, P0-2).
 * **Supabase CLI.** ``supabase/setup-cli`` gets one exact version everywhere,
   never ``latest``.
-* **PyInstaller.** The installer build pins it exactly.
+* **PyInstaller.** The installer build pins it exactly (in
+  gui/requirements-build.txt, installed only through the hash-locked
+  gui/requirements.lock since E1, 2026-11-11).
 * **Release channel.** Both asset uploads (the installer and the Pi tarball)
   and W6's ``GIT_REPO`` resolve the target repository from
   ``vars.RELEASES_REPO`` with this repository as the fallback, so the downloads
@@ -175,14 +177,15 @@ class SupabaseCliPin(unittest.TestCase):
 
 
 class PyInstallerPin(unittest.TestCase):
+    # E1 (2026-11-11): the build installs PyInstaller from gui/requirements.lock
+    # (hash-checked, tests/test_python_hash_locks.py); its exact pins are
+    # declared in gui/requirements-build.txt, the lock's input.
     def test_the_installer_build_pins_pyinstaller(self):
+        pins = _requirement_pins(REPO / "robotis_ai_setup" / "gui" / "requirements-build.txt")
+        self.assertRegex(pins.get("pyinstaller", ""), r"^\d+\.\d+\.\d+$")
+        self.assertRegex(pins.get("pyinstaller-hooks-contrib", ""), r"^[\d.]+$")
         text = (WF / "release-installer.yml").read_text(encoding="utf-8")
-        installs = re.findall(r"pip install[^\n]*\bpyinstaller\b[^\n]*", text)
-        self.assertTrue(installs)
-        for line in installs:
-            with self.subTest(line=line):
-                self.assertRegex(line, r"\bpyinstaller==\d+\.\d+\.\d+\b")
-                self.assertRegex(line, r"\bpyinstaller-hooks-contrib==[\d.]+\b")
+        self.assertNotRegex(text, r"pip install[^\n]*\bpyinstaller\b", "only through the lock")
 
 
 class CloudApiPinsFollowRequirements(unittest.TestCase):

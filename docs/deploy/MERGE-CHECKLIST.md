@@ -10,7 +10,7 @@ order, within minutes, and without a tag:
 | W3 `railway-deploy-teacher-web.yml` | `physical_ai_tools/physical_ai_manager/` | the teacher web |
 
 **W1 `supabase-migrate.yml` does NOT fire on a merge** (owner decision
-2026-11-15). The production database changes only through a release
+2026-11-10). The production database changes only through a release
 (`release.yml` calls W1 first, on a tag or when `release.yml` itself is
 dispatched by hand) or by hand: GitHub → Actions → **supabase-migrate** → **Run
 workflow**, target `production` (any other target fails the run and changes
@@ -29,7 +29,7 @@ details sit in `DEPLOY.md` §1 (053 … 059), §3c and §3d.
 
 ## This merge: the launch-plan branch and the deep security audit (migrations 053 … 059)
 
-What it brings, measured by verification round B (2026-11-15):
+What it brings, measured by verification round B (2026-11-10):
 
 - **The production database is at 052.** The merge brings seven migrations:
   053 (the classroom Jetson's objects dropped), 054 (advisor clean-up), 055
@@ -59,13 +59,30 @@ both schemas serves, so there is neither a crash window for the old API nor a
    lists: with the legacy HS256 secret still current, every request answers 401
    the moment W2 is live. Rotate first, or set `AUTH_VERIFY_MODE=remote` on
    Railway (`--skip-deploys`) before merging and rotate later.
-2. **TOTP is enabled** for the admin's second factor (§3c step 2). Without it the
-   admin's enrolment screen says the second factor is not available, and the
-   admin cannot reach the admin area at all.
-3. **The project's password minimum is 8** (§3c step 3).
+   **Checked 2026-11-11:** the current key is ECC (P-256), kid
+   `73fb3edb-a1d4-4124-908b-57dabf564f1a`; the legacy HS256 key is listed under
+   „Previously used keys". **Never revoke that HS256 key**, whatever the
+   dashboard's „Revoke once all tokens have expired" suggests: the legacy
+   `anon` API key (baked into every robot image, in the Modal secrets) and the
+   legacy `service_role` key are signed with it, and revoking it breaks them
+   at once (`DEPLOY.md` §4b step 3 names every holder).
+2. **TOTP is enabled** for the admin's second factor (§3c step 2), **as the last
+   step before the merge, on merge day** (verification of 2026-11-10, M4). Once
+   TOTP is on, any session that knows the admin password can enrol a factor
+   through Supabase Auth's API, before the teacher web offers the screen; so
+   first give the admin a password of at least 12 characters, then switch TOTP
+   on, merge, and enrol right after W3 (section 3). Without TOTP the admin's
+   enrolment screen says the second factor is not available, and the admin
+   cannot reach the admin area at all.
+3. **The project's password minimum is 8** (§3c step 3). **Owner decision
+   (2026-11-11): left at Supabase's default.** Accepted: a signed-in user could
+   set their own password shorter than 8 through Supabase Auth's API (no
+   EduBotics screen offers it); every password the API sets keeps 12 / 8.
 4. **Sign-up is off** (SA-03): Supabase dashboard → Authentication → Sign In /
    Providers → „Allow new users to sign up" off, and auto-confirm off. 058 is
-   the database's floor behind that switch.
+   the database's floor behind that switch. **Done 2026-11-11** (`/auth/v1/settings`
+   answers `disable_signup: true`). **Owner decision: auto-confirm stays on**; it
+   applies only to self-registration, which is closed.
 5. **Accounts that registered themselves are deleted.** Sign-up was open with
    auto-confirm, and until 044 (`role`) and 055 (`created_by`, `username`, …)
    an account could write its own `public.users` row through PostgREST, so
@@ -91,7 +108,7 @@ both schemas serves, so there is neither a crash window for the old API nor a
    (If the editor answers `permission denied` for `audit_log_entries`, write
    `false` in place of each `EXISTS (SELECT 1 FROM auth.audit_log_entries …)`
    below: the queries then judge as for an empty audit log.) **Measured
-   read-only on production on 2026-11-15: the audit log holds 0 entries.** Both
+   read-only on production on 2026-11-10: the audit log holds 0 entries.** Both
    queries then judge as for an empty audit log: (a) shows „not in the audit
    log" for every admin and teacher, so recognise each one BY NAME, and (b)
    lists only the hints that do not need the log.
@@ -183,18 +200,25 @@ both schemas serves, so there is neither a crash window for the old API nor a
    leaked): it then sits in that teacher's class list, so **ask every teacher to
    look over their class lists** for a student they did not create. Proven on a
    052 replay with the verifier's evasions (`docs/CLAUDE-CHANGELOG.md`,
-   2026-11-15).
+   2026-11-10).
 
    Delete the ones nobody at the school created (Authentication → Users → the
    user → Delete). Accounts the server created before 058 carry no marker; that
-   is harmless (058 judges only new accounts).
+   is harmless (058 judges only new accounts). **Done 2026-11-11:** the early
+   test account `teststudent@robotis-ai.test` (no creator, made before the
+   admin existed) and the test teacher `t.terst` were deleted; 7 accounts remain,
+   each made by `admin` or by the teacher `kemper`.
 6. **The `releases` storage is closed** (SA-01): Supabase dashboard → Storage →
    Policies → delete the policy „Service role upload to releases"; then look
    through the bucket `releases` for anything you did not upload and delete the
    bucket (or make it private). 057 does both itself only where the migrating
    role may; on the hosted project `postgres` may not, and 057 then STOPS
    (`057: postgres may not drop the storage policy …`), W1 goes red after
-   053 … 056 and 057, 058, 059 never land.
+   053 … 056 and 057, 058, 059 never land. **Done 2026-11-11** (no bucket and no
+   storage policy left, read back). Measured 2026-11-10: nothing else stops
+   057's self-check — no other public bucket or storage policy, and no
+   function, relation or extension in schema `public` owned by a role other
+   than `postgres`.
 7. **`postgres` may read `auth.users`** (VB-07a): 058's check runs as its owner,
    `postgres` (the role W1's connection uses), and its self-check stops the
    migration when that role cannot read what it judges. Read-only, in the SQL
@@ -208,12 +232,17 @@ both schemas serves, so there is neither a crash window for the old API nor a
 
    All three must be `true`. If one is `false`, W1 would stop at 058 with
    053 … 057 applied (a state the new API runs on); do not run W1 until
-   Supabase support has restored the grant, or stop and report.
+   Supabase support has restored the grant, or stop and report. **Checked
+   2026-11-10: all three `true`.**
 8. **Step 4's variables are decided** (§3d). The three `LEGAL_*_URL` on the API
    service are optional: set them only when the pages exist, and only with valid
    `https://` values — an invalid one stops the new API's boot, its `/health`
    gate fails and the old API keeps serving. `EDUBOTICS_CSP_ENFORCE` on the
-   teacher-web service stays UNSET (report-only) for the first week.
+   teacher-web service stays UNSET (report-only) for the first week. **Owner
+   decision (checked 2026-11-11): all three `LEGAL_*` unset** until the pages
+   exist; `AUTH_VERIFY_MODE` and `TRUSTED_PROXY_HOPS` are unset as well, and
+   `SUPABASE_URL` is `https://fnnbysrjkfugsqzwcksd.supabase.co` (the issuer the
+   new API compares every token with).
 9. **The update channel has the pinned shape** (SA-01, VB-07b). The new
    `/version` serves an update only as a release asset of `GUI_RELEASE_REPO`.
    On the API service (Railway → the service → Variables; reading is enough):
@@ -227,19 +256,46 @@ both schemas serves, so there is neither a crash window for the old API nor a
      makes every updating GUI refuse the download).
 
    Save `curl -s https://scintillating-empathy-production-1068.up.railway.app/version`
-   now, to compare after W2.
+   now, to compare after W2. **Checked 2026-11-10/11:** `GUI_DOWNLOAD_URL` is
+   exactly the v2.37.0 asset of `SvenDanilBorodun/Testre`, and both hashes
+   `/version` serves equal GitHub's own asset digests.
 10. **The `production` environment** (GitHub → Settings → Environments, named
     exactly `production`, `DEPLOY.md` §0). It holds a job for approval only on a
     public repository or with GitHub Enterprise; on a private repository under
     Free, Pro or Team it is harmless and approves nothing — there the missing
-    push trigger of W1 is the control.
+    push trigger of W1 is the control. **Done 2026-11-11**, with the owner as
+    required reviewer: while the repository is public, every production job
+    of the merge waits for that approval, which sets the order in section 2.
 11. **The admin is ready to enrol right after W3** (section 3 below): the first
-    enrolment wins. Merge outside lessons: between W2 and W3 the admin pages
-    answer errors (section 2).
+    enrolment wins, so the admin has a password of at least 12 characters
+    (step 2) and an authenticator app at hand. Merge outside lessons: between
+    W2 and W3 the admin pages answer errors (section 2).
+12. **Nothing outside the repository deploys the merge.** Supabase dashboard →
+    Project Settings → Integrations → GitHub: no repository connected (checked
+    2026-11-11). A connected one with „Deploy to production" would apply
+    053 … 059 on the merge, before the new API serves.
+13. **A database backup, on merge day, right before the merge** (verification
+    of 2026-11-10, M1): every rollback restores the schema, not the data, and
+    053 drops `public.jetsons` (one row on 2026-11-10). Either note the time of
+    the newest daily backup (Supabase dashboard → Database → Backups, where the
+    plan has them) or dump it yourself (the database password is under Project
+    Settings → Database), and keep the files outside the repository:
+
+    ```bash
+    supabase db dump --linked -f edubotics-backup-schema.sql
+    ```
+    ```bash
+    supabase db dump --linked --data-only -f edubotics-backup-data.sql
+    ```
+14. **Last: TOTP on** (step 2), then merge.
 
 ### 2. The merge, then W1 by hand
 
-1. **Merge.** W2 and W3 start, in no order between them. W1 does not start.
+1. **Merge** (a normal merge, no squash). W2 and W3 start; W1 does not. With
+   step 1.10's required reviewer (public repository) both WAIT at their
+   production job: **approve W2 only.** (On a private repository without
+   reviewers they run at once, in no order between them; the windows below
+   then apply.)
 2. **Wait for W2 to go green**, then check by hand:
 
    ```bash
@@ -250,17 +306,27 @@ both schemas serves, so there is neither a crash window for the old API nor a
    API on the 052 database). Compare `/version` with the copy from step 1.9.
    **If W2 is red, do NOT run W1**: the old API keeps serving (blue-green) on the
    untouched database; fix forward first.
-3. **Wait for W3 to go green** (its `/version.json` gate), and enrol the admin's
-   second factor at once (section 3).
+
+   **Then the login smoke, before anything else** (verification of 2026-11-10,
+   M5; W2's own gate compares only the commit): DEPLOY.md §3c step 4 (the
+   „JWKS: 1 signing key(s) cached" log line; a teacher and a student log in and
+   load their pages; the 401 `curl`) and §3c step 5 (the client-address check
+   that decides `TRUSTED_PROXY_HOPS`: from W2 on, the failed-login cap and the
+   per-address rate limits key on it). If every login answers 401, set
+   `AUTH_VERIFY_MODE=remote` on Railway (the one-variable rollback, section 5)
+   and stop here.
+3. **Approve W3**, wait for it to go green (its `/version.json` gate), and enrol
+   the admin's second factor at once (section 3).
 4. **Run W1 by hand:** GitHub → Actions → **supabase-migrate** → **Run
    workflow** → branch `main`, target `production`, `rollback_to` EMPTY, reason
-   e.g. „053–059, merge <short SHA>". Read the log of „Apply pending
-   migrations": it applies 053 … 059 in order. When a migration stops, its own
-   transaction changes nothing and the migrations before it stay applied (every
-   intermediate state runs with the new API): fix the cause its message names
-   and run W1 again — it applies only what is missing.
+   e.g. „053–059, merge <short SHA>"; approve its production job. Read the log
+   of „Apply pending migrations": it applies 053 … 059 in order. When a
+   migration stops, its own transaction changes nothing and the migrations
+   before it stay applied (every intermediate state runs with the new API):
+   fix the cause its message names and run W1 again — it applies only what is
+   missing.
 
-**The windows between W2 and W3, in either order** (minutes):
+**The windows between W2 and W3** (minutes; with the approvals only the first):
 
 - W2 before W3: every admin route answers 403 `mfa_required` to the old admin
   page, which has no second-factor screen. Do not use the admin dashboard until
@@ -275,7 +341,9 @@ binds whichever authenticator scans it. Until the real admin has enrolled,
 anyone who knows the admin password can enrol THEIR authenticator first and so
 own the account's second factor. Therefore:
 
-1. Log in as every admin account at once after W3 and enrol (§3c step 6).
+1. Right before: `SELECT count(*) FROM auth.mfa_factors;` in the SQL editor
+   answers 0 (measured 2026-11-10: no factor exists). Log in as every admin
+   account at once after W3 and enrol (§3c step 6).
 2. Supabase dashboard → Authentication → Users → each admin: exactly one MFA
    factor, created at the time you enrolled. An unexpected factor means the
    password is known to someone else: remove that factor, change the password,
@@ -320,8 +388,8 @@ own the account's second factor. Therefore:
    (058 with the new API's marker).
 5. **An admin logs in with the second factor** and the admin dashboard loads; an
    admin session with only the password gets the TOTP screen, never data.
-6. **§3c steps 4 and 5**: the „JWKS: 1 signing key(s) cached" log line, the 401
-   `curl`, the client-address check (it decides `TRUSTED_PROXY_HOPS`).
+6. **§3c steps 4 and 5** ran right after W2 (section 2, step 2); repeat the
+   teacher and student login once more now that 053 … 059 are applied.
 7. **The Pi login on a real Pi** that runs this branch's agent and images (a dev
    Pi; the fielded Pis get them only with the release tag): claim with the
    setup code, a student logs in, rosbridge and the camera stream come up, the

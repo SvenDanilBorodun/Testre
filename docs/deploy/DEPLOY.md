@@ -2,7 +2,7 @@
 
 > ⚠️ **PARTLY HISTORICAL.** The undated sections of this runbook (the golden-order list below, §1's generic steps, §2, §3's manual push, §4's Docker Hub pushes, §5 and the closing checklists) predate the GHCR-primary migration and the release.yml W1→W6 golden order, and some of their steps (e.g. manual `docker push nettername/*:latest`) **contradict CLAUDE.md Rule §6** — CI owns the student-facing images; they are never pushed from a workstation. For the authoritative process see **CLAUDE.md → "Six non-negotiable rules → §6 CI/CD deploys"** + `.github/workflows/`.
 >
-> **Current and binding (owner steps):** the DATED sections — §1's notes on migrations 053, 055 and 056, §3b (managed training), §3c (the login check, the admin's second factor, the edge) and §3d (legal links, CSP) — and **[`MERGE-CHECKLIST.md`](MERGE-CHECKLIST.md): merging to `main` is a production deploy** (W2 and W3 fire by path, without a tag; W1, the migrations, never runs on a merge and is run by hand after W2's `/health`, owner decision 2026-11-15); its steps come BEFORE the merge, not before a release.
+> **Current and binding (owner steps):** the DATED sections — §1's notes on migrations 053, 055 and 056, §3b (managed training), §3c (the login check, the admin's second factor, the edge) and §3d (legal links, CSP) — and **[`MERGE-CHECKLIST.md`](MERGE-CHECKLIST.md): merging to `main` is a production deploy** (W2 and W3 fire by path, without a tag; W1, the migrations, never runs on a merge and is run by hand after W2's `/health`, owner decision 2026-11-10); its steps come BEFORE the merge, not before a release.
 
 One-page reference. Pair with `APPLY_MIGRATIONS.sql` / `ROLLBACK_MIGRATIONS.sql` in this folder.
 
@@ -24,11 +24,11 @@ Skip step 1 → Railway boot fails. Skip step 2 → student training spawns fail
 
 ---
 
-## 0. The production approval gate (security audit SA-13, 2026-11-13) — and why W1 is manual (2026-11-15)
+## 0. The production approval gate (security audit SA-13, 2026-11-10) — and why W1 is manual (2026-11-10)
 
 Six jobs that change production name `environment: production`: `supabase-migrate.yml` **apply-production** and **rollback** (W1), `railway-deploy-cloud-api.yml` **deploy** (W2), `railway-deploy-teacher-web.yml` **deploy** (W3), and in `release.yml` **trainer-image-var** (W2b) and **publish-gui-version** (W6). The gate is the environment's protection rule (required reviewers), which the workflow cannot create.
 
-**The gate exists only on a public repository or with GitHub Enterprise.** GitHub's documentation („Deployments and environments"): on the Free, Pro and Team plans, required reviewers are only available for PUBLIC repositories. On a private repository under those plans the environment is created anyway and approves nothing: every job above runs at once (verification round B, VB-02). Therefore, by owner decision (2026-11-15), **W1 has no push trigger**: a merge to `main` deploys W2 and W3 and never touches the database; the migrations run only from a release (`release.yml` calls W1 first, on a tag or when `release.yml` itself is dispatched by hand) or the manual „Run workflow" button of `supabase-migrate.yml` (`workflow_dispatch`, apply or `rollback_to`). Both act on production only: a target other than `production` (the button's `branch` choice; a Supabase branch exists only per pull request) fails the run in `refuse-unsupported-target` and applies or rolls back nothing (verification round C, VC-07/VC-11; before, `branch` applied nothing silently and `branch` with a `rollback_to` rolled back PRODUCTION). `robotis_ai_setup/tests/test_deploy_approval_gate.py::MigrationsAreManual` fails if a push trigger comes back, if `release.yml` stops calling W1 or passes an input that would make it skip apply-production, and apply-production accepts the event `push` only for a `refs/tags/v…` ref. W2 and W3 on a merge stay ungated on such a plan (accepted).
+**The gate exists only on a public repository or with GitHub Enterprise.** GitHub's documentation („Deployments and environments"): on the Free, Pro and Team plans, required reviewers are only available for PUBLIC repositories. On a private repository under those plans the environment is created anyway and approves nothing: every job above runs at once (verification round B, VB-02). Therefore, by owner decision (2026-11-10), **W1 has no push trigger**: a merge to `main` deploys W2 and W3 and never touches the database; the migrations run only from a release (`release.yml` calls W1 first, on a tag or when `release.yml` itself is dispatched by hand) or the manual „Run workflow" button of `supabase-migrate.yml` (`workflow_dispatch`, apply or `rollback_to`). Both act on production only: a target other than `production` (the button's `branch` choice; a Supabase branch exists only per pull request) fails the run in `refuse-unsupported-target` and applies or rolls back nothing (verification round C, VC-07/VC-11; before, `branch` applied nothing silently and `branch` with a `rollback_to` rolled back PRODUCTION). `robotis_ai_setup/tests/test_deploy_approval_gate.py::MigrationsAreManual` fails if a push trigger comes back, if `release.yml` stops calling W1 or passes an input that would make it skip apply-production, and apply-production accepts the event `push` only for a `refs/tags/v…` ref. W2 and W3 on a merge stay ungated on such a plan (accepted).
 
 **Owner, once** (GitHub → the repository → Settings → Environments) — useful on a public repository or with Enterprise, harmless otherwise:
 
@@ -84,7 +84,7 @@ schema, not the data.
 - Hand-run assertions: `supabase/tests/053_retire_jetson_assertions.sql`
   (12 PASS on a local stack; never against the linked project).
 
-### Migration 055 — `public.users` default-deny; deletion requests (2026-11-11, launch plan step 5)
+### Migration 055 — `public.users` default-deny; deletion requests (2026-11-09, launch plan step 5)
 
 `20261111120000_055_users_identity_guard.sql` revokes INSERT, UPDATE, DELETE,
 TRUNCATE, REFERENCES and TRIGGER on `public.users` from `anon` and
@@ -116,7 +116,7 @@ unchanged). It changes no API-visible shape and touches no row.
   month from the request; „Löschung ausführen" deletes the account for good;
   recordings in a student's own Hugging Face account must be deleted there.
 
-### Migration 056 — an admin's RLS reads need a two-factor session (2026-11-12, wave-A fix VA-04)
+### Migration 056 — an admin's RLS reads need a two-factor session (2026-11-10, wave-A fix VA-04)
 
 `20261112120000_056_admin_requires_aal2.sql` makes `public.rls_is_admin()`
 require the JWT claim `aal = aal2` and routes the nine inline admin branches of
@@ -135,7 +135,7 @@ PostgREST, as the API already refused them. No API-visible shape, no row touched
 - Hand-run assertions: `supabase/tests/056_admin_requires_aal2_assertions.sql`
   (36 PASS on a local stack; 20 at 055; never against the linked project).
 
-### Migrations 057–059 — request roles default-deny, no self-registration, reserved Hugging Face namespaces (2026-11-13, deep security audit)
+### Migrations 057–059 — request roles default-deny, no self-registration, reserved Hugging Face namespaces (2026-11-10, deep security audit)
 
 `20261113120000_057_request_role_default_deny.sql` leaves `anon` and
 `authenticated` only the reads and RPCs in `supabase/request_role_allowlist.json`
@@ -169,7 +169,7 @@ namespace. None changes an API-visible shape.
 - **After W1:** the NOTICEs said „057 self-check passed", „058 self-check
   passed", „059 self-check passed"; read 059's WARNING (registry rows already in
   a reserved namespace, `docs/KNOWN-ISSUES.md` names the review query). Then the
-  live checks of `docs/KNOWN-ISSUES.md` (2026-11-13 entry): the Training page's
+  live checks of `docs/KNOWN-ISSUES.md` (2026-11-10 entry): the Training page's
   live chart, the dataset picker, the template picker, the Lernpfade progress,
   and a few 42501 probes with a student token.
 - **Rollback, in this order:** 059 → 058 → 057
@@ -254,7 +254,7 @@ git push
 
 Authoritative rules: `CLAUDE.md` „Managed ACT training", Rule §4's ledger paragraph and Rule §6. Order: 047 + 049 + 050 (W1) → the trainer image (dispatch once, see below) → the operator state → the API with `TRAINING_DISPATCH=legacy` → `TRAINING_DISPATCH=managed`. Since 052 `TRAINING_DISPATCH=legacy` STOPS new trainings (503); it is no longer a fallback path.
 
-**The training-hour ledger (052, v2.37.0): release steps, in this order.** The release starts at the MERGE to `main`, not at the tag: the merge deploys the API and the teacher web; the tag adds the installer, the Pi tarball and the GUI update gate. **Since 2026-11-15 a merge no longer deploys the database**: W1 has no push trigger, and the owner runs it by hand after the new API's `/health` (`MERGE-CHECKLIST.md`); the steps below record v2.37.0, when W1 still ran on the merge.
+**The training-hour ledger (052, v2.37.0): release steps, in this order.** The release starts at the MERGE to `main`, not at the tag: the merge deploys the API and the teacher web; the tag adds the installer, the Pi tarball and the GUI update gate. **Since 2026-11-10 a merge no longer deploys the database**: W1 has no push trigger, and the owner runs it by hand after the new API's `/health` (`MERGE-CHECKLIST.md`); the steps below record v2.37.0, when W1 still ran on the merge.
 
 - (−1) **Gate G0 has passed** on the R2 TEST bucket (it did on 2026-10-29; its JSON line goes into the release notes). To re-run it (the owner's OK; it writes only under `train/gate/<uuid>/` in `edubotics-training-test` and deletes everything it wrote; it refuses `edubotics-training` and any bucket named by `R2_BUCKET` / `R2_PRODUCTION_BUCKET` before any request; without `--run` it prints its plan): `cd robotis_ai_setup/cloud_training_api && ( set -a; . ~/.edubotics-test/r2-test.env; set +a; python ../runpod_training/e2e/r2_checksum_gate.py --run )`. Exit 0 = pass, 1 = R2 does not enforce the signed SHA-256 (stop the release), 2 = refused before any request.
 - (0) Before the merge to `main`: Railway `MANAGED_ACT_CAP_S` is unset or one of 3600 / 7200 / 10800 (anything else stops the new API's boot and W2's health gate fails) and `TRAINING_DISPATCH=managed`. Schedule the merge (and the tag after it) outside lesson time and tell the teachers beforehand (owner D9); there is no student-facing banner.
@@ -281,7 +281,7 @@ The release needs no trainer-image or Modal change: the new signed `x-amz-checks
    - **a pod's own exit:** if a pod whose main process exited stayed `EXITED` without restarting, set `entry.EXIT_AFTER_FAILED_SELF_STOP = True` in the next release;
    - anything wrong ⇒ `TRAINING_DISPATCH=legacy` (rollback step 2 below; it stops new trainings); a failed managed training charges only its counted training time (often 0), and a wrong charge is the admin's compensation (`POST /admin/credit-grants`).
 
-8. **Before `TRAINING_DISPATCH=managed` (owner E49/E51): the pod-key check, on all three RunPod APIs.** `python robotis_ai_setup/runpod_training/e2e/pod_key_check.py --run --key-file <0600 file with the account key> --a-gpu <the cheapest Community GPU with stock> --cpu-flavor <id> --vcpu <n> --surfaces v2,v1,graphql` (outside lesson time; cents; after 2026-11-15 drop `v1` — the report marks it `retired`). Each surface is asked in its own documented shape (GraphQL reads `env` as `KEY=value` strings; REST v1 gets its own CPU-pod body). GraphQL has no documented CPU-pod create, so its create check asks for a GPU pod on pod A's card and cloud: a key that CAN create costs one more pod for seconds, and the launcher deletes it. Exit 0 (the key worked on its own pod and reached, changed, stopped or created NOTHING on any surface, pod A on COMMUNITY) is the go; exit 1 (any `allowed` on any surface) means the key is not confined — `TRAINING_DISPATCH` stays `legacy` and the owner decides the design change; exit 2 (any `unknown`: a 400/429/5xx answer proves nothing) — repeat; exit 3 (no key in the pod) — report to the owner; if no Community card can be had for 30 min, run it with `--a-cloud SECURE` (exit 1 there is as final), then keep a Secure-only `RUNPOD_LADDER` until a Community run exits 0.
+8. **Before `TRAINING_DISPATCH=managed` (owner E49/E51): the pod-key check, on all three RunPod APIs.** `python robotis_ai_setup/runpod_training/e2e/pod_key_check.py --run --key-file <0600 file with the account key> --a-gpu <the cheapest Community GPU with stock> --cpu-flavor <id> --vcpu <n> --surfaces v2,v1,graphql` (outside lesson time; cents; after 2026-11-10 drop `v1` — the report marks it `retired`). Each surface is asked in its own documented shape (GraphQL reads `env` as `KEY=value` strings; REST v1 gets its own CPU-pod body). GraphQL has no documented CPU-pod create, so its create check asks for a GPU pod on pod A's card and cloud: a key that CAN create costs one more pod for seconds, and the launcher deletes it. Exit 0 (the key worked on its own pod and reached, changed, stopped or created NOTHING on any surface, pod A on COMMUNITY) is the go; exit 1 (any `allowed` on any surface) means the key is not confined — `TRAINING_DISPATCH` stays `legacy` and the owner decides the design change; exit 2 (any `unknown`: a 400/429/5xx answer proves nothing) — repeat; exit 3 (no key in the pod) — report to the owner; if no Community card can be had for 30 min, run it with `--a-cloud SECURE` (exit 1 there is as final), then keep a Secure-only `RUNPOD_LADDER` until a Community run exits 0.
 
 **Emergency: the Modal rung.** RunPod has no stock anywhere or is down for hours: (1) make sure the Modal prod app carries THIS release (`modal deploy modal_app.py` from the tagged commit; a stale deploy answers `wrong_image` on every Modal attempt, and attempt 4 is Modal-only under the switch); (2) set `MANAGED_MODAL_RUNG=1` (nothing else needs changing; check that the deploy succeeded; a Modal attempt is accounted like a RunPod one). Since 052 the owner keeps `edubotics-training` stopped, so step (1) is never optional; managed rows then take Modal after 2 min without a RunPod placement; (3) when RunPod is back, unset it. The boot logs a WARNING on every start while it is set.
 
@@ -315,7 +315,7 @@ cd physical_ai_tools/physical_ai_manager
 Its one runtime variable, `EDUBOTICS_CSP_ENFORCE`, switches the Content
 Security Policy from report-only to enforced (section 3d).
 
-## 3c. The cloud API's login check, the admin's second factor and the edge (2026-11-10)
+## 3c. The cloud API's login check, the admin's second factor and the edge (2026-11-09)
 
 The API verifies every access token LOCALLY against the project's public
 signing keys (`<SUPABASE_URL>/auth/v1/.well-known/jwks.json`, fetched at boot
@@ -341,7 +341,11 @@ window and the first-use TOTP enrolment).
    `AUTH_VERIFY_MODE=remote` on Railway with `--skip-deploys` until you have
    rotated. Symptom of a mismatch after the deploy: every request answers 401
    and the Railway log says „access token refused: algorithm HS256 …"; set
-   `AUTH_VERIFY_MODE=remote` to recover.
+   `AUTH_VERIFY_MODE=remote` to recover. After the rotation the legacy HS256
+   key sits under „Previously used keys": **never revoke it** while the legacy
+   `anon` / `service_role` API keys are in use (they are signed with it; §4b
+   step 3 lists every holder). Moving off them is the signing-keys guide's
+   migration to the publishable/secret keys, a project of its own.
 2. **Supabase dashboard → Authentication → Multi-Factor (MFA):** TOTP enabled
    (both „enroll" and „verify"). Without it the admin's enrolment screen says
    „Die Zwei-Faktor-Anmeldung ist für dieses Projekt nicht freigeschaltet".
@@ -396,7 +400,7 @@ a database with 053 and its account creation fails under 058; 054–057 may stay
 (`MERGE-CHECKLIST.md` section 5). The teacher web's gate then only adds the
 second factor for admins, and the older API accepts an `aal2` token too.
 
-## 3d. Legal links and the teacher web's Content Security Policy (2026-11-11)
+## 3d. Legal links and the teacher web's Content Security Policy (2026-11-09)
 
 Both are runtime switches on Railway: no code change, no rebuild. A variable
 change makes Railway redeploy the service; the next container start reads it.
@@ -577,12 +581,19 @@ follow-up on Docker Hub / GHCR: the `open-manipulator-jetson`,
 can be deleted. **`open-manipulator-jetson-base` must stay**: it is the Orange
 Pi's open_manipulator base (`docs/arm64_base/README.md`).
 
-**Owner action once this release is live, in this order:**
+**Owner clean-up once this release is live, in this order** (optional: nothing
+that runs reads these any more — the new API reads none of the three Railway
+variables, the previous one only logs a warning when they are missing):
 
 1. Revoke the Hugging Face token that `EDUBOTICS_JETSON_HF_TOKEN` held, at
    huggingface.co (Settings → Access Tokens, the account that created it).
 2. Delete the three Railway variables `EDUBOTICS_JETSON_HF_TOKEN`,
-   `SUPABASE_JWT_ALGORITHM` and `SUPABASE_JWT_SECRET`.
+   `SUPABASE_JWT_ALGORITHM` and `SUPABASE_JWT_SECRET`. **State 2026-11-11:**
+   `SUPABASE_JWT_ALGORITHM` is `ES256`, `SUPABASE_JWT_SECRET` does not exist,
+   and the owner never set it. The Jetson registration handed out the legacy
+   secret only when both were set (it refused to register under `HS256`
+   without the secret), so the legacy secret never left through the Jetson
+   and step 3 does not apply.
 3. If `SUPABASE_JWT_ALGORITHM` was ever `HS256` in production, rotate the
    Supabase JWT secret, at a time when no managed training is running (a
    running attempt keeps the anon key it was started with; once that key
@@ -683,7 +694,9 @@ Then launch the GUI on a Windows box with a robot: toolbar renders, Galerie popu
 3. **Modal** — `git checkout <prior-sha> -- modal_training/<app>.py && modal deploy <app>.py`
 4. **Docker** — re-tag prior `BUILD_ID` as `:latest`: `docker tag nettername/<image>:<prior_id> nettername/<image>:latest && docker push nettername/<image>:latest`
 
-The schema fingerprint prevents Railway booting against a half-rolled-back DB — that's why Railway rolls back first.
+The schema fingerprint prevents Railway booting against a half-rolled-back DB — that's why Railway rolls back first. (Step 4 predates the release tags: the fleets pin `IMAGE_TAG` to a release, so re-tagging `:latest` changes no installed robot.)
+
+**A bad release after W6 advertised it** (verification of 2026-11-10, M6). The GUI and the Pi only ever move to a NEWER version, so nothing moves them back. Stop further updates at once: on the cloud API service set `GUI_VERSION`, `GUI_DOWNLOAD_URL`, `GUI_INSTALLER_SHA256` and `PI_AGENT_SHA256` back to the previous release's values in one change (one redeploy; for v2.37.0 they are the ones `/version` served before the merge, saved in `MERGE-CHECKLIST.md` step 1.9). PCs and Pis that already updated are fixed forward with a patch release. Before W6 nothing is advertised: a held or red W6 needs no rollback, which is why W6 waits for its approval until the tag's own `.exe` and Pi tarball have run on a real PC and a real Pi.
 
 ---
 

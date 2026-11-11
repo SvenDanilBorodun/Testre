@@ -22,7 +22,7 @@ The four CI-driven workflows in `.github/workflows/`:
 
 | Workflow | Triggers on changes to | What it does |
 |----------|------------------------|--------------|
-| `supabase-migrate.yml` | `supabase/migrations/**` (PRs only) | PR: applies to an ephemeral branch. Production: only from `release.yml` (a tag) or the manual „Run workflow" button — never on a push to `main` (owner decision 2026-11-15) |
+| `supabase-migrate.yml` | `supabase/migrations/**` (PRs only) | PR: applies to an ephemeral branch. Production: only from `release.yml` (a tag) or the manual „Run workflow" button — never on a push to `main` (owner decision 2026-11-10) |
 | `railway-deploy-cloud-api.yml` | `cloud_training_api/**` | Schema-probe → `railway up` → `/health` gate |
 | `railway-deploy-teacher-web.yml` | `physical_ai_manager/**` | Validate → `railway up` teacher-web → `/version.json` gate |
 | `docker-publish.yml` | `docker/**`, `open_manipulator/**`, `physical_ai_tools/**` | Native amd64 + opi (arm64) builds → push → smoke-test |
@@ -132,7 +132,7 @@ Same flow. On merge to main, all path-filter-matching workflows fire in
 parallel. Sequencing matters here:
 
 ```
-Schema change       → nothing on the merge: run supabase-migrate by hand (2026-11-15)
+Schema change       → nothing on the merge: run supabase-migrate by hand (2026-11-10)
 FastAPI change      → railway-deploy-cloud-api fires
 React change        → railway-deploy-teacher-web fires
 Image source change → docker-publish fires
@@ -303,7 +303,9 @@ want them still available.
 
 ## Known issue: supabase-migrate CI
 
-**Status:** `apply-production` job consistently fails at step 5 "Apply pending migrations" since 2026-05-19. Tried `--db-url`, `--linked --password`, all variants — without admin GH-Actions log access we can't see the exact CLI error. Production is unaffected (failure is at the CLI call, no partial DDL).
+**RESOLVED (read 2026-11-11):** `apply-production` applies migrations again — its run on the push of 2026-11-02 (`supabase-migrate` run 58, merge of #46) applied 052 green, and production's ledger ends at 052. Since 2026-11-10 W1 runs only by hand or from `release.yml` (`MERGE-CHECKLIST.md`). The history below is kept for reference.
+
+**Status (historical):** `apply-production` job consistently fails at step 5 "Apply pending migrations" since 2026-05-19. Tried `--db-url`, `--linked --password`, all variants — without admin GH-Actions log access we can't see the exact CLI error. Production is unaffected (failure is at the CLI call, no partial DDL).
 
 **Workaround for applying new migrations:**
 
@@ -381,7 +383,7 @@ Railway dashboard, then re-run W1, then re-run W3.
 
 | Event | Workflows fired |
 |---|---|
-| `push` to main, paths match `supabase/migrations/**` | _(none since 2026-11-15 — run `supabase-migrate.yml` by hand, „Run workflow")_ |
+| `push` to main, paths match `supabase/migrations/**` | _(none since 2026-11-10 — run `supabase-migrate.yml` by hand, „Run workflow")_ |
 | `push` to main, paths match `modal_training/**` | _(none — operator deploys Modal manually)_ |
 | `push` to main, paths match `cloud_training_api/**` | `railway-deploy-cloud-api.yml` |
 | `push` to main, paths match `physical_ai_manager/**` | `railway-deploy-teacher-web.yml` |

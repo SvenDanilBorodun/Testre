@@ -128,11 +128,120 @@ class ClientAddress(unittest.TestCase):
                     edge.trusted_proxy_hops()
                 self.assertNotIn(raw, str(ctx.exception).replace("1 to 5", ""))
 
-    def test_main_validates_both_settings_at_import(self):
+    def test_main_validates_every_edge_setting_at_import(self):
         with open(os.path.join(APP, "main.py"), encoding="utf-8") as fh:
             src = fh.read()
-        self.assertIn("_TRUSTED_PROXY_HOPS = _validate_edge_settings()", src)
+        self.assertIn("_TRUSTED_PROXY_HOPS, _CLIENT_IP_SOURCE = _validate_edge_settings()", src)
         self.assertIn("_jwt_auth.validate_boot()", src)
+        self.assertIn("return _edge.trusted_proxy_hops(), _edge.client_ip_source()", src)
+        # Both middlewares that key on the address get the source, not just the hops.
+        self.assertEqual(src.count("source=_CLIENT_IP_SOURCE"), 2)
+
+
+class ClientAddressSource(unittest.TestCase):
+    """CLIENT_IP_SOURCE (2026-11-11). Measured on Railway on merge day: the
+    right-most X-Forwarded-For entry is the address of the edge server that took
+    the connection and changes from connection to connection, so a per-address
+    limit counted per edge server. Railway documents X-Real-IP for the client."""
+
+    def test_the_source_is_validated_at_boot(self):
+        for raw, want in (("", "x-real-ip"), ("x-real-ip", "x-real-ip"), (" X-Real-IP ", "x-real-ip"),
+                          ("forwarded-for", "forwarded-for"), ("forwarded-for-first", "forwarded-for-first")):
+            with self.subTest(raw=raw), patch.dict(os.environ, {"CLIENT_IP_SOURCE": raw}):
+                self.assertEqual(edge.client_ip_source(), want)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CLIENT_IP_SOURCE", None)
+            self.assertEqual(edge.client_ip_source(), "x-real-ip")
+        for raw in ("xff", "real-ip", "x-forwarded-for", "remote", "1"):
+            with self.subTest(raw=raw), patch.dict(os.environ, {"CLIENT_IP_SOURCE": raw}):
+                with self.assertRaises(RuntimeError) as ctx:
+                    edge.client_ip_source()
+                self.assertNotIn(raw, str(ctx.exception).replace("x-real-ip", "").replace("forwarded-for", ""))
+
+    def test_the_default_is_x_real_ip(self):
+        self.assertEqual(edge.CLIENT_IP_SOURCE_DEFAULT, "x-real-ip")
+        self.assertIn(edge.CLIENT_IP_SOURCE_DEFAULT, edge.CLIENT_IP_SOURCES)
+
+    def test_x_real_ip_wins_over_forwarded_for(self):
+        f = edge.client_ip_from_headers
+        self.assertEqual(f("198.51.100.9", "198.51.100.9, 152.233.23.193", "100.64.0.1", 1), "198.51.100.9")
+        self.assertEqual(f(" 2001:db8::7 ", "152.233.23.193", None, 1), "2001:db8::7")
+        self.assertEqual(f("[2001:db8::7]:443", None, None, 1), "2001:db8::7")
+
+    def test_a_missing_or_malformed_x_real_ip_falls_back_to_the_right_most_entry(self):
+        f = edge.client_ip_from_headers
+        for bad in (None, "", "   ", "not-an-ip", "198.51.100.9, 203.0.113.1"):
+            with self.subTest(bad=bad):
+                self.assertEqual(f(bad, "10.0.0.1, 203.0.113.7", "100.64.0.1", 1), "203.0.113.7")
+                self.assertEqual(f(bad, None, "100.64.0.1", 1), "100.64.0.1")
+
+    def test_forwarded_for_is_exactly_the_old_rule_and_ignores_x_real_ip(self):
+        f = edge.client_ip_from_headers
+        for xff, peer, hops in (("10.0.0.1, 203.0.113.7", "100.64.0.1", 1), ("203.0.113.7", "100.64.0.1", 2),
+                                ("1.1.1.1, 203.0.113.7, 100.64.0.9", "100.64.0.1", 2), (None, None, 1),
+                                ("not-an-ip", "100.64.0.1", 1)):
+            with self.subTest(xff=xff, hops=hops):
+                self.assertEqual(f("198.51.100.9", xff, peer, hops, "forwarded-for"),
+                                 edge.client_ip_from(xff, peer, hops))
+
+    def test_forwarded_for_first_takes_the_left_most_entry(self):
+        f = edge.client_ip_from_headers
+        self.assertEqual(f("198.51.100.9", "203.0.113.7, 152.233.23.193", "100.64.0.1", 1, "forwarded-for-first"),
+                         "203.0.113.7")
+        self.assertEqual(f(None, "203.0.113.7:51234", None, 1, "forwarded-for-first"), "203.0.113.7")
+        self.assertEqual(f(None, "garbage, 203.0.113.7", "100.64.0.1", 1, "forwarded-for-first"), "100.64.0.1")
+        self.assertEqual(f(None, None, None, 1, "forwarded-for-first"), "unknown")
+
+    def _app(self, source, *, rule_limit=3, auth_limit=3):
+        app = FastAPI()
+        app.add_middleware(edge.RateLimitMiddleware, rules=[("GET", "/open", rule_limit, 60.0)],
+                           per_user_prefixes=(), limiter=RateLimiter(), hops=1, source=source)
+        app.add_middleware(edge.AuthFailureLimitMiddleware, counter=FailureCounter(), hops=1,
+                           limit=auth_limit, source=source)
+
+        @app.get("/open")
+        async def open_route():
+            return {"ok": True}
+
+        @app.get("/locked")
+        async def locked():
+            return JSONResponse(status_code=401, content={"detail": "Anmeldung erforderlich."})
+
+        return TestClient(app)
+
+    def test_the_rate_limit_counts_per_x_real_ip_whatever_the_edge_server(self):
+        # Railway's shape: the same client behind a different edge server each time.
+        c = self._app("x-real-ip")
+        codes = [c.get("/open", headers={"X-Real-IP": "198.51.100.9",
+                                         "X-Forwarded-For": f"198.51.100.9, 152.233.23.{i}"}).status_code
+                 for i in range(5)]
+        self.assertEqual(codes, [200, 200, 200, 429, 429])
+        # Another client still has its own bucket.
+        self.assertEqual(c.get("/open", headers={"X-Real-IP": "203.0.113.4"}).status_code, 200)
+
+    def test_under_forwarded_for_each_edge_server_was_its_own_bucket(self):
+        # The measured defect, kept as the documented behaviour of the old rule.
+        c = self._app("forwarded-for")
+        codes = [c.get("/open", headers={"X-Real-IP": "198.51.100.9",
+                                         "X-Forwarded-For": f"198.51.100.9, 152.233.23.{i}"}).status_code
+                 for i in range(5)]
+        self.assertEqual(codes, [200] * 5)
+
+    def test_the_failed_authentication_cap_counts_per_x_real_ip(self):
+        c = self._app("x-real-ip")
+        hdr = lambda i: {"Authorization": "Bearer junk", "X-Real-IP": "198.51.100.9",  # noqa: E731
+                         "X-Forwarded-For": f"198.51.100.9, 152.233.23.{i}"}
+        codes = [c.get("/locked", headers=hdr(i)).status_code for i in range(5)]
+        self.assertEqual(codes, [401, 401, 401, 429, 429])
+        self.assertEqual(c.get("/locked", headers={"Authorization": "Bearer junk",
+                                                    "X-Real-IP": "203.0.113.4"}).status_code, 401)
+
+    def test_the_middlewares_default_to_x_real_ip(self):
+        import inspect
+        for cls in (edge.RateLimitMiddleware, edge.AuthFailureLimitMiddleware):
+            self.assertEqual(inspect.signature(cls.__init__).parameters["source"].default, "x-real-ip")
+        self.assertEqual(inspect.signature(edge.rate_limit_key).parameters["source"].default, "x-real-ip")
+        self.assertEqual(inspect.signature(edge.client_ip).parameters["source"].default, "x-real-ip")
 
 
 class BodyLimits(unittest.TestCase):

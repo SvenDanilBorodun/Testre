@@ -128,17 +128,21 @@ def _validate_managed_training() -> None:
 _validate_managed_training()
 
 
-def _validate_edge_settings() -> int:
+def _validate_edge_settings() -> tuple[int, str]:
     """API hardening (2026-11-10): ``AUTH_VERIFY_MODE`` must be ``local`` (the
     default: access tokens verified against the project's JWKS) or ``remote``
-    (the rollback to Supabase's ``auth.get_user``), and ``TRUSTED_PROXY_HOPS``
-    an integer 1–5 (default 1). Either malformed stops the boot; the messages
-    name the variable, never the value. Returns the hop count."""
+    (the rollback to Supabase's ``auth.get_user``), ``TRUSTED_PROXY_HOPS``
+    an integer 1–5 (default 1), and ``CLIENT_IP_SOURCE`` (2026-11-11) one of
+    ``x-real-ip`` (default), ``forwarded-for``, ``forwarded-for-first``
+    (app/edge.py). Any malformed one stops the boot; the messages name the
+    variable, never the value. Returns the hop count and the address source."""
     _jwt_auth.validate_boot()
-    return _edge.trusted_proxy_hops()
+    return _edge.trusted_proxy_hops(), _edge.client_ip_source()
 
 
-_TRUSTED_PROXY_HOPS = _validate_edge_settings()
+_TRUSTED_PROXY_HOPS, _CLIENT_IP_SOURCE = _validate_edge_settings()
+logger.info("Client address for rate limits: CLIENT_IP_SOURCE=%s, TRUSTED_PROXY_HOPS=%d",
+            _CLIENT_IP_SOURCE, _TRUSTED_PROXY_HOPS)
 
 
 def _validate_legal_links() -> None:
@@ -843,9 +847,10 @@ _RATE_LIMIT_RULES.sort(key=lambda rule: len(rule[1]), reverse=True)
 
 
 # Every IP-keyed bucket (and the failed-authentication cap) keys on
-# app/edge.py::client_ip: the TRUSTED_PROXY_HOPS-th X-Forwarded-For entry from
-# the RIGHT (default 1, the address Railway's edge added), never the left-most,
-# which the client writes itself.
+# app/edge.py::client_ip, chosen by CLIENT_IP_SOURCE: by default the X-Real-IP
+# header Railway's edge writes (2026-11-11: the right-most X-Forwarded-For entry
+# turned out to be the edge server's own, per-connection address on Railway),
+# falling back to the TRUSTED_PROXY_HOPS-th X-Forwarded-For entry from the RIGHT.
 #
 # Routes that rate-limit per AUTHENTICATED USER rather than per IP. Since the
 # API hardening (2026-11-10) the key is the VERIFIED `sub` of the access token
@@ -985,13 +990,15 @@ app.add_middleware(
     per_user_prefixes=_PER_USER_RATE_LIMIT_PREFIXES,
     limiter=_rate_limiter,
     hops=_TRUSTED_PROXY_HOPS,
+    source=_CLIENT_IP_SOURCE,
 )
 app.add_middleware(
     _edge.BodySizeLimitMiddleware,
     limited_prefixes=_BODY_SIZE_LIMITED_PREFIXES,
     limited_max_bytes=_MAX_WRITE_BODY_BYTES,
 )
-app.add_middleware(_edge.AuthFailureLimitMiddleware, counter=_auth_failures, hops=_TRUSTED_PROXY_HOPS)
+app.add_middleware(_edge.AuthFailureLimitMiddleware, counter=_auth_failures, hops=_TRUSTED_PROXY_HOPS,
+                   source=_CLIENT_IP_SOURCE)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,

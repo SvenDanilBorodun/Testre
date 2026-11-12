@@ -61,10 +61,10 @@ jobs:
       EDUBOTICS_HF_TOKEN_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
       ALLOWED_ORIGINS: http://localhost
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           # The production image's minor version (cloud_training_api/Dockerfile:
           # python:3.12.x-slim, digest-pinned); tests/test_cloud_api_base_image.py
@@ -100,7 +100,7 @@ jobs:
     # RAILWAY_TOKEN is set on the steps that call `railway`, never on the job:
     # nothing that downloads or installs code runs with the token in scope.
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - name: Install Railway CLI (pinned release binary, SHA-256 checked)

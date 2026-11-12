@@ -136,7 +136,7 @@ jobs:
       # The VERSION file, for W2a (the trainer image is tagged with it) and W2b.
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - name: Read the VERSION file
@@ -446,7 +446,7 @@ jobs:
     permissions:
       contents: write  # softprops/action-gh-release: attach the tarball asset
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
@@ -788,7 +788,7 @@ jobs:
           echo "Release channel: ${RELEASES_REPO}"
 
       - name: Attach pi-agent tarball to GitHub Release (tag pushes only)
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3  # v3.0.4
         with:
           files: edubotics-pi-agent.tar.gz
           fail_on_unmatched_files: true

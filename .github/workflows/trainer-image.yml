@@ -50,7 +50,7 @@ jobs:
       digest: ${{ steps.push.outputs.digest }}
       image: ${{ steps.tag.outputs.image }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
@@ -84,7 +84,7 @@ jobs:
           fi
 
       - name: Free disk space (the CUDA wheel set is several GB)
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6  # v2.0.0
         with:
           tool-cache: true
           android: true
@@ -136,7 +136,7 @@ jobs:
           fi
 
       - name: GHCR login
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550  # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

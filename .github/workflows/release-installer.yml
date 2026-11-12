@@ -67,7 +67,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
@@ -78,7 +78,7 @@ jobs:
           ls -la ../../robotis_ai_setup/installer/assets/edubotics-rootfs.tar.gz*
 
       - name: Upload rootfs artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: edubotics-rootfs
           path: |
@@ -99,17 +99,17 @@ jobs:
     permissions:
       contents: write  # softprops/action-gh-release: attach the .exe asset
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.11"
 
       - name: Download rootfs artifact from previous job
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: edubotics-rootfs
           path: robotis_ai_setup/installer/assets/
@@ -231,7 +231,7 @@ jobs:
           if ($size -lt 100000000) { throw "installer suspiciously small ($size bytes)" }
 
       - name: Upload installer as CI artifact (always)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: EduBotics_Setup
           path: robotis_ai_setup/installer/output/EduBotics_Setup.exe
@@ -276,7 +276,7 @@ jobs:
 
       - name: Attach installer to GitHub Release (tag pushes only)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3  # v3.0.4
         with:
           files: robotis_ai_setup/installer/output/EduBotics_Setup.exe
           fail_on_unmatched_files: true

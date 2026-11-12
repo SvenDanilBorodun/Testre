@@ -93,10 +93,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: supabase/setup-cli@52a446718e4edd1a9f1e2631186019c87e329f60  # v2.1.0
+      - uses: supabase/setup-cli@689adcfb80d947100a1eab127289b97d1fb07b13  # v3.2.0
         with:
           # Pinned, never `latest`: these jobs hold the access token and the
           # database password. 2.122.0 is the CLI the last production apply
@@ -144,10 +144,10 @@ jobs:
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: supabase/setup-cli@52a446718e4edd1a9f1e2631186019c87e329f60  # v2.1.0
+      - uses: supabase/setup-cli@689adcfb80d947100a1eab127289b97d1fb07b13  # v3.2.0
         with:
           version: 2.122.0  # pinned: see the first setup-cli step
       - name: Link to the production project (creates branches under it)
@@ -240,10 +240,10 @@ jobs:
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: supabase/setup-cli@52a446718e4edd1a9f1e2631186019c87e329f60  # v2.1.0
+      - uses: supabase/setup-cli@689adcfb80d947100a1eab127289b97d1fb07b13  # v3.2.0
         with:
           version: 2.122.0  # pinned: see the first setup-cli step
       - name: Link
@@ -287,10 +287,10 @@ jobs:
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: supabase/setup-cli@52a446718e4edd1a9f1e2631186019c87e329f60  # v2.1.0
+      - uses: supabase/setup-cli@689adcfb80d947100a1eab127289b97d1fb07b13  # v3.2.0
         with:
           version: 2.122.0  # pinned: see the first setup-cli step
       - name: Link to production
@@ -383,7 +383,7 @@ jobs:
     env:
       PGPASSWORD: dummy  # psql reads from SUPABASE_DB_URL; this just silences a warning
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - name: Install psql

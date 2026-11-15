@@ -171,18 +171,20 @@ jobs:
         shell: pwsh
         run: |
           cd robotis_ai_setup/gui
-          python -m pip install --upgrade pip
-          # `--pre` because pythonnet>=3.1.0rc0 is a pre-release pin
-          # (see comments in requirements.txt). Without --pre, pip would
-          # downgrade to 3.0.x which won't install on Python 3.14 (when
-          # we eventually bump) and can produce subtly different WinForms
-          # interop behavior on 3.11.
-          python -m pip install --pre -r requirements.txt
-          # Pinned to what built v2.37.0 (release run 41416948649). An
-          # unpinned PyInstaller in a job that writes the installer every
-          # school PC runs elevated is a supply-chain hole (security review
-          # 2026-10-25, P0-9; hash-locking requirements.txt is still open).
-          python -m pip install pyinstaller==6.22.3 pyinstaller-hooks-contrib==2026.9
+          # E1 (2026-11-11): every package hash-checked, nothing unpinned
+          # (the old unpinned `pip install --upgrade pip` is gone; the
+          # runner's pip installs hash-locked files). requirements.lock is
+          # requirements.txt + requirements-build.txt (PyInstaller and its
+          # hooks) locked for this interpreter by .github/scripts/python_locks.sh,
+          # exactly the versions that built v2.37.0 (release run 41416948649).
+          # Its one source-only package (proxy_tools) is built WITHOUT build
+          # isolation, which would fetch setuptools/wheel unchecked: with the
+          # runner's own setuptools (left out of the lock: it is what
+          # PyInstaller bundles, as before) and the hash-locked wheel below.
+          python -m pip install --no-cache-dir --require-hashes --only-binary :all: -r requirements-build-backend.lock
+          if ($LASTEXITCODE -ne 0) { throw "pip install requirements-build-backend.lock failed ($LASTEXITCODE)" }
+          python -m pip install --no-cache-dir --require-hashes --no-build-isolation --only-binary :all: --no-binary proxy-tools -r requirements.lock
+          if ($LASTEXITCODE -ne 0) { throw "pip install requirements.lock failed ($LASTEXITCODE)" }
 
       - name: Build GUI with PyInstaller
         shell: pwsh

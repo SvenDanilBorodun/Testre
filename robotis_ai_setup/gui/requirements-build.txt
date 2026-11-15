@@ -1,0 +1,13 @@
+# Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
+#
+# Proprietary and confidential. Licensed under the EduBotics End-User
+# Licence Agreement; see LICENSE at the repository root.
+#
+# Build-only tools for EduBotics.exe (release-installer.yml), locked together
+# with requirements.txt into requirements.lock by
+# .github/scripts/python_locks.sh. Pinned to what built v2.37.0 (release run
+# 41416948649): an unpinned PyInstaller in a job that writes the installer
+# every school PC runs elevated is a supply-chain hole (security review
+# 2026-10-25, P0-9).
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.9

@@ -1,0 +1,13 @@
+# Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
+#
+# Proprietary and confidential. Licensed under the EduBotics End-User
+# Licence Agreement; see LICENSE at the repository root.
+#
+# The build backend for the one source-only package in requirements.lock
+# (proxy_tools, a dependency of pywebview), installed hash-checked BEFORE it
+# so that requirements.lock installs with --no-build-isolation: in an isolated
+# build pip fetches setuptools/wheel WITHOUT hash checks. The build uses the
+# runner's own setuptools (65.5.0, bundled with Python 3.11, as v2.37.0 did);
+# wheel 0.45.1 is the last release with its own bdist_wheel, which a
+# setuptools older than 70.1 needs. Locked by .github/scripts/python_locks.sh.
+wheel==0.45.1

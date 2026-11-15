@@ -58,7 +58,8 @@ the 401 check passed, `/docs` 404. The client-address check FAILED in a way the
 old text did not foresee: 35 requests on separate connections never got a 429,
 35 on one kept-alive connection did — the right-most `X-Forwarded-For` entry is
 the per-connection address of Railway's edge server (`DEPLOY.md` §3c step 5;
-fixed by `CLIENT_IP_SOURCE`, owner decision: after merge day). W3 approved:
+fixed by `CLIENT_IP_SOURCE` in #55, deployed 2026-11-15 as `06d90042` and
+verified by the same check from the owner's laptop). W3 approved:
 `/version.json` names the merge commit, the CSP is report-only. The admin
 enrolled TOTP (exactly one verified factor, nothing else). The data 053 and 059
 change was saved read-only beforehand together with a fingerprint of every

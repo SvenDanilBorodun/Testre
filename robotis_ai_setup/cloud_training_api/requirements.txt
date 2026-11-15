@@ -1,3 +1,6 @@
+# The image and W2's probe install requirements.lock (every package pinned and
+# hash-checked), written from this file by .github/scripts/python_locks.sh:
+# after editing it, run `.github/scripts/python_locks.sh write` (ci.yml::python-locks).
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
 supabase==2.15.1

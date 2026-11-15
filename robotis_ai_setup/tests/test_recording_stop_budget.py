@@ -228,6 +228,18 @@ class TheSmokeScenarioMirrorsTheNode(unittest.TestCase):
         self.assertIn("_shutdown_scenario('SIGINT')", main)
         self.assertIn("_shutdown_scenario('SIGTERM')", main)
 
+    def test_the_child_and_the_node_shut_the_context_down_alike(self):
+        # The smoke child ended with rclpy.try_shutdown() while the node ended
+        # with rclpy.shutdown(), which raises on a context the signal handler
+        # already shut down: every orderly stop of the shipped node logged a
+        # traceback and exit code 1, and the smoke could not see it (2.38.0,
+        # 2026-11-15). Both must use the call that tolerates a context down.
+        child = ast.get_source_segment(self.src, self._function('shutdown_child'))
+        node_main = ast.unparse(_function(_NODE, 'main'))
+        for src in (child, node_main):
+            self.assertIn('rclpy.try_shutdown()', src)
+            self.assertNotIn('rclpy.shutdown()', src)
+
 
 if __name__ == '__main__':
     unittest.main()

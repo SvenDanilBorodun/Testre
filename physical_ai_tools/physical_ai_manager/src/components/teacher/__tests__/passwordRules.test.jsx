@@ -17,7 +17,7 @@ import CreateTeacherModal from '../../admin/CreateTeacherModal';
 import CreateStudentModal from '../CreateStudentModal';
 import PasswordResetModal from '../PasswordResetModal';
 import {
-  PASSWORD_MAX,
+  PASSWORD_MAX_BYTES,
   STAFF_PASSWORD_MIN,
   STUDENT_PASSWORD_MIN,
   passwordErrorDe,
@@ -30,9 +30,9 @@ beforeEach(() => vi.clearAllMocks());
 
 describe('passwordRules', () => {
   test('the numbers and the sentences', () => {
-    expect([STAFF_PASSWORD_MIN, STUDENT_PASSWORD_MIN, PASSWORD_MAX]).toEqual([12, 8, 128]);
-    expect(passwordHintDe('staff')).toBe('Mindestens 12 Zeichen (höchstens 128).');
-    expect(passwordHintDe('student')).toBe('Mindestens 8 Zeichen (höchstens 128).');
+    expect([STAFF_PASSWORD_MIN, STUDENT_PASSWORD_MIN, PASSWORD_MAX_BYTES]).toEqual([12, 8, 72]);
+    expect(passwordHintDe('staff')).toBe('Mindestens 12 Zeichen (höchstens 72; ä, ö, ü, ß und andere Sonderzeichen zählen mehrfach).');
+    expect(passwordHintDe('student')).toBe('Mindestens 8 Zeichen (höchstens 72; ä, ö, ü, ß und andere Sonderzeichen zählen mehrfach).');
     expect(passwordErrorDe('x'.repeat(11), 'staff')).toBe(
       'Das Passwort muss für Lehrkräfte und Admins mindestens 12 Zeichen lang sein.',
     );
@@ -41,9 +41,13 @@ describe('passwordRules', () => {
       'Das Passwort muss für Schülerinnen und Schüler mindestens 8 Zeichen lang sein.',
     );
     expect(passwordErrorDe('x'.repeat(8), 'student')).toBeNull();
-    expect(passwordErrorDe('x'.repeat(129), 'student')).toBe(
-      'Das Passwort darf höchstens 128 Zeichen lang sein.',
-    );
+    const tooLong = 'Das Passwort ist zu lang: höchstens 72 Zeichen, wobei ä, ö, ü, ß und '
+      + 'andere Sonderzeichen mehrfach zählen.';
+    // 72 UTF-8 bytes is bcrypt's limit and Supabase Auth's (73 made it answer 500).
+    expect(passwordErrorDe('x'.repeat(72), 'student')).toBeNull();
+    expect(passwordErrorDe('x'.repeat(73), 'student')).toBe(tooLong);
+    expect(passwordErrorDe('ä'.repeat(36), 'staff')).toBeNull();
+    expect(passwordErrorDe('ä'.repeat(37), 'staff')).toBe(tooLong);
     expect(passwordErrorDe(undefined, 'student')).not.toBeNull();
     // code points, like the server's len(): eight emoji are eight characters
     expect(passwordErrorDe('😀'.repeat(8), 'student')).toBeNull();
@@ -68,7 +72,7 @@ describe('CreateTeacherModal', () => {
 
   test('states the rule and refuses 11 characters before sending', () => {
     const { onSubmit, password, form } = renderIt();
-    expect(screen.getByText('Mindestens 12 Zeichen (höchstens 128).')).toBeInTheDocument();
+    expect(screen.getByText('Mindestens 12 Zeichen (höchstens 72; ä, ö, ü, ß und andere Sonderzeichen zählen mehrfach).')).toBeInTheDocument();
     typeInto(password, 'kurz-11zeic');
     expect(screen.getByRole('button', { name: 'Erstellen' })).toBeDisabled();
     fireEvent.submit(form);
@@ -101,7 +105,7 @@ describe('CreateStudentModal', () => {
 
   test('refuses 7 characters before sending, sends 8', () => {
     const { onSubmit, password, form } = renderIt();
-    expect(screen.getByText(/Mindestens 8 Zeichen \(höchstens 128\)\./)).toBeInTheDocument();
+    expect(screen.getByText(/Mindestens 8 Zeichen \(höchstens 72;/)).toBeInTheDocument();
     typeInto(password, 'sieben7');
     fireEvent.submit(form);
     expect(onSubmit).not.toHaveBeenCalled();

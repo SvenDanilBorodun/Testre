@@ -22,6 +22,11 @@ on:
         description: "Audit reason for manual redeploy"
         required: true
         type: string
+      allow_rollback:
+        description: "Deploy even though production serves a commit this one does not contain (a deliberate rollback)"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: railway-teacher-web-${{ github.ref }}
@@ -84,6 +89,25 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
+          # The whole commit graph (no file contents beyond HEAD's), so the
+          # rollback check below can tell whether this commit contains
+          # production's without a credentialed fetch.
+          fetch-depth: 0
+          filter: blob:none
+      - name: Refuse to roll production back
+        # After the approval, right before the deploy: a release that waited
+        # while a later merge to main went live must not deploy its older
+        # commit over it (the two lanes do not share a concurrency group).
+        # .github/scripts/refuse_rollback.sh decides; tests/test_refuse_rollback.py.
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
+          ALLOW_ROLLBACK: ${{ inputs.allow_rollback }}
+          SERVED_URL: https://teacher-web-production.up.railway.app/version.json
+        run: |
+          set -euo pipefail
+          served=$(curl -fsS -m 15 --retry 2 "$SERVED_URL" 2>/dev/null \
+            | python3 -c "import json, re, sys; v = json.load(sys.stdin).get('buildId'); m = re.search(r'[0-9a-f]{40}', v) if isinstance(v, str) else None; print(m.group(0) if m else '')" 2>/dev/null || true)
+          bash .github/scripts/refuse_rollback.sh "$served" "$DEPLOY_SHA" "${ALLOW_ROLLBACK:-false}"
       - name: Install Railway CLI (pinned release binary, SHA-256 checked)
         # One fixed release asset, verified by hash, installed with no token
         # in scope. The npm wrapper it replaces fetched the binary in a

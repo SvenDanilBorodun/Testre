@@ -721,7 +721,7 @@ Then launch the GUI on a Windows box with a robot: toolbar renders, Galerie popu
 
 ## Rollback (reverse order)
 
-1. **Railway** — Dashboard → Deployments → click prior green → Redeploy
+1. **Railway** — Dashboard → Deployments → click prior green → Redeploy. Through GitHub instead: run W2 / W3 („Run workflow") on the older tag with `allow_rollback` ticked; without it their deploy job refuses a commit that does not contain the one production serves (`.github/scripts/refuse_rollback.sh`, since 2026-11-15), which is what stops a release that waited for its approval from rolling back a newer merge.
 2. **Supabase** — paste `docs/deploy/ROLLBACK_MIGRATIONS.sql` (or single rollback file) in Studio
 3. **Modal** — `git checkout <prior-sha> -- modal_training/<app>.py && modal deploy <app>.py`
 4. **Docker** — re-tag prior `BUILD_ID` as `:latest`: `docker tag nettername/<image>:<prior_id> nettername/<image>:latest && docker push nettername/<image>:latest`

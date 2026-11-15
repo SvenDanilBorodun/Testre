@@ -3,7 +3,7 @@ import toast from 'react-hot-toast';
 import Modal from './Modal';
 import { Btn } from '../EbUI';
 import {
-  PASSWORD_MAX,
+  PASSWORD_MAX_BYTES,
   passwordErrorDe,
   passwordHintDe,
   passwordMinLength,
@@ -73,7 +73,7 @@ export default function PasswordResetModal({ onClose, onSubmit, username, audien
           onChange={(e) => setPassword(e.target.value)}
           placeholder={`mindestens ${passwordMinLength(audience)} Zeichen`}
           minLength={passwordMinLength(audience)}
-          maxLength={PASSWORD_MAX}
+          maxLength={PASSWORD_MAX_BYTES}
           aria-describedby="reset-password-hint"
           autoFocus
           required

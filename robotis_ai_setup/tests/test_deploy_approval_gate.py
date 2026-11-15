@@ -540,11 +540,12 @@ class MigrationsAreManual(unittest.TestCase):
                     self.assertNotEqual(text, release, label)
                     self.assertNotEqual(release_call_problems(text, self.text), [], label)
         # ...and on the callee's side: a default other than production, for a
-        # release that names no target (one that names production is immune).
+        # release that names no target, whatever the shipped call passes
+        # (one that names production is immune).
         callee = self.text.replace('        default: "production"\n        type: string',
                                    '        default: "branch"\n        type: string', 1)
         self.assertNotEqual(callee, self.text)
-        self.assertNotEqual(release_call_problems(plain, callee), [])
+        self.assertNotEqual(release_call_problems(_with_block(plain, None), callee), [])
         self.assertEqual(release_call_problems(_with_block(plain, '      target: production\n'), callee), [])
 
     def test_any_other_target_fails_the_run_loudly(self):
@@ -649,14 +650,16 @@ _GIT_REF_SWITCH = re.compile(
 _SUPABASE_USES = '    uses: ./.github/workflows/supabase-migrate.yml\n'
 
 
-def _with_block(release_text: str, body: str) -> str:
-    """release.yml with the `supabase` call's `with:` block replaced by `body`."""
+def _with_block(release_text: str, body: str | None) -> str:
+    """release.yml with the `supabase` call's `with:` block replaced by
+    `body`, or removed when `body` is None (a call that relies on the
+    callee's workflow_call defaults)."""
     i = release_text.index(_SUPABASE_USES) + len(_SUPABASE_USES)
     rest = release_text[i:]
     m = re.match(r'    with:\n(?:      .*\n)+', rest)
     if m:
         rest = rest[m.end():]
-    return release_text[:i] + '    with:\n' + body + rest
+    return release_text[:i] + ('' if body is None else '    with:\n' + body) + rest
 
 
 def _as_list(value) -> list:

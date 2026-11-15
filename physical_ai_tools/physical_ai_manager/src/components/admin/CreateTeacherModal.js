@@ -3,7 +3,7 @@ import toast from 'react-hot-toast';
 import Modal from '../teacher/Modal';
 import { Btn } from '../EbUI';
 import {
-  PASSWORD_MAX,
+  PASSWORD_MAX_BYTES,
   passwordErrorDe,
   passwordHintDe,
   passwordMinLength,
@@ -112,7 +112,7 @@ export default function CreateTeacherModal({ onClose, onSubmit }) {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             minLength={passwordMinLength('staff')}
-            maxLength={PASSWORD_MAX}
+            maxLength={PASSWORD_MAX_BYTES}
             aria-describedby="create-teacher-password-hint"
             required
           />

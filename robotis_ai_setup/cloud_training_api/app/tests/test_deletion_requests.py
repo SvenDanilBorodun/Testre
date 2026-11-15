@@ -108,9 +108,23 @@ class Deadline(unittest.TestCase):
         self.assertEqual(dr.one_month_after(at(2026, 3, 31)), at(2026, 4, 30))
 
     def test_postgrest_timestamps_parse_and_garbage_is_none(self):
-        self.assertEqual(dr.due_by("2026-11-11T10:00:00.123456+00:00"), "2026-12-11T10:00:00.123456+00:00")
-        self.assertEqual(dr.due_by("2026-11-11T10:00:00Z"), "2026-12-11T10:00:00+00:00")
-        self.assertEqual(dr.due_by("2026-11-11T11:00:00+01:00"), "2026-12-11T10:00:00+00:00")
+        self.assertEqual(dr.due_by("2026-11-11T10:00:00.123456+00:00"), "2026-12-11T23:59:59+01:00")
+        self.assertEqual(dr.due_by("2026-11-11T10:00:00Z"), "2026-12-11T23:59:59+01:00")
+        self.assertEqual(dr.due_by("2026-11-11T11:00:00+01:00"), "2026-12-11T23:59:59+01:00")
+
+    def test_the_deadline_is_the_end_of_the_german_calendar_date(self):
+        # Just after midnight in Germany is still the previous day in UTC: the
+        # old UTC count showed 01.05 for a request of 31.03 01:30 (legal: 30.04).
+        self.assertEqual(dr.due_by("2026-03-30T23:30:00+00:00"), "2026-04-30T23:59:59+02:00")
+        self.assertEqual(dr.due_by("2026-05-30T23:00:00+00:00"), "2026-06-30T23:59:59+02:00")
+        # Late in the German day stays that day, early in the UTC one too.
+        self.assertEqual(dr.due_by("2026-11-11T22:59:59+00:00"), "2026-12-11T23:59:59+01:00")
+        self.assertEqual(dr.due_by("2026-11-11T23:00:00+00:00"), "2026-12-12T23:59:59+01:00")
+        # The offset is the deadline day's own, across both clock changes.
+        self.assertEqual(dr.due_by("2026-02-28T12:00:00+00:00"), "2026-03-28T23:59:59+01:00")
+        self.assertEqual(dr.due_by("2026-03-01T12:00:00+00:00"), "2026-04-01T23:59:59+02:00")
+        self.assertEqual(dr.due_by("2026-09-29T12:00:00+00:00"), "2026-10-29T23:59:59+01:00")
+        self.assertEqual(dr.due_by("2027-01-31T12:00:00+00:00"), "2027-02-28T23:59:59+01:00")
         for bad in (None, "", "gestern", 17, "2026-13-01T00:00:00+00:00"):
             self.assertIsNone(dr.due_by(bad), bad)
 
@@ -130,7 +144,7 @@ class TeacherQueue(unittest.TestCase):
         self.assertEqual([r.student_id for r in rows], ["ben", "anna"])
         ben = rows[0]
         self.assertEqual((ben.classroom_name, ben.requested_at), ("7b", "2026-10-31T09:00:00+00:00"))
-        self.assertEqual(ben.due_by, "2026-11-30T09:00:00+00:00")
+        self.assertEqual(ben.due_by, "2026-11-30T23:59:59+01:00")
         with _Patched(_db()):
             self.assertEqual([r.student_id for r in teacherroute.list_deletion_requests(teacher={"id": T2})],
                              ["dora"])
@@ -227,7 +241,7 @@ class AdminQueue(unittest.TestCase):
         self.assertEqual(by["dora"].teacher_name, "Herr Anders")
         self.assertEqual((by["emil"].classroom_name, by["emil"].teacher_name), (None, None))
         self.assertEqual((by["t3"].role, by["t3"].classroom_name), ("teacher", None))
-        self.assertEqual(by["emil"].due_by, "2026-11-20T10:00:00+00:00")
+        self.assertEqual(by["emil"].due_by, "2026-11-20T23:59:59+01:00")
 
     def _confirm(self, db, user_id):
         erased = []
@@ -280,7 +294,7 @@ class Requester(unittest.IsolatedAsyncioTestCase):
         with _Patched(db):
             res = await meroute.delete_my_account(profile=self._profile(db, "anna"))
         self.assertEqual(res["requested_at"], "2026-11-03T10:00:00+00:00")
-        self.assertEqual(res["due_by"], "2026-12-03T10:00:00+00:00")
+        self.assertEqual(res["due_by"], "2026-12-03T23:59:59+01:00")
         self.assertIn("03.12.2026", res["message"])
         self.assertEqual(self._profile(db, "anna")["deletion_requested_at"], "2026-11-03T10:00:00+00:00")
         self.assertIn("zurückziehen", res["message"])
@@ -329,7 +343,7 @@ class Requester(unittest.IsolatedAsyncioTestCase):
             me = meroute._build_my_profile({"id": "x", "role": "admin", "username": "x", "full_name": "X",
                                             "deletion_requested_at": "2026-11-03T10:00:00+00:00"})
         self.assertEqual(me.deletion_requested_at, "2026-11-03T10:00:00+00:00")
-        self.assertEqual(me.deletion_due_by, "2026-12-03T10:00:00+00:00")
+        self.assertEqual(me.deletion_due_by, "2026-12-03T23:59:59+01:00")
         # the profile every route reads carries the column (app/auth.py may be stubbed here: read the file)
         import os
 

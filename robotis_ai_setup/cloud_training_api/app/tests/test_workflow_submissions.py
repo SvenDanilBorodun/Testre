@@ -172,6 +172,7 @@ class TestRateLimitRulesUnchanged(unittest.TestCase):
     _PER_USER = (
         "/trainings/", "/workflows", "/me/hf-token", "/me/group-members", "/inference/",
         "/teacher/", "/admin/", "/pi/tickets",
+        "/datasets", "/me/tutorial-progress", "/me/export",
     )
 
     _EXPECTED = [

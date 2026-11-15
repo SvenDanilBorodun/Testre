@@ -17,13 +17,24 @@ teacher who has left. The requester may withdraw an open request
 legal judgment, not a button).
 
 Art. 12(3): the request is carried out without undue delay and at the latest one
-month after it arrived. ``due_by`` is that date, computed once here.
+month after it arrived. ``due_by`` is that date, computed once here: the END of
+the same calendar date one month later IN GERMANY (Regulation 1182/71 Art.
+3(2)(c), clamped to the month's last day). Before 2026-11-15 it was the same
+UTC time one month later, so a request made just after midnight German time
+(still the previous day in UTC) showed a deadline one day past the legal one:
+Berlin 31.03 01:30 → 01.05 instead of 30.04.
 """
 
 from __future__ import annotations
 
 import calendar
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
+from zoneinfo import ZoneInfo
+
+# Where the schools are, and so where a calendar date is counted. The API image
+# (python:3.12.14-slim) ships /usr/share/zoneinfo; tests/test_deletion_requests.py
+# fails without it rather than silently counting in UTC.
+LEGAL_TIMEZONE = ZoneInfo("Europe/Berlin")
 
 # Read by the student SPA, the teacher web and the admin page (Rule §1: German).
 NOT_OPEN_DE = (
@@ -73,9 +84,12 @@ def one_month_after(moment: datetime) -> datetime:
 
 
 def due_by(requested_at) -> str | None:
-    """The Art. 12(3) deadline of a request recorded at ``requested_at`` (ISO, UTC),
-    or None when the timestamp cannot be read."""
+    """The Art. 12(3) deadline of a request recorded at ``requested_at`` (ISO,
+    any offset): the last second of the same calendar date one month later in
+    German local time, as ISO 8601 with that day's offset (``+01:00`` or
+    ``+02:00``); None when the timestamp cannot be read."""
     moment = parse_timestamp(requested_at)
     if moment is None:
         return None
-    return one_month_after(moment.astimezone(timezone.utc)).isoformat()
+    last_day = one_month_after(moment.astimezone(LEGAL_TIMEZONE)).date()
+    return datetime.combine(last_day, time(23, 59, 59), tzinfo=LEGAL_TIMEZONE).isoformat()

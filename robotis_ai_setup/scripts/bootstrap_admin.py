@@ -32,10 +32,11 @@ USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,31}$")
 # (tests/test_supabase_058.py holds them equal).
 PROVISIONED_KEY = "edubotics_provisioned"
 # The staff password rule (owner decision 2026-11-10): equal to
-# cloud_training_api/app/services/passwords.py::STAFF_MIN_LENGTH / MAX_LENGTH
-# (tests/test_password_rule_lockstep.py holds them equal).
+# cloud_training_api/app/services/passwords.py::STAFF_MIN_LENGTH / MAX_BYTES
+# (tests/test_password_rule_lockstep.py holds them equal). The upper bound is
+# UTF-8 BYTES: Supabase Auth stores a bcrypt hash, which takes at most 72.
 ADMIN_PASSWORD_MIN_LENGTH = 12
-PASSWORD_MAX_LENGTH = 128
+PASSWORD_MAX_BYTES = 72
 
 
 def main():
@@ -69,8 +70,13 @@ def main():
         sys.exit("Passwords do not match")
     if len(password) < ADMIN_PASSWORD_MIN_LENGTH:
         sys.exit(f"Password must be at least {ADMIN_PASSWORD_MIN_LENGTH} characters")
-    if len(password) > PASSWORD_MAX_LENGTH:
-        sys.exit(f"Password must be at most {PASSWORD_MAX_LENGTH} characters")
+    try:
+        size = len(password.encode("utf-8"))
+    except UnicodeEncodeError:
+        sys.exit("Password contains a character that cannot be encoded as UTF-8")
+    if size > PASSWORD_MAX_BYTES:
+        sys.exit(f"Password must be at most {PASSWORD_MAX_BYTES} bytes of UTF-8 "
+                 "(an umlaut counts as two)")
 
     client = create_client(url, key)
     email = f"{username}@{SYNTHETIC_EMAIL_DOMAIN}"

@@ -6,8 +6,16 @@
 
 A NEW or RESET password is at least ``STAFF_MIN_LENGTH`` (12) characters for a
 teacher or an admin and ``STUDENT_MIN_LENGTH`` (8) for a student, at most
-``MAX_LENGTH`` (128). Passwords set before the rule keep working (Supabase Auth
-checks only what it stores). The check runs by hand, not as a pydantic
+``MAX_BYTES`` (72) bytes of UTF-8. Passwords set before the rule keep working
+(Supabase Auth checks only what it stores).
+
+The upper bound is BYTES, not characters (2026-11-15): Supabase Auth stores a
+bcrypt hash, and bcrypt takes at most 72 bytes. The rule said 128 characters
+before, and every password of 73–128 bytes (37 umlauts are already 74) made
+Supabase Auth panic („bcrypt: password length exceeds 72 bytes") and the route
+answer its generic 500 — measured against GoTrue v2.188.1. An ä, ö, ü or ß is
+two bytes, most other non-ASCII characters two to four, which the sentence
+says. The check runs by hand, not as a pydantic
 ``min_length``: pydantic's 422 is English and echoes the password back.
 
 Callers: ``routes/admin.py`` (teacher create + reset) and ``routes/teacher.py``
@@ -25,14 +33,20 @@ from __future__ import annotations
 
 STAFF_MIN_LENGTH = 12
 STUDENT_MIN_LENGTH = 8
-MAX_LENGTH = 128
+MAX_BYTES = 72
 STAFF_ROLES = frozenset({"teacher", "admin"})
 
 WEAK_PASSWORD_DE = (
     "Dieses Passwort wird nicht akzeptiert: Es ist zu leicht zu erraten oder in einem "
     "bekannten Datenleck aufgetaucht. Bitte ein anderes Passwort wählen."
 )
-TOO_LONG_DE = f"Das Passwort darf höchstens {MAX_LENGTH} Zeichen lang sein."
+TOO_LONG_DE = (
+    f"Das Passwort ist zu lang: höchstens {MAX_BYTES} Zeichen, wobei ä, ö, ü, ß und "
+    "andere Sonderzeichen mehrfach zählen."
+)
+# A str the JSON body can carry but UTF-8 cannot (a lone surrogate, "\ud800"):
+# no browser types one; refused in German instead of a 500 from .encode().
+INVALID_CHARACTER_DE = "Das Passwort enthält ein Zeichen, das nicht erlaubt ist."
 
 
 def min_length_for(role: str) -> int:
@@ -48,7 +62,11 @@ def password_error_de(password, role: str) -> str | None:
     """The German refusal of a password for an account of ``role``, else None."""
     if not isinstance(password, str) or len(password) < min_length_for(role):
         return too_short_de(role)
-    if len(password) > MAX_LENGTH:
+    try:
+        size = len(password.encode("utf-8"))
+    except UnicodeEncodeError:
+        return INVALID_CHARACTER_DE
+    if size > MAX_BYTES:
         return TOO_LONG_DE
     return None
 

@@ -4,7 +4,7 @@ import Modal from './Modal';
 import { Btn } from '../EbUI';
 import { numberDe } from '../../utils/hoursDe';
 import {
-  PASSWORD_MAX,
+  PASSWORD_MAX_BYTES,
   passwordErrorDe,
   passwordHintDe,
   passwordMinLength,
@@ -115,7 +115,7 @@ export default function CreateStudentModal({ onClose, onSubmit, poolAvailable })
             onChange={(e) => setPassword(e.target.value)}
             placeholder={`mindestens ${passwordMinLength('student')} Zeichen`}
             minLength={passwordMinLength('student')}
-            maxLength={PASSWORD_MAX}
+            maxLength={PASSWORD_MAX_BYTES}
             aria-describedby="create-student-password-hint"
             required
           />

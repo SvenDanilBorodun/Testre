@@ -305,6 +305,21 @@ class RateLimitKey(unittest.TestCase):
         self.post(user_token(sub, session_id="other"))
         self.assertEqual(self.seen["keys"], [f"user:{sub}"] * 2)
 
+    def test_classmates_behind_one_school_address_get_their_own_buckets(self):
+        # 2026-11-15: registrations, Lernpfad progress and the export were
+        # counted per address, i.e. per school NAT since X-Real-IP (#55).
+        app, seen = build_app(rules=_main_literal("_RATE_LIMIT_RULES"), limit=10_000)
+        client = TestClient(app)
+        anna, ben = str(uuid.uuid4()), str(uuid.uuid4())
+        for method, path in (("post", "/datasets"), ("post", "/datasets/sync"),
+                             ("patch", "/me/tutorial-progress"), ("get", "/me/export")):
+            with self.subTest(path=path):
+                seen["keys"].clear()
+                for sub in (anna, ben):
+                    getattr(client, method)(path, headers={
+                        "Authorization": f"Bearer {user_token(sub)}", "X-Forwarded-For": "203.0.113.7"})
+                self.assertEqual(seen["keys"], [f"user:{anna}", f"user:{ben}"])
+
     def test_a_rotating_fake_token_falls_into_its_address_bucket(self):
         statuses = [self.post(f"{uuid.uuid4().hex}.{uuid.uuid4().hex}.{uuid.uuid4().hex}").status_code
                     for _ in range(6)]

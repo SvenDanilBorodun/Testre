@@ -3,7 +3,7 @@
 # Proprietary and confidential. Licensed under the EduBotics End-User
 # Licence Agreement; see LICENSE at the repository root.
 """The password rule (owner decision 2026-11-10): a new or reset password is at
-least 12 characters for a teacher or an admin and 8 for a student, at most 128,
+least 12 characters for a teacher or an admin and 8 for a student, at most 72 UTF-8 bytes,
 refused in German BEFORE Supabase is asked; Supabase Auth's own refusal (its
 project minimum, the leaked-password check) is a German 400, not a bare 500."""
 
@@ -87,15 +87,25 @@ def refusal(call):
 
 class TheRule(unittest.TestCase):
     def test_the_numbers_and_sentences(self):
-        self.assertEqual((passwords.STAFF_MIN_LENGTH, passwords.STUDENT_MIN_LENGTH, passwords.MAX_LENGTH),
-                         (12, 8, 128))
+        self.assertEqual((passwords.STAFF_MIN_LENGTH, passwords.STUDENT_MIN_LENGTH, passwords.MAX_BYTES),
+                         (12, 8, 72))
         self.assertEqual(passwords.password_error_de("x" * 11, "teacher"), STAFF_SHORT_DE)
         self.assertEqual(passwords.password_error_de("x" * 11, "admin"), STAFF_SHORT_DE)
         self.assertIsNone(passwords.password_error_de("x" * 12, "teacher"))
         self.assertEqual(passwords.password_error_de("x" * 7, "student"), STUDENT_SHORT_DE)
         self.assertIsNone(passwords.password_error_de("x" * 8, "student"))
-        self.assertEqual(passwords.password_error_de("x" * 129, "student"),
-                         "Das Passwort darf höchstens 128 Zeichen lang sein.")
+        too_long = ("Das Passwort ist zu lang: höchstens 72 Zeichen, wobei ä, ö, ü, ß und "
+                    "andere Sonderzeichen mehrfach zählen.")
+        # 72 bytes is bcrypt's limit and Supabase Auth's: 73 made it answer 500.
+        self.assertIsNone(passwords.password_error_de("x" * 72, "student"))
+        self.assertEqual(passwords.password_error_de("x" * 73, "student"), too_long)
+        # Bytes, not characters: 36 umlauts are 72 bytes, 37 are 74.
+        self.assertIsNone(passwords.password_error_de("ä" * 36, "teacher"))
+        self.assertEqual(passwords.password_error_de("ä" * 37, "teacher"), too_long)
+        self.assertEqual(passwords.password_error_de("x" * 70 + "\U0001F600", "student"), too_long)
+        # A lone surrogate (JSON can carry one) is refused, never a 500.
+        self.assertEqual(passwords.password_error_de("x" * 12 + "\ud800", "student"),
+                         passwords.INVALID_CHARACTER_DE)
         self.assertEqual(passwords.password_error_de(None, "student"), STUDENT_SHORT_DE)
         self.assertTrue(passwords.is_weak_password_error(AuthWeakPasswordError()))
         self.assertFalse(passwords.is_weak_password_error(RuntimeError("Password should be")))

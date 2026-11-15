@@ -881,9 +881,16 @@ _RATE_LIMIT_RULES.sort(key=lambda rule: len(rule[1]), reverse=True)
 # NAT must not share one bucket when they re-assign hours after the reset; this
 # also keys the existing POST /teacher/classrooms and /teacher/workgroups rules
 # per teacher, which is what those limits meant anyway.
+#
+# /datasets, /me/tutorial-progress and /me/export joined on 2026-11-15: since
+# the per-address limits count the real client (X-Real-IP, #55), a class
+# uploading recordings or stepping through a Lernpfad together shared ONE bucket
+# per school NAT (20/min registrations, 30/min progress saves, 3/h exports for
+# the whole school). Keyed by the verified subject they mean what they say.
 _PER_USER_RATE_LIMIT_PREFIXES = (
     "/trainings/", "/workflows", "/me/hf-token", "/me/group-members", "/inference/",
     "/teacher/", "/admin/", "/pi/tickets",
+    "/datasets", "/me/tutorial-progress", "/me/export",
 )
 
 

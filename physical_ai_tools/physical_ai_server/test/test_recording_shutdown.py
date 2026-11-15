@@ -334,8 +334,19 @@ def test_the_finalize_follows_the_cloud_bye_and_precedes_the_rest():
     finally_src = src[src.index('finally:'):]
     finalize_at = finally_src.index('node._finalize_recording_on_shutdown()')
     for later in ('node._cleanup_hf_api_worker()', 'node._shutdown_sensor_executor()',
-                  'executor.shutdown()', 'node.destroy_node()', 'rclpy.shutdown()'):
+                  'executor.shutdown()', 'node.destroy_node()', 'rclpy.try_shutdown()'):
         assert finalize_at < finally_src.index(later), later
+
+
+def test_the_context_shutdown_tolerates_a_context_already_down():
+    """On an environment stop rclpy's signal handler has shut the context down
+    before spin() returns; rclpy.shutdown() then raised RCLError and the node
+    died with exit code 1 on every orderly stop (2.38.0 images, 2026-11-15).
+    The finally must end with try_shutdown, never the raising shutdown."""
+    tries = [n for n in ast.walk(_MAIN) if isinstance(n, ast.Try) and n.finalbody]
+    calls = [ast.unparse(stmt) for stmt in tries[0].finalbody]
+    assert calls[-1] == 'rclpy.try_shutdown()', calls
+    assert 'rclpy.shutdown()' not in calls, calls
 
 
 def test_the_sensor_supervisor_finalizes_before_its_exit():

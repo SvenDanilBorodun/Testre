@@ -8895,7 +8895,13 @@ def main(args=None):
         node._shutdown_sensor_executor()
         executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        # try_shutdown, never shutdown: on an environment stop (SIGINT/SIGTERM)
+        # rclpy's own signal handler has already shut the context down, and
+        # rclpy.shutdown() then raised RCLError („rcl_shutdown already called"),
+        # so every orderly stop ended with a traceback and the launch logged
+        # „process has died … exit code 1" (measured in the 2.38.0 images,
+        # 2026-11-15). try_shutdown is a no-op on a context already down.
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

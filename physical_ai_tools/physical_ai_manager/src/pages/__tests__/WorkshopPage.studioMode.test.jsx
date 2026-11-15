@@ -13,7 +13,7 @@
 // WorkshopPage.simToggle.test.jsx.
 
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import toast from 'react-hot-toast';
 import WorkshopPage from '../WorkshopPage';
@@ -245,7 +245,10 @@ describe('WorkshopPage — the switch toast', () => {
     // The variable path: previewAsset → ensureSimMode, no service call.
     mockBlockly.provider.dispatchAction({ type: 'preview', asset: { kind: 'variable', name: 'p' } });
     await screen.findByTestId('sim-stage');
-    expect(modeToasts()).toHaveLength(1);
+    // The dispatch runs outside act(), so the stage can be in the DOM before
+    // the passive effect that toasts has run; under load the toast came a
+    // moment later (failed on PR #53's CI; 1 in 30 runs locally). Wait for it.
+    await waitFor(() => expect(modeToasts()).toHaveLength(1));
     expect(modeToasts()[0][0]).toBe(MODE_DE.TOAST_SIM);
   });
 

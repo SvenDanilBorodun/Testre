@@ -22,7 +22,12 @@ and W3 at once, in no order (verification round B, VB-02).
 
 W4 (`docker-publish.yml`) also builds `:latest` images on a merge; both fleets
 pin a release tag, so no robot pulls them. The robots, the Windows GUI and the
-Pi agent change only with a release tag (`release.yml`).
+Pi agent change only with a release: a tag (`release.yml`) uploads the `.exe`
+and the Pi tarball and announces nothing, and only W6, which the owner starts
+by hand after testing both on a real PC and Pi (GitHub → Actions →
+**publish-gui-version** → **Run workflow**, from `main`, the version;
+`publish-gui-version.yml`, `DEPLOY.md` §0b), tells the fleet (launch item E6,
+2026-11-15). A merge never starts W6.
 
 Every step below is an owner action (CLAUDE.md, „When to ask the user"). The
 details sit in `DEPLOY.md` §1 (053 … 059), §3c and §3d.

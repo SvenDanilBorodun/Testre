@@ -20,11 +20,11 @@ Every step that touches GitHub settings, Railway or a repository's visibility is
 
 ## The release channel
 
-Both asset uploads (`release-installer.yml`, `release.yml::pi-agent-tarball`) and W6 (`release.yml::publish-gui-version`) resolve the target repository from `${{ vars.RELEASES_REPO || github.repository }}`:
+Both asset uploads (`release-installer.yml`, `release.yml::pi-agent-tarball`) and W6 (`publish-gui-version.yml`, started by hand) resolve the target repository from `${{ vars.RELEASES_REPO || github.repository }}`:
 - **Variable unset:** assets go to this repository (the behaviour before 2026-11-05).
 - **Variable set** (e.g. `SvenDanilBorodun/edubotics-releases`): assets go to that public repository, written with `secrets.RELEASES_REPO_TOKEN`. A check step before each upload fails when the variable is set but the token is missing.
 
-W6 then sets Railway's `GUI_RELEASE_REPO` and `GUI_DOWNLOAD_URL` to the public repository. GUIs and Pis follow on their next check, with no client update.
+W6 checks the release there (public channel, both assets, their SHA-256 against GitHub's recorded digests) and then sets Railway's `GUI_RELEASE_REPO` and `GUI_DOWNLOAD_URL` to the public repository. GUIs and Pis follow on their next check, with no client update.
 
 **`version-preflight` checks the channel for the whole release before W1** (tag pushes). The release stops before any migration or deploy when:
 - this repository is private and `RELEASES_REPO` is unset (fails closed on an unknown visibility);
@@ -61,7 +61,13 @@ The fine-grained token expires: **renew it before its expiry date**, or the next
 6. **Mirror the previous release too** (`--latest=false`), so the documented rollback (install the older `.exe` and pin) stays downloadable after the flip. v2.36.0 is mirrored.
 7. **Prove it:**
    - one Windows PC and one Pi check for updates (same version → no update; the forced-update path works);
-   - the next tagged release runs W5 → W5b → W6 through the new channel.
+   - the next tagged release runs W5 → W5b through the new channel, and W6, started by hand after the hardware test, advertises it from there.
+
+---
+
+## W6 by hand — DONE in the code (launch item E6, 2026-11-15)
+
+On a private repository under Free, Pro or Team the `production` environment has no required reviewers, so the approval stops a tag used to make do nothing: a W6 inside `release.yml` would advertise every tag to every school PC and Pi before anyone tried it. W6 is therefore its own workflow, `publish-gui-version.yml`, `workflow_dispatch` only. A tag uploads the `.exe` and the Pi tarball and announces nothing; the owner tests both on real hardware and then starts W6 (`DEPLOY.md` §0b). Nothing to do at the flip, except that the workflow file must be on `main` (pushed from the owner's machine) before the first release after it.
 
 ---
 

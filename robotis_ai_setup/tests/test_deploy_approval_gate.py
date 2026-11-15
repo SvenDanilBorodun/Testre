@@ -24,6 +24,13 @@ applies to production for both ways a release arrives (no input of the
 caller can make it skip), and that every target other than production, a
 rollback included, fails the run loudly instead of skipping or acting on
 production.
+
+For the same reason W6, the update gate that tells every Windows PC and Pi
+about a release, runs only by hand (launch item E6, owner decision
+2026-11-15): `W6IsManual` holds publish-gui-version.yml to workflow_dispatch,
+release.yml free of any job that sets the update variables or starts W6, and
+the W6 job's order (every check before the Railway CLI is installed, the five
+variables in their order, GUI_VERSION last and the only one that redeploys).
 """
 
 import json
@@ -39,7 +46,7 @@ GATED = {
     ('railway-deploy-cloud-api.yml', 'deploy'),
     ('railway-deploy-teacher-web.yml', 'deploy'),
     ('release.yml', 'trainer-image-var'),
-    ('release.yml', 'publish-gui-version'),
+    ('publish-gui-version.yml', 'publish-gui-version'),
 }
 
 _JOB_RE = re.compile(r'^  ([A-Za-z0-9_-]+):\n', re.M)
@@ -473,6 +480,154 @@ class MigrationsAreManual(unittest.TestCase):
         self.assertIn('Run workflow', doc)
         self.assertIn('supabase-migrate', doc)
 
+
+
+# ── W6 is manual (launch item E6, owner decision 2026-11-15) ────────────────
+#
+# On a private repository under Free, Pro or Team the production environment
+# approves nothing, so a W6 inside release.yml advertised every tag to every
+# school PC and Pi before anyone had tried it. W6 now runs only when the owner
+# starts it, after the tag's .exe and Pi tarball ran on real hardware.
+
+_W6 = _WF / 'publish-gui-version.yml'
+_UPDATE_VARS = ('GUI_RELEASE_REPO', 'GUI_DOWNLOAD_URL', 'GUI_INSTALLER_SHA256',
+                'PI_AGENT_SHA256', 'GUI_VERSION')
+_SET_RE = re.compile(r'railway variable set "([A-Z0-9_]+)=([^"]*)"((?:[^\n]*\\\n)*[^\n]*)')
+
+
+def _steps(block: str) -> list:
+    """(name, text) of each `- name:` step of one job block, in order."""
+    body = block[block.index('\n    steps:\n'):]
+    parts = re.split(r'(?m)^      - name: ', body)[1:]
+    return [(p.split('\n', 1)[0].strip(), p) for p in parts]
+
+
+_RAILWAY_CALL = re.compile(r'(^|[\s;&|(])railway\s+[a-z]', re.M)
+
+
+def _code(text: str) -> str:
+    """`text` without its comment lines."""
+    return '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('#'))
+
+
+def _railway_sets(text: str) -> list:
+    """(variable, value, skips the deploy?) of every `railway variable set`."""
+    return [(m.group(1), m.group(2), '--skip-deploys' in m.group(3)) for m in _SET_RE.finditer(text)]
+
+
+def w6_problems(text: str) -> list:
+    """Why publish-gui-version.yml would not be a manual, check-first W6."""
+    problems = []
+    triggers = re.findall(r'^  ([a-z_]+):', _on_block(text), re.M)
+    if triggers != ['workflow_dispatch']:
+        problems.append(f'triggers are {triggers!r}, not only workflow_dispatch')
+    if not re.search(r'(?m)^      version:\n        description: .*\n        required: true\n', _on_block(text)):
+        problems.append('no required `version` input')
+    jobs = _jobs(text)
+    if list(jobs) != ['publish-gui-version']:
+        return problems + [f'jobs are {list(jobs)!r}, not exactly publish-gui-version']
+    block = jobs['publish-gui-version']
+    if 'cancel-in-progress: false' not in text:
+        problems.append('a second dispatch could cancel one halfway through the variable sets')
+    steps = _steps(block)
+    names = [n for n, _ in steps]
+    install = 'Install Railway CLI (pinned release binary, SHA-256 checked)'
+    if install not in names:
+        return problems + ['no pinned Railway CLI install step']
+    first_change = names.index(install)
+    checks = '\n'.join(s for _, s in steps[:first_change])
+    for needle, why in (
+        ('refs/heads/main', 'runs from main'),
+        ('releases/tags/${TAG}', 'reads the release from the channel'),
+        ('"private"', 'proves the channel public'),
+        ('sha256:([0-9a-f]{64})', "reads GitHub's recorded digests"),
+        ('EduBotics_Setup.exe', 'checks the installer'),
+        ('edubotics-pi-agent.tar.gz', 'checks the Pi tarball'),
+        ('"$tgz" pi_agent/VERSION ', "reads the tarball's version"),
+        ('"$tgz" pi_agent/docker/versions.env ', "reads the tarball's IMAGE_TAG"),
+        ('for repo in ', 'probes the -opi images'),
+    ):
+        if needle not in checks:
+            problems.append(f'no check before the Railway CLI install: {why}')
+    if _RAILWAY_CALL.search(_code(checks)):
+        problems.append('a step before the Railway CLI install runs railway')
+    downloads = _code(checks).split('DOWNLOAD_URL="https://github.com/', 1)[-1].split('sha256sum', 1)[0]
+    if 'Authorization' in downloads or '-u ' in downloads:
+        problems.append('the asset download sends a credential: the fleet downloads anonymously')
+    sets = _railway_sets(block)
+    if [v for v, _, _ in sets] != list(_UPDATE_VARS):
+        problems.append(f'sets {[v for v, _, _ in sets]!r}, not {list(_UPDATE_VARS)!r} in that order')
+    else:
+        if [skip for _, _, skip in sets] != [True, True, True, True, False]:
+            problems.append('every variable but GUI_VERSION (last, the one redeploy) must --skip-deploys')
+    set_steps = [n for n, s in steps if 'railway variable set' in s]
+    if len(set_steps) != 1 or names.index(set_steps[0]) <= first_change:
+        problems.append('the variables must be set in one step after the CLI install')
+    return problems
+
+
+class W6IsManual(unittest.TestCase):
+    def setUp(self):
+        self.text = _W6.read_text(encoding='utf-8')
+
+    def test_publish_gui_version_is_a_manual_check_first_w6(self):
+        self.assertEqual(w6_problems(self.text), [])
+
+    def test_the_check_has_teeth(self):
+        mutations = {
+            'a push trigger': self.text.replace('on:\n  workflow_dispatch:\n', 'on:\n  push:\n    tags: ["v*"]\n  workflow_dispatch:\n', 1),
+            'a workflow_call trigger': self.text.replace('on:\n  workflow_dispatch:\n', 'on:\n  workflow_call:\n  workflow_dispatch:\n', 1),
+            'GUI_VERSION before the hashes': self.text.replace(
+                'railway variable set "GUI_INSTALLER_SHA256=', 'railway variable set "GUI_VERSION_X=', 1),
+            'GUI_VERSION with --skip-deploys': self.text.replace(
+                '"GUI_VERSION=${VERSION}" \\\n              --service scintillating-empathy --environment production >/dev/null',
+                '"GUI_VERSION=${VERSION}" \\\n              --service scintillating-empathy --environment production --skip-deploys >/dev/null', 1),
+            'no digest check': self.text.replace('sha256:([0-9a-f]{64})', 'sha256:(.*)', 1),
+            'no tarball version check': self.text.replace('"$tgz" pi_agent/VERSION ', '"$tgz" pi_agent/README ', 1),
+            'no tarball IMAGE_TAG check': self.text.replace('"$tgz" pi_agent/docker/versions.env ', '"$tgz" pi_agent/x ', 1),
+            'a token on the download': self.text.replace('curl -fsSL --retry 3 --retry-connrefused --max-time 600 -o "$exe"',
+                                                          'curl -fsSL -H "Authorization: Bearer ${GH_API_TOKEN}" --retry 3 --retry-connrefused --max-time 600 -o "$exe"', 1),
+            'railway in a check step': self.text.replace('      - name: Gate the Pi update on the four -opi images\n',
+                                                         '      - name: Early\n        run: railway whoami\n      - name: Gate the Pi update on the four -opi images\n', 1),
+            'not tied to main': self.text.replace('refs/heads/main', 'refs/heads/', 1),
+            'cancellable': self.text.replace('cancel-in-progress: false', 'cancel-in-progress: true', 1),
+        }
+        for label, text in mutations.items():
+            with self.subTest(label):
+                self.assertNotEqual(text, self.text, label)
+                self.assertNotEqual(w6_problems(text), [], label)
+
+    def test_no_other_workflow_sets_the_update_gate_or_starts_w6(self):
+        for path in sorted(_WF.glob('*.yml')):
+            if path.name == _W6.name:
+                continue
+            text = path.read_text(encoding='utf-8')
+            with self.subTest(workflow=path.name):
+                for var, _, _ in _railway_sets(text):
+                    self.assertNotIn(var, _UPDATE_VARS, f'{path.name} sets {var}')
+                # Only comments may name it: no `uses:`, no `gh workflow run`,
+                # no dispatch through the API.
+                self.assertNotIn('publish-gui-version.yml', _code(text), f'{path.name} starts W6')
+                self.assertNotIn('workflow run publish-gui-version', _code(text))
+
+    def test_release_yml_has_no_w6_job(self):
+        jobs = _jobs((_WF / 'release.yml').read_text(encoding='utf-8'))
+        self.assertNotIn('publish-gui-version', jobs)
+        for name, block in jobs.items():
+            with self.subTest(job=name):
+                self.assertNotIn('uses: ./.github/workflows/publish-gui-version.yml', block)
+        # The release ends in a job that changes nothing and says so.
+        self.assertIn('next-step', jobs)
+        self.assertIn('    permissions: {}\n', jobs['next-step'])
+        self.assertNotIn('environment:', jobs['next-step'])
+        self.assertNotIn('secrets.', jobs['next-step'])
+
+    def test_the_runbooks_say_w6_is_run_by_hand(self):
+        root = _WF.parents[1]
+        for rel in ('docs/deploy/DEPLOY.md', 'docs/deploy/MERGE-CHECKLIST.md',
+                    'docs/deploy/PRIVATE-REPOSITORY.md', 'CLAUDE.md'):
+            with self.subTest(doc=rel):
+                self.assertIn('publish-gui-version.yml', (root / rel).read_text(encoding='utf-8'))
 
 if __name__ == '__main__':
     unittest.main()

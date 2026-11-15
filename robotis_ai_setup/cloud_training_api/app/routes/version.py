@@ -20,9 +20,9 @@ Two changes from the v1 shape:
      SHA matches the just-pushed commit (catches stale-cache deploys).
 
   4. `download_url` auto-derives from GUI_VERSION + GUI_RELEASE_REPO when
-     GUI_DOWNLOAD_URL is unset. The release pipeline (release.yml W6
-     `publish-gui-version`) sets BOTH vars explicitly after the installer
-     asset is uploaded, so this derivation is a defensive backstop — it
+     GUI_DOWNLOAD_URL is unset. W6 (`publish-gui-version.yml`, started by
+     hand after the release was tested) sets BOTH vars explicitly once the
+     installer asset is in the release channel, so this derivation is a defensive backstop — it
      removes GUI_DOWNLOAD_URL as a SEPARATELY-driftable surface. The GH
      Release asset URL is deterministic from the tag:
        https://github.com/<repo>/releases/download/v<version>/EduBotics_Setup.exe
@@ -33,7 +33,7 @@ Two changes from the v1 shape:
      `edubotics-pi-agent.tar.gz` release asset. They are derived the SAME
      way as the `.exe` pair: the download URL from GUI_VERSION +
      GUI_RELEASE_REPO + the fixed asset name; the hash from PI_AGENT_SHA256
-     (set by release.yml W6 AFTER it hashes the exact attached tarball,
+     (set by W6, publish-gui-version.yml, AFTER it hashes the exact attached tarball,
      empty-on-failure so it is never stale). Old GUIs simply ignore the
      extra keys — the response stays backward-compatible.
 
@@ -138,8 +138,8 @@ def _resolve_commit() -> str:
 
 
 def _resolve_installer_sha256() -> str | None:
-    """The SHA-256 of the advertised EduBotics_Setup.exe, set by release.yml W6
-    (publish-gui-version) after it hashes the just-attached GH-Release asset.
+    """The SHA-256 of the advertised EduBotics_Setup.exe, set by W6
+    (publish-gui-version.yml) after it hashes the just-attached GH-Release asset.
 
     Lets the GUI verify integrity of the downloaded installer before launching
     it (corruption/truncation guard). Optional + backward-compatible: when
@@ -184,7 +184,7 @@ def _resolve_download_url(version: str | None) -> str | None:
 
 def _resolve_pi_agent_sha256() -> str | None:
     """The SHA-256 of the advertised edubotics-pi-agent.tar.gz, set by
-    release.yml W6 (publish-gui-version) after it hashes the just-attached
+    W6 (publish-gui-version.yml) after it hashes the just-attached
     GH-Release asset.
 
     Lets pi_agent/update_checker.py verify the tarball before unpacking it over

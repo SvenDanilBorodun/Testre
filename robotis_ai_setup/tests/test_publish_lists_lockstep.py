@@ -10,8 +10,9 @@ each hand-written and none derived from the other:
     its flat dual-push integrity list (REPOS=, whose own comment says "keep
     BOTH in sync"), its third OPI_REPOS restatement, and the smoke-test matrix's
     repo columns;
-  - release.yml's anonymous-pullable probe loop, which gates the Pi
-    self-update advertisement on every -opi image of the release;
+  - W6's anonymous-pullable probe loop (publish-gui-version.yml, run by hand
+    since launch item E6), which gates the Pi self-update advertisement on
+    every -opi image of the release;
   - build-images.sh's per-platform *_OUT_REPO variables, from which its two
     push loops derive the repo names;
   - image_source_parity.sh's `kind` case, which is the only thing that proves
@@ -38,6 +39,7 @@ _REPO_ROOT = os.path.dirname(_SETUP_ROOT)
 
 _PUBLISH_YML = os.path.join(_REPO_ROOT, ".github", "workflows", "docker-publish.yml")
 _RELEASE_YML = os.path.join(_REPO_ROOT, ".github", "workflows", "release.yml")
+_W6_YML = os.path.join(_REPO_ROOT, ".github", "workflows", "publish-gui-version.yml")
 _BUILD_SH = os.path.join(_SETUP_ROOT, "docker", "build-images.sh")
 _PARITY_SH = os.path.join(_REPO_ROOT, ".github", "scripts", "image_source_parity.sh")
 
@@ -285,12 +287,14 @@ class TestTheFirstPublishCarveOutIsNarrow(unittest.TestCase):
 
 class TestReleaseProbeLoopNamesEveryOpiImage(unittest.TestCase):
     def test_the_pullable_probe_loop_is_the_pi_image_names(self):
-        text = _read(_RELEASE_YML)
+        text = _read(_W6_YML)
         src = _read(os.path.join(_SETUP_ROOT, "pi_agent", "constants.py"))
         body = re.search(r"^IMAGE_NAMES = \[\n(.*?)\n\]", src, re.M | re.S).group(1)
         pi_names = re.findall(r'"([a-z0-9-]+)"', body)
         loops = re.findall(r"^\s*for repo in ((?:[a-z0-9-]+-opi ?)+); do\s*$", text, re.M)
-        self.assertEqual(len(loops), 1, "exactly one -opi probe loop expected in release.yml")
+        self.assertEqual(len(loops), 1, "exactly one -opi probe loop expected in publish-gui-version.yml")
+        self.assertEqual(re.findall(r"^\s*for repo in ((?:[a-z0-9-]+-opi ?)+); do\s*$", _read(_RELEASE_YML), re.M), [],
+                         "release.yml no longer advertises anything (W6 runs by hand)")
         self.assertEqual(set(loops[0].split()), set(pi_names),
                          "a Pi would advertise a self-update whose compose names an "
                          "image this loop never proved pullable")

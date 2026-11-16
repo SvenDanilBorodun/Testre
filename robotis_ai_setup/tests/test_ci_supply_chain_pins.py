@@ -13,10 +13,10 @@ Pinned here, across every workflow:
   gui/requirements-build.txt, installed only through the hash-locked
   gui/requirements.lock since E1, 2026-11-11).
 * **Release channel.** Both asset uploads (the installer and the Pi tarball)
-  and W6's ``GIT_REPO`` resolve the target repository from
-  ``vars.RELEASES_REPO`` with this repository as the fallback, so the downloads
-  can leave this repository before it goes private
-  (docs/deploy/PRIVATE-REPOSITORY.md).
+  and W6's ``GIT_REPO`` (publish-gui-version.yml, run by hand since launch
+  item E6) resolve the target repository from ``vars.RELEASES_REPO`` with this
+  repository as the fallback, so the downloads can leave this repository
+  before it goes private (docs/deploy/PRIVATE-REPOSITORY.md).
 * **The cloud API stack and Dependabot (2026-11-09).** Dependabot proposes
   patch releases and security fixes for the internet-facing cloud API's
   libraries: their ``ignore`` entries name only minor updates, never a bare
@@ -303,10 +303,15 @@ class ReleaseChannel(unittest.TestCase):
                 self.assertIn("exit 1", check["run"])
 
     def test_w6_advertises_the_same_repository(self):
-        job = _load(WF / "release.yml")["jobs"]["publish-gui-version"]
-        envs = [(s.get("env") or {}) for s in job["steps"]]
-        repos = [e["GIT_REPO"] for e in envs if "GIT_REPO" in e]
-        self.assertEqual(repos, [RELEASES_REPO_EXPR])
+        # W6 resolves the channel once, in the step that checks the release
+        # there, and advertises exactly that checked value.
+        job = _load(WF / "publish-gui-version.yml")["jobs"]["publish-gui-version"]
+        envs = [(s.get("id"), s.get("env") or {}) for s in job["steps"]]
+        repos = [(sid, e["GIT_REPO"]) for sid, e in envs if "GIT_REPO" in e]
+        self.assertEqual(repos, [
+            ("release", RELEASES_REPO_EXPR),
+            (None, "${{ steps.release.outputs.git_repo }}"),
+        ])
 
     def test_a_broken_channel_stops_the_release_before_w1(self):
         jobs = _load(WF / "release.yml")["jobs"]

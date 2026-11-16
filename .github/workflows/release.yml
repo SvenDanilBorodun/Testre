@@ -22,7 +22,10 @@ name: release
 #   W5b pi-agent-tarball     (attaches edubotics-pi-agent.tar.gz for the Orange Pi)
 #       │
 #       ▼
-#   W6 publish-gui-version
+#   next-step                (changes nothing: says the release is NOT advertised)
+#
+#   ── by hand, after the .exe and the Pi tarball ran on a real PC and Pi ──
+#   W6 publish-gui-version.yml   (workflow_dispatch only, input: the version)
 #
 # release-installer MUST run AFTER docker-publish — the installer's
 # auto-update poll directs students at the `:vX.Y.Z` image tags that
@@ -33,19 +36,23 @@ name: release
 # (robotis_ai_setup/pi_agent/) into edubotics-pi-agent.tar.gz and attaches it
 # to the SAME GH Release, so the Pi's SHA-256-verified self-update
 # (pi_agent/update_checker.py) has an asset to fetch. It runs AFTER the
-# installer created the Release and BEFORE W6, so W6 can hash the exact
-# attached tarball into PI_AGENT_SHA256 (attach-asset-first, advertise-last —
-# the same race-safety the .exe hash already has). The -opi container images
-# ride W4 via docker-publish's existing matrix; W5b handles ONLY the agent
-# tarball, not the images.
+# installer created the Release, so W6 can later hash the exact attached
+# tarball into PI_AGENT_SHA256 (attach-asset-first, advertise-last). The -opi
+# container images ride W4 via docker-publish's existing matrix; W5b handles
+# ONLY the agent tarball, not the images.
 #
-# publish-gui-version (W6) MUST run AFTER release-installer — it flips the
-# Railway GUI_VERSION/GUI_DOWNLOAD_URL env vars that drive the student
-# auto-update gate (/version). Setting them before the .exe is attached to
-# the GH Release would point every updating student at a 404. Automating
-# this here removes the manual "bump Railway env after gh release" step
-# (CLAUDE.md §"Bumping product VERSION") that silently drifted — a GUI
-# could auto-update while the images it pulls stayed on a stale `:latest`.
+# W6 (publish-gui-version, the Railway GUI_VERSION/GUI_DOWNLOAD_URL/hash flip
+# that drives the student auto-update gate /version) is NOT in this file any
+# more (launch item E6, owner decision 2026-11-15). On a private repository
+# under GitHub Free, Pro or Team the `production` environment has no required
+# reviewers, so a W6 here advertised every tag to every school PC and Pi
+# before anyone had tried it. It now lives in publish-gui-version.yml
+# (workflow_dispatch only): the owner tests this run's .exe and Pi tarball on
+# real hardware, then starts it with the version. It checks the channel, both
+# assets' SHA-256 against GitHub's recorded digests and the tarball's
+# pi_agent/VERSION before it sets anything. A tag therefore uploads everything
+# and announces nothing; tests/test_deploy_approval_gate.py fails if any job
+# here sets GUI_VERSION or calls that workflow.
 #
 # Modal deploys are MANUAL (operator runs `modal deploy modal_app.py`
 # from their workstation). Modal's image build occurs in Modal's
@@ -105,13 +112,16 @@ permissions: {}
 jobs:
   # ── Preflight: the pushed git tag MUST equal the in-tree VERSION file ──
   #
-  # W6 advertises the auto-update gate off the pushed TAG (VERSION="${TAG#v}"
-  # below), while the pi-agent tarball (W5b) and the installer (.exe, W5) bake
-  # the in-tree VERSION FILE. If someone tags vX.Y.Z WITHOUT bumping the VERSION
-  # file in the same commit, /version advertises a version the attached assets
-  # don't carry: every Orange Pi + Windows GUI then sees a "newer version" it can
-  # never satisfy (the installer/tarball self-reports the OLD file version), i.e.
-  # a permanent, non-closable forced-update loop across the whole fleet.
+  # The assets live under the pushed TAG's release (and W6, started by hand in
+  # publish-gui-version.yml, advertises that tag's version), while the pi-agent
+  # tarball (W5b) and the installer (.exe, W5) bake the in-tree VERSION FILE.
+  # If someone tags vX.Y.Z WITHOUT bumping the VERSION file in the same commit,
+  # /version would advertise a version the attached assets don't carry: every
+  # Orange Pi + Windows GUI then sees a "newer version" it can never satisfy
+  # (the installer/tarball self-reports the OLD file version), i.e. a
+  # permanent, non-closable forced-update loop across the whole fleet. W6
+  # refuses a tarball whose pi_agent/VERSION differs, but it cannot read the
+  # .exe's version: this preflight is the installer's only guard.
   #
   # Fail the WHOLE release here, before W1 touches the DB, if they disagree.
   # This job runs on workflow_dispatch too but only ASSERTS on a tag push
@@ -122,7 +132,7 @@ jobs:
   # Threaded into the graph via supabase (W1) AND cloud-api (W2): W1 has no
   # always()/skip tolerance so a preflight FAILURE skips it; W2 tolerates a
   # SKIPPED supabase (skip_supabase dispatch) so it must gate on the preflight
-  # result explicitly. W3→W6 + pi-agent-tarball each require their parent
+  # result explicitly. W3→W5 + pi-agent-tarball each require their parent
   # == 'success', so a skipped W2 cascades the skip through the rest.
   version-preflight:
     name: Preflight. Assert tag == VERSION file
@@ -374,7 +384,7 @@ jobs:
     # skip_supabase dispatch path), so a preflight FAILURE — which SKIPS
     # supabase rather than failing it — would otherwise let W2 (and the whole
     # chain below it) proceed. Gate on the preflight result explicitly so a
-    # tag/VERSION mismatch blocks W2, and W3→W6 cascade the skip via their
+    # tag/VERSION mismatch blocks W2, and W3→W5b cascade the skip via their
     # parent == 'success' gates.
     needs: [version-preflight, supabase, trainer-image, trainer-image-var]
     if: >-
@@ -434,9 +444,9 @@ jobs:
   # /opt/edubotics (agent.py::_apply_agent_update_and_restart) — refreshes
   # /opt/edubotics/pi_agent/ and keeps `python3 -m pi_agent.agent` working.
   #
-  # Runs AFTER the installer (the Release must exist) and BEFORE W6 (which
-  # hashes the exact attached tarball into PI_AGENT_SHA256). Tag-push only, for
-  # the same reason as W6: on workflow_dispatch there is no Release to attach to.
+  # Runs AFTER the installer (the Release must exist) and before W6 (which
+  # hashes the exact attached tarball into PI_AGENT_SHA256). Tag-push only: on
+  # workflow_dispatch there is no Release to attach to.
   pi-agent-tarball:
     name: W5b. Build + attach pi-agent tarball
     needs: [installer]
@@ -802,313 +812,41 @@ jobs:
           draft: false
           prerelease: false
 
-  # ── W6: Flip the student auto-update gate (must run AFTER the installer
-  # .exe is attached to the GH Release, so /version never advertises a
-  # version whose download asset 404s) ──
+  # ── After W5b: nothing is advertised (launch item E6, 2026-11-15) ──
   #
-  # Sets GUI_VERSION / GUI_DOWNLOAD_URL / GUI_RELEASE_REPO on the cloud-api
-  # Railway service. The variable change triggers ONE redeploy that picks
-  # up all three atomically; /version then advertises the new version and
-  # existing student installs auto-update — which lands a new installer
-  # whose baked docker/versions.env pins the matching immutable IMAGE_TAG,
-  # so the pulled images can't drift from the GUI version.
-  #
-  # Tag-push only: on workflow_dispatch the installer's Release-attach step
-  # is skipped (no tag), so there's no asset to advertise.
-  publish-gui-version:
-    name: W6. Publish GUI auto-update gate
-    # pi-agent-tarball is an ORDERING-ONLY dependency: W6 must run AFTER the Pi
-    # tarball attach attempt so it can hash the EXACT attached asset into
-    # PI_AGENT_SHA256 when it IS present. It is deliberately NOT gated on that
-    # job's result — the mature Windows .exe auto-update advertisement must not
-    # be blocked by a transient Pi-tarball hiccup. The PI_AGENT_SHA256 curl below
-    # already degrades to empty-on-failure, so a missing/failed Pi tarball
-    # advertises NO Pi hash (never a stale one) instead of withholding the whole
-    # release. (Only `installer` success is required — that produces the .exe.)
+  # W6 (publish-gui-version) is no longer part of this chain. It lives in
+  # publish-gui-version.yml and runs ONLY when the owner starts it by hand,
+  # after this release's .exe and Pi tarball have run on a real Windows PC and
+  # a real Pi: on a private repository under GitHub Free, Pro or Team the
+  # production environment has no required reviewers, so a W6 here advertised
+  # every tag to every school PC and Pi untested. This job changes nothing; it
+  # only says so at the end of the run, so a finished release is not mistaken
+  # for an advertised one.
+  next-step:
+    name: Next. Test the .exe and Pi tarball, then run W6 by hand
     needs: [installer, pi-agent-tarball]
-    if: >-
-      always()
-      && needs.installer.result == 'success'
-      && startsWith(github.ref, 'refs/tags/v')
-    # SA-13 (2026-11-13): the production environment's required reviewers
-    # approve this job before it runs (docs/deploy/DEPLOY.md, section 0).
-    environment: production
+    if: always() && needs.installer.result == 'success' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions: {}  # talks only to Railway via RAILWAY_TOKEN; no GITHUB_TOKEN use
-    # RAILWAY_TOKEN is set on the steps that call `railway`, never on the job:
-    # nothing that downloads or installs code runs with the token in scope.
+    timeout-minutes: 2
+    permissions: {}
     steps:
-      - name: Install Railway CLI (pinned release binary, SHA-256 checked)
-        # One fixed release asset, verified by hash, installed with no token
-        # in scope. The npm wrapper it replaces fetched the binary in a
-        # postinstall script through floating dependencies while the token sat
-        # in the job env (security review 2026-10-25, P0-2). Bump the version
-        # and the hash together; tests/test_ci_supply_chain_pins.py holds all
-        # four copies of this step equal.
+      - name: Say what is left
         env:
-          RAILWAY_CLI_VERSION: "5.71.0"
-          RAILWAY_CLI_SHA256: "2e682fd2ddf8d6fdf9e46d9d99d99646ff0022a6abb0c2bca93011348a269fb9"
+          GIT_REF_NAME: ${{ github.ref_name }}
+          PI_RESULT: ${{ needs.pi-agent-tarball.result }}
+          CHANNEL: ${{ vars.RELEASES_REPO || github.repository }}
         run: |
           set -euo pipefail
-          dir="${RUNNER_TEMP}/railway-cli"
-          mkdir -p "$dir"
-          curl -fsSL --retry 3 -o "$dir/railway.tgz" \
-            "https://github.com/railwayapp/cli/releases/download/v${RAILWAY_CLI_VERSION}/railway-v${RAILWAY_CLI_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-          echo "${RAILWAY_CLI_SHA256}  $dir/railway.tgz" | sha256sum -c -
-          tar -xzf "$dir/railway.tgz" -C "$dir" railway
-          chmod +x "$dir/railway"
-          echo "$dir" >> "$GITHUB_PATH"
-          "$dir/railway" --version
-      - name: Set GUI auto-update env vars on the cloud-api service
-        env:
-          GIT_REF_NAME: ${{ github.ref_name }}
-          # The PUBLIC repository the release assets were attached to (the
-          # same expression as the two attach steps): vars.RELEASES_REPO once
-          # the downloads moved out of this repository, else this repository.
-          # Every GUI and Pi takes its download URL from /version, which is
-          # built from what this step sets, so moving the channel needs no
-          # client update.
-          GIT_REPO: ${{ vars.RELEASES_REPO || github.repository }}
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: |
-          set -e
-          # github.ref_name on a tag push is the bare tag (e.g. "v2.5.4").
-          # GUI_VERSION is the numeric version with the leading "v" stripped;
-          # the download URL keeps the "v" since that's the GH Release tag.
-          TAG="${GIT_REF_NAME}"
-          VERSION="${TAG#v}"
-          DOWNLOAD_URL="https://github.com/${GIT_REPO}/releases/download/${TAG}/EduBotics_Setup.exe"
-          echo "Publishing GUI update gate: version=${VERSION} url=${DOWNLOAD_URL}"
-
-          # Hash the EXACT .exe asset W5 just attached, so /version can advertise
-          # an integrity hash the GUI verifies before launching the installer as
-          # admin. On failure, ADVERTISE NO HASH (empty) — never a stale one, or
-          # the GUI would reject the new .exe against the previous release's
-          # hash and every student would be unable to update.
-          SHA=""
-          if curl -fsSL --retry 3 -o /tmp/EduBotics_Setup.exe "$DOWNLOAD_URL"; then
-            SHA="$(sha256sum /tmp/EduBotics_Setup.exe | awk '{print $1}')"
-            echo "  installer sha256=${SHA}"
-          else
-            echo "::warning::could not download the installer asset to hash it — advertising version without an integrity hash (GUI falls back to the Content-Length guard)"
+          VERSION="${GIT_REF_NAME#v}"
+          {
+            echo "### ${GIT_REF_NAME} is uploaded to \`${CHANNEL}\`, and NOT advertised"
+            echo ""
+            echo "No PC and no Pi sees this release yet. Next:"
+            echo ""
+            echo "1. Install \`EduBotics_Setup.exe\` from the ${GIT_REF_NAME} release on a real Windows PC, and \`edubotics-pi-agent.tar.gz\` on a real Pi."
+            echo "2. Actions → **publish-gui-version** → Run workflow (from \`main\`), version \`${VERSION}\` (optionally with the SHA-256 of the two files you tested)."
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${PI_RESULT}" != "success" ]; then
+            echo "::warning::The Pi tarball job ended '${PI_RESULT}'. W6 refuses a release without edubotics-pi-agent.tar.gz: re-run that job of this run first."
           fi
-
-          # Hash the EXACT edubotics-pi-agent.tar.gz that W5b just attached, so
-          # /version can advertise a hash the Pi agent verifies before unpacking
-          # the tarball over the running agent (pi_agent/update_checker.py). Same
-          # empty-on-failure / never-stale posture as the installer hash: on a
-          # download failure ADVERTISE NO HASH — a stale one would make every Pi
-          # reject the new tarball against the previous release's checksum.
-          PI_AGENT_URL="https://github.com/${GIT_REPO}/releases/download/${TAG}/edubotics-pi-agent.tar.gz"
-          PI_SHA=""
-          if curl -fsSL --retry 3 -o /tmp/edubotics-pi-agent.tar.gz "$PI_AGENT_URL"; then
-            PI_SHA="$(sha256sum /tmp/edubotics-pi-agent.tar.gz | awk '{print $1}')"
-            echo "  pi-agent sha256=${PI_SHA}"
-          else
-            # Unlike the .exe path (the GUI falls back to a Content-Length-only
-            # guard on an empty hash), the Pi agent's update_checker treats an
-            # empty pi_agent_sha256 as "no verified update available" and
-            # advertises NO self-update — it refuses to unpack an unverified
-            # tarball over the running agent. So an empty hash here means the Pi
-            # simply won't self-update from this release (safe), not that it
-            # applies the tarball behind only a length check.
-            echo "::warning::could not download the pi-agent tarball to hash it — advertising version without a Pi integrity hash. The Pi agent then advertises NO self-update (it refuses an unverified tarball); it does NOT fall back to a Content-Length-only check like the .exe does."
-          fi
-
-          # GATE the Pi self-update advertisement on the -opi CONTAINER images
-          # actually existing + being ANONYMOUSLY pullable on GHCR. The -opi build
-          # leg is decoupled (continue-on-error in docker-publish.yml), so a
-          # release can attach the pi-agent tarball (which pins IMAGE_TAG=X.Y.Z)
-          # while the -opi images never published. A Pi that self-updates then
-          # pins X.Y.Z and 404s on the next "Umgebung starten" → robot tier dead
-          # fleet-wide. So if ANY of the four -opi:${VERSION} images is not
-          # anonymously pullable (missing OR private — a Pi pulls anonymously)
-          # on GHCR *or, failing that, on its Docker Hub twin* — mirroring the
-          # Pi's own GHCR→Hub acquisition order — advertise NO Pi update
-          # (empty hash), exactly as the tarball-download failure path does. A
-          # Hub-only release still advertises, with a ::warning naming the
-          # GHCR gap. The .exe advertisement is unaffected (amd64 images are
-          # coupled + fatal in W4). Probe via pull-scoped registry tokens
-          # (curl only — no docker dependency in this Railway-focused job).
-          # Every outcome here is a ::warning + withhold — this gate has NO
-          # hard-fail path, by design.
-          #
-          # Accept BOTH index/list AND single-image manifest media types: a
-          # plain `docker push` publishes a bare single-arch manifest, and the
-          # OCI dist-spec permits a 404/406 on an Accept mismatch — an
-          # index-only Accept could silently withhold the Pi self-update on
-          # every release if the pipeline ever stops list-wrapping its retags.
-          # ONE comma-joined Accept header (the canonical HTTP form); four
-          # separate -H Accept: flags happen to work but rely on the registry
-          # iterating r.Header["Accept"] rather than reading the first value.
-          #
-          # TIME BUDGET — measured, not estimated. curl's --max-time is
-          # PER-ATTEMPT, so `--retry 2 --max-time 15` against a blackholed host
-          # costs 3x15 + 1 + 2 = 48 s (curl 8.7.1, timed). Four such curls per
-          # repo (GHCR token + manifest, Hub token + manifest) = 192 s/repo, and
-          # a budget check that only ran BETWEEN repos let repo 1 and repo 2
-          # both finish first: 384 s of a 600 s job, leaving the /version verify
-          # loop ~120 s of its explicit 300 s budget. A slow Railway cold-pod
-          # redeploy then times the job out — RED, with GUI_VERSION already
-          # flipped. So: --retry-max-time 10 + --max-time 8 caps each curl at
-          # ~17 s (timed), and the budget is re-checked before EVERY registry
-          # probe, not every repo. Worst case is now 150 s (budget) + one probe
-          # (2 curls, ~34 s) = ~184 s, leaving the verify loop its full 5 min.
-          _ACCEPT='application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
-          # 0 = anonymously pullable
-          # 1 = definitively NOT pullable (404 missing / 401-403 private)
-          # 2 = PROBE FAILED (token fetch died, curl error, 5xx/429) — the
-          #     registry never answered, so this must NOT be reported as "the
-          #     image is missing": that message sends the operator off to
-          #     rebuild opi when the real cause was a network blip.
-          _probe_manifest() {
-            local tok_url="$1" man_url="$2" tok code
-            tok="$(curl -fsS --retry 2 --retry-connrefused --retry-max-time 10 --max-time 8 \
-              "$tok_url" 2>/dev/null | sed -E 's/.*"token":"([^"]+)".*/\1/')"
-            [ -n "$tok" ] || return 2
-            code="$(curl -fsS --retry 2 --retry-connrefused --retry-max-time 10 --max-time 8 \
-              -o /dev/null -w '%{http_code}' \
-              -H "Authorization: Bearer ${tok}" -H "Accept: ${_ACCEPT}" \
-              "$man_url" 2>/dev/null)"
-            case "$code" in
-              200)         return 0 ;;
-              401|403|404) return 1 ;;
-              *)           return 2 ;;
-            esac
-          }
-          _probe_ghcr() {
-            _probe_manifest \
-              "https://ghcr.io/token?scope=repository:svendanilborodun/$1:pull" \
-              "https://ghcr.io/v2/svendanilborodun/$1/manifests/${VERSION}"
-          }
-          _probe_hub() {
-            _probe_manifest \
-              "https://auth.docker.io/token?service=registry.docker.io&scope=repository:nettername/$1:pull" \
-              "https://registry-1.docker.io/v2/nettername/$1/manifests/${VERSION}"
-          }
-          # NOTE (deliberate non-goal): this stays an EXISTENCE probe, not a
-          # provenance check. Comparing the manifest's
-          # org.opencontainers.image.revision to github.sha would not catch the
-          # scenario it looks like it should — a retried release re-tags the
-          # SAME commit, so attempt 1's surviving -opi images carry exactly the
-          # sha we would compare against. The cheap alternative (downloading
-          # W4's `opi-build-success` marker artifact) would force an `actions:
-          # read` GITHUB_TOKEN grant onto a job that deliberately runs with
-          # `permissions: {}`. Neither trade is worth it here; the marker gate
-          # in docker-publish.yml's retag job remains the provenance authority.
-          if [ -n "$PI_SHA" ]; then
-            _GATE_START=$SECONDS
-            _over_budget() { [ $((SECONDS - _GATE_START)) -gt 150 ]; }
-            # Every -opi image the Pi compose references — held to
-            # pi_agent/constants.py::IMAGE_NAMES by tests/test_publish_lists_lockstep.py
-            # (a repo missing here advertises a self-update whose compose names
-            # an image this gate never proved pullable).
-            for repo in physical-ai-server-opi physical-ai-manager-opi open-manipulator-opi code-runner-opi; do
-              if _over_budget; then
-                echo "::warning::opi image gate exceeded its 150 s budget — withholding the Pi self-update advertisement (empty pi_agent_sha256) rather than risking the W6 job timeout (which would also withhold the .exe)."
-                PI_SHA=""
-                break
-              fi
-              if _probe_ghcr "$repo"; then continue; else _g=$?; fi
-              if _over_budget; then
-                echo "::warning::opi image gate exceeded its 150 s budget after the GHCR probe of ${repo} — withholding the Pi self-update advertisement (empty pi_agent_sha256)."
-                PI_SHA=""
-                break
-              fi
-              if _probe_hub "$repo"; then
-                echo "::warning::ghcr.io/svendanilborodun/${repo}:${VERSION} is not anonymously pullable (GHCR probe verdict: $([ "$_g" = 2 ] && echo 'probe FAILED — registry unreachable' || echo 'missing or private')), but the Docker Hub twin nettername/${repo}:${VERSION} is — advertising the Pi self-update (the Pi's own acquisition falls back to Hub). Fix the GHCR side."
-                continue
-              else
-                _h=$?
-              fi
-              # Neither registry said yes. Name WHICH failure it was, because
-              # "image missing" and "registry unreachable" need opposite
-              # operator actions (rebuild opi vs. simply re-run W6).
-              if [ "$_g" = "2" ] || [ "$_h" = "2" ]; then
-                echo "::warning::could not VERIFY ${repo}:${VERSION} on GHCR (verdict ${_g}) or Docker Hub (verdict ${_h}) — at least one probe FAILED rather than answering (verdict 2 = registry unreachable/5xx/rate-limited). Withholding the Pi self-update advertisement (empty pi_agent_sha256) because the availability criterion must equal the apply criterion. This is NOT evidence the -opi images are missing: re-run W6 before rebuilding anything."
-              else
-                echo "::warning::${repo}:${VERSION} is anonymously pullable on NEITHER ghcr.io/svendanilborodun nor Docker Hub (nettername) — both registries answered definitively (missing or private). Withholding the Pi self-update advertisement (empty pi_agent_sha256) so no Pi pins a version whose -opi images it cannot pull. Rebuild/publish the -opi images."
-              fi
-              PI_SHA=""
-              break
-            done
-          fi
-
-          # Hand PI_SHA to the verify step (empty when the tarball couldn't be
-          # hashed). The verify step asserts /version's pi_agent_sha256 matches
-          # this exact value when it is non-empty.
-          echo "PI_SHA=${PI_SHA}" >> "$GITHUB_ENV"
-
-          # Set the non-triggering vars first with --skip-deploys, then
-          # GUI_VERSION WITHOUT it so exactly ONE redeploy fires and picks up
-          # all of them atomically (mirrors railway-deploy-cloud-api.yml's
-          # BUILD_COMMIT pattern). GUI_INSTALLER_SHA256 + PI_AGENT_SHA256 are
-          # always set (to their hash or empty) so neither can be stale from a
-          # prior release. The Pi's download URL is DERIVED cloud-side from
-          # GUI_RELEASE_REPO + GUI_VERSION (routes/version.py), so there is no
-          # separate PI_AGENT_DOWNLOAD_URL var to set here.
-          railway variable set "GUI_RELEASE_REPO=${GIT_REPO}" \
-              --service scintillating-empathy --environment production \
-              --skip-deploys >/dev/null
-          railway variable set "GUI_DOWNLOAD_URL=${DOWNLOAD_URL}" \
-              --service scintillating-empathy --environment production \
-              --skip-deploys >/dev/null
-          railway variable set "GUI_INSTALLER_SHA256=${SHA}" \
-              --service scintillating-empathy --environment production \
-              --skip-deploys >/dev/null
-          railway variable set "PI_AGENT_SHA256=${PI_SHA}" \
-              --service scintillating-empathy --environment production \
-              --skip-deploys >/dev/null
-          railway variable set "GUI_VERSION=${VERSION}" \
-              --service scintillating-empathy --environment production >/dev/null
-          echo "  set GUI_RELEASE_REPO, GUI_DOWNLOAD_URL, GUI_INSTALLER_SHA256, PI_AGENT_SHA256, GUI_VERSION (redeploy triggered)"
-      - name: Verify /version advertises the new release
-        env:
-          GIT_REF_NAME: ${{ github.ref_name }}
-        run: |
-          set -e
-          EXPECTED="${GIT_REF_NAME#v}"
-          URL=https://scintillating-empathy-production-1068.up.railway.app/version
-          # PI_SHA arrives from the previous step via $GITHUB_ENV (empty when the
-          # tarball couldn't be hashed). Once `version` matches, the redeploy that
-          # set all five vars atomically is serving, so the Pi fields are final:
-          #   - pi_agent_download_url MUST be present (routes/version.py derives
-          #     it from GUI_RELEASE_REPO + GUI_VERSION, both set above);
-          #   - pi_agent_sha256 MUST equal PI_SHA when PI_SHA is non-empty.
-          # A version-match with a bad Pi field fails immediately (exit 2/3) — it
-          # will not self-correct, so we do not keep polling on it.
-          # Railway redeploy + healthcheck on an env-only change is fast, but
-          # pad for cold-pod routing. 5-min budget like the cloud-api gate.
-          for attempt in $(seq 1 150); do
-            BODY=$(curl -fsS --max-time 5 "$URL" 2>/dev/null || true)
-            if [ -n "$BODY" ]; then
-              # Single-line -c (no leading-indent hazard). Exit codes:
-              #   0 = version matches AND Pi fields valid (url present, hash OK)
-              #   1 = version not yet matching (or unparseable) — keep polling
-              #   2 = version matches but pi_agent_download_url missing
-              #   3 = version matches but pi_agent_sha256 != PI_SHA
-              rc=0
-              python3 -c "import json,sys; d=json.loads(sys.argv[1]); v=d.get('version'); u=d.get('pi_agent_download_url'); s=d.get('pi_agent_sha256'); e=sys.argv[2]; p=sys.argv[3]; sys.exit(0 if (v==e and u and (not p or s==p)) else (1 if v!=e else (2 if not u else 3)))" "$BODY" "$EXPECTED" "${PI_SHA:-}" || rc=$?
-              if [ "$rc" = "0" ]; then
-                echo "/version now advertises ${EXPECTED} (+ valid pi_agent_download_url / pi_agent_sha256)."
-                echo "  body: $BODY"
-                exit 0
-              elif [ "$rc" = "2" ]; then
-                echo "::error::/version advertises ${EXPECTED} but pi_agent_download_url is missing (GUI_RELEASE_REPO/GUI_VERSION not applied?)."
-                echo "  body: $BODY"
-                exit 1
-              elif [ "$rc" = "3" ]; then
-                echo "::error::/version advertises ${EXPECTED} but pi_agent_sha256 != the tarball we attached (expected ${PI_SHA})."
-                echo "  body: $BODY"
-                exit 1
-              fi
-              ACTUAL=$(echo "$BODY" | python3 -c "import json, sys; print(json.loads(sys.stdin.read()).get('version', '<missing>'))" 2>/dev/null || echo "<unparseable>")
-              echo "Attempt $attempt: /version=$ACTUAL, expected $EXPECTED"
-            else
-              echo "Attempt $attempt: $URL → curl failed or empty body"
-            fi
-            sleep 2
-          done
-          echo "::error::/version did not advertise ${EXPECTED} within 5 minutes after setting Railway env vars."
-          exit 1
+          echo "::notice::${GIT_REF_NAME} is uploaded but not advertised. Test it on a real PC and Pi, then run publish-gui-version with version ${VERSION}."

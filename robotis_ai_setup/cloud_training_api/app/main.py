@@ -179,14 +179,14 @@ def _warn_optional_secrets() -> None:
         # GUI_VERSION / GUI_DOWNLOAD_URL feed /version which the student
         # installer polls on every launch. When missing, the update gate
         # silently disables — existing installs never learn about new
-        # releases. These are normally set automatically by release.yml's
-        # W6 publish-gui-version job after the installer .exe is attached
-        # to the GH Release; a warning here means that job didn't run (or a
-        # manual deploy bypassed it).
+        # releases. These are set by W6 (publish-gui-version.yml), which the
+        # owner starts by hand once a release's .exe and Pi tarball have run
+        # on a real PC and Pi (launch item E6); a warning here means it never
+        # ran against this service (or a manual deploy bypassed it).
         (
             "GUI_VERSION",
             "/version returns version=null — student installs cannot detect updates. "
-            "Normally set by release.yml W6; matches the in-tree VERSION file.",
+            "Normally set by W6 (publish-gui-version.yml, run by hand); matches the release's VERSION file.",
         ),
         # GUI_DOWNLOAD_URL is OPTIONAL now: /version derives the GH Release
         # asset URL from GUI_VERSION + GUI_RELEASE_REPO when it's unset. We

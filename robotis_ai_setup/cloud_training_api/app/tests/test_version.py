@@ -120,7 +120,7 @@ class TestVersionExeFields(unittest.TestCase):
         )
 
     def test_an_explicit_release_asset_of_the_repo_wins(self):
-        # The exact shape release.yml W6 sets (another tag than GUI_VERSION is
+        # The exact shape W6 (publish-gui-version.yml) sets (another tag than GUI_VERSION is
         # allowed: the operator may pin an asset by hand).
         for url in ("https://github.com/owner/repo/releases/download/v2.12.3/EduBotics_Setup.exe",
                     "https://github.com/Owner/Repo/releases/download/v2.12.2/EduBotics_Setup.exe"):
@@ -188,7 +188,8 @@ class TestSa01TheUpdateChannelIsPinnedToTheReleaseRepo(unittest.TestCase):
 
     def test_the_release_workflow_sets_exactly_the_accepted_shape(self):
         root = os.path.dirname(os.path.dirname(APP_PARENT))  # the repository root
-        wf = open(os.path.join(root, ".github", "workflows", "release.yml"), encoding="utf-8").read()
+        # W6, run by hand since launch item E6 (2026-11-15).
+        wf = open(os.path.join(root, ".github", "workflows", "publish-gui-version.yml"), encoding="utf-8").read()
         self.assertIn('DOWNLOAD_URL="https://github.com/${GIT_REPO}/releases/download/${TAG}/EduBotics_Setup.exe"', wf)
         self.assertIn('railway variable set "GUI_RELEASE_REPO=${GIT_REPO}"', wf)
 

@@ -3,7 +3,8 @@
 
 rules:
   secrets-inherit:
-    # release.yml is the golden-order dispatcher (W1→W6, CLAUDE.md Rule §6):
+    # release.yml is the golden-order dispatcher (W1→W5b; W6 runs by hand from
+    # publish-gui-version.yml, CLAUDE.md Rule §6):
     # it intentionally forwards the full secret set to its five SAME-REPO,
     # path-pinned (./.github/workflows/...) callees — each callee is already
     # the canonical deploy workflow for its surface and consumes a distinct

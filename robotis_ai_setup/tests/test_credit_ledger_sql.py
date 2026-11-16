@@ -224,8 +224,9 @@ class FilesAndOrder(unittest.TestCase):
         # credit object either, 057 (2026-11-13: the request roles
         # default-deny), which leaves every credit object service-role only
         # and narrows the students' trainings read to the live columns (052's
-        # four included), 058 (refuse self-registration) and 059 (reserved
-        # Hugging Face namespaces). A later migration must be added here deliberately.
+        # four included), 058 (refuse self-registration), 059 (reserved
+        # Hugging Face namespaces) and 060 (the query statistics closed to the
+        # request roles; no credit object). A later migration must be added here deliberately.
         names = sorted(p.name for p in _MIG.glob("*.sql"))
         self.assertEqual(names[names.index(M052.name) + 1:], ["20261109120000_053_retire_jetson.sql",
                                                               "20261110120000_054_advisor_cleanup.sql",
@@ -233,7 +234,8 @@ class FilesAndOrder(unittest.TestCase):
                                                               "20261112120000_056_admin_requires_aal2.sql",
                                                               "20261113120000_057_request_role_default_deny.sql",
                                                               "20261113130000_058_refuse_self_signup.sql",
-                                                              "20261113140000_059_hf_reserved_namespaces.sql"])
+                                                              "20261113140000_059_hf_reserved_namespaces.sql",
+                                                              "20261116120000_060_query_stats_not_public.sql"])
 
     def test_one_transaction_each(self):
         for p in (M052, R052):

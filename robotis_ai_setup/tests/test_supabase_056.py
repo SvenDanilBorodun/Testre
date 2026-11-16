@@ -105,6 +105,7 @@ class FilesAndOrder(unittest.TestCase):
             '20261113120000_057_request_role_default_deny.sql',
             '20261113130000_058_refuse_self_signup.sql',
             '20261113140000_059_hf_reserved_namespaces.sql',
+            '20261116120000_060_query_stats_not_public.sql',
         ])
 
     def test_one_transaction_each(self):

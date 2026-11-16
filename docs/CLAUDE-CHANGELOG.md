@@ -6,6 +6,12 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### 2026-11-16, migration 060: the query statistics are closed (SA-22)
+
+**Why.** 057 revoked SELECT on `extensions.pg_stat_statements(_info)` from `anon` and `authenticated` directly and accepted the read that remained through PUBLIC, believing that grant was `supabase_admin`'s and so out of the migrating role's reach. Measured on the hosted project on 2026-11-16: both views and the three `pg_stat_statements*` functions are owned by `postgres` (not a superuser there), and the PUBLIC grants were made by `postgres` itself (`=r/postgres` on the views, `=X/postgres` on the reader functions). Both request roles could therefore read every role's call counts and timings and the text of every statement run as their own role, i.e. every student's PostgREST and Realtime queries. No shipped path reached it (PostgREST serves `public` and `graphql_public` only), so it was defence in depth, but the owner asked for it closed.
+
+**What.** 060 revokes SELECT on both views and EXECUTE on every `extensions.pg_stat_statements*` function from PUBLIC, `anon` and `authenticated` (calling `pg_stat_statements(true)` directly read the same data), and grants the two views and the two reader functions to `pg_read_all_stats`: Supabase's monitoring roles (`supabase_read_only_user`, `supabase_etl_admin`, `postgres` through `pg_monitor`) read them through PUBLIC until now and keep doing so; `dashboard_user` keeps its own grants and nobody new may reset the statistics. Its self-check aborts where the migrating role can act for the owner and only warns where it cannot. `ci.yml::migrations-replay` now fails on any request-role read of them, through any grant (`supabase_request_role_check.py`, `query_stats`), and the replay stub's comment says where the grant really comes from. Not covered by any CI: a Supabase upgrade of the extension, or a disable/enable in the dashboard, re-runs its script and grants PUBLIC again; the hand-run assertion file is read-only and may be run against the linked project to check (`docs/KNOWN-ISSUES.md`).
+
 ### 2026-11-15, after 2.38.0: the review's small findings (passwords, deadline, limits, rollbacks)
 
 The independent review of 2.38.0 measured four defects that each reach a user or production quietly; all four are fixed in one PR.

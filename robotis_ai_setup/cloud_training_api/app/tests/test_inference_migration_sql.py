@@ -102,8 +102,9 @@ class TestMigration048Shape(unittest.TestCase):
         # training-hour ledger's 052, the Jetson retirement's 053, the advisor
         # clean-up's 054, the users guard's 055, the admin two-factor rule's
         # 056, the request roles' default-deny 057 (which keeps the four anon
-        # session RPCs on its allowlist), the self-registration refusal 058
-        # and the reserved Hugging Face namespaces 059, in that order.
+        # session RPCs on its allowlist), the self-registration refusal 058,
+        # the reserved Hugging Face namespaces 059 and the query statistics
+        # closed to the request roles 060, in that order.
         self.assertEqual(names[names.index(mine) + 1:], [
             "20261020120000_047_hide_worker_token.sql",
             "20261020130000_049_managed_training.sql",
@@ -117,6 +118,7 @@ class TestMigration048Shape(unittest.TestCase):
             "20261113120000_057_request_role_default_deny.sql",
             "20261113130000_058_refuse_self_signup.sql",
             "20261113140000_059_hf_reserved_namespaces.sql",
+            "20261116120000_060_query_stats_not_public.sql",
         ])
         self.assertTrue(os.path.isfile(ROLLBACK))
         self.assertTrue(os.path.isfile(ASSERTIONS))

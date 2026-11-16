@@ -48,6 +48,7 @@ def clean_facts() -> dict:
                           'public.users.role', 'true']],
         'storage_policies': [],
         'public_buckets': [],
+        'query_stats': [],
         'default_acl': [['postgres', 'public', 'r', 'service_role', 'SELECT'],
                         ['postgres', '-', 'f', 'service_role', 'EXECUTE']],
         'default_roles': ['postgres'],
@@ -110,6 +111,28 @@ class TheJudge(unittest.TestCase):
         self._reports(lambda f: f['storage_policies'].append(['storage.objects', 'Service role upload to releases']),
                       'storage policy "Service role upload to releases"')
         self._reports(lambda f: f['public_buckets'].append('releases'), 'storage bucket "releases" is public')
+
+    def test_query_statistics(self):
+        # 060 (SA-22): a read through any grant, PUBLIC's included, is reported,
+        # and no allowlist entry can accept it.
+        self._reports(lambda f: f['query_stats'].append(['extensions.pg_stat_statements', 'authenticated']),
+                      "authenticated may read the server's query statistics through extensions.pg_stat_statements")
+        self._reports(lambda f: f['query_stats'].append(['extensions.pg_stat_statements(boolean)', 'anon']),
+                      "anon may read the server's query statistics through extensions.pg_stat_statements(boolean)")
+        allow = copy.deepcopy(ALLOW)
+        allow['reads'].append({'table': 'extensions.pg_stat_statements', 'roles': ['authenticated'],
+                               'columns': ['query']})
+        f = clean_facts()
+        f['query_stats'].append(['extensions.pg_stat_statements', 'authenticated'])
+        self.assertTrue(any('query statistics' in p for p in CHECK.judge(f, allow)))
+
+    def test_facts_reads_the_query_statistics_through_has_privilege(self):
+        source = _SCRIPT.read_text(encoding='utf-8')
+        block = source[source.index("out['query_stats']"):source.index("out['default_acl']")]
+        for needle in ("to_regnamespace('extensions')", "'pg_stat_statements', 'pg_stat_statements_info'",
+                       "has_table_privilege(r.rolname, c.oid, 'SELECT')",
+                       "'pg_stat_statements_reset'", "has_function_privilege(r.rolname, p.oid, 'EXECUTE')"):
+            self.assertIn(needle, block)
 
     def test_default_privileges(self):
         self._reports(lambda f: f['default_acl'].append(['postgres', 'public', 'r', 'anon', 'SELECT']),

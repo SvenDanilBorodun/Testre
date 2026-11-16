@@ -105,7 +105,8 @@ class Files(unittest.TestCase):
         # 056 (admin aal2) is written in parallel and sorts between 055 and 057.
         self.assertEqual([n for n in names[names.index(M057.name) + 1:]],
                          ['20261113130000_058_refuse_self_signup.sql',
-                          '20261113140000_059_hf_reserved_namespaces.sql'])
+                          '20261113140000_059_hf_reserved_namespaces.sql',
+                          '20261116120000_060_query_stats_not_public.sql'])
 
     def test_one_transaction_each(self):
         for path in (M057, R057):

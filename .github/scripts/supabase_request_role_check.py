@@ -22,6 +22,10 @@ then FAILS on any of:
     sub-selects a column, that role may not use;
   * a storage policy for a request role ("storage_policies") or a public bucket
     ("public_buckets");
+  * a request role that may read the server's query statistics: SELECT on
+    extensions.pg_stat_statements(_info) or EXECUTE on an
+    extensions.pg_stat_statements* function, through any grant, PUBLIC's
+    included (migration 060, SA-22; never allowlistable);
   * a default privilege (schema public or global) granting a request role or
     PUBLIC anything, a role with a default ACL in public but no global function
     default (PostgreSQL's built-in PUBLIC EXECUTE), or — by behaviour — a probe
@@ -142,6 +146,20 @@ def facts(db: str) -> dict:
                 OR to_regrole('authenticated')::oid = ANY (pol.polroles))""") if has_storage[0][0] == 't' else []
     out['public_buckets'] = [r[0] for r in q("SELECT id FROM storage.buckets WHERE public")] \
         if has_storage[0][1] == 't' else []
+    # The query statistics (060): judged by has_*_privilege, so a grant to
+    # PUBLIC or through a role membership counts like a direct one.
+    out['query_stats'] = q("""
+        SELECT c.oid::regclass::text, r.rolname
+          FROM pg_class c CROSS JOIN (VALUES ('anon'),('authenticated')) r (rolname)
+         WHERE c.relnamespace = to_regnamespace('extensions')
+           AND c.relname IN ('pg_stat_statements', 'pg_stat_statements_info')
+           AND has_table_privilege(r.rolname, c.oid, 'SELECT')
+        UNION ALL
+        SELECT p.oid::regprocedure::text, r.rolname
+          FROM pg_proc p CROSS JOIN (VALUES ('anon'),('authenticated')) r (rolname)
+         WHERE p.pronamespace = to_regnamespace('extensions')
+           AND p.proname IN ('pg_stat_statements', 'pg_stat_statements_info', 'pg_stat_statements_reset')
+           AND has_function_privilege(r.rolname, p.oid, 'EXECUTE')""")
     out['default_acl'] = q("""
         SELECT d.defaclrole::regrole::text, coalesce(d.defaclnamespace::regnamespace::text, ''), d.defaclobjtype::text,
                CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END, a.privilege_type
@@ -227,6 +245,8 @@ def judge(f: dict, allow: dict) -> list[str]:
     for bucket in f['public_buckets']:
         if bucket not in set(allow.get('public_buckets', [])):
             problems.append(f'storage bucket "{bucket}" is public')
+    for obj, role in f['query_stats']:
+        problems.append(f'{role} may read the server\'s query statistics through {obj} (060, SA-22)')
 
     for owner, nsp, objtype, grantee, priv in f['default_acl']:
         if objtype in ('r', 'S', 'f') and grantee in ('PUBLIC',) + REQUEST_ROLES:

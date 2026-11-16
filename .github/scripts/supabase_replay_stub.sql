@@ -17,8 +17,12 @@
 --     releases" for every signed-in user. No migration created them; 057
 --     removes the policy and makes the bucket private, and the replay check
 --     proves it;
---   * extensions.pg_stat_statements(_info) with Supabase's SELECT grant to the
---     request roles (SA-22), when the server ships the extension;
+--   * extensions.pg_stat_statements(_info) as the live project has it, when the
+--     server ships the extension: the extension script's own SELECT TO PUBLIC
+--     on the two views and PostgreSQL's default EXECUTE TO PUBLIC on its
+--     functions, made by the extension's owner (on the hosted project
+--     postgres, measured 2026-11-16), plus a direct grant to the request roles
+--     for 057 to revoke; 060 revokes PUBLIC's (SA-22);
 --   * the supabase_realtime publication;
 --   * Supabase's default privileges: every table, function and sequence a
 --     migration creates in public is granted ALL to anon, authenticated and

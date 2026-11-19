@@ -76,7 +76,7 @@ class TestCameraBridgeMapping(unittest.TestCase):
         self.assertEqual(len(bridge._senders), 2)
         self.assertEqual({s.worker.role for s in bridge._senders}, {"gripper", "scene"})
         # senders share the bridge's single stop event
-        self.assertTrue(all(s._stop is bridge._stop for s in bridge._senders))
+        self.assertTrue(all(s._halt is bridge._stop for s in bridge._senders))
 
     def test_connected_false_before_start(self):
         bridge = camera_bridge.CameraBridge({"gripper": 0})

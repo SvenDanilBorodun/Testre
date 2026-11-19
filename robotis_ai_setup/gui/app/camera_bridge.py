@@ -50,7 +50,9 @@ class _CaptureWorker(threading.Thread):
         self.cam_id = cam_id
         self.role = role
         self.index = index
-        self._stop = threading.Event()
+        # Never `self._stop`: threading.Thread has a method of that name, which
+        # join() and is_alive() call on CPython 3.11/3.12 (D24).
+        self._halt = threading.Event()
         self._cond = threading.Condition()
         self._latest = None          # (frame_bgr, capture_ns)
         self._latest_seq = 0         # monotonic; lets the sender detect new frames
@@ -80,7 +82,7 @@ class _CaptureWorker(threading.Thread):
             return self._latest, self._latest_seq
 
     def stop(self):
-        self._stop.set()
+        self._halt.set()
         # Wake any sender blocked in wait_new so stop() is prompt.
         with self._cond:
             self._cond.notify_all()
@@ -89,7 +91,7 @@ class _CaptureWorker(threading.Thread):
         cv2 = None
         cap = None
         failures = 0
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             if cap is None:
                 try:
                     import cv2 as _cv2
@@ -140,8 +142,21 @@ class _CaptureWorker(threading.Thread):
             # runs its native size; resize only if it differs from the target.
             # The Innomaker's native MSMF size is already 640x480 (no-op here);
             # this keeps the bridge correct on cameras whose native size differs.
-            if (frame.shape[1] != constants.CAMERA_WIDTH
-                    or frame.shape[0] != constants.CAMERA_HEIGHT):
+            height, width = frame.shape[:2]
+            if (width != constants.CAMERA_WIDTH
+                    or height != constants.CAMERA_HEIGHT):
+                # Centre-crop a frame of another aspect ratio to the target's
+                # first, so a 16:9 camera is cut at the sides instead of
+                # squeezed (D21); a frame already of that aspect is resized
+                # exactly as before.
+                if width * constants.CAMERA_HEIGHT > height * constants.CAMERA_WIDTH:
+                    crop_w = height * constants.CAMERA_WIDTH // constants.CAMERA_HEIGHT
+                    x0 = (width - crop_w) // 2
+                    frame = frame[:, x0:x0 + crop_w]
+                elif width * constants.CAMERA_HEIGHT < height * constants.CAMERA_WIDTH:
+                    crop_h = width * constants.CAMERA_HEIGHT // constants.CAMERA_WIDTH
+                    y0 = (height - crop_h) // 2
+                    frame = frame[y0:y0 + crop_h]
                 frame = cv2.resize(frame, (constants.CAMERA_WIDTH, constants.CAMERA_HEIGHT))
             ns = time.time_ns()
             with self._cond:
@@ -163,13 +178,13 @@ class _ConnectMixin:
 
     Both the per-camera sender and the phone external sender are CLIENTS to the
     container's TCP server and reconnect identically; only the frame source
-    differs. Subclasses set ``self.host`` / ``self.port`` / ``self._stop`` /
+    differs. Subclasses set ``self.host`` / ``self.port`` / ``self._halt`` /
     ``self.connected`` / ``self.last_error_de`` and call ``self._connect()``.
     """
 
     def _connect(self) -> "socket.socket | None":
         attempt = 0
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             try:
                 sock = socket.create_connection((self.host, self.port), timeout=5.0)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -185,7 +200,7 @@ class _ConnectMixin:
                 backoff = _RECONNECT_BACKOFF_S[min(attempt, len(_RECONNECT_BACKOFF_S) - 1)]
                 attempt += 1
                 # Wait responsively so stop() returns promptly.
-                if self._stop.wait(backoff):
+                if self._halt.wait(backoff):
                     break
         return None
 
@@ -201,16 +216,20 @@ class _SenderWorker(_ConnectMixin, threading.Thread):
         self.worker = worker
         self.host = host
         self.port = port
-        self._stop = stop_event
+        self._halt = stop_event  # never `_stop`, see _CaptureWorker
         self.connected = False
         self.last_error_de = ""
 
     def run(self):
         import cv2
         jpeg_params = [cv2.IMWRITE_JPEG_QUALITY, constants.CAMERA_JPEG_QUALITY]
-        last_seq = -1
+        # Start at the worker's current sequence so wait_new blocks until a
+        # frame exists. Starting below it (the old -1 against the worker's 0)
+        # returned at once on every call until the first frame: a busy-spin of
+        # millions of calls a second on a camera that never delivers (D21).
+        _, last_seq = self.worker.latest()
         sock = None
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             if sock is None:
                 sock = self._connect()
                 if sock is None:
@@ -286,7 +305,7 @@ class _ExternalSenderWorker(_ConnectMixin, threading.Thread):
         self.cam_id = cam_id
         self.host = host
         self.port = port
-        self._stop = stop_event
+        self._halt = stop_event  # never `_stop`, see _CaptureWorker
         self.stale_max_age_s = stale_max_age_s
         self.poll_interval_s = poll_interval_s
         self.connected = False
@@ -297,7 +316,7 @@ class _ExternalSenderWorker(_ConnectMixin, threading.Thread):
     def run(self):
         last_seq = -1
         sock = None
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             if sock is None:
                 sock = self._connect()
                 if sock is None:
@@ -307,7 +326,7 @@ class _ExternalSenderWorker(_ConnectMixin, threading.Thread):
             if (got is None
                     or got[2] == last_seq
                     or not self.slot.fresh_within(self.stale_max_age_s)):
-                if self._stop.wait(self.poll_interval_s):
+                if self._halt.wait(self.poll_interval_s):
                     break
                 continue
             jpeg, capture_ns, seq = got

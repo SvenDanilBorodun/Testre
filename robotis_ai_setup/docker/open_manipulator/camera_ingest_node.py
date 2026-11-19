@@ -52,6 +52,7 @@ import os
 import socket
 import struct
 import threading
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -64,6 +65,9 @@ _HEADER_LEN = _HEADER.size
 # Reject absurd frame sizes early — a 640x480 JPEG is ~30-60 KB; cap at 8 MB
 # so a desynced/garbage stream can't make us allocate gigabytes.
 _MAX_JPEG_BYTES = 8 * 1024 * 1024
+# A frame for a camera id with no publisher is dropped; the first one is warned
+# about, then at most one warning per id in this interval, with the count.
+_UNKNOWN_CAM_WARN_INTERVAL_S = 10.0
 
 
 class CameraIngestNode(Node):
@@ -100,6 +104,10 @@ class CameraIngestNode(Node):
 
         self._stop = threading.Event()
         self._frame_counts = {cam_id: 0 for cam_id in self.publishers_by_id}
+        # cam_id -> [monotonic time of its last warning, frames dropped since].
+        # The client handlers are threads of their own, hence the lock.
+        self._unknown_cams = {}
+        self._unknown_cams_lock = threading.Lock()
         self._server_thread = threading.Thread(
             target=self._serve_forever, name='ingest-tcp', daemon=True)
         self._server_thread.start()
@@ -195,8 +203,23 @@ class CameraIngestNode(Node):
     def _publish(self, cam_id, jpeg_bytes, capture_ns=0):
         entry = self.publishers_by_id.get(cam_id)
         if entry is None:
-            # Unknown camera id — log once-ish and drop.
-            self.get_logger().warn(f'dropping frame for unknown cam_id={cam_id}')
+            # Unknown camera id: drop the frame. Warning on every frame flooded
+            # the log at the camera's rate (D21).
+            now = time.monotonic()
+            warning = None
+            with self._unknown_cams_lock:
+                seen = self._unknown_cams.get(cam_id)
+                if seen is None:
+                    self._unknown_cams[cam_id] = [now, 0]
+                    warning = f'dropping frame for unknown cam_id={cam_id}'
+                else:
+                    seen[1] += 1
+                    if now - seen[0] >= _UNKNOWN_CAM_WARN_INTERVAL_S:
+                        warning = (f'dropped {seen[1]} frames for unknown cam_id={cam_id} '
+                                   f'in the last {now - seen[0]:.0f} s')
+                        seen[0], seen[1] = now, 0
+            if warning is not None:
+                self.get_logger().warn(warning)
             return
         name, pub = entry
         msg = CompressedImage()

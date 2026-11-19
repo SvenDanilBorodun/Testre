@@ -32,6 +32,34 @@ by hand after testing both on a real PC and Pi (GitHub → Actions →
 Every step below is an owner action (CLAUDE.md, „When to ask the user"). The
 details sit in `DEPLOY.md` §1 (053 … 059), §3c and §3d.
 
+## The 2.40.0 merge (`feat/scene-camera-tower-autocal-b`, the dataset's scene-camera stamp): no owner step before it
+
+Nothing has to happen before this merge: no migration (W1 has nothing to
+apply and is not run), no Railway variable, no secret, no Modal deploy, no
+Supabase setting. What the merge itself deploys:
+
+- **W2 deploys the cloud API at the merge** (the branch changes
+  `robotis_ai_setup/cloud_training_api/`). Its one change: `POST
+  /inference/sessions` answers one more key, `scene_camera_profile`
+  (`'tower_v1'` | `'legacy'` | `null`), read anonymously and best effort from
+  the training dataset's stamp file on Hugging Face, waiting at most 2 s after
+  the GPU start (`CLAUDE.md`, Cloud-Inferenz). It is additive: the student page
+  in every robot image shipped so far ignores the key, and no robot states its
+  scene camera before the tower release, so no page shows a warning. After W2,
+  as after every merge: `/health` names the merge commit with `schema_ok: true`
+  (W2's own gate). Optional: one Cloud-Inferenz reservation from a student
+  account still answers as before.
+- **W3 rebuilds the teacher web** (the branch changes
+  `physical_ai_tools/physical_ai_manager/`); none of its screens changes (the
+  changed pages are the student's Daten merge panel and Cloud-Inferenz view).
+- **W4 builds `:latest` images**; no robot pulls them. The robots get 2.40.0
+  only with the tag and W6, like every release.
+
+**Rollback:** a revert merged to `main` (W2 and W3 deploy it); the robots go
+back with the previous release (the older `.exe` AND the pinned image tag).
+Before the tower release nothing is stamped, so nothing is lost
+(`docs/KNOWN-ISSUES.md`, „Release 2.40.0").
+
 ## This merge: the launch-plan branch and the deep security audit (migrations 053 … 059)
 
 What it brings, measured by verification round B (2026-11-10):

@@ -1646,6 +1646,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         if daten is not None:
             self.data_manager._dataset_lease = daten.claim_record_lease
             self.data_manager._sync_download = daten.start_sync_download
+        # D58: the scene camera this robot records with, with or without Daten
+        # (no tower camera in this release: the constant legacy provider).
+        from physical_ai_server import scene_provenance
+        self.data_manager._scene_camera_profile = scene_provenance.LEGACY_PROVIDER
         self.communicator.clear_latest_data()
 
         # D19: a second START used to replace the manager and leave the first run's timer

@@ -187,6 +187,9 @@ const DATEN_COPY = deepFreeze({
       videoBad: 'Unterschiedliches Videoformat – lässt sich nicht zusammenführen',
       statsOk: 'Gleiche Statistiken',
       statsBad: 'Unterschiedliche Statistiken – lässt sich nicht zusammenführen',
+      sceneOk: 'Gleiche Szenen-Kamera: Turm-Kamera',
+      sceneBad: 'Mit verschiedenen Szenen-Kameras aufgenommen (Turm-Kamera und bisherige Szenen-Kamera) – lässt sich nicht zusammenführen',
+      sceneUnknown: 'Bei einem Datensatz ist nicht lesbar, mit welcher Szenen-Kamera er aufgenommen wurde – lässt sich nicht zusammenführen',
     },
   },
 

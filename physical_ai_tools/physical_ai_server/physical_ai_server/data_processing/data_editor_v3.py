@@ -99,6 +99,28 @@ def _texts():
     return _load_sibling('daten', 'texts_de')
 
 
+def _scene_provenance():
+    """``scene_provenance`` (D58, stdlib only, the package root): by package name
+    in the image, by file path when a deps-free loader gave the package no
+    ``__path__`` (cached by key)."""
+    try:
+        return importlib.import_module('physical_ai_server.scene_provenance')
+    except ImportError:
+        key = '_edubotics_scene_provenance'
+        module = sys.modules.get(key)
+        if module is None:
+            path = Path(__file__).resolve().parent.parent / 'scene_provenance.py'
+            spec = importlib.util.spec_from_file_location(key, str(path))
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[key] = module
+            try:
+                spec.loader.exec_module(module)
+            except BaseException:
+                sys.modules.pop(key, None)
+                raise
+        return module
+
+
 def _default_logger() -> logging.Logger:
     logger = logging.getLogger('DataEditorV3')
     if not logger.handlers:
@@ -223,11 +245,14 @@ def _clear_stale(*paths: Path, logger) -> None:
 
 def _build(out: Path, parts, repo_id, progress: ProgressFn, logger):
     """assemble + verify into ``out``; any failure removes ``out`` and raises a
-    German DataEditError."""
+    German DataEditError. D58: the output carries its sources' scene-camera
+    stamp (one source: its bytes; several: their common stamp)."""
     V = _load_sibling('data_processing', 'v3_surgery')
     try:
         V.assemble(out, parts, repo_id,
                    progress=lambda stage, done, total: _progress(progress, 'copy', done, total))
+        sources = list({id(s): s for s, _ in parts}.values())
+        _scene_provenance().copy_stamp([s.root for s in sources], out)
         _progress(progress, 'verify', 0, 1)
         V.verify_or_raise(out, parts)
         _progress(progress, 'verify', 1, 1)

@@ -131,7 +131,8 @@ def test_an_ok_entry_carries_the_contract_fields(lib, root):
     e = by_id(lib.scan([NS]))[f'{NS}/omx_f_ok']
     assert set(e) == {'id', 'ns', 'name', 'display_name', 'state', 'meta_digest', 'codebase_version',
                       'robot_type', 'fps', 'total_episodes', 'total_frames', 'duration_s', 'size_bytes',
-                      'modified_at', 'cameras', 'joints', 'stat_names', 'tasks', 'hint_episodes', 'record'}
+                      'modified_at', 'cameras', 'joints', 'stat_names', 'tasks', 'hint_episodes', 'record',
+                      'scene_camera_profile'}
     assert (e['ns'], e['name'], e['display_name']) == (NS, 'omx_f_ok', 'Würfel legen')
     assert e['meta_digest'] == S.meta_digest(root / NS / 'omx_f_ok')
     assert (e['fps'], e['total_episodes'], e['total_frames']) == (30, 3, sum(LENGTHS))

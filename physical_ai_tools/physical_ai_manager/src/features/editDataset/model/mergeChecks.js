@@ -4,7 +4,7 @@
 // Licence Agreement; see LICENSE at the repository root.
 
 // The merge panel's compatibility check BEFORE anything starts (spec §D5,
-// §D1 step 2), computed from the library entries: the seven MERGE_CHECKS. The
+// §D1 step 2), computed from the library entries: the eight MERGE_CHECKS. The
 // server re-checks and refuses in German (`incompatible_de`) if the page was
 // wrong; the button stays disabled while any row fails.
 
@@ -97,10 +97,22 @@ export function mergeChecks(entries) {
   const statsOk = same(sel.map(statsSignature));
   checks.push({ id: 'stats', ok: statsOk, text: statsOk ? C.statsOk : C.statsBad });
 
-  // Every id of the contract is decided above (version only when it fails).
+  // scene_camera (D58): shown only when it fails or a dataset is a tower dataset
+  // (the version row's pattern), so a legacy rig's panel is unchanged. An entry
+  // without the field (an older robot image) is 'legacy'; null = the robot
+  // could not read the dataset's stamp.
+  const scenes = sel.map((e) => (e.scene_camera_profile === undefined ? 'legacy' : e.scene_camera_profile));
+  const scenesKnown = scenes.every((p) => p === 'legacy' || p === 'tower_v1');
+  const sceneOk = scenesKnown && same(scenes);
+  if (!sceneOk || scenes.includes('tower_v1')) {
+    checks.push({ id: 'scene_camera', ok: sceneOk, text: sceneOk ? C.sceneOk : (scenesKnown ? C.sceneBad : C.sceneUnknown) });
+  }
+
+  // Every id of the contract is decided above (version only when it fails,
+  // scene_camera only when it fails or a tower dataset is picked).
   const ok = checks.every((c) => c.ok);
   return { checks, ok };
 }
 
-/** The seven check ids of the contract, in order (for tests and the server's names). */
+/** The eight check ids of the contract, in order (for tests and the server's names). */
 export const CHECK_IDS = MERGE_CHECKS;

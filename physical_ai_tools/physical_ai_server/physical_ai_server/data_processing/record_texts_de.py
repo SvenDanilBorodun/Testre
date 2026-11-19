@@ -263,6 +263,30 @@ def resume_robot_de(name) -> str:
     return RESUME_ROBOT_DE.format(name=name)
 
 
+# D58: a dataset is never continued with another scene-camera arrangement
+# (scene_provenance.py), and a tower session stamps the dataset it creates.
+SCENE_CAMERA_NAMES_DE = {'legacy': 'der bisherigen Szenen-Kamera', 'tower_v1': 'der Turm-Kamera'}
+
+RESUME_SCENE_CAMERA_DE = ('Der Datensatz „{name}“ wurde mit {then} aufgenommen, dieser Roboter nimmt '
+                          'jetzt mit {now} auf. Die beiden Ansichten dürfen nicht in einem Datensatz '
+                          'gemischt werden. Wähle einen neuen Aufgabennamen.')
+
+SCENE_STAMP_FAILED_DE = ('Der Datensatz „{name}“ konnte nicht als Aufnahme der Turm-Kamera '
+                         'gekennzeichnet werden – es wurde nichts aufgenommen. Bitte einen neuen '
+                         'Aufgabennamen wählen und den freien Speicherplatz prüfen.')
+
+
+def resume_scene_camera_de(name, then, now) -> str:
+    """``then``/``now``: the dataset's and the robot's profile (``legacy``,
+    ``tower_v1``)."""
+    return RESUME_SCENE_CAMERA_DE.format(
+        name=name, then=SCENE_CAMERA_NAMES_DE[then], now=SCENE_CAMERA_NAMES_DE[now])
+
+
+def scene_stamp_failed_de(name) -> str:
+    return SCENE_STAMP_FAILED_DE.format(name=name)
+
+
 # ── upload (F7, R5-4b) ────────────────────────────────────────────────────────
 
 # The end-of-session upload could not be handed to the worker.

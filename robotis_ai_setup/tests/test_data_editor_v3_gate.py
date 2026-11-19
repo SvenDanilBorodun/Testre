@@ -101,7 +101,7 @@ class _Engine:
 
 
 ENGINE = _Engine()
-MERGE_CHECKS = ('version', 'robot', 'fps', 'cameras', 'joints', 'video', 'stats')
+MERGE_CHECKS = ('version', 'robot', 'fps', 'cameras', 'joints', 'video', 'stats', 'scene_camera')
 
 
 class _FakeSource:

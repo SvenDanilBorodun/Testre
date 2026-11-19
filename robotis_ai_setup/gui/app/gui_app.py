@@ -419,6 +419,10 @@ def _frame_to_photo_data(frame_bgr):
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
         if img.ndim != 3 or img.shape[2] != 3:
             return None
+        # Show the field the camera bridge records: a frame of another aspect
+        # ratio is centre-cropped to the target's by the same helper the
+        # capture worker uses (D82); a 4:3 frame comes back as it is.
+        img = camera_bridge_mod.crop_to_target_aspect(img)
         preview_max_width = 320
         if img.shape[1] > preview_max_width:
             new_height = max(

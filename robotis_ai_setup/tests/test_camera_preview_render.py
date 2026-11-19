@@ -62,7 +62,9 @@ def _load_frame_to_photo_data():
                 if idx != -1:
                     end = min(end, idx)
             snippet = rest[:end]
-            ns = {"base64": base64}
+            # The preview crops through gui_app's camera_bridge_mod (D82).
+            from gui.app import camera_bridge
+            ns = {"base64": base64, "camera_bridge_mod": camera_bridge}
             exec(snippet, ns)  # noqa: S102 — trusted in-repo source
             return ns["_frame_to_photo_data"]
         return module._frame_to_photo_data

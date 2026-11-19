@@ -42,6 +42,31 @@ _RECONNECT_BACKOFF_S = (0.5, 1.0, 2.0, 3.0, 5.0)  # capped, then repeats last
 _MAX_READ_FAILURES = 10  # consecutive read() failures before reopening (phosphobot uses the same threshold)
 
 
+def crop_to_target_aspect(frame):
+    """The centre of ``frame`` in the target's aspect ratio
+    (``constants.CAMERA_WIDTH`` x ``CAMERA_HEIGHT``, 4:3 by default).
+
+    A wider frame loses its sides, a taller one its top and bottom; a frame
+    already of that aspect is returned as it is. The one implementation of the
+    field the bridge records: the capture worker resizes the result to the
+    target size, and the setup window's preview (``gui_app.py``'s
+    ``_frame_to_photo_data``) shows the same field (D21, D82). The crop keeps
+    at least one row or column: against the 4:3 target a 1-pixel-wide frame's
+    crop rounds down to 0 rows, and cv2.resize raises on an empty frame, which
+    would end the capture thread.
+    """
+    height, width = frame.shape[:2]
+    if width * constants.CAMERA_HEIGHT > height * constants.CAMERA_WIDTH:
+        crop_w = max(1, height * constants.CAMERA_WIDTH // constants.CAMERA_HEIGHT)
+        x0 = (width - crop_w) // 2
+        return frame[:, x0:x0 + crop_w]
+    if width * constants.CAMERA_HEIGHT < height * constants.CAMERA_WIDTH:
+        crop_h = max(1, width * constants.CAMERA_HEIGHT // constants.CAMERA_WIDTH)
+        y0 = (height - crop_h) // 2
+        return frame[y0:y0 + crop_h]
+    return frame
+
+
 class _CaptureWorker(threading.Thread):
     """Free-running capture loop for one camera. Keeps only the newest frame."""
 
@@ -148,19 +173,9 @@ class _CaptureWorker(threading.Thread):
                 # Centre-crop a frame of another aspect ratio to the target's
                 # first, so a 16:9 camera is cut at the sides instead of
                 # squeezed (D21); a frame already of that aspect is resized
-                # exactly as before. The crop keeps at least one row or
-                # column: against the 4:3 target a 1-pixel-wide frame's crop
-                # rounds down to 0 rows, and cv2.resize raises on an empty
-                # frame, which would end this thread.
-                if width * constants.CAMERA_HEIGHT > height * constants.CAMERA_WIDTH:
-                    crop_w = max(1, height * constants.CAMERA_WIDTH // constants.CAMERA_HEIGHT)
-                    x0 = (width - crop_w) // 2
-                    frame = frame[:, x0:x0 + crop_w]
-                elif width * constants.CAMERA_HEIGHT < height * constants.CAMERA_WIDTH:
-                    crop_h = max(1, width * constants.CAMERA_HEIGHT // constants.CAMERA_WIDTH)
-                    y0 = (height - crop_h) // 2
-                    frame = frame[y0:y0 + crop_h]
-                frame = cv2.resize(frame, (constants.CAMERA_WIDTH, constants.CAMERA_HEIGHT))
+                # exactly as before.
+                frame = cv2.resize(crop_to_target_aspect(frame),
+                                   (constants.CAMERA_WIDTH, constants.CAMERA_HEIGHT))
             ns = time.time_ns()
             with self._cond:
                 self._latest = (frame, ns)

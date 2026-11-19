@@ -281,9 +281,11 @@ def open_capture(index: int, width: int, height: int, fps: float):
             # re-negotiation AND pins the camera to a slower ~24 fps mode;
             # setting only the fourcc opens in ~3 s and runs the camera's native
             # mode — 640x480 MJPG @ ~30 fps on the Innomaker U20CAM-720P. We do
-            # NOT request a resolution here; the capture worker normalises to
-            # the target size with a cheap resize if a camera's native size
-            # differs. (MSMF reports an empty fourcc read-back — harmless.)
+            # NOT request a resolution here; if a camera's native size differs
+            # from the target, the capture worker centre-crops a frame of
+            # another aspect ratio to the target's and then resizes it
+            # (camera_bridge.crop_to_target_aspect). (MSMF reports an empty
+            # fourcc read-back — harmless.)
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         else:
             # DSHOW (rollback path): FOURCC must be set LAST or the camera stays

@@ -260,6 +260,17 @@ class ANon43FrameIsCroppedNotSqueezed(BoundedTestCase):
                 self.assertLessEqual(abs((xs.max() + xs.min()) / 2 - 319.5), 2.0)
                 self.assertLessEqual(abs((ys.max() + ys.min()) / 2 - 239.5), 2.0)
 
+    def test_a_one_pixel_wide_frame_is_still_stored(self):
+        # The crop height of a 1-pixel-wide frame rounds down to 0 rows; an
+        # empty slice made cv2.resize raise inside run(), which ended the
+        # capture thread with no German error (the squeeze before the crop
+        # stored such a frame).
+        for width, height in ((1, 1), (1, 2), (1, 480)):
+            with self.subTest(size=f'{width}x{height}'):
+                frame = np.full((height, width, 3), 200, np.uint8)
+                stored = self._captured(frame)
+                self.assertEqual(stored.shape, (480, 640, 3))
+
     def test_4_3_frames_send_the_same_bytes_as_before(self):
         """The sender's bytes for a 640x480 and a 1280x960 camera equal the
         bytes of the path before the crop existed: no resize for 640x480,

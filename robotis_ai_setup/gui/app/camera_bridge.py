@@ -148,13 +148,16 @@ class _CaptureWorker(threading.Thread):
                 # Centre-crop a frame of another aspect ratio to the target's
                 # first, so a 16:9 camera is cut at the sides instead of
                 # squeezed (D21); a frame already of that aspect is resized
-                # exactly as before.
+                # exactly as before. The crop keeps at least one row or
+                # column: against the 4:3 target a 1-pixel-wide frame's crop
+                # rounds down to 0 rows, and cv2.resize raises on an empty
+                # frame, which would end this thread.
                 if width * constants.CAMERA_HEIGHT > height * constants.CAMERA_WIDTH:
-                    crop_w = height * constants.CAMERA_WIDTH // constants.CAMERA_HEIGHT
+                    crop_w = max(1, height * constants.CAMERA_WIDTH // constants.CAMERA_HEIGHT)
                     x0 = (width - crop_w) // 2
                     frame = frame[:, x0:x0 + crop_w]
                 elif width * constants.CAMERA_HEIGHT < height * constants.CAMERA_WIDTH:
-                    crop_h = width * constants.CAMERA_HEIGHT // constants.CAMERA_WIDTH
+                    crop_h = max(1, width * constants.CAMERA_HEIGHT // constants.CAMERA_WIDTH)
                     y0 = (height - crop_h) // 2
                     frame = frame[y0:y0 + crop_h]
                 frame = cv2.resize(frame, (constants.CAMERA_WIDTH, constants.CAMERA_HEIGHT))

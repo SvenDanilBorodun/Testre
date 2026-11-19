@@ -7,6 +7,10 @@
 // stage, the model running on a cloud GPU. Chips: the robot, the rosbridge
 // heartbeat, the LOCAL cameras' liveness, and the cloud's answer time from the
 // robot's state topic (facts only; one HTTPS path to the cloud, O7').
+//
+// Above the panel with Start: a warning when the reserved model was trained with
+// another scene camera than the one the robot states (D58). Both must be known;
+// it never disables Start.
 
 import React from 'react';
 import { useSelector } from 'react-redux';
@@ -18,7 +22,9 @@ import Icon from '../icons/Icon';
 import { Led, Plate, Screen } from '../sucher';
 import '../sucher-pages/inference.css';
 import { useCameraLiveness } from '../../hooks/useCameraLiveness';
+import useCloudInferenceSession from '../../hooks/useCloudInferenceSession';
 import useCloudInferenceState from '../../hooks/useCloudInferenceState';
+import useSceneCameraProfile, { sceneCameraProfileOf } from '../../hooks/useSceneCameraProfile';
 import CloudInferencePanel from './CloudInferencePanel';
 import CloudWait from './CloudWait';
 import { cloudCopy, fill } from './cloudCopy';
@@ -39,6 +45,9 @@ export default function CloudInferenceView({ isActive = true, cloud }) {
   const rosbridgeUrl = useSelector((s) => s.ros.rosbridgeUrl);
   const { liveCount } = useCameraLiveness({ topics: imageTopicList, rosbridgeUrl, enabled: isActive });
   const cloudState = useCloudInferenceState({ enabled: isActive });
+  const modelScene = sceneCameraProfileOf(useCloudInferenceSession().sceneCameraProfile);
+  const robotScene = useSceneCameraProfile({ enabled: isActive });
+  const sceneMismatch = modelScene !== null && robotScene !== null && modelScene !== robotScene;
   const configured = imageTopicList?.length || 0;
   const rtt = cloudState && cloudState.active && typeof cloudState.rtt_ms_p50 === 'number'
     ? Math.round(cloudState.rtt_ms_p50)
@@ -78,6 +87,16 @@ export default function CloudInferenceView({ isActive = true, cloud }) {
           </div>
         </Screen>
         <Plate as="aside" className="su-inf__panel">
+          {sceneMismatch && (
+            <div role="status" className="shrink-0 px-5 pt-5 flex items-start gap-2 text-sm text-[color:var(--amber)]"
+              data-testid="cloud-scene-mismatch">
+              <Icon name="warning" size={16} className="mt-0.5 shrink-0" />
+              <span>{fill(cloudCopy.sceneMismatch, {
+                then: cloudCopy.sceneCameraNames[modelScene],
+                now: cloudCopy.sceneCameraNames[robotScene],
+              })}</span>
+            </div>
+          )}
           <CloudInferencePanel isActive={isActive} cloud={cloud} cloudState={cloudState} />
         </Plate>
       </div>

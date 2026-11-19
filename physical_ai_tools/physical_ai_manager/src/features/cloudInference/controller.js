@@ -42,6 +42,11 @@
 // student sees the retry during its pause) and `reserveStartedAt` (Date.now()
 // at the FIRST attempt; a retry never moves it). Outside a reserve they are 0
 // and null. Read-only for the page: nothing decides on them.
+//
+// THE MODEL'S SCENE CAMERA (D58): `sceneCameraProfile` is the reserve answer's
+// `scene_camera_profile` ('legacy' | 'tower_v1'; null when unknown or from an
+// API without the key), set and cleared together with `summary`. The view warns
+// when it differs from the robot's stated camera; nothing here decides on it.
 
 import TaskPhase from '../../constants/taskPhases';
 import {
@@ -52,6 +57,7 @@ import {
   reserveInferenceSession,
 } from '../../services/cloudInferenceApi';
 import { cloudCopy } from '../../components/CloudInference/cloudCopy';
+import { sceneCameraProfileOf } from '../../hooks/useSceneCameraProfile';
 import { startCloudInference, stopCloudInference } from './robotCalls';
 import { taskInfoWire } from './taskInfoWire';
 
@@ -74,6 +80,7 @@ const INITIAL = Object.freeze({
   sessionId: null,
   trainingId: null,
   summary: null,
+  sceneCameraProfile: null,
   sessionS: null,
   message: '',
   modelRefused: false,
@@ -278,6 +285,7 @@ async function reserve(trainingId) {
     trainingId,
     sessionId: null,
     summary: null,
+    sceneCameraProfile: null,
     message: '',
     modelRefused: false,
     reserveAttempt: 1,
@@ -304,6 +312,7 @@ async function reserve(trainingId) {
     phase: 'reserved',
     sessionId: res?.session_id || null,
     summary: res?.summary || null,
+    sceneCameraProfile: sceneCameraProfileOf(res?.scene_camera_profile),
     sessionS: res?.session_s ?? null,
     message: '',
     modelRefused: false,
@@ -454,7 +463,7 @@ export function release() {
   const id = state.sessionId;
   clearTimers();
   // seq += 1: a reserve answer still in flight is then ignored and ended.
-  set({ seq: state.seq + 1, phase: 'idle', sessionId: null, summary: null, message: '', modelRefused: false, ...NOT_STARTING });
+  set({ seq: state.seq + 1, phase: 'idle', sessionId: null, summary: null, sceneCameraProfile: null, message: '', modelRefused: false, ...NOT_STARTING });
   if (id) endInferenceSessionKeepalive(accessToken(), id);
 }
 

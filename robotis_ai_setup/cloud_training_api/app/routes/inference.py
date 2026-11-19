@@ -50,6 +50,11 @@ Conventions that are easy to undo by accident:
     add no START_POOL thread. A start keeps its thread until Modal answers, also after
     the page gave up, and one older than START_JOIN_MAX_AGE_S is never joined, so the
     pool is bounded by students with a start in flight, not by the global cap.
+  * The reserve answer names the training dataset's scene camera
+    (`scene_camera_profile`: 'tower_v1' | 'legacy' | null, D58) and never fails or
+    waits long for it: the lookup starts beside the model resolve, the reservation
+    and the GPU start, the answer waits for it at most SCENE_LOOKUP_WAIT_S after the
+    start returned, and a slower lookup answers null and finishes in the background.
 """
 
 from __future__ import annotations
@@ -77,6 +82,10 @@ GPU_NOT_STARTED_CODE = "gpu_not_started"
 # The reserve body is `{"training_id": <int>}`; anything past this is not one.
 _RESERVE_BODY_MAX_BYTES = 4096
 _TRAINING_ID_MAX = 2_147_483_647  # trainings.id is a Postgres INT
+# How long the reserve answer waits for the scene-camera lookup after the GPU start returned.
+SCENE_LOOKUP_WAIT_S = 2.0
+# Running lookups, held strongly (the event loop keeps only weak references to tasks).
+_SCENE_LOOKUPS: set = set()
 
 
 class _CodedHTTPException(HTTPException):
@@ -223,6 +232,34 @@ async def _end_edge_failed(sb, uid: str, session_id: str) -> None:
     inference_edge.kick()
 
 
+def _scene_lookup_done(task) -> None:
+    """Drop the reference and retrieve the outcome, so a lookup that raised never
+    logs "Task exception was never retrieved", whichever way the route left."""
+    _SCENE_LOOKUPS.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("inference scene lookup failed: %s", type(exc).__name__)
+
+
+def _start_scene_lookup(row) -> asyncio.Task:
+    task = asyncio.get_running_loop().create_task(asyncio.to_thread(svc.dataset_scene_profile, row))
+    _SCENE_LOOKUPS.add(task)
+    task.add_done_callback(_scene_lookup_done)
+    return task
+
+
+async def _scene_profile_by(task, deadline: float):
+    """The lookup's answer if it is in by `deadline` (loop time), else None. The
+    lookup is never cancelled (shield): a slower one finishes in the background."""
+    remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), remaining)
+    except Exception:  # noqa: BLE001 - not in time, or the lookup failed: no answer
+        return None
+
+
 # -------------------------------------------------------------------- reserve
 
 
@@ -241,6 +278,8 @@ async def reserve_session(request: Request, profile=Depends(get_current_profile)
     repo = row.get("model_name")
     if not isinstance(repo, str) or not svc.MODEL_REPO_RE.fullmatch(repo):
         raise HTTPException(status_code=409, detail="Dieses Modell liegt nicht im EduBotics-Modellarchiv.")
+    # Runs beside everything below; every exit of the route leaves it to its done-callback.
+    scene_lookup = _start_scene_lookup(row)
     try:
         summary = await asyncio.to_thread(svc.resolve_model, repo)
     except svc.ModelResolveError as exc:
@@ -317,6 +356,7 @@ async def reserve_session(request: Request, profile=Depends(get_current_profile)
         logger.warning("inference start failed: %s session=%s user=%s", type(exc).__name__, session_id, uid)
         await _end_edge_failed(sb, uid, session_id)
         raise _gpu_start_failed() from None
+    scene_deadline = asyncio.get_running_loop().time() + SCENE_LOOKUP_WAIT_S
     if not _valid_creds(creds):
         logger.warning("inference start: credentials of an unexpected shape, session=%s", session_id)
         await inference_edge.terminate_now(getattr(creds, "token", None))
@@ -339,6 +379,7 @@ async def reserve_session(request: Request, profile=Depends(get_current_profile)
             "session_s": reservation.get("session_s"),
             "remaining_today_s": reservation.get("remaining_today_s"),
             "reserve_s": svc.RESERVE_S,
+            "scene_camera_profile": await _scene_profile_by(scene_lookup, scene_deadline),
         })
     if status == "ended":
         # Stored on the ended row: the terminate loop ends the Modal session (D39, G-4).

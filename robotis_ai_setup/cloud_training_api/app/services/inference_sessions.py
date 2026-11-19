@@ -16,6 +16,8 @@ What lives here:
   * the training visibility ladder (exactly `routes/training.py::get_training`'s),
     the model resolver against the Hugging Face Hub, and thin wrappers around
     the 048 service-role RPCs with their error mapping;
+  * the training dataset's scene-camera profile (D58): its stamp file read
+    ANONYMOUSLY at the training's pinned dataset revision, best effort;
   * `log_ended_sessions`, the one writer of `inference_runs` rows with
     backend='cloud' (D14, R-19).
 
@@ -36,6 +38,7 @@ import re
 import secrets
 import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 
 from app.services import hf_credentials
@@ -411,6 +414,115 @@ def resolve_model(repo) -> dict:
     return dict(result)
 
 
+# ------------------------------------------------- scene-camera profile (D58)
+
+# A dataset recorded with the tower camera carries ONE stamp file; no file means
+# 'legacy'. The values and the reader's rules are the robot's own
+# (physical_ai_server/scene_provenance.py; tests/test_scene_provenance_lockstep.py).
+SCENE_STAMP_RELPATH = "meta/edubotics_scene_camera.json"
+SCENE_PROFILES = ("legacy", "tower_v1")
+SCENE_STAMP_VERSION = 1
+SCENE_PLATFORMS = ("windows", "pi")
+SCENE_STAMP_MAX_BYTES = 4096
+_SCENE_STAMP_KEYS = ("v", "scene_camera_profile", "profile_id", "platform")
+_SCENE_PROFILE_ID_RE = re.compile(r"[0-9a-f]{12}")
+# == dataset_preflight.EXPECTED_CODEBASE_VERSION: what a training without a pinned
+# revision (before E17) read its dataset at.
+SCENE_STAMP_TAG = "v3.0"
+SCENE_CACHE_MAX = 512
+DATASET_REPO_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
+
+# (dataset, revision) -> (stored at, profile); definite answers only.
+_scene_cache: OrderedDict = OrderedDict()
+_scene_lock = threading.Lock()
+
+
+def _reset_scene_cache_for_tests() -> None:
+    with _scene_lock:
+        _scene_cache.clear()
+
+
+def _scene_profile_of_stamp(body: bytes):
+    """The profile a stamp file names, by scene_provenance.read_stamp's rules, else None."""
+    try:
+        stamp = json.loads(body.decode("utf-8"))
+    except (ValueError, RecursionError):  # UnicodeDecodeError and JSONDecodeError are ValueErrors
+        return None
+    if not isinstance(stamp, dict) or set(stamp) != set(_SCENE_STAMP_KEYS):
+        return None
+    if type(stamp["v"]) is not int or stamp["v"] != SCENE_STAMP_VERSION:
+        return None
+    profile, profile_id, platform = stamp["scene_camera_profile"], stamp["profile_id"], stamp["platform"]
+    if not (type(profile) is str and profile in SCENE_PROFILES):
+        return None
+    if not (profile_id is None or (type(profile_id) is str and _SCENE_PROFILE_ID_RE.fullmatch(profile_id))):
+        return None
+    if not (platform is None or (type(platform) is str and platform in SCENE_PLATFORMS)):
+        return None
+    return profile
+
+
+def _fetch_scene_profile(dataset: str, revision: str):
+    """One anonymous GET of the stamp: 200 + a valid stamp -> its profile; 404 with
+    X-Error-Code EntryNotFound -> 'legacy'; anything else -> None. No header, no
+    credential: the platform token acts only inside the organisation (SA-08)."""
+    import httpx
+
+    url = f"{HF_BASE_URL}/datasets/{dataset}/resolve/{revision}/{SCENE_STAMP_RELPATH}"
+    deadline = time.monotonic() + HF_TIMEOUT_S
+    with httpx.Client(timeout=HF_TIMEOUT_S, follow_redirects=True) as client:
+        with client.stream("GET", url) as response:
+            if response.status_code == 404 and response.headers.get("x-error-code") == "EntryNotFound":
+                return "legacy"
+            if response.status_code != 200:
+                logger.info("inference scene stamp: status=%s dataset=%s", response.status_code, dataset)
+                return None
+            declared = response.headers.get("content-length")
+            try:
+                if declared is not None and int(declared) > SCENE_STAMP_MAX_BYTES:
+                    return None
+            except ValueError:
+                pass
+            buf = bytearray()
+            for chunk in response.iter_bytes():
+                buf += chunk
+                if len(buf) > SCENE_STAMP_MAX_BYTES or time.monotonic() > deadline:
+                    return None
+    return _scene_profile_of_stamp(bytes(buf))
+
+
+def dataset_scene_profile(row):
+    """'tower_v1' | 'legacy' | None: the scene camera the training's dataset was
+    recorded with, read at its pinned `training_params.dataset_revision` (40 hex;
+    else the v3.0 tag). Definite answers are cached in a bounded LRU, per pinned
+    revision without expiry and per tag for MODEL_CACHE_TTL_S; None never is.
+    Never raises (a failure is None: the page shows no warning)."""
+    dataset = row.get("dataset_name") if isinstance(row, dict) else None
+    if not isinstance(dataset, str) or not DATASET_REPO_RE.fullmatch(dataset):
+        return None
+    params = row.get("training_params")
+    revision = params.get("dataset_revision") if isinstance(params, dict) else None
+    pinned = isinstance(revision, str) and SHA_RE.fullmatch(revision) is not None
+    key = (dataset, revision if pinned else SCENE_STAMP_TAG)
+    with _scene_lock:
+        hit = _scene_cache.get(key)
+        if hit is not None and (pinned or time.monotonic() - hit[0] < MODEL_CACHE_TTL_S):
+            _scene_cache.move_to_end(key)
+            return hit[1]
+    try:
+        profile = _fetch_scene_profile(*key)
+    except Exception as exc:  # noqa: BLE001 - transport errors; never log str(exc)
+        logger.info("inference scene stamp lookup failed: %s dataset=%s", type(exc).__name__, dataset)
+        return None
+    if profile is not None:
+        with _scene_lock:
+            _scene_cache[key] = (time.monotonic(), profile)
+            _scene_cache.move_to_end(key)
+            while len(_scene_cache) > SCENE_CACHE_MAX:
+                _scene_cache.popitem(last=False)
+    return profile
+
+
 # ------------------------------------------------------------ RPC wrappers
 
 
@@ -561,5 +673,5 @@ __all__ = [
     "MODEL_REPO_RE", "SESSION_ID_RE", "MODAL_SESSION_ID_RE", "EDGE_TOKEN_RE",
     "END_REASON_DE", "EXIT_REASON", "new_token", "edge_seal", "edge_open", "visible_training",
     "resolve_model", "summary_from_config", "create_reservation", "attach_edge", "arm", "end_session",
-    "client_heartbeat", "usage", "log_ended_sessions",
+    "client_heartbeat", "usage", "log_ended_sessions", "dataset_scene_profile",
 ]

@@ -73,14 +73,6 @@ BYTE_CASES = {
     'not utf-8': b'\xff\xfe\x00',
     'latin-1 text': '{"v":1,"scene_camera_profile":"tower_v1","profile_id":null,"platform":"pi","ä":1}'.encode('latin-1'),
 }
-# Where the two readers deliberately disagree, each with its reason. An entry that
-# no longer disagrees fails the test (remove it then).
-KNOWN_DIVERGENCES = {
-    'a profile id with a trailing newline': (
-        "scene_provenance._PROFILE_ID is '^[0-9a-f]{12}$' used with match, and '$' also matches before a "
-        'trailing newline, so the robot reads that stamp as tower_v1; the API uses fullmatch and answers '
-        'None (no warning). The robot writes no such stamp (write_stamp validates first).'),
-}
 
 _API_CHILD = r'''
 import json, sys
@@ -160,9 +152,8 @@ class SceneProvenanceLockstep(BoundedTestCase):
             capture_output=True, text=True, encoding='utf-8', timeout=120, env=env, cwd=str(REPO_ROOT))
         self.assertEqual(proc.returncode, 0, proc.stderr[-3000:])
         api = json.loads(proc.stdout.strip().splitlines()[-1])
-        diverging = {name for name in bodies if robot[name] != api[name]}
-        self.assertEqual(diverging, set(KNOWN_DIVERGENCES),
-                         {name: (robot[name], api[name]) for name in diverging ^ set(KNOWN_DIVERGENCES)})
+        diverging = {name: (robot[name], api[name]) for name in bodies if robot[name] != api[name]}
+        self.assertEqual(diverging, {})
         # the table reaches every verdict
         self.assertEqual({robot[n] for n in bodies}, {'tower_v1', 'legacy', None})
 

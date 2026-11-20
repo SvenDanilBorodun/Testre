@@ -89,6 +89,7 @@ def test_a_valid_stamp_is_tower(tmp_path):
     ('unknown value', {**TOWER, 'scene_camera_profile': 'tower_v2'}),
     ('profile as a list', {**TOWER, 'scene_camera_profile': ['tower_v1']}),
     ('a bad profile id', {**TOWER, 'profile_id': '3EFCA10F3A05'}),
+    ('a profile id with a trailing newline', {**TOWER, 'profile_id': '3efca10f3a05\n'}),
     ('an unknown platform', {**TOWER, 'platform': 'mac'}),
     ('a missing key', {k: v for k, v in TOWER.items() if k != 'platform'}),
     ('an extra key', {**TOWER, 'extra': 1}),
@@ -151,7 +152,8 @@ def test_the_writer_keeps_the_key_order_compact(tmp_path):
     assert not (root / '.edubotics_scene_camera.json.tmp').exists()
 
 
-@pytest.mark.parametrize('profile_id,platform', [('3EFCA10F3A05', 'pi'), ('x', None), (None, 'mac'), (12, None)])
+@pytest.mark.parametrize('profile_id,platform', [
+    ('3EFCA10F3A05', 'pi'), ('3efca10f3a05\n', 'pi'), ('x', None), (None, 'mac'), (12, None)])
 def test_the_writer_refuses_values_outside_the_schema(tmp_path, profile_id, platform):
     root = _dataset(tmp_path / 'ds')
     before = _tree(root)
@@ -225,6 +227,7 @@ def _raises():
     (lambda: 'tower_v1', None),
     (lambda: {'profile': 'tower_v2', 'profile_id': None, 'platform': None}, None),
     (lambda: {'profile': 'tower_v1', 'profile_id': 'NOT-HEX', 'platform': None}, None),
+    (lambda: {'profile': 'tower_v1', 'profile_id': '3efca10f3a05\n', 'platform': 'pi'}, None),
     (lambda: {'profile': 'tower_v1', 'profile_id': None, 'platform': 'mac'}, None),
     (lambda: {'profile': None, 'profile_id': None, 'platform': None}, None),
     (lambda: {'profile': 'legacy', 'profile_id': None, 'platform': None}, 'legacy'),

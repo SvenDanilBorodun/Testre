@@ -45,7 +45,8 @@ PLATFORMS = ('windows', 'pi')
 # not ours and is never read whole.
 STAMP_MAX_BYTES = 4096
 _STAMP_KEYS = ('v', 'scene_camera_profile', 'profile_id', 'platform')
-_PROFILE_ID = re.compile(r'^[0-9a-f]{12}$')
+# fullmatch only: `$` would also accept a trailing newline.
+_PROFILE_ID = re.compile(r'[0-9a-f]{12}')
 # In the dataset ROOT, outside meta/: a crash between write and rename never
 # leaves a file the upload sends or the meta digest hashes.
 _TMP_NAME = '.edubotics_scene_camera.json.tmp'
@@ -61,7 +62,7 @@ def _unknown():
 
 
 def _valid_profile_id(value) -> bool:
-    return value is None or (type(value) is str and bool(_PROFILE_ID.match(value)))
+    return value is None or (type(value) is str and bool(_PROFILE_ID.fullmatch(value)))
 
 
 def _valid_platform(value) -> bool:

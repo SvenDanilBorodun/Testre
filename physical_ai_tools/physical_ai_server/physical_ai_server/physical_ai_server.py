@@ -8282,7 +8282,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         THE TOWER CALIBRATION TAKES PRECEDENCE (spec 40 S4, WP-13): when the
         calibration service's start gate approved this run, the camera is the
         tower camera's own picture (``scene_studio``) with the arm check's lens
-        and the mat check's pose, and ``image_size`` (guard G4). Under the
+        and the mat check's pose, ``image_size`` (guard G4) and the stored arm
+        check's ``droop_envelope_rad`` (the arrival trim, S6.6). Under the
         tower's scope (any statement but ``legacy``) the legacy YAMLs and their
         ground-truth correction are not read."""
         from pathlib import Path
@@ -8304,6 +8305,19 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             result['scene_intrinsics'] = tower['intrinsics']
             result['scene_extrinsics'] = tower['T_cam_to_w']
             result['image_size'] = tower['image_size']
+            # The arrival trim (spec 40 S6.6) runs only with a valid arm check:
+            # its droop envelope (one value per arm joint) bounds the trim.
+            from physical_ai_server.workflow.autocal import store
+            profile_id = getattr(getattr(self, '_arm_profile', None), 'profile_id', None)
+            try:
+                got = store.Store(str(calib_dir)).read(profile_id) if profile_id else None
+            except Exception as e:  # noqa: BLE001 — an unreadable arm check is no arm check
+                self.get_logger().warning(f'arm check read for the arrival trim failed: {e}')
+                got = None
+            envelope = (got.data.get('droop_envelope_rad')
+                        if got is not None and got.status == 'ok' else None)
+            if isinstance(envelope, (list, tuple)):
+                result['droop_envelope_rad'] = list(envelope)
         if legacy and scene_intrinsic_path.exists():
             try:
                 fs = cv2.FileStorage(str(scene_intrinsic_path), cv2.FILE_STORAGE_READ)

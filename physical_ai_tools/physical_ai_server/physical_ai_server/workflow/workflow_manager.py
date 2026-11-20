@@ -404,6 +404,11 @@ class WorkflowContext:
     # None (the legacy calibration, the simulator): then a frame of any size
     # is looked at. perception_blocks refuses a frame of another size in German.
     scene_image_size: tuple | None = None
+    # The droop envelope of this rig's valid arm check (one value per arm joint,
+    # rad), handed in only with a run's tower calibration, or None (no arm
+    # check, legacy, the simulator): motion._trim_arrival (spec 40 S6.6) runs
+    # only with it. Set once in start(), never mutated.
+    arm_trim_envelope_rad: list | None = None
 
 
 MAX_WORKFLOW_JSON_BYTES = 256 * 1024  # 256 KiB; see plan §2.5
@@ -1175,6 +1180,8 @@ class WorkflowManager:
                     # W5 — ground-truth accuracy correction (None/0.0 when never run).
                     xy_correction=calib.get('xy_correction'),
                     yaw_bias_rad=float(calib.get('yaw_bias_rad', 0.0) or 0.0),
+                    # The arm check's droop envelope (the arrival trim; None → no trim).
+                    arm_trim_envelope_rad=calib.get('droop_envelope_rad'),
                     should_stop=self._stop_event.is_set,
                     log=lambda msg: self._emit_status({'log_message': msg}),
                     emit_detections=lambda dets: self._emit_status({'detections': dets}),

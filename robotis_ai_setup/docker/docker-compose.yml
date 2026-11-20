@@ -480,6 +480,12 @@ services:
       - EDUBOTICS_OUTPUT_MAX_PER_S=${EDUBOTICS_OUTPUT_MAX_PER_S:-5}
       - EDUBOTICS_GRASP_RETRY=${EDUBOTICS_GRASP_RETRY:-1}
       - EDUBOTICS_GRASP_SETTLE_S=${EDUBOTICS_GRASP_SETTLE_S:-0.3}
+      # Arrival trim (spec 40 S6.6): before the gripper closes in „aufnehmen" /
+      # „Greife", joints 2-4 are commanded once more by what the arm still lacks
+      # (raise-only, at most two rounds; only with a valid arm check, never in
+      # the simulator). `0` is the one-variable rollback. Read by
+      # workflow/handlers/motion.py.
+      - EDUBOTICS_ARM_TRIM=${EDUBOTICS_ARM_TRIM:-1}
       # Teleop force/collision e-stop (Rule §2 software guard, teleop-only). Read by the
       # collision monitor in safety/collision_monitor.py + collision_detector.py. The follower
       # is MIXED-MODEL: dxl11-13 (XL430-W250) expose 'Present Load', dxl14-15 (XL330-M288)

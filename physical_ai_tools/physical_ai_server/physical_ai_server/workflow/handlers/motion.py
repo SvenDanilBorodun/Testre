@@ -2897,6 +2897,183 @@ def compute_grasp_roll(ctx, x: float, y: float, tag_yaw: float) -> float:
     return grasp_joint5(base, float(tag_yaw), GRASP_ROLL_RAD)
 
 
+# ── The arrival trim (spec 40 S6.6; decisions C8, D33, D34, D42; WP-14) ──────
+# Before the gripper closes in ``_execute_pickup`` the MEASURED joints 2..4 are
+# compared with the model pose the arm was commanded to, and what the arm still
+# lacks is commanded once more, at most ARM_TRIM_ROUNDS times: a sagging arm
+# closes where the calibrated model put the object, not a few millimetres low.
+# Each round waits ARM_TRIM_SETTLE_S (stop-polled; Stop raises), reads the
+# source ``check_grasp_held`` reads, and ends the trim when every error is within
+# ARM_TRIM_DONE_RAD (two encoder ticks). A round is skipped — and the trim ends
+# with one German [WARNUNG] — when
+#   (a) an error exceeds ``arm_trim_bounds``: larger than anything the arm check
+#       saw in free space, so something holds the arm; or
+#   (b) the calibrated model says the correction would LOWER the fingertip by
+#       more than ARM_TRIM_LOWER_MAX_M (raise-only, C8: a finger resting on an
+#       object is never pushed down).
+# The total correction per joint is clamped to the same bound, and never past
+# the arm model's joint limits. ``ctx.last_full_joints`` keeps the MODEL pose;
+# the close and the lift start from what was really commanded (a leg from the
+# model pose would let the arm sag back before the jaws close).
+#
+# Decision D33/D42: ``autocal.arm_check.DROOP_ENVELOPE_MAX_RAD`` × 1.4 stays at
+# or below ARM_TRIM_CAP_RAD, so bound (a) never stands in a free arm's way for
+# an arm without the droop warning; an arm with it may skip at a far-edge grasp
+# (``test_arrival_trim.py``).
+#
+# Never in the simulator, only with a valid arm check (``ctx.arm_trim_envelope_rad``,
+# the stored envelope the node hands a run the calibration gate approved), and
+# ``EDUBOTICS_ARM_TRIM=0`` is the one-variable rollback. It runs inside
+# ``_execute_pickup``'s motion-lock hold and takes none of its own.
+ARM_TRIM_ENV = 'EDUBOTICS_ARM_TRIM'
+ARM_TRIM_ROUNDS = 2
+ARM_TRIM_SETTLE_S = 0.25
+ARM_TRIM_DONE_RAD = 0.0031          # two ticks of 2π/4096 (0.00307 rad)
+ARM_TRIM_ENVELOPE_FACTOR = 2.0
+ARM_TRIM_ENVELOPE_MARGIN_RAD = 0.010
+ARM_TRIM_CAP_RAD = 0.15
+ARM_TRIM_LOWER_MAX_M = 0.0005
+# Requested duration of one correction leg (the velocity floor may extend it).
+ARM_TRIM_MOVE_S = 0.5
+# Joints 2..4 (indices into the arm vector); joints 1 and 5 are never trimmed.
+_ARM_TRIM_JOINTS = (1, 2, 3)
+_ARM_TRIM_SKIPPED_DE = ('[WARNUNG] Der Arm ist nicht genau angekommen – '
+                        'die Feinkorrektur wurde ausgelassen.')
+
+
+def arm_trim_enabled() -> bool:
+    """``EDUBOTICS_ARM_TRIM`` read when the pickup runs: unset or blank is on,
+    ``0`` is the rollback (a malformed value warns and stays on)."""
+    return _safe_float(ARM_TRIM_ENV, 1.0) != 0.0
+
+
+def arm_trim_bounds(envelope) -> tuple[float, float, float] | None:
+    """Bound (a) per trimmed joint (2..4): ``min(2 × envelope[j] + 0.010,
+    ARM_TRIM_CAP_RAD)`` from the arm check's stored droop envelope (one value per
+    arm joint). ``None`` — no trim — for anything that is not a finite,
+    non-negative envelope covering joints 2..4."""
+    if isinstance(envelope, (str, bytes, dict)):
+        return None
+    try:
+        values = [float(envelope[j]) for j in _ARM_TRIM_JOINTS]
+    except (TypeError, ValueError, IndexError):
+        return None
+    if not all(math.isfinite(v) and v >= 0.0 for v in values):
+        return None
+    return tuple(min(ARM_TRIM_ENVELOPE_FACTOR * v + ARM_TRIM_ENVELOPE_MARGIN_RAD, ARM_TRIM_CAP_RAD)
+                 for v in values)
+
+
+def _trim_settle(ctx) -> None:
+    """Wait ARM_TRIM_SETTLE_S in ``_MOTION_LOCK_POLL_S`` slices; Stop raises."""
+    should_stop = getattr(ctx, 'should_stop', None)
+    deadline = time.monotonic() + ARM_TRIM_SETTLE_S
+    while True:
+        if callable(should_stop) and should_stop():
+            raise WorkflowError('Workflow wurde gestoppt.')
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            return
+        time.sleep(min(_MOTION_LOCK_POLL_S, remaining))
+
+
+def _trim_readback(ctx, n: int) -> list[float] | None:
+    """The measured arm joints (``n`` finite values), or ``None``."""
+    try:
+        joints = ctx.get_follower_joints()
+        if not joints or len(joints) < n:
+            return None
+        values = [float(v) for v in joints[:n]]
+    except Exception:  # noqa: BLE001 — no readback is no trim
+        return None
+    return values if all(math.isfinite(v) for v in values) else None
+
+
+def _model_fingertip_z(ik, arm_q) -> float | None:
+    """The calibrated model's fingertip height at the arm joints ``arm_q``:
+    ``fk`` plus ``tool_tip_below_ee_m`` along the tool's world approach axis
+    (``home_planner.pose_floor_clearance``'s closed fingertip). ``None`` when the
+    model cannot answer."""
+    try:
+        got = ik.fk([float(v) for v in arm_q])
+        if got is None:
+            return None
+        rot, tcp = got
+        local = [float(v) for v in ik.approach_axis_local]
+        norm = math.sqrt(sum(v * v for v in local))
+        down = sum(float(rot[2][k]) * local[k] for k in range(3)) / norm
+        z = float(tcp[2]) + float(getattr(ik, 'tool_tip_below_ee_m', 0.0) or 0.0) * down
+    except Exception:  # noqa: BLE001 — an unjudgeable correction is never published
+        return None
+    return z if math.isfinite(z) else None
+
+
+def _trim_arrival(ctx, model_q: list[float], tempo: float | None = None) -> list[float]:
+    """The arrival trim (see the block comment above) at the model pose
+    ``model_q`` (arm joints + gripper). Returns the full joint vector the arm is
+    commanded to now: ``model_q`` itself when nothing was published."""
+    if getattr(ctx, 'simulated', False) or not arm_trim_enabled():
+        return model_q
+    bounds = arm_trim_bounds(getattr(ctx, 'arm_trim_envelope_rad', None))
+    n = _n(ctx)
+    if (bounds is None or n <= max(_ARM_TRIM_JOINTS)
+            or not callable(getattr(ctx, 'get_follower_joints', None))):
+        return model_q
+    ik = getattr(ctx, 'ik', None)
+    try:
+        limits = [(float(lo), float(hi)) for lo, hi in ik.joint_limits]
+    except Exception:  # noqa: BLE001 — no stated limits: the bound alone clamps
+        limits = []
+    model = [float(v) for v in model_q]
+    command = model_q
+    errors_log: list[list[float]] = []
+    applied, skipped, rounds = False, None, 0
+    while rounds < ARM_TRIM_ROUNDS:
+        rounds += 1
+        _trim_settle(ctx)
+        measured = _trim_readback(ctx, n)
+        if measured is None:
+            skipped = 'no_readback'
+            break
+        errors = [model[j] - measured[j] for j in _ARM_TRIM_JOINTS]
+        errors_log.append([round(e, 5) for e in errors])
+        if all(abs(e) <= ARM_TRIM_DONE_RAD for e in errors):
+            break
+        if any(abs(e) > b for e, b in zip(errors, bounds)):
+            skipped = 'bound'
+            break
+        new = [float(v) for v in command]
+        for j, e, b in zip(_ARM_TRIM_JOINTS, errors, bounds):
+            total = max(-b, min(b, float(command[j]) + e - model[j]))
+            value = model[j] + total
+            if j < len(limits):
+                value = max(limits[j][0], min(limits[j][1], value))
+            new[j] = value
+        if all(new[j] == float(command[j]) for j in _ARM_TRIM_JOINTS):
+            break                                   # nothing left to command (bound or limit)
+        after = list(measured)
+        for j in _ARM_TRIM_JOINTS:
+            after[j] += new[j] - float(command[j])
+        z_now, z_after = _model_fingertip_z(ik, measured), _model_fingertip_z(ik, after)
+        if z_now is None or z_after is None:
+            skipped = 'unjudgeable'
+            break
+        if z_after < z_now - ARM_TRIM_LOWER_MAX_M:
+            skipped = 'lowers'
+            break
+        _publish_motion_t(ctx, command, new, ARM_TRIM_MOVE_S, tempo)
+        command = new
+        applied = True
+    _logger.info('arrival trim: errors_rad=%s rounds=%d applied=%s%s', errors_log, rounds, applied,
+                 f' skipped={skipped}' if skipped else '')
+    if skipped in ('bound', 'lowers', 'unjudgeable'):
+        try:
+            ctx.log(_ARM_TRIM_SKIPPED_DE)
+        except Exception:  # noqa: BLE001 — diagnostics never gate motion
+            pass
+    return command
+
+
 def _execute_pickup(
     ctx,
     grasp_xyz: tuple[float, float, float],
@@ -2922,6 +3099,9 @@ def _execute_pickup(
     ``unreachable_de``: the ``pickup`` block names its Ziel or point (B8); the
     composite „Greife" passes nothing and keeps the object sentence. ``label``:
     how the refinement warning (D42) names the grasp point.
+
+    Between the descend and the close runs the arrival trim
+    (:func:`_trim_arrival`, spec 40 S6.6).
     """
     grasp_arm_q, above_arm_q = _solve_grasp_and_approach(
         ctx, grasp_xyz, approach_height_m, roll=roll, unreachable_de=unreachable_de,
@@ -2959,14 +3139,21 @@ def _execute_pickup(
         _publish_motion_t(ctx, above_q, grasp_q, DEFAULT_GRASP_DURATION_S, tempo)
         ctx.last_full_joints = grasp_q
         ctx.last_arm_joints = grasp_arm_q
+        # ARRIVAL TRIM (spec 40 S6.6): raise-only, at most two rounds, inside
+        # this hold. ctx.last_full_joints stays the MODEL pose; the close and
+        # the lift start from what was really commanded (the model pose itself
+        # whenever nothing was trimmed).
+        commanded_arm_q = _trim_arrival(ctx, grasp_q, tempo)[:_n(ctx)]
         # Gripper-only close — EXEMPT (raw).
-        _publish_motion_t(ctx, grasp_q, closed_q, DEFAULT_GRIPPER_DURATION_S, tempo)
+        _publish_motion_t(ctx, commanded_arm_q + [_gripper_open(ctx)],
+                          commanded_arm_q + [close_rad], DEFAULT_GRIPPER_DURATION_S, tempo)
         ctx.last_full_joints = closed_q
         # Record the COMMANDED close (the recipe's gripper_close_rad on the
         # named-object path) for the per-object grasp-held threshold.
         ctx.last_commanded_close_rad = close_rad
         # LIFT-OUT (carry up to the hover) — TRANSIT, zone-avoided.
-        safe_move(ctx, closed_q, lift_q, DEFAULT_APPROACH_DURATION_S, roll=roll, tempo=tempo)
+        safe_move(ctx, commanded_arm_q + [close_rad], lift_q, DEFAULT_APPROACH_DURATION_S,
+                  roll=roll, tempo=tempo)
         ctx.last_arm_joints = lift_arm_q
         ctx.last_full_joints = lift_q
     finally:

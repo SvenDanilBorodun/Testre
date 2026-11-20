@@ -5370,7 +5370,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     'der Kalibrierung abschließen, bevor der Arm nach unten oder zu '
                     'einem Ziel gefahren wird.')
             target = _motion.table_ziel_hover(shim, (x, y, table_z), roll)
-        return _motion._solve_or_raise(shim, target, roll=roll)
+        arm_q = _motion._solve_or_raise(shim, target, roll=roll)
+        # D42: the arm model's pose misses this target by more than its
+        # acceptance (the sector edge) — the drive still goes, the student hears
+        # how close it gets. One target per call, so once.
+        from physical_ai_server.workflow import arm_model as _arm_model
+        warning = _arm_model.refinement_warning(ik, 'Ziel')
+        if warning is not None:
+            shim.log(warning)
+        return arm_q
 
     def _compute_jog_target(self, mode, request, joints):
         """Resolve a jog request into the achieved 6-joint vector + the FK world
@@ -7576,10 +7584,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         publisher → SimArm.publish, perception → SimPerception, joints → SimArm,
         scene frame → a 1x1 non-None dummy (only the None-check matters), scene
         age → 0.0, calibration → empty dict (the critical bypass so
-        _attach_named_world preserves the preset world_xyz_m). The IK + object
-        catalog are the REAL ones, and emit_status / on_finished are reused so
-        the React editor, the on_workflow mutex, and status all behave
-        identically to a real run."""
+        _attach_named_world preserves the preset world_xyz_m). The IK is the
+        simulator's own arm model (``_build_sim_ik_solver``: the plate's lift
+        and the joint-1 window, never this rig's arm check), for SimArm AND the
+        manager; the object catalog is the REAL one, and emit_status /
+        on_finished are reused so the React editor, the on_workflow mutex, and
+        status all behave identically to a real run."""
         if self.sim_workflow_manager is not None:
             return self.sim_workflow_manager
         try:
@@ -7601,12 +7611,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         _profile = getattr(self, '_arm_profile', None)
         _home = getattr(_profile, 'home_joints_rad', None)
         _g_open = getattr(_profile, 'gripper_open_rad', None)
+        # A node without the simulator builder (a test's stub) keeps one solver.
+        sim_ik_factory = getattr(self, '_build_sim_ik_solver', self._build_ik_solver)
         sim_arm = SimArm(
             # Real-time playback: each chunk's waypoints go out at their own
             # time_from_start from SimArm's player thread, the way the rig's
             # JointTrajectoryController plays them — not as one burst per second.
             frame_sink=self._publish_sim_frame,
-            ik=self._build_ik_solver(),
+            ik=sim_ik_factory(),
             objects=list(getattr(self, '_sim_objects', []) or []),
             num_arm_joints=self._profile_n(),
             home_full_joints=(
@@ -7639,7 +7651,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             sim_table_z = 0.0
         self.sim_workflow_manager = WorkflowManager(
             publisher=sim_arm.publish,
-            ik_factory=self._build_ik_solver,
+            ik_factory=sim_ik_factory,
             perception_factory=lambda: SimPerception(
                 list(getattr(self, '_sim_objects', []) or []),
                 self._load_object_catalog_tolerant(),
@@ -7758,29 +7770,53 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self.get_logger().warning(f'Sim object catalog load failed: {e}')
             return None
 
-    def _build_ik_solver(self):
-        """Return the arm's IK solver, built ONCE per server lifetime.
+    def _build_profile_ik(self, profile):
+        """The profile's own solver, through its ``build_ik`` factory (the
+        kinematics seam — a genuinely new arm plugs its solver in there). For
+        OMX the closed-form analytical IKSolver: exact geometry with the OMX-F
+        kinematics baked in, so it needs NO ``/robot_description`` fetch and is
+        ALWAYS available. If the URDF parameter happens to be local we pass it
+        so the solver can verify its baked constants; we never block on a
+        cross-node fetch."""
+        urdf_string = None
+        if self.has_parameter('robot_description'):
+            urdf_string = self.get_parameter('robot_description').value or None
+        return profile.build_ik(urdf_string=urdf_string)
 
-        Construction goes through the resolved ArmProfile's ``build_ik`` factory
-        (the kinematics seam — a genuinely new arm plugs its solver in there).
-        For OMX this returns the closed-form analytical IKSolver: exact geometry
-        with the OMX-F kinematics baked in, so it needs NO ``/robot_description``
-        fetch and is ALWAYS available (the old "robot_description not available;
-        IK disabled" failure mode is gone). If the URDF parameter happens to be
-        local we pass it so the solver can verify its baked constants; we never
-        block on a cross-node fetch."""
+    def _build_ik_solver(self):
+        """Return the REAL robot's arm model, built ONCE per server lifetime:
+        the profile's solver seen in the tower kit's world (``arm_model.
+        CalibratedIK``: the plate's lift, this rig's arm check — joint offsets,
+        axis tilts, mat slopes — read again whenever a new one is stored, the
+        joint-1 window and the contract's fingertip offset; spec 40 S6.1)."""
         cached = getattr(self, '_ik_solver', None)
         if cached is not None:
             return cached
         try:
-            urdf_string = None
-            if self.has_parameter('robot_description'):
-                urdf_string = self.get_parameter('robot_description').value or None
+            from physical_ai_server.workflow import arm_model
             profile = getattr(self, '_arm_profile', None) or robot_profiles.resolve(None)
-            self._ik_solver = profile.build_ik(urdf_string=urdf_string)
+            calib_dir = os.environ.get('EDUBOTICS_CALIB_DIR', '/root/.cache/edubotics/calibration')
+            self._ik_solver = arm_model.for_robot(
+                self._build_profile_ik(profile), profile.profile_id, calib_dir)
             return self._ik_solver
         except Exception as e:
             self.get_logger().error(f'IKSolver init failed: {e}')
+            return None
+
+    def _build_sim_ik_solver(self):
+        """Return the SIMULATOR's arm model, built once: the same solver with
+        the plate's lift and the joint-1 window only — never this rig's arm
+        check, and the solver's own fingertip constant (spec 40 S6.1, N12)."""
+        cached = getattr(self, '_sim_ik_solver', None)
+        if cached is not None:
+            return cached
+        try:
+            from physical_ai_server.workflow import arm_model
+            profile = getattr(self, '_arm_profile', None) or robot_profiles.resolve(None)
+            self._sim_ik_solver = arm_model.for_simulator(self._build_profile_ik(profile))
+            return self._sim_ik_solver
+        except Exception as e:
+            self.get_logger().error(f'Simulator IKSolver init failed: {e}')
             return None
 
     def _build_perception(self):
@@ -7817,8 +7853,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         return (float(t[0]), float(t[1]), float(t[2]))
 
     def _load_workflow_calibration(self):
-        """Load scene intrinsics + extrinsic + the two table-height keys for
-        the workflow runtime. Returns a dict consumed by ``WorkflowContext``.
+        """Load scene intrinsics + extrinsic + the three table keys for the
+        workflow runtime. Returns a dict consumed by ``WorkflowContext``.
 
         WS4 (2026-06-17): the scene extrinsic is now the single-shot
         board-on-table transform; it is still persisted to
@@ -7827,21 +7863,19 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         — this has always been scene-only, which is why dropping gripper
         calibration is safe for the runtime).
 
-        DUAL Z-KEY (don't conflate — see CLAUDE.md):
-        - ``board_table_z`` = the table SURFACE height (written by the extrinsic
-          solve, default 0). This is the plane the camera ray must intersect to
-          recover an object's (x, y) — the object sits ON the surface, NOT at the
-          gripper's grasp height. Used by the named-object tag-pose projection.
-        - ``z_table`` = the MEASURED end-effector-frame grasp height (written ONLY
-          by the touch-off, ~finger-length ABOVE the surface). This is the
-          DESCEND target for motion.pickup — NOT a projection plane. NO 0.0
-          fallback: a missing ``z_table`` leaves it None so grasp correctly
-          refuses ("Tisch vermessen zuerst").
-
-        ``table_plane`` (a, b, c) is the MEASURED EE-frame tilt from the touch-off;
-        it rides along for motion's descend, NOT for object projection (it is
-        offset above the surface, so projecting objects onto it reintroduces the
-        lateral error on a tilted camera that board_table_z avoids)."""
+        THE TABLE IS THE FIXTURE'S, by design (spec 40 S5; decision D29: the
+        touch-off no longer sets it). In Roboter Studio's world the mat lies
+        flat — the arm model (``_build_ik_solver``) carries its tilt — so every
+        real run gets the contract's constants. DUAL Z-KEY (don't conflate):
+        - ``board_table_z`` = the mat's top, ``MAT_THICKNESS_M``: the plane the
+          camera ray is intersected with to recover an object's (x, y) — the
+          object sits ON the surface. Used by the named-object projection.
+        - ``z_table`` = the end effector's height when the fingertips touch the
+          mat, ``MAT_THICKNESS_M + FINGERTIP_BELOW_EE_M[arm]``: the DESCEND
+          target for motion.pickup — NOT a projection plane.
+        - ``table_plane`` = ``None``: the plane is horizontal.
+        A profile the contract does not know gets none of the three, so grasps
+        refuse rather than guess."""
         from pathlib import Path
         import os
         import cv2
@@ -7880,33 +7914,21 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             try:
                 fs = cv2.FileStorage(str(scene_handeye_path), cv2.FILE_STORAGE_READ)
                 T = fs.getNode('transform').mat()
-                z_node = fs.getNode('z_table')
-                # No 0.0 fallback: leave z_table absent if the YAML lacks it.
-                z_table = float(z_node.real()) if not z_node.empty() else None
-                # board_table_z = the SURFACE height (the projection plane).
-                # Written by the extrinsic solve, so present whenever the
-                # extrinsic is. No 0.0 fallback here either — absence means an
-                # old YAML; the projection then has no plane and refuses loudly.
-                board_z_node = fs.getNode('board_table_z')
-                board_table_z = (
-                    float(board_z_node.real()) if not board_z_node.empty() else None
-                )
-                plane_node = fs.getNode('table_plane')
-                plane_mat = plane_node.mat() if not plane_node.empty() else None
                 fs.release()
                 if T is not None:
                     result['scene_extrinsics'] = T
-                if z_table is not None:
-                    result['z_table'] = z_table
-                if board_table_z is not None:
-                    result['board_table_z'] = board_table_z
-                if plane_mat is not None and plane_mat.size == 3:
-                    flat = [float(v) for v in plane_mat.reshape(-1)]
-                    result['table_plane'] = (flat[0], flat[1], flat[2])
             except Exception as e:
                 self.get_logger().warning(
                     f'scene_handeye.yaml load failed: {e}'
                 )
+        from physical_ai_server.workflow import scene_fixture
+        profile = getattr(self, '_arm_profile', None) or robot_profiles.resolve(None)
+        arm = scene_fixture.arm_key(getattr(profile, 'profile_id', None))
+        if arm is not None:
+            result['board_table_z'] = scene_fixture.MAT_THICKNESS_M
+            result['z_table'] = (scene_fixture.MAT_THICKNESS_M
+                                 + scene_fixture.FINGERTIP_BELOW_EE_M[arm])
+            result['table_plane'] = None
         # W5 — ground-truth XY correction + yaw bias (identity / 0 when the
         # student never ran the accuracy-verify step). perception_blocks
         # (_attach_named_world) + mark_destination apply these AFTER projecting

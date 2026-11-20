@@ -113,6 +113,13 @@ def test_the_scalar_constants_are_the_specs():
         assert getattr(sf, name) == value, name
 
 
+def test_the_fingertip_offset_is_the_value_the_build_ships():
+    """WP-11 enters WP-M1's number here. Decision D86: the release ships the
+    provisional mesh value 0.0026 for the OMX (the owner's RG-0 measurement
+    replaces it in a follow-up release); the V1's 0.0 is exact on the meshes."""
+    assert _sf().FINGERTIP_BELOW_EE_M == {'omx': 0.0026, 'v1': 0.0}
+
+
 def test_the_module_imports_the_standard_library_only():
     """Read by object_catalog (stdlib only) and by the setup suite's lockstep test."""
     tree = ast.parse(_SRC.read_text(encoding='utf-8'))

@@ -150,6 +150,11 @@ richtigen Größe (Standard **24 mm**; per `EDUBOTICS_TAG_SIZE_M` änderbar —
 Bogen und Rig-Einstellung müssen übereinstimmen). Mit „Tatsächliche Größe"
 drucken und **nachmessen**.
 
+Die Tag-IDs **400 bis 586** gehören der Kalibrierung (Matten, Turm-Marker,
+Kalibrier-Ziele); `generate_apriltags.py` verweigert sie in jedem Modus, auch mit
+`--allow-reserved`. Ihre Druckvorlagen stehen im Abschnitt „Turm-Kit:
+Druckdateien“ unten.
+
 - Beim Ausschneiden den **weißen Rand um das schwarze Quadrat stehen lassen**
   (die Erkennung braucht ihn).
 - Jeden Tag **flach auf die OBERSEITE** des passenden Objekts kleben (nicht
@@ -213,3 +218,51 @@ Wenn etwas hakt, vor der Stunde lösen — nicht während 24 Schülerinnen zusch
   Rig-Einstellung (`EDUBOTICS_TAG_SIZE_M`) — Tag neu drucken/aufkleben.
 
 Issues über das EduBotics-Repository melden.
+
+## Turm-Kit: Druckdateien und Bestelltext (für die Kit-Herstellung)
+
+Die Turm-Kits werden mit fertig gedruckten Matten und Etiketten ausgeliefert;
+Schulen drucken davon nichts selbst, und ein gekachelter Druck auf
+Büro-Druckern ist kein vorgesehener Weg. Alle Maße kommen aus dem
+Fixture-Vertrag (`physical_ai_server/workflow/scene_fixture.py`); die Dateien
+liegen in `classroom_kit/`:
+
+| Datei | Inhalt | erzeugt mit |
+|---|---|---|
+| `scene_mat_v1.pdf` | Szenen-Matte V1, Seite = Blatt 470 × 830 mm | `python3 tools/generate_scene_mat.py --arm v1` |
+| `scene_mat_omx.pdf` | Szenen-Matte OMX, Seite = Blatt 380 × 660 mm | `python3 tools/generate_scene_mat.py --arm omx` |
+| `calibration_target_v1.pdf` | Etikett des Kalibrier-Ziels V1 (80 × 80 mm, Tags 500–508), A4 | `python3 tools/generate_calibration_target.py --arm v1` |
+| `calibration_target_omx.pdf` | Etikett des Kalibrier-Ziels OMX (80 × 80 mm, Tags 520–528), A4 | `python3 tools/generate_calibration_target.py --arm omx` |
+| `fixture_tags.pdf` | Turm-Marker 480 und 481 (je 35 × 35 mm, Maß der Taschen im Turm-Fuß), A4 | `python3 tools/generate_calibration_target.py --fixture-tags` |
+
+Jedes Blatt nennt die Kit-Kennung `tower_v1` und die ersten 8 Zeichen der
+Prüfsumme des Vertrags. Ändert sich der Vertrag (zum Beispiel, wenn der
+gemessene OMX-Fingerspitzen-Versatz eingetragen wird), alle fünf Dateien neu
+erzeugen. Die Matten werden erst nach der Freigabe der Probedrucke (Rig-Gate
+RG-MAT) in Auftrag gegeben: Der ausgesparte Turm-Bereich der Arbeitsfläche darf
+bis dahin nur noch wachsen.
+
+**Bestelltext für die Druckerei – Matten** (je Kit eine Matte des passenden Arms):
+
+> Plott der beiliegenden PDF-Datei im Maßstab 100 % – die Seitengröße ist das
+> Endformat (V1 470 × 830 mm, OMX 380 × 660 mm); nicht skalieren, nicht
+> kacheln. Papier 160–200 g/m², beidseitig matt laminiert, 2 × 125 µm
+> (Gesamtdicke 0,45 mm ± 0,05 mm). Auf die Außenkontur zuschneiden,
+> einschließlich des rechteckigen Ausschnitts für die Grundplatte entlang der
+> gedruckten Schnittlinie. Vor der Auslieferung die beiden 100-mm-Marken (eine
+> waagerecht, eine senkrecht) mit dem Lineal nachmessen: je 100 mm ± 0,3 mm.
+> Flach lagern und versenden, nicht rollen.
+
+**Bestelltext für die Druckerei – Etiketten** (je Kit ein Kalibrier-Ziel des
+passenden Arms und ein Satz Turm-Marker):
+
+> Druck der beiliegenden PDF-Dateien im Maßstab 100 % auf mattes
+> Etikettenmaterial (nicht glänzend), etwa 0,3 mm dick (die Taschen im
+> Turm-Fuß sind 0,3 mm tief). Entlang der gedruckten Schnittlinien
+> ausschneiden. Die beiden 100-mm-Marken je Blatt mit dem Lineal nachmessen:
+> je 100 mm ± 0,3 mm.
+
+Beim Zusammenbau: das Ziel-Etikett so auf die Platte kleben, dass die Kante mit
+dem kurzen Balken zur Klammer zeigt; die Turm-Marker so in ihre Taschen kleben,
+dass der kurze Balken nach vorn zeigt (in die Blickrichtung des Roboters, zur
+Matte) – Marker 481 in die Tasche näher am Turm-Profil.

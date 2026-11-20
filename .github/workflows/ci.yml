@@ -35,6 +35,9 @@ jobs:
       # test_code_insert_cases.py compiles the insertion fixture with javac
       # ($JAVA_HOME_21_X64 on this runner): a lost JDK fails, never skips.
       EDUBOTICS_REQUIRE_JAVAC: "1"
+      # The server suite's real-detector tests (test/pupil_required.py) need
+      # pupil_apriltags, installed below: a lost detector fails, never skips.
+      EDUBOTICS_REQUIRE_PUPIL: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -79,6 +82,13 @@ jobs:
             pyarrow==25.0.0 av==15.1.0 huggingface_hub==1.23.0 \
             fastapi==0.115.12 httpx==0.28.1 aiohttp==3.14.1 "uvicorn[standard]==0.34.2" \
             boto3==1.43.107 botocore==1.43.107 "PyJWT[crypto]==2.15.1"
+          # pupil-apriltags: the real AprilTag detector of the server image (its
+          # version), for the server suite's detector tests (EDUBOTICS_REQUIRE_PUPIL
+          # above). 1.0.4 has no wheel for Python 3.12, so pip builds its sdist; the
+          # sdist's CMakeLists asks for CMake 3.1, which the CMake 4 of the isolated
+          # build refuses unless told to behave as 3.5 (the image's workaround,
+          # docker/physical_ai_server/Dockerfile).
+          CMAKE_POLICY_VERSION_MINIMUM=3.5 python -m pip install pupil-apriltags==1.0.4
       - name: Syntax-check Python modules
         # ZERO-FILE FLOOR, the repo's standing rule for scan-based guards (the
         # four ps_* guards and the three lockstep tests all carry one).
@@ -167,7 +177,8 @@ jobs:
           python -m unittest discover -s tests -v
 
       - name: Roboter Studio workflow + IK unit tests (pure-Python, no ROS)
-        # numpy + opencv only (workflow modules import ROS/onnx/pupil lazily).
+        # numpy + opencv + pupil_apriltags (workflow modules import ROS/onnx/pupil
+        # lazily; the real-detector tests fail without pupil, EDUBOTICS_REQUIRE_PUPIL).
         # Covers the closed-form IK round-trip + base_yaw, the AprilTag
         # tag-pose/yaw math (the SOLE automated guard for the orientation chain —
         # the IK self-check is position-only), the object catalog schema, the

@@ -39,6 +39,11 @@ COPY identify_arm.py /usr/local/bin/identify_arm.py
 # of usb_cam) when EDUBOTICS_CAMERA_SOURCE=native_bridge. See the script header
 # and CLAUDE.md "native camera capture bridge" for the full rationale.
 COPY camera_ingest_node.py /usr/local/bin/camera_ingest_node.py
+# The tower scene camera's shared derivation (camera ids, topics, the JPEG
+# header rules); the ingest node imports it from its own directory. Byte-
+# identical twin of gui/app/scene_split.py; byte-verified by
+# image_source_parity.sh.
+COPY scene_split.py /usr/local/bin/scene_split.py
 # Teleop collision-threshold calibration helper (operator runs it once per rig). Standalone
 # rclpy script, COPY'd like identify_arm.py / camera_ingest_node.py — NOT an apply_overlay target.
 COPY calibrate_collision_currents.py /usr/local/bin/calibrate_collision_currents.py
@@ -59,8 +64,8 @@ COPY feetech_geometry.py /usr/local/bin/feetech_geometry.py
 # image_source_parity.sh.
 COPY activation_agent.py /usr/local/bin/activation_agent.py
 # Strip Windows CRLF line endings (Git on Windows may convert LF→CRLF)
-RUN sed -i 's/\r$//' /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py /usr/local/bin/calibrate_collision_currents.py /usr/local/bin/feetech_bus.py /usr/local/bin/feetech_arm_node.py /usr/local/bin/feetech_geometry.py /usr/local/bin/activation_agent.py \
-    && chmod +x /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py /usr/local/bin/calibrate_collision_currents.py /usr/local/bin/feetech_bus.py /usr/local/bin/feetech_arm_node.py /usr/local/bin/feetech_geometry.py /usr/local/bin/activation_agent.py
+RUN sed -i 's/\r$//' /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py /usr/local/bin/scene_split.py /usr/local/bin/calibrate_collision_currents.py /usr/local/bin/feetech_bus.py /usr/local/bin/feetech_arm_node.py /usr/local/bin/feetech_geometry.py /usr/local/bin/activation_agent.py \
+    && chmod +x /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py /usr/local/bin/scene_split.py /usr/local/bin/calibrate_collision_currents.py /usr/local/bin/feetech_bus.py /usr/local/bin/feetech_arm_node.py /usr/local/bin/feetech_geometry.py /usr/local/bin/activation_agent.py
 
 # Overlay patched ros2_control configs:
 #   - follower (omx_f): joint limits + aligned gripper current limit

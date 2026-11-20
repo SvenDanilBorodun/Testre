@@ -150,6 +150,7 @@ def modules():
     qos.QoSProfile = QoSProfile
     qos.HistoryPolicy = types.SimpleNamespace(KEEP_LAST='keep_last', KEEP_ALL='keep_all')
     qos.ReliabilityPolicy = types.SimpleNamespace(RELIABLE='reliable', BEST_EFFORT='best_effort')
+    qos.DurabilityPolicy = types.SimpleNamespace(VOLATILE='volatile', TRANSIENT_LOCAL='transient_local')
 
     rclpy.node = node
     rclpy.qos = qos

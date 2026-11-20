@@ -61,7 +61,7 @@ class UnknownCameraIdWarnsOnce(unittest.TestCase):
         warnings = node.get_logger().lines('warn')
         self.assertEqual(len(warnings), 1, warnings[:3])
         self.assertIn('cam_id=9', warnings[0])
-        self.assertEqual([p.published for p in node.publishers], [[], []])
+        self.assertEqual([p.published for p in node.publishers], [[], [], [], []])
 
     def test_the_warning_repeats_after_10_s_with_the_count_and_per_id(self):
         node = _make_node()
@@ -83,7 +83,7 @@ class UnknownCameraIdWarnsOnce(unittest.TestCase):
         self.assertIn('cam_id=9', warnings[1])
         self.assertIn('100', warnings[1])                # 99 silent drops + the one at 10 s
         self.assertIn('cam_id=7', warnings[2])
-        self.assertEqual([p.published for p in node.publishers], [[], []])
+        self.assertEqual([p.published for p in node.publishers], [[], [], [], []])
 
 
 class KnownCameraIdsPublishAsBefore(unittest.TestCase):
@@ -93,8 +93,10 @@ class KnownCameraIdsPublishAsBefore(unittest.TestCase):
         self.assertEqual(
             [p.topic for p in node.publishers],
             ['/gripper/image_raw/compressed', '/scene/image_raw/compressed',
-             '/phone/image_raw/compressed'])
-        for pub in node.publishers:
+             '/phone/image_raw/compressed',
+             # WP-05: the tower camera's studio and state topics, silent here.
+             '/studio/tower/compressed', '/edubotics/scene_camera_state'])
+        for pub in node.publishers[:3]:
             self.assertEqual(pub.msg_type.__name__, 'CompressedImage')
             self.assertEqual(pub.qos.depth, 5)
             self.assertEqual(pub.qos.reliability, 'reliable')
@@ -113,7 +115,7 @@ class KnownCameraIdsPublishAsBefore(unittest.TestCase):
         clock_msg = node.publishers[1].published[1]
         self.assertEqual((clock_msg.header.stamp.sec, clock_msg.header.stamp.nanosec),
                          (ros_stubs.FakeClock.NOW_SEC, ros_stubs.FakeClock.NOW_NANOSEC))
-        self.assertEqual([len(p.published) for p in node.publishers], [1, 2, 1])
+        self.assertEqual([len(p.published) for p in node.publishers], [1, 2, 1, 0, 0])
         self.assertEqual(node._frame_counts, {0: 1, 1: 2, 2: 1})
         self.assertEqual(node.get_logger().lines('warn'), [])
 

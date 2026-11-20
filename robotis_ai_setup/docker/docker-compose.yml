@@ -180,6 +180,12 @@ services:
       - EDUBOTICS_CAMERA_SOURCE=${EDUBOTICS_CAMERA_SOURCE:-}
       - EDUBOTICS_CAMERA_INGEST_PORT=${EDUBOTICS_CAMERA_INGEST_PORT:-5557}
       - EDUBOTICS_CAMERA_NAMES=${EDUBOTICS_CAMERA_NAMES:-gripper,scene}
+      # Scene-camera profile: `tower_v1` = the tower camera kit (one camera on
+      # the tower is the scene camera for everything), anything else and the
+      # default = `legacy`, today's camera path. Read only by the arm
+      # container's scene-camera code, through one value table
+      # (scene_split.normalise_profile); no other service gets it.
+      - EDUBOTICS_SCENE_CAMERA_PROFILE=${EDUBOTICS_SCENE_CAMERA_PROFILE:-legacy}
     volumes:
       - /dev:/dev
       - /dev/shm:/dev/shm

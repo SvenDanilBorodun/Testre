@@ -227,6 +227,12 @@ _MANUAL_HOME_MIN_DURATION_S = 3.0
 # Every arm joint already this close to HOME → answer „steht bereits in der
 # Grundstellung" instead of running a 3 s glide that goes nowhere.
 _MANUAL_HOME_ALREADY_THERE_RAD = 0.01
+# /edubotics/home_glide_state (spec 40 WP-12, 52 §5.1): the V1's manual home
+# glide's tower verdict for the live pose, latched and re-sent at 2 Hz for the
+# home-glide prompt; judged again once a joint moved more than two servo ticks.
+_HOME_GLIDE_STATE_TOPIC = '/edubotics/home_glide_state'
+_HOME_GLIDE_STATE_PERIOD_S = 0.5
+_HOME_GLIDE_REJUDGE_RAD = 2 * 2.0 * math.pi / 4096
 # Timeout (s) for acquiring the manual-control mutex in a driving/torque-switch
 # callback. If a jog/replay drive is holding it, a new manual op is refused in
 # German rather than queueing (the callbacks run on the reentrant preempt group,
@@ -613,6 +619,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self._manual_idle_watchdog_cb,
             callback_group=MutuallyExclusiveCallbackGroup(),
         )
+        # The V1's home-glide hint (/edubotics/home_glide_state, WP-12): its own
+        # timer and group; never fatal at boot.
+        try:
+            self._init_home_glide_state()
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().error(f'home glide state not started: {e!r}')
 
         self.previous_data_manager_status = None
 
@@ -5491,6 +5503,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         else:
             raise _motion.WorkflowError('Unbekannter Handbetrieb-Modus.')
 
+        # The camera tower (spec 40 S6.2, WP-12): the step from the live pose is
+        # judged like a program's leg; under legacy there is no guard.
+        fixture_guard = getattr(self, '_fixture_guard', None)
+        guard = fixture_guard() if callable(fixture_guard) else None
+        if guard is not None:
+            verdict = _motion.tower_leg_verdict(guard, arm + [grip], q_end, n)
+            if verdict is not None:
+                raise _motion.tower_refusal(verdict)
+
         world = (0.0, 0.0, 0.0)
         fk = ik.fk(q_end[:n])
         if fk is not None:
@@ -5705,7 +5726,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                         0, self._manual_transient_ops - 1)
                     self._recompute_on_manual_locked()
 
-    def _plan_manual_home_legs(self, joints):
+    def _plan_manual_home_legs(self, joints, quiet=False):
         """Legs ``[(q_from, q_to, duration), …]`` from the live pose ``joints``
         (n arm joints + gripper) to the profile HOME, gripper CARRIED (a held
         object stays held — the `home` block's rule).
@@ -5718,7 +5739,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         drive a link through the table (measured: 4,193 of 20,069 near-table
         starts, worst 87.6 mm). A manual jog has no Sperrzonen (they live in a
         run payload), so ``zones`` is None, as for every other jog. Raises
-        ``motion.WorkflowError`` (German) on a refusal."""
+        ``motion.WorkflowError`` (German) on a refusal.
+
+        The camera tower (spec 40 WP-12): the manual guard is the planner's rung
+        condition, so a rung it refuses is not taken and, with none left, the
+        planner refuses with ``home_planner.TowerRefusal``. ``quiet`` drops the
+        route's notes (the home-glide state plans the same route at 2 Hz)."""
         from types import SimpleNamespace
         from physical_ai_server.workflow import home_planner
         from physical_ai_server.workflow.handlers import motion as _motion
@@ -5740,6 +5766,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         q_home = [float(v) for v in home] + [q_start[n]]
 
         def _log(text):
+            if quiet:
+                return
             self.get_logger().warning(str(text))
             # Also handed back to the student with the result: a lift over a via
             # is a motion they did not see coming from the countdown text alone.
@@ -5755,8 +5783,92 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             log=_log,
             num_arm_joints=n,
         )
+        fixture_guard = getattr(self, '_fixture_guard', None)
+        guard = fixture_guard() if callable(fixture_guard) else None
+        if guard is None:
+            return home_planner.plan_floor_checked_home_route(
+                shim, q_start, q_home, _MANUAL_HOME_MIN_DURATION_S)
         return home_planner.plan_floor_checked_home_route(
-            shim, q_start, q_home, _MANUAL_HOME_MIN_DURATION_S)
+            shim, q_start, q_home, _MANUAL_HOME_MIN_DURATION_S, tower=guard)
+
+    def _init_home_glide_state(self):
+        """``/edubotics/home_glide_state`` (spec 40 WP-12, 52 §5.1): on the V1
+        only, a 2 Hz timer of its own group; the latched publisher itself is
+        created on the first tick under ``tower_v1``, so the OMX profiles,
+        ``legacy`` and a profile never stated get none (D1)."""
+        self._home_glide_pub = None
+        self._home_glide_gen = 0
+        self._home_glide_judged = None
+        self._home_glide_timer = None
+        if getattr(getattr(self, '_arm_profile', None), 'profile_id', None) != 'v1_studio':
+            return
+        self._home_glide_timer = self.create_timer(
+            _HOME_GLIDE_STATE_PERIOD_S, self._home_glide_state_tick,
+            callback_group=MutuallyExclusiveCallbackGroup())
+
+    def _home_glide_idle(self) -> bool:
+        """The studio is idle: no manual drive or take, no program, recording or
+        inference owns the arm."""
+        return not (getattr(self, 'on_workflow', False) or getattr(self, 'on_recording', False)
+                    or getattr(self, 'on_inference', False)
+                    or getattr(self, '_manual_record_active', False)
+                    or getattr(self, '_manual_transient_ops', 0) > 0)
+
+    def _home_glide_verdict(self, joints) -> str:
+        """What the press of „Grundstellung" would get from ``joints``, as the
+        hint reads it: ``'refused'`` (the tower refuses every rung),
+        ``'unjudgeable'`` (the guard cannot judge it, no pose, or the planning
+        failed), else ``'clear'`` — a floor or Sperrzone refusal is not the
+        tower's, and the press then says it as today."""
+        from physical_ai_server.workflow import home_planner
+        from physical_ai_server.workflow.handlers.motion import WorkflowError
+        if joints is None:
+            return 'unjudgeable'
+        try:
+            self._plan_manual_home_legs(joints, quiet=True)
+        except home_planner.TowerRefusal as e:
+            return 'refused' if e.reason == 'too_close' else 'unjudgeable'
+        except WorkflowError:
+            return 'clear'
+        except Exception:  # noqa: BLE001 — a hint that cannot be computed is never 'clear'
+            return 'unjudgeable'
+        return 'clear'
+
+    def _home_glide_state_tick(self):
+        """One 2 Hz tick of ``/edubotics/home_glide_state`` ``{v, glide, gen}``:
+        while the V1's studio is idle under ``tower_v1``, the verdict for the
+        live pose, judged again only once a joint (or the claw) moved more than
+        _HOME_GLIDE_REJUDGE_RAD from the reading it was judged for (the driver's
+        tower-state resolution); the press re-plans its own pose. Never raises."""
+        try:
+            camera = getattr(self, 'studio_camera', None)
+            if camera is None or camera.profile() != 'tower_v1' or not self._home_glide_idle():
+                return
+            n = self._profile_n()
+            joints = None
+            if not self._follower_joints_stale() and self.communicator is not None:
+                live = self.communicator.get_latest_follower_joints()
+                if live and len(live) >= n + 1:
+                    values = [float(v) for v in live[:n + 1]]
+                    if all(math.isfinite(v) for v in values):
+                        joints = values
+            judged = self._home_glide_judged
+            moved = (judged is None or (judged[0] is None) != (joints is None)
+                     or (joints is not None and any(abs(a - b) > _HOME_GLIDE_REJUDGE_RAD
+                                                    for a, b in zip(judged[0], joints))))
+            if moved:
+                judged = self._home_glide_judged = (joints, self._home_glide_verdict(joints))
+            if self._home_glide_pub is None:
+                self._home_glide_pub = self.create_publisher(
+                    String, _HOME_GLIDE_STATE_TOPIC,
+                    QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                               durability=DurabilityPolicy.TRANSIENT_LOCAL))
+            self._home_glide_gen += 1
+            msg = String()
+            msg.data = json.dumps({'v': 1, 'glide': judged[1], 'gen': self._home_glide_gen})
+            self._home_glide_pub.publish(msg)
+        except Exception as e:  # noqa: BLE001 — a hint never breaks the node
+            self.get_logger().warning(f'home glide state not published: {e!r}')
 
     def _run_manual_home_glide(self, joints, exit_gen, response) -> None:
         """Body of /workshop/jog mode 'home'. Runs with ``_manual_lock`` HELD and
@@ -6664,8 +6776,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         CONTRACT B) OR a server-persisted trajectory named ``name``."""
         from physical_ai_server.workflow.handlers.motion import WorkflowError
         from physical_ai_server.workflow.handlers.trajectory import (
-            REPLAY_PUBLISHES_VELOCITIES, clamp_speed, extract_points,
-            refuse_wrapped_joint_jumps, refuse_wrapped_lead_in, resegment_trajectory,
+            REPLAY_PUBLISHES_VELOCITIES, clamp_speed, extract_points, judge_replay_tower,
+            refuse_outside_joint1_window, refuse_wrapped_joint_jumps, refuse_wrapped_lead_in,
+            resegment_trajectory,
         )
         response.success = False
         response.message = ''
@@ -6725,12 +6838,23 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 response.message = 'Keine Aufnahme angegeben.'
                 return response
         n = self._profile_n()
+        # The camera tower (spec 40 S6.2, WP-12): the take is judged here, once,
+        # as ONE polyline, and its lead-in from the live pose inside
+        # _segment_from (every build) — together the whole path, judged before
+        # the first publish. Under legacy there is no guard.
+        fixture_guard = getattr(self, '_fixture_guard', None)
+        guard = fixture_guard() if callable(fixture_guard) else None
         try:
             points = extract_points(traj, num_arm_joints=n)
             refuse_wrapped_joint_jumps(
                 points, getattr(self._build_ik_solver(), 'joint_limits', None),
                 num_arm_joints=n)
             # (the LEAD-IN twin of this check runs inside _segment_from below)
+            refuse_outside_joint1_window(
+                points, getattr(self._build_ik_solver(), 'joint_limits', None),
+                num_arm_joints=n)
+            if guard is not None:
+                judge_replay_tower(guard, [p[:n + 1] for p in points], n)
         except WorkflowError as e:
             response.message = str(e)
             return response
@@ -6768,6 +6892,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
         def _segment_from(pose):
             refuse_wrapped_lead_in(pose, points[0], joint_limits, num_arm_joints=n)
+            if guard is not None:
+                judge_replay_tower(guard, [pose[:n + 1], points[0][:n + 1]], n)
             return resegment_trajectory(
                 points, speed, lead_in_from=pose,
                 lead_in_floor_check=lead_floor,
@@ -7225,6 +7351,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # Roboter Studio text programs (§3.3): the DATA-socket RPC server,
             # or None when the coding suite is not up (runs refused in German).
             code_rpc=getattr(self, '_code_rpc', None),
+            # The camera tower (spec 40 S6.2, WP-12): each run's guard, scoped by
+            # the stated scene-camera profile (None under legacy).
+            fixture_guard_provider=getattr(self, '_fixture_guard', None),
         )
         return self.workflow_manager
 
@@ -7613,6 +7742,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         _g_open = getattr(_profile, 'gripper_open_rad', None)
         # A node without the simulator builder (a test's stub) keeps one solver.
         sim_ik_factory = getattr(self, '_build_sim_ik_solver', self._build_ik_solver)
+        _fixture_guard = getattr(self, '_fixture_guard', None)
         sim_arm = SimArm(
             # Real-time playback: each chunk's waypoints go out at their own
             # time_from_start from SimArm's player thread, the way the rig's
@@ -7695,6 +7825,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # person can put an object back) and every sentence names the
             # Sim-Tisch instead of the camera. ONLY this builder passes it.
             simulated=True,
+            # The camera tower: guarded exactly when the real arm is (spec 40
+            # S6.2 revision 5, 58 m-8), its own arm model against the tower
+            # where the simulator draws it.
+            fixture_guard_provider=(None if _fixture_guard is None
+                                    else (lambda: _fixture_guard(simulated=True))),
         )
         return self.sim_workflow_manager
 
@@ -7818,6 +7953,66 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         except Exception as e:
             self.get_logger().error(f'Simulator IKSolver init failed: {e}')
             return None
+
+    def _fixture_guard(self, simulated=False):
+        """The camera tower's guard for a Roboter-Studio motion now, or None
+        (spec 40 S6.2 'Scope' and 'Where'; decisions D63, D65; WP-12).
+
+        Scoped by the scene-camera profile the arm container STATES
+        (``studio_camera.profile()``): ``legacy`` → None, today's code path in
+        every caller; ``tower_v1`` and ``None`` (no statement yet: silence is
+        never ``legacy``) → the guard, for the manual paths (jog, home glide,
+        /workshop/replay) and the programs of both managers (the real ones are
+        held by the mat check under ``None`` as well; a simulator program has
+        nothing else). With a valid arm check of this profile the tower stands
+        where the arm check measured it (``tower_pose``) and the calibrated
+        residual and the kit's droop envelope apply; without one, the contract
+        place, the uncalibrated residual and the design envelope. The
+        simulator's guard (``simulated``) judges its own arm model against the
+        tower where the simulator draws it, the contract place, with the same
+        residual and envelope. Anything the guard needs and cannot get refuses
+        every leg (``RefusingGuard``), never passes one. Built once per
+        (profile, store version, arm model) and reused."""
+        camera = getattr(self, 'studio_camera', None)
+        try:
+            scene = camera.profile() if camera is not None else None
+        except Exception:  # noqa: BLE001 — an unreadable statement is no statement
+            scene = None
+        if scene == 'legacy':
+            return None
+        from physical_ai_server.workflow import fixture_guard
+        from physical_ai_server.workflow.autocal import store
+        profile_id = getattr(getattr(self, '_arm_profile', None), 'profile_id', None)
+        build = getattr(self, '_build_sim_ik_solver', self._build_ik_solver) if simulated else self._build_ik_solver
+        ik = build()
+        calib_dir = os.environ.get('EDUBOTICS_CALIB_DIR', '/root/.cache/edubotics/calibration')
+        key = (scene, profile_id, store.version(), calib_dir, id(ik))
+        cache = getattr(self, '_fixture_guard_cache', None) or {}
+        cached = cache.get(bool(simulated))
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        frames = getattr(ik, 'guard_frames', None)
+        if not callable(frames):
+            guard = fixture_guard.RefusingGuard('no arm model with guard frames')
+        else:
+            arm_check, contract = None, None
+            got = store.Store(calib_dir).read(profile_id) if profile_id else None
+            if got is not None and got.status == 'ok':
+                # The stored envelope holds one value per arm joint; the guard
+                # reads joints 2..4 (spec 40 S6.2: env_j = droop_envelope_rad[j-1]).
+                envelope = got.data.get('droop_envelope_rad')
+                if isinstance(envelope, (list, tuple)) and len(envelope) == 5:
+                    envelope = list(envelope[1:4])
+                arm_check = {'tower_pose': (0.0, 0.0, 0.0) if simulated else got.data.get('tower_pose'),
+                             'droop_envelope_rad': envelope}
+                contract = got.data.get('contract_hash')
+            guard = fixture_guard.make_guard(
+                profile_id, frames, base_axis_x=getattr(ik, 'base_axis_x', None),
+                arm_check=arm_check, contract_hash=contract)
+        if isinstance(guard, fixture_guard.RefusingGuard):
+            self.get_logger().error(f'camera tower guard refuses every motion: {guard.why}')
+        self._fixture_guard_cache = {**cache, bool(simulated): (key, guard)}
+        return guard
 
     def _build_perception(self):
         # Cache the Perception instance (AprilTag detector) for the server

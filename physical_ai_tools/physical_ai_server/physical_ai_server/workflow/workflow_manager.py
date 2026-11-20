@@ -388,6 +388,17 @@ class WorkflowContext:
     # Position names already warned THIS RUN that they were taught on another
     # robot (motion._stored_pose_joints): the [WARNUNG] is said once per name.
     position_warned: set = field(default_factory=set)
+    # The camera tower's check for THIS run (spec 40 S6.2 'Where'; WP-12): the
+    # guard the node's provider handed to start() — a fixture_guard.TowerGuard,
+    # or a RefusingGuard when it cannot be built — or None (``legacy``, a
+    # manager without a provider): then no motion is judged and every handler
+    # publishes what it always did. The handlers read it only through
+    # getattr(ctx, 'fixture_guard', None). Set once in start(), never mutated.
+    fixture_guard: Any | None = None
+    # (label, target) pairs whose refinement warning (D42: the arm model's pose
+    # misses the target by more than IK_REFINE_ACCEPT_M — the sector edge) was
+    # already said THIS RUN (motion._warn_refinement): once per target per run.
+    refine_warned: set = field(default_factory=set)
 
 
 MAX_WORKFLOW_JSON_BYTES = 256 * 1024  # 256 KiB; see plan §2.5
@@ -515,8 +526,14 @@ class WorkflowManager:
         arm_profile: Any | None = None,
         code_rpc: Any | None = None,
         simulated: bool = False,
+        fixture_guard_provider: Callable[[], Any] | None = None,
     ) -> None:
         self._publisher = publisher
+        # The camera tower (spec 40 S6.2 'Where'; WP-12): asked at every start()
+        # for the run's guard (None: nothing judged). The node passes one for the
+        # real and the simulator manager, scoped by the stated scene-camera
+        # profile (D63); a manager without a provider judges nothing.
+        self._fixture_guard_provider = fixture_guard_provider
         # True ONLY for the simulator's manager (the node's
         # _get_or_create_sim_workflow_manager passes it). Stamped onto every
         # run's ctx.simulated: the one source of the mode-aware behaviour (no
@@ -1032,6 +1049,16 @@ class WorkflowManager:
                     except Exception as e:
                         return False, f'IK-Solver konnte nicht initialisiert werden: {e}', []
 
+                # The run's tower guard. A provider that fails cannot pass a
+                # motion: the run is refused in German, never started unjudged.
+                fixture_guard = None
+                if self._fixture_guard_provider is not None:
+                    try:
+                        fixture_guard = self._fixture_guard_provider()
+                    except Exception:  # noqa: BLE001 — refused below, never passed
+                        from physical_ai_server.workflow import fixture_guard as _fg
+                        return False, _fg.TOWER_UNJUDGEABLE_DE, []
+
                 perception_instance = None
                 if self._perception_factory is not None:
                     try:
@@ -1068,7 +1095,8 @@ class WorkflowManager:
                 else:
                     unreachable = self._ik_precheck(interpreter, ik_instance, zones,
                                                     destinations=destinations,
-                                                    calib=calib)
+                                                    calib=calib,
+                                                    fixture_guard=fixture_guard)
 
                 # Audit fix #6: seed ctx.last_full_joints synchronously HERE,
                 # before hat threads (or the main daemon) ever spawn. The
@@ -1162,6 +1190,8 @@ class WorkflowManager:
                     hat_reclaim_at={},
                     # Phase-4 no-go zones (None/empty → motion behaves as today).
                     zones=zones,
+                    # The camera tower's check (None → nothing judged).
+                    fixture_guard=fixture_guard,
                     # Phase-2 Tempo (global speed multiplier; 1.0 → unchanged speed).
                     tempo=tempo,
                     # ArmProfile geometry stamps (motion._n & friends read these;
@@ -1760,7 +1790,12 @@ class WorkflowManager:
         zones: list | None = None,
         destinations: dict[str, dict[str, Any]] | None = None,
         calib: dict[str, Any] | None = None,
+        fixture_guard: Any | None = None,
     ) -> list[dict[str, Any]]:
+        # ``fixture_guard`` (the run's tower guard): a target whose solved pose
+        # it refuses is flagged too — advisory like the rest; the runtime judges
+        # every leg. Judged with the claw open (the HOME seed's).
+        #
         # A Position that takes the JOINT route is not a point the arm has to
         # reach by a Cartesian solve (its HOME-like poses are often outside the
         # strict-vertical image), so it is left out of the point pre-check; the
@@ -1816,7 +1851,24 @@ class WorkflowManager:
                     'block_id': target['block_id'],
                     'message': 'Diese Position liegt in einer Sperrzone.',
                 })
+            elif fixture_guard is not None:
+                refusal = self._tower_refuses_pose(fixture_guard, solution)
+                if refusal is not None:
+                    unreachable.append({'block_id': target['block_id'], 'message': refusal})
         return unreachable
+
+    def _tower_refuses_pose(self, guard, solution) -> str | None:
+        """The guard's German refusal of the pose ``solution`` (arm joints) with
+        the claw open, or None (also when it cannot be asked: advisory)."""
+        try:
+            n = self._num_arm_joints
+            verdict = guard.judge_pose([float(v) for v in list(solution)[:n]],
+                                       float(self._home_full_joints[n]))
+        except Exception:  # noqa: BLE001 — advisory; the runtime judges every leg
+            return None
+        if getattr(verdict, 'refused', False):
+            return getattr(verdict, 'sentence_de', None)
+        return None
 
     def _zone_precheck_only(
         self,

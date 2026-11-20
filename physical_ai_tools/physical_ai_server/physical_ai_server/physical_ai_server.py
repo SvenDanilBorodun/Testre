@@ -4397,6 +4397,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             guard_parts=self._calibration_guard_parts,
             start_program=self._start_calibration_program,
             stop_program=self._stop_calibration_program,
+            claim_mode=self._claim_calibration_mode,
+            release_mode=lambda: self._set_calibration_active(False),
             log=self._calibration_log,
             log_internal=lambda text: self.get_logger().warning(str(text)),
             on_state=self._publish_calibration_state)
@@ -4470,6 +4472,18 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         manager = getattr(self, 'workflow_manager', None)
         if manager is not None and manager.is_running and manager.workflow_id == workflow_id:
             manager.stop()
+
+    def _claim_calibration_mode(self):
+        """The handheld step's claim of the calibration mode (spec 40 S4): while
+        the student moves the target by hand in front of the camera nothing else
+        may move the arm or start. Claimed under _mode_lock like every claim;
+        the mode 'handheld' takes no relaxation, so another calibration step,
+        a program, a recording or Handbetrieb refuses it with its own sentence."""
+        with self._mode_lock:
+            ok, msg = self._assert_no_other_active('handheld')
+            if ok:
+                self._set_calibration_active(True)
+        return ok, msg
 
     def _workflow_start_gate(self, workflow_json, workflow_id):
         """The real manager's start gate: the mat check of every real program."""

@@ -519,11 +519,12 @@ def test_only_the_wiring_imports_the_guard():
     # modules on no motion path. WP-11's arm model (lift, mat, fingertip, joint-1 window) and the node's
     # calibration dict (the mat's plane) read its constants; neither calls the guard. WP-13's calibration
     # service reads the arm-check poses, the zone and the outside window; its guard_margin gate gets the guard
-    # from the node.
+    # from the node. WP-15's handheld step reads the target plate and the lens band; it moves nothing.
     assert importers.get('scene_fixture', set()) == {
         'workflow/fixture_guard.py', 'workflow/object_catalog.py', 'workflow/autocal/arm_check.py',
         'workflow/autocal/mat_check.py', 'workflow/autocal/store.py', 'workflow/autocal/tags.py',
-        'workflow/autocal/service.py', 'workflow/arm_model.py', 'physical_ai_server.py'}
+        'workflow/autocal/service.py', 'workflow/autocal/handheld.py', 'workflow/arm_model.py',
+        'physical_ai_server.py'}
 
 
 def test_the_guard_imports_only_numpy_arm_geometry_arm_cells_and_scene_fixture():

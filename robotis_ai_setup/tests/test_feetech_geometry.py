@@ -342,6 +342,36 @@ class TestTheRefusalLeavesTheArmTorqued(unittest.TestCase):
             self.assertNotIn(bad, msg.replace('neu', '').replace('erneut', ''))
 
 
+class TestTheTowerCheckMirrorsTheServerGuard(unittest.TestCase):
+    """WP-T1's literals that are the server guard's own (the tower's are held
+    by test_scene_fixture_lockstep.py): the claw's generated cell table and
+    the guard's constants."""
+
+    def test_the_claw_cells_are_the_servers_generated_table(self):
+        server = _module_literal(os.path.join(_SERVER, 'workflow', 'arm_cells.py'), 'ARM_CELLS')
+        self.assertEqual(_module_literal(_GEO, 'V1_ARM_CELLS'), server['v1'])
+
+    def test_the_guard_constants(self):
+        guard = os.path.join(_SERVER, 'workflow', 'fixture_guard.py')
+        self.assertEqual(_module_literal(_GEO, 'TOWER_R_J_M'), _module_literal(guard, 'R_J_M')['v1'])
+        for driver_name, server_name in (('TOWER_TILT_SLACK', 'TILT_SLACK'),
+                                         ('TOWER_GRAVITY_M_S2', 'GRAVITY_M_S2'),
+                                         ('TOWER_DROOP_SUM_LIMIT', 'DROOP_SUM_LIMIT')):
+            self.assertEqual(_module_literal(_GEO, driver_name), _module_literal(guard, server_name))
+
+    def test_the_dense_step_is_twice_the_sample_term(self):
+        self.assertEqual(fg.TOWER_DENSE_STEP_M, 2.0 * fg.TOWER_SAMPLE_M)
+
+    def test_the_tower_check_needs_no_numpy(self):
+        """pure Python like the rest of the module: the arm image's driver
+        must not depend on a package this suite does not need."""
+        tree = ast.parse(_read(_GEO))
+        imported = {alias.name for node in ast.walk(tree)
+                    if isinstance(node, (ast.Import, ast.ImportFrom))
+                    for alias in node.names}
+        self.assertEqual(imported, {'annotations', 'math'})
+
+
 class TestPackaging(unittest.TestCase):
     """A plain-COPY driver file only reaches the image if it is registered in
     three places. Missing one ships an ImportError at boot."""
@@ -361,6 +391,20 @@ class TestPackaging(unittest.TestCase):
         src = _read(os.path.join(_REPO, '.github', 'scripts',
                                  'image_source_parity.sh'))
         self.assertIn('feetech_geometry.py', src)
+
+    def test_the_tower_checks_files_are_byte_verified_and_shipped(self):
+        """WP-T1 changes feetech_arm_node.py and feetech_geometry.py, and
+        the driver now imports scene_split.py: all three are plain COPYs
+        next to each other in /usr/local/bin, each byte-verified."""
+        parity = _read(os.path.join(_REPO, '.github', 'scripts',
+                                    'image_source_parity.sh'))
+        loop = next(line for line in parity.splitlines()
+                    if line.strip().startswith('for f in feetech_arm_node.py'))
+        dockerfile = _read(os.path.join(_DRIVER_DIR, 'Dockerfile'))
+        for name in ('feetech_arm_node.py', 'feetech_geometry.py',
+                     'scene_split.py'):
+            self.assertIn(f' {name}', loop)
+            self.assertIn(f'COPY {name} /usr/local/bin/{name}', dockerfile)
 
     def test_the_knob_is_forwarded_on_both_composes(self):
         """ci.yml::env-forwarding-guard unions four compose files, so the

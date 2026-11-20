@@ -15,7 +15,10 @@ to it here:
 * the reserved tag ids (the mats, the fixture tags, the clip-on targets) and
   every place that names the ids an object may use instead: ``code_rpc``'s
   ``_TAG_ID_MAX`` and its German sentence, ``robot_api``'s kind comment, and
-  ``object_catalog``'s refusal (read from the contract, never restated).
+  ``object_catalog``'s refusal (read from the contract, never restated);
+* the V1 driver's twin of the tower literals (``docker/open_manipulator/
+  feetech_geometry.py``, WP-T1): the arm container cannot import the server
+  package, so its tower check carries the contract's values as literals.
 
 The server's own suite pins the block's sha256 and the rules
 (``test/test_scene_fixture.py``); this file needs neither ROS nor numpy.
@@ -33,7 +36,27 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOW = REPO / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server' / 'workflow'
 FIXTURE_DIR = REPO / 'physical_ai_tools' / 'physical_ai_manager' / 'src' / 'components' / 'Workshop' / 'fixture'
 EXPORT = REPO / 'tools' / 'export_scene_fixture.py'
+DRIVER_GEOMETRY = REPO / 'robotis_ai_setup' / 'docker' / 'open_manipulator' / 'feetech_geometry.py'
 TAG36H11_IDS = 587          # tag36h11 has ids 0..586
+
+# The V1 driver's tower literal -> where the contract holds it (a name, then keys into its value).
+DRIVER_TWINS = {
+    'LIFT_M': ('LIFT_M',),
+    'LENS_F': ('LENS_F',),
+    'TOWER_OBB_F': ('TOWER_OBB_F',),
+    'TOWER_LEAN_AT_LENS_M': ('TOWER_LEAN_AT_LENS_M',),
+    'TOWER_AXIS_M': ('TOWER_AXIS_M',),
+    'TOWER_BUILD_M': ('TOWER_BUILD_M',),
+    'TOWER_TOP_ROTATION_M': ('TOWER_TOP_ROTATION_M',),
+    'TOWER_SAMPLE_M': ('TOWER_SAMPLE_M',),
+    'TOWER_RESIDUAL_DRIVER_M': ('TOWER_RESIDUAL_DRIVER_M',),
+    'TOWER_TOP_PARTS': ('TOWER_TOP_PARTS',),
+    'TOWER_T1_PARTS': ('TOWER_T1_PARTS',),
+    'TOWER_DROOP_DESIGN_ENV_V1_RAD': ('TOWER_DROOP_DESIGN_ENV_RAD', 'v1'),
+    'TOWER_DROOP_KAPPA_V1': ('TOWER_DROOP_KAPPA', 'v1'),
+    'TOWER_DROOP_TAU_AC_V1_NM': ('TOWER_DROOP_TAU_AC_NM', 'v1'),
+    'TOWER_DROOP_LINK_MASSES_V1': ('ARM_V1', 'link_masses'),
+}
 
 
 def _contract():
@@ -88,6 +111,28 @@ class SceneFixtureLockstep(unittest.TestCase):
         catalog = (WORKFLOW / 'object_catalog.py').read_text(encoding='utf-8')
         self.assertIn('from physical_ai_server.workflow.scene_fixture import RESERVED_TAG_IDS', catalog)
         self.assertIn('ist für die Kalibrierung reserviert', catalog)
+
+
+class TheV1DriversTwin(unittest.TestCase):
+    """WP-T1: the driver's tower check judges the contract's tower with the contract's numbers."""
+
+    def test_every_tower_literal_of_the_driver_is_the_contracts(self):
+        contract = _contract()
+        for name, path in DRIVER_TWINS.items():
+            with self.subTest(name=name):
+                expected = contract[path[0]]
+                for key in path[1:]:
+                    expected = expected[key]
+                self.assertEqual(_module_constant(DRIVER_GEOMETRY, name), expected)
+
+    def test_the_driver_residual_is_the_uncalibrated_v1s(self):
+        contract = _contract()
+        self.assertEqual(contract['TOWER_RESIDUAL_DRIVER_M'], contract['TOWER_RESIDUAL_UNCALIBRATED_M']['v1'])
+        self.assertEqual(contract['TOWER_RESIDUAL_DRIVER_M'], 0.0260)
+
+    def test_the_judged_parts_are_tower_parts(self):
+        names = [part[0] for part in _contract()['TOWER_OBB_F']]
+        self.assertTrue(set(_module_constant(DRIVER_GEOMETRY, 'TOWER_T1_PARTS')) <= set(names))
 
 
 if __name__ == '__main__':

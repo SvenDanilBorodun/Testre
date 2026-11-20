@@ -398,6 +398,17 @@ def _load_feetech_geometry():
     return mod
 
 
+def _load_scene_split():
+    """The driver's sibling scene_split.py (standard library at import time):
+    run_home's camera-tower check reads the scene-camera profile through it."""
+    import importlib.util
+    path = os.path.join(_DOCKER, 'scene_split.py')
+    spec = importlib.util.spec_from_file_location('scene_split_for_tests', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _load_node_functions():
     path = os.path.join(_DOCKER, 'feetech_arm_node.py')
     source = open(path, encoding='utf-8').read()
@@ -409,6 +420,7 @@ def _load_node_functions():
         # so this deps-free suite can hold the REAL module rather than a stub —
         # which is what lets the boot-path tests below exercise the real gate.
         'fg': _load_feetech_geometry(),
+        'scene_split': _load_scene_split(),
         'time': __import__('time'), 'threading': __import__('threading'),
         'CENTER_TICK': 2048, 'TICKS_PER_REV': 4096,
     }
@@ -428,7 +440,11 @@ def _load_node_functions():
               'wrong_way_abort_message', 'post_energise_read_failure_message',
               '_parse_goal_edge_margin', 'rad_to_command_tick',
               'firmware_fingerprint_notes', 'angular_resolution_note',
-              '_parse_home_floor_tol', 'boot_home_floor_decision'}
+              '_parse_home_floor_tol', 'boot_home_floor_decision',
+              # the camera-tower check run_home calls after the floor check
+              # (WP-T1; it exists only under the tower scene profile)
+              '_eeprom_window_rad', 'scene_profile_from_env', 'tower_check_on',
+              'tower_glide_from', 'boot_home_tower_decision'}
     consts = {'RAD_PER_TICK', 'HOME_JOINTS_RAD', 'GRIPPER_OPEN_RAD',
               'LOOP_HZ', 'BOOT_HOME_DURATION_S', 'SERVO_IDS', 'JOINT_NAMES',
               'JOINT_LIMITS_RAD', '_DEFAULT_SIGNS', 'JOINT_SIGNS',
@@ -451,7 +467,9 @@ def _load_node_functions():
               # Arm constants: the V1 literals are plain module-level
               # assignments, executed in order like everything above.
               'TORQUE_SERVICE', 'HOME_SERVICE', 'HOME_SERVICE_ALIAS',
-              'GEOMETRY_SPEC', 'N_ARM_JOINTS'}
+              'GEOMETRY_SPEC', 'N_ARM_JOINTS',
+              'ARM_PROFILE', 'SCENE_PROFILE_ENV', 'TOWER_GLIDE_REFUSAL_DE',
+              'TOWER_GLIDE_UNJUDGEABLE_DE', 'TOWER_WINDOW_RAD'}
     # Instance methods extracted as plain functions and bound onto a stub self
     # (_TorqueStubNode) — the torque path is BEHAVIOUR, not something a source
     # grep can prove, and rclpy is not installed here.

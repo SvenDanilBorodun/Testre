@@ -67,21 +67,24 @@ _OMX_JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5',
                     'gripper_joint_1')
 
 # v1_studio geometry (the V1 CAD export with Base_part.2 as the base; shipped as
-# physical_ai_manager/public/v1-urdf/v1.urdf). HOME stands the arm UP over its
-# own base with the claw pointing up, chosen by measurement rather than by eye:
-# it keeps every joint at least 0.640 rad from its own limit (the binding joint
-# is joint2), the lowest moving-link box 43.7 mm above the table, the box model's
-# self-clearance at 22.0 mm and the whole arm inside a 146.9 mm plan radius at
-# every claw opening, so it does not stand in the scene camera's view. Fingertip
-# TCP at world (+0.0125, 0, +0.554). The pose that maximises the joint margins
-# under the same constraints refuses the same share of boot glides from a limp
-# collapse, so HOME is not a different pose.
+# physical_ai_manager/public/v1-urdf/v1.urdf). HOME is the OMX's SHAPE (owner
+# decisions D46, D49; the OMX's own joint values lie outside the V1's joint2
+# window): the upper arm leans back, the forearm and the claw point forward,
+# level, at the elbow's height. Measured on this solver and box model: every
+# joint at least 0.640 rad from its own limit (binding: joint2 and joint3), the
+# lowest moving-link box 43.7 mm above the table (link1's structural floor),
+# the box model's self-clearance 22.0 mm at every claw opening, elbow, wrist and
+# fingertip TCP 0.2105 m above the table (the TCP 0.2974 m in front of the
+# joint1 axis), the highest mesh point 0.278 m. Joint 3 holds the level
+# forearm, a load the owner accepted without a bench test. The upright HOME
+# before it, (0, 0.64, 1.48, 0.90, 0), stood 0.554 m tall.
 #
-# CONSEQUENCE worth knowing: the tool at HOME points 9.7 degrees off straight
-# UP, so HOME is OUTSIDE the solver's image (solve() only emits strict-vertical
-# poses) and no Cartesian machinery — reach check, workspace floor, reroute
-# vias — can reason about it. That is why the table-floor guard on the way to it
-# is joint-space (workflow/arm_geometry.py + workflow/home_planner.py).
+# CONSEQUENCE worth knowing: the tool at HOME lies level, 90 degrees off the
+# vertical, so HOME is OUTSIDE the solver's image (solve() only emits
+# strict-vertical poses) and no Cartesian machinery — reach check, workspace
+# floor, reroute vias — can reason about it. That is why the table-floor guard
+# on the way to it is joint-space (workflow/arm_geometry.py +
+# workflow/home_planner.py).
 #
 # The gripper channel is the claw servo angle in RADIANS, 0 = jaws closed …
 # 0.90 = open, so open > closed numerically, which every shared code path
@@ -93,7 +96,7 @@ _OMX_JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5',
 # twin agree on one name set. ``RL_joint`` is the CAD's own name for the driven
 # claw finger (the other rides an <mimic>) — it is "Right-finger L joint", not
 # reinforcement learning.
-_V1_HOME_JOINTS_RAD = (0.0, 0.64, 1.48, 0.90, 0.0)
+_V1_HOME_JOINTS_RAD = (0.0, 0.64, 0.64, 0.0, 0.0)
 _V1_JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5',
                    'RL_joint')
 

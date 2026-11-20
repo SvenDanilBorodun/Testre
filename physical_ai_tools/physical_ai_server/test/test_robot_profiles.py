@@ -294,7 +294,7 @@ def test_resolve_v1():
     assert prof.camera_roles == ('scene',)
     assert prof.torque_service == '/v1/set_torque'
     assert prof.urdf_asset_id == 'v1'
-    assert prof.home_joints_rad == (0.0, 0.64, 1.48, 0.90, 0.0)
+    assert prof.home_joints_rad == (0.0, 0.64, 0.64, 0.0, 0.0)
     assert prof.safe_home_arm_rad == prof.home_joints_rad
     assert (prof.gripper_open_rad, prof.gripper_closed_rad) == (0.90, 0.0)
     assert prof.tool_length_m == 0.1086
@@ -343,6 +343,26 @@ def test_no_drift_v1_vs_v1_ik():
                for value, (lo, hi) in zip(prof.home_joints_rad, solver.joint_limits)]
     assert min(margins) == pytest.approx(0.640, abs=1e-9)
     assert all(m >= 0.5 for m in margins)
+
+
+def test_v1_home_is_the_omx_shape_low_over_the_table():
+    """HOME is the OMX's shape (owner decisions D46, D49): the upper arm leans
+    back, the forearm and the claw point forward, level, at the elbow's height.
+    The highest point of the solver's link sampling (5 per link, the fingertip
+    included) stays under 0.215 m; the upright HOME before it reached 0.554 m.
+    The tool lies level, so HOME is still outside the strict-vertical solver's
+    image and the guard on the way to it stays joint-space."""
+    import numpy as np
+
+    prof = rp.resolve('v1_studio')
+    solver = prof.build_ik()
+    points = solver.link_points(list(prof.home_joints_rad), samples_per_link=5)
+    assert points is not None
+    assert max(float(p[2]) for p in points) < 0.215
+    rot, _tcp = solver.fk(list(prof.home_joints_rad))
+    tool_axis = np.asarray(rot) @ np.asarray(solver.approach_axis_local)
+    # Level to within 0.01 degrees (the URDF's right angles are rounded).
+    assert float(tool_axis[2]) == pytest.approx(0.0, abs=1e-4)
 
 
 def test_only_the_rotating_claw_advertises_tool_tip_tracks_gripper():

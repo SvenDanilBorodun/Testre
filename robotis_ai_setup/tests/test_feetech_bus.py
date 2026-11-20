@@ -579,7 +579,7 @@ class TestNodePureFunctions(unittest.TestCase):
         self.assertEqual(_N['JOINT_NAMES'],
                          ('joint1', 'joint2', 'joint3', 'joint4', 'joint5',
                           'RL_joint'))
-        self.assertEqual(_N['HOME_JOINTS_RAD'], (0.0, 0.64, 1.48, 0.90, 0.0))
+        self.assertEqual(_N['HOME_JOINTS_RAD'], (0.0, 0.64, 0.64, 0.0, 0.0))
         self.assertEqual(_N['GRIPPER_OPEN_RAD'], 0.90)
         self.assertEqual(_N['SERVO_IDS'], (1, 2, 3, 4, 5, 6))
         self.assertEqual(_N['N_ARM_JOINTS'], 5)
@@ -1045,7 +1045,8 @@ class _TorqueStubNode:
         self.errors, self.warnings, self.infos = [], [], []
         self.traj_calls = []
         self.verify_calls = []
-        # The V1 HOME + the claw open: a boot glide from here is floor-safe.
+        # The V1's previous, upright HOME + the claw open: a boot glide from here
+        # to today's HOME is floor-safe.
         self.read_positions = [0.0, 0.64, 1.48, 0.90, 0.0, 0.90]
 
     # --- logger seam -------------------------------------------------------
@@ -1398,7 +1399,7 @@ class TestTorqueOnEdgeGuard(unittest.TestCase):
     # ── the boot-home table-floor pre-check (Rule §2, 2026-07-27) ──────────
     def test_boot_path_refuses_to_glide_into_the_table_but_keeps_torque_ON(self):
         """A deep press: from this pose (above the table, like HOME) the straight
-        glide to HOME drives a link ~225 mm below the table on the box model.
+        glide to HOME drives a link ~190 mm below the table on the box model.
 
         The gate must skip the glide — and it must LEAVE THE ARM TORQUED. A
         refusal that de-energises a BACKDRIVING arm turns a guard into a
@@ -1407,7 +1408,7 @@ class TestTorqueOnEdgeGuard(unittest.TestCase):
         here on the real node path, not only in the AST structure tests.
         """
         node, bus = self._node()
-        # the stub's default read_positions IS home; make it the measured press
+        # the stub's default read_positions is a standing pose; make it the press
         node.read_positions = [0.039, 3.023, 0.019, -1.356, 0.554, 0.90]
         clock = _FakeTime()
         with patch.dict(_N, {'time': clock, 'threading': _SyncThreading}):
@@ -3969,7 +3970,7 @@ class TestCommandedGoalEdgeClamp(unittest.TestCase):
         home = list(_N['HOME_JOINTS_RAD']) + [_N['GRIPPER_OPEN_RAD']]
         worst = min(min(t, 4095 - t) for t in
                     (_N['rad_to_tick'](r, 1) for r in home))
-        self.assertEqual(worst, 1082)                    # joint3 at 1.48 rad
+        self.assertEqual(worst, 1460)                    # the claw at 0.90 rad
         self.assertGreater(worst, _N['_GOAL_EDGE_MARGIN_MAX_TICKS'])
         self.assertGreater(worst, m)
 
@@ -4134,10 +4135,10 @@ class TestCommandedGoalEdgeClamp(unittest.TestCase):
             ticks,
             {sid: _N['rad_to_tick'](home[i], _N['JOINT_SIGNS'][i])
              for i, sid in enumerate(_N['SERVO_IDS'])})
-        self.assertEqual(ticks[3], 3013)                 # joint3 at HOME
+        self.assertEqual(ticks[3], 2465)                 # joint3 at HOME
 
     def test_every_boot_home_point_is_commanded_unchanged(self):
-        # The boot-home glide's HOME endpoint is 1082 ticks clear, so a glide from
+        # The boot-home glide's HOME endpoint is 1460 ticks clear, so a glide from
         # any pose the plausibility band admits arrives unclamped. (Its FIRST
         # points can be clamped when a joint was hand-parked inside the band —
         # that is the documented, direction-safe jerk, not a silent failure.)

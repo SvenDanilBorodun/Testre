@@ -97,7 +97,11 @@ from trajectory_msgs.msg import JointTrajectory  # noqa: E402
 # 1/4/5/6, STS3250 on the high-load shoulder + elbow 2/3.
 SERVO_IDS = (1, 2, 3, 4, 5, 6)
 JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'RL_joint')
-HOME_JOINTS_RAD = (0.0, 0.64, 1.48, 0.90, 0.0)
+# HOME is the OMX's shape (owner decisions D46, D49): the upper arm leans back,
+# the forearm and the claw point forward, level, 0.21 m above the table; every
+# glide to it (build_boot_home) opens the claw to GRIPPER_OPEN_RAD. Joint 3
+# holds the level forearm, a load the owner accepted without a bench test.
+HOME_JOINTS_RAD = (0.0, 0.64, 0.64, 0.0, 0.0)
 GRIPPER_OPEN_RAD = 0.90
 TICKS_PER_REV = 4096
 CENTER_TICK = 2048
@@ -780,8 +784,8 @@ PHYSICAL_TORQUE_REFUSALS = tuple(BOOT_PHYSICAL_REMEDY_DE)
 #
 # WHAT IT COSTS: the outer `margin` ticks of commanded travel at those two bounds
 # only — 11.25° at the default, i.e. joint2/joint3 command to at most +168.75°
-# instead of +180°. Nothing autonomous reaches them: HOME sits ≥1082 ticks from
-# the nearest register end (joint3 at 1.48 rad → tick 3013), and the closest any
+# instead of +180°. Nothing autonomous reaches them: HOME sits ≥1460 ticks from
+# the nearest register end (the claw at 0.90 rad → tick 2635), and the closest any
 # real V1IKSolver solution comes is 131 ticks — joint3 at its unconditional
 # analytic bound q3 ≤ _G_OFFSET = 2.938642 rad (tick 3964), reached at full
 # extension. That sits STRICTLY ABOVE the fenced maximum margin (130 — see

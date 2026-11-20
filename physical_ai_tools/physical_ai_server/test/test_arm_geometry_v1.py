@@ -291,7 +291,8 @@ def test_self_pairs_are_sized_off_this_arms_table():
 
 
 def test_floor_clearance_at_home_is_positive_and_finite():
-    """HOME is the pose the driver glides to on EVERY boot."""
+    """The upright pose, the V1's HOME before owner decision D46 (today's
+    HOME is judged by the profile tests below)."""
     geom = AG.resolve_geometry(_Ctx(V1IKSolver()))
     gap = geom.floor_clearance([0.0, 0.64, 1.48, 0.90, 0.0], lambda x, y: 0.0)
     assert gap is not None
@@ -321,10 +322,11 @@ def _unique_verts(urdf):
 
 
 def test_floor_clearance_is_exact_at_home():
-    """At HOME the model equals the mesh truth (+43.7 mm, link1's structural
-    floor) rather than merely bounding it, at any claw opening — the claw
-    points up there. A regression here means the model has become loose enough
-    to start refusing legitimate poses."""
+    """At the upright pose (the V1's HOME before owner decision D46) the
+    model equals the mesh truth (+43.7 mm, link1's structural floor) rather
+    than merely bounding it, at any claw opening — the claw points up there.
+    A regression here means the model has become loose enough to start
+    refusing legitimate poses."""
     urdf = _Urdf()
     verts = _unique_verts(urdf)
     home = [0.0, 0.64, 1.48, 0.90, 0.0]
@@ -334,6 +336,55 @@ def test_floor_clearance_is_exact_at_home():
         assert model == pytest.approx(_lowest_both_ratios(urdf, verts, home, claw),
                                       abs=2e-4)
     assert model == pytest.approx(0.0437, abs=5e-4)
+
+
+def test_the_profile_home_is_exact_and_clear_at_every_claw_opening():
+    """The profile's HOME (the OMX's shape, owner decisions D46, D49) is the
+    pose the driver glides to on every activation. Over the claw's whole
+    window the box model reads link1's structural floor (+43.7 mm) and equals
+    the mesh truth at both gear ratios (the level claw stays far above it),
+    and no two non-adjacent links come closer than 20 mm."""
+    from physical_ai_server import robot_profiles as rp
+
+    home = list(rp.resolve('v1_studio').home_joints_rad)
+    urdf = _Urdf()
+    verts = _unique_verts(urdf)
+    geom = AG.resolve_geometry(_Ctx(V1IKSolver()))
+    for claw in np.linspace(*_CLAW_BAND, 9):
+        q = home + [float(claw)]
+        model = geom.floor_clearance(q, lambda x, y: 0.0)
+        assert model == pytest.approx(0.0437, abs=1e-4), claw
+        assert model == pytest.approx(
+            _lowest_both_ratios(urdf, verts, home, float(claw)), abs=2e-4), claw
+        assert geom.self_clearance(q) >= 0.020, claw
+
+
+def test_a_grasp_glides_to_the_profile_home_in_one_direct_leg():
+    """From the strict-vertical grasp 0.14 m in front of the base, the home
+    planner's route to the profile's HOME is ONE direct leg, as it was to the
+    upright HOME before owner decision D46."""
+    from physical_ai_server import robot_profiles as rp
+    from physical_ai_server.workflow import home_planner as HP
+    from physical_ai_server.workflow.handlers import motion as M
+
+    class _PlannerCtx:
+        def __init__(self):
+            self.ik = V1IKSolver()
+            self.zones = []
+            self.z_table = 0.0
+            self.table_plane = None
+            self.logs = []
+            self.log = self.logs.append
+
+    prof = rp.resolve('v1_studio')
+    home_full = list(prof.home_joints_rad) + [prof.gripper_open_rad]
+    ik = V1IKSolver()
+    start = list(ik.solve((ik.base_axis_x + 0.14, 0.0, 0.0),
+                          roll=M.GRASP_ROLL_RAD)) + [prof.gripper_open_rad]
+    legs = HP.plan_home_route(_PlannerCtx(), start, home_full, 3.0)
+    assert len(legs) == 1
+    assert legs[0][0] == start
+    assert legs[0][1] == home_full
 
 
 def test_floor_clearance_is_a_sound_lower_bound_on_the_real_meshes():

@@ -160,7 +160,7 @@ class TestLowestZ(unittest.TestCase):
 
     def test_the_swept_check_catches_a_dip_the_endpoints_miss(self):
         """The whole reason the glide is judged SWEPT rather than at its ends:
-        both endpoints are above the table, the line between them is ~225 mm
+        both endpoints are above the table, the line between them is ~190 mm
         under it."""
         self.assertGreater(fg.lowest_z(_DIP_START), 0.0)
         self.assertGreater(fg.lowest_z(list(_HOME)), 0.0)
@@ -174,6 +174,16 @@ class TestLowestZ(unittest.TestCase):
     def test_home_to_home_is_the_home_clearance(self):
         self.assertAlmostEqual(fg.swept_lowest_z(list(_HOME), list(_HOME)),
                                fg.lowest_z(list(_HOME)), places=9)
+
+    def test_home_stands_low_over_the_table(self):
+        """HOME is the OMX's shape (owner decisions D46, D49): the upper arm
+        leans back, the forearm and the claw point forward, level, so every
+        joint origin of the driver's own chain stays under 0.215 m (elbow,
+        wrist and tool origin at 0.2105 m). The upright HOME before it put the
+        tool origin at 0.447 m."""
+        frames = fg.link_frames(list(_HOME))
+        self.assertIsNotNone(frames)
+        self.assertLess(max(pos[2] for _rot, pos in frames), 0.215)
 
     def test_a_big_swing_is_sampled_far_more_finely_than_a_small_one(self):
         """The tunneling argument: a straight JOINT-space move traces ARCS, so
@@ -243,6 +253,16 @@ class TestBootHomeFloorDecision(unittest.TestCase):
 
     def test_home_itself_is_allowed(self):
         ok, _depth = self._decide(list(_HOME), 0.020)
+        self.assertTrue(ok)
+
+    def test_the_glide_from_the_upright_home_is_allowed(self):
+        """An arm standing at the upright HOME of the releases before owner
+        decision D46 glides to today's HOME without a link dipping: the swept
+        floor stays at link1's structural 43.7 mm."""
+        upright = [0.0, 0.64, 1.48, 0.90, 0.0]
+        self.assertAlmostEqual(fg.swept_lowest_z(upright, list(_HOME)), 0.0437,
+                               places=4)
+        ok, _depth = self._decide(upright, 0.020)
         self.assertTrue(ok)
 
     def test_zero_tolerance_disables_the_check(self):

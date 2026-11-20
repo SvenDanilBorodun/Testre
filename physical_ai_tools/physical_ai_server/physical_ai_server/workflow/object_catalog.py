@@ -242,7 +242,7 @@ _FIXED_CATALOG: dict = {
 # v1_studio variant: the SAME physical objects + tag ids (one printed tag sheet
 # fleet-wide), only the gripper close differs. The V1 channel is the claw servo
 # angle in RADIANS (0 = jaws closed … 0.90 = open command; see
-# robot_profiles._V1_HOME_JOINTS_RAD).
+# robot_profiles._V1_STUDIO.gripper_open_rad).
 #
 # Where 0.05 comes from: simulated against the claw meshes, a 30 mm cube held at
 # the 15 mm grasp depth blocks the blades at 0.195 rad (gear ratio 1) / 0.206 rad

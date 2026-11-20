@@ -10,9 +10,9 @@ service step, the arm check that follows it, and the node's claim of the calibra
 
 The views are synthetic: the clip-on target's 36 corners seen by a known Kannala–Brandt camera at chosen plate
 poses, each tag's four corners rolled by one place (A14: the detector's order is not the model's). Three looks
-per view with 0.05 px of pixel noise each, the quiet looks the arm check's capture tests use (``QUIET`` of
-``test_autocal_service``): the capture's stillness rule is the arm check's 0.4 px per corner, which 0.15 px per
-look would break for most tags.
+per view at autocal_sim's full pixel noise, 0.15 px per corner and look, as the arm check's capture tests use
+(``QUIET`` of ``test_autocal_service``): the capture's stillness rule judges each tag's centre (conductor D89-2;
+judged per corner, 0.15 px broke it for most tags).
 """
 
 from __future__ import annotations
@@ -34,11 +34,11 @@ from physical_ai_server.workflow.autocal import service as SV
 from physical_ai_server.workflow.autocal import tags as TG
 from physical_ai_server.workflow.autocal import texts_de as T
 from physical_ai_server.workflow.autocal.camera_model import KB
-from test_autocal_service import _NODE_SRC, CAMERA_STATE, KINDS, _Camera, _Env, _stored, _StubNode
+from test_autocal_service import _NODE_SRC, CAMERA_STATE, KINDS, _Camera, _Env, _stored, _StubNode, _plate_moved
 
 W, H = 1920, 1080
 CELL_W, CELL_H = W / HH.GRID_COLS, H / HH.GRID_ROWS
-LOOK_NOISE_PX = 0.05
+LOOK_NOISE_PX = S.SIG_PX
 XT = AC.target_model('v1')[1]          # (36, 3): the plate, the same for both arms
 TRUTH = KB(1100.0, 1.0, 975.0, 528.0, 0.06, -0.08)
 # 18 views in 10 cells: both size classes in the top and bottom rows, the small class in two middle cells.
@@ -135,6 +135,51 @@ def test_a_moving_target_is_not_captured():
     drift = 0.15 * step                                         # 0.15 px per look: still
     assert [capture.offer(look(TRUTH, (R, t + k * drift), rng)) for k in range(3)] == [False, False, True]
     assert len(capture.views) == 1
+
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_a_still_plate_at_full_detector_noise_finishes_the_capture(kind):
+    """FAILS FIRST (S4, conductor D89-2): the plate held still for three looks per view of ``TEN_CELLS`` at
+    autocal_sim's full pixel noise (0.15 px per corner and look): the capture ends (18 views in at least 9
+    cells) in at least 39 of 41 runs. Judged by the largest of a tag's four corner moves it ended in none of
+    them (0–3 views per run, WP-15)."""
+    finished = 0
+    for seed in list(range(40)) + [2026]:
+        rng = np.random.default_rng(seed)
+        capture = _capture(kind)
+        for cell, size in TEN_CELLS:
+            pose = pose_in(TRUTH, rng, cell, size)
+            for _ in range(3):
+                capture.offer(look(TRUTH, pose, rng, kind=kind, noise=S.SIG_PX))
+        finished += capture.finished
+    assert finished >= 39, finished
+
+
+@pytest.mark.parametrize('motion', ('shift', 'turn'))
+@pytest.mark.parametrize('kind', KINDS)
+def test_a_plate_moving_half_a_pixel_per_look_is_never_captured(kind, motion):
+    """The centre rule keeps its grip on a real motion: a plate that moves 0.5 px per look — shifted, or turned
+    about its centre so that the outer tags' centres move 0.5 px — gives no view in any cell, at full noise."""
+    rng = np.random.default_rng(31)
+    capture = _capture(kind)
+    for cell, size in TEN_CELLS:
+        pose = pose_in(TRUTH, rng, cell, size)
+        for k in range(12):
+            assert not capture.offer(_plate_moved(_ids(kind), look(TRUTH, pose, rng, kind=kind), k, motion))
+    assert capture.views == []
+
+
+def test_both_captures_judge_stillness_with_the_one_helper():
+    """D89-2: the stillness of two looks is written once, ``arm_check.still_between``; the arm check's capture
+    (``service._target_look``) and the handheld capture (``Capture.offer``) call it and measure no corner
+    themselves."""
+    for module, name in ((SV, '_target_look'), (HH, 'offer')):
+        with open(module.__file__, encoding='utf-8') as f:
+            tree = ast.parse(f.read())
+        fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
+        calls = {ast.unparse(n.func) for n in ast.walk(fn) if isinstance(n, ast.Call)}
+        assert '_ac.still_between' in calls, module.__name__
+        assert not [c for c in calls if 'norm' in c or c.endswith(('.max', '.mean'))], (module.__name__, calls)
 
 
 def test_the_same_cell_and_size_class_twice_counts_once():
@@ -479,6 +524,25 @@ def test_the_next_arm_check_holds_the_handheld_lens_and_a_written_one_uses_it_up
     assert env.svc.start('arm_check')[0]
     assert env.play() == 'finished'
     assert seen == [data, None]
+
+
+@pytest.mark.parametrize('seed', range(12))
+@pytest.mark.parametrize('kind', KINDS)
+def test_a_following_arm_check_stores_the_handheld_lens_unchanged(kind, seed, tmp_path):
+    """FAILS FIRST (S4, conductor D89-1): through the service, the handheld step and then the arm check on the
+    same kit — the stored arm check's six lens parameters ARE the handheld lens. Held under a σ 0.5 px prior
+    instead, the arm check's own data outweighed it: 9 of 12 such arm checks moved f by 0.50–1.37 px (WP-15)."""
+    env = _handheld_env(kind, tmp_path, seed=seed)
+    assert env.svc.start('handheld')[0]
+    _all_views(env, np.random.default_rng([seed, 23]))
+    handheld = HH.read(str(tmp_path), (W, H))
+    assert handheld is not None, env.svc.state()
+    env.svc._detect = env.detect
+    assert env.svc.start('arm_check')[0]
+    assert env.play() == 'finished'
+    got = _stored(env)
+    assert got.status == 'ok', env.svc.state()
+    assert got.data['kb'] == handheld['kb']
 
 
 @pytest.mark.parametrize('kind', KINDS)

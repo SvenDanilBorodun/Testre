@@ -39,7 +39,8 @@ tests hand it fakes.
   never the commanded joints, D84); it is CAPTURED when the encoders lie
   within 0.15 rad of the contract pose and three consecutive looks into the
   target's predicted image region (its nominal projection grown by 120 px)
-  show at least six target tags whose corners moved less than 0.4 px. One
+  show at least six target tags whose centres (the mean of the four corners,
+  D89-2) moved less than 0.4 px (``arm_check.still_between``). One
   full-frame look per pose collects the field and fixture tags. POSE 1 IS THE
   IDENTITY CHECK: still at AC01 for 3.0 s with fewer than six of this arm's
   target tags seen -> the program is stopped, a second program holding only
@@ -51,8 +52,8 @@ tests hand it fakes.
   guard on the solved arm model with the ladder; on success
   ``arm_check.json`` with ``target_removed: false`` and the state
   ``confirm_target_removed``. The droop warning is a warning (D42). A
-  pending handheld lens (``handheld.read``) is the solve's lens prior, and a
-  written arm check uses it up.
+  pending handheld lens (``handheld.read``) is held fixed in the solve
+  (``lens_prior``, D89-1), and a written arm check uses it up.
 * THE HANDHELD STEP (:meth:`start_handheld`, decision D9's fallback): the
   node's calibration mode claimed (``claim_mode``: nothing else moves the arm
   or starts while the student holds the target in front of the camera), the
@@ -121,7 +122,7 @@ _WAIT_ID = _WAIT_PREFIX + '{:02d}'
 _CLOSE_ID = 'armcheck-close'
 _HOME_ID = 'armcheck-home'
 
-# ── the capture rule (S4; the static half is arm_check.capturable) ───────────
+# ── the capture rule (S4; arm_check.capturable is its static half, arm_check.still_between its stillness) ──
 CAPTURE_PERIOD_S = 0.1
 STILL_WINDOW_S = 0.3
 STILL_TOL_RAD = 0.002
@@ -141,14 +142,12 @@ GUARD_HOVER_RADII = 6
 GUARD_HOVER_AZIMUTHS = 13
 GUARD_HOVER_ABOVE_MAT_M = 0.075
 
-# The sentences of this service the spec does not word: a second start while
-# an arm check (its program, its pose-1 way home or its solve) is under way, a
-# check that failed for a reason of its own (logged in English), a start while
-# the handheld step is under way, and the handheld step cancelled.
-ARM_CHECK_BUSY_DE = 'Der Arm-Check läuft gerade – bitte warten, bis er fertig ist.'
-CHECK_FAILED_DE = 'Die Kalibrierung konnte gerade nicht geprüft werden. Bitte noch einmal versuchen.'
-HANDHELD_BUSY_DE = 'Die Kamera wird gerade von Hand vermessen – bitte zuerst fertig vermessen oder abbrechen.'
-HANDHELD_STOPPED_DE = 'Vermessen der Kamera abgebrochen. Es wurde nichts gespeichert.'
+# The sentences of this service the spec does not word live in texts_de with
+# the others; the names stay importable from here.
+ARM_CHECK_BUSY_DE = _t.ARM_CHECK_BUSY_DE
+CHECK_FAILED_DE = _t.CHECK_FAILED_DE
+HANDHELD_BUSY_DE = _t.HANDHELD_BUSY_DE
+HANDHELD_STOPPED_DE = _t.HANDHELD_STOPPED_DE
 
 _FIXTURE_STATE = {'id': _sf.FIXTURE_ID, 'lift_m': _sf.LIFT_M}
 _CAPTURE_SIZE = (int(_sf.CAPTURE['width']), int(_sf.CAPTURE['height']))
@@ -958,12 +957,8 @@ class SceneCalibration:
             if len(own) < _ac.CAPTURE_MIN_TARGET_TAGS:
                 run.streak = []
                 return
-            if run.streak:
-                prev = run.streak[-1][0]
-                steady = [tid for tid in own if tid in prev
-                          and float(np.max(np.linalg.norm(own[tid] - prev[tid], axis=1))) < LOOK_STABLE_PX]
-                if len(steady) < _ac.CAPTURE_MIN_TARGET_TAGS:
-                    run.streak = []
+            if run.streak and not _ac.still_between(run.streak[-1][0], own, LOOK_STABLE_PX):
+                run.streak = []
             run.streak.append((own, q))
             if len(run.streak) < CAPTURE_LOOKS:
                 return

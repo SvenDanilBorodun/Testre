@@ -11,12 +11,12 @@ student moves the clip-on target by hand in front of the tower camera.
 
 * THE CAPTURE (:class:`Capture`): a view is captured when at least
   :data:`MIN_TARGET_TAGS` of this arm's target tags are seen still — the arm
-  check's own rule, ``looks`` consecutive looks whose corners moved less than
-  ``stable_px`` (the service hands in its ``CAPTURE_LOOKS`` and
-  ``LOOK_STABLE_PX``) — and the plate centre falls into a slot not yet
-  filled: a cell of the :data:`GRID_COLS` × :data:`GRID_ROWS` image grid in
-  one of two size classes (the median tag edge below or at least
-  :data:`SIZE_CLASS_EDGE_PX`). :data:`VIEWS_REQUIRED` views in at least
+  check's own rule, ``looks`` consecutive looks whose tag centres moved less
+  than ``stable_px`` (``arm_check.still_between``; the service hands in its
+  ``CAPTURE_LOOKS`` and ``LOOK_STABLE_PX``) — and the plate centre falls into
+  a slot not yet filled: a cell of the :data:`GRID_COLS` × :data:`GRID_ROWS`
+  image grid in one of two size classes (the median tag edge below or at
+  least :data:`SIZE_CLASS_EDGE_PX`). :data:`VIEWS_REQUIRED` views in at least
   :data:`CELLS_REQUIRED` cells end the capture. The plate centre is where
   the affine map of the tag centres (A13) puts the plate's origin, and each
   tag's corners are put into the model's order against that map (A14).
@@ -26,7 +26,8 @@ student moves the clip-on target by hand in front of the tower camera.
   (focal length, principal point, aspect, ``k``, valid field).
 * THE RESULT: :data:`FILE_NAME` beside ``arm_check.json``
   (:func:`write`, :func:`read`, :func:`discard`). The next arm check holds
-  it as its lens prior; a written arm check uses it up (the service).
+  that lens fixed (``arm_check.run``'s ``lens_prior``, D89-1); a written arm
+  check uses it up (the service).
 
 Pure NumPy and the standard library.
 """
@@ -129,12 +130,8 @@ class Capture:
         if len(own) < MIN_TARGET_TAGS:
             self._streak = []
             return False
-        if self._streak:
-            prev = self._streak[-1]
-            steady = [tid for tid in own if tid in prev
-                      and float(np.max(np.linalg.norm(own[tid] - prev[tid], axis=1))) < self.stable_px]
-            if len(steady) < MIN_TARGET_TAGS:
-                self._streak = []
+        if self._streak and not _ac.still_between(self._streak[-1], own, self.stable_px):
+            self._streak = []
         self._streak.append(own)
         if len(self._streak) < self.looks:
             return False

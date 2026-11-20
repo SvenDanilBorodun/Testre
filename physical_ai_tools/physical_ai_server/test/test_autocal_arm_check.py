@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import ast
 from dataclasses import replace
+import hashlib
 import math
 from pathlib import Path
+import platform
 import sys
 
 import numpy as np
@@ -332,6 +334,89 @@ def test_d5_freed_is_held_only_by_the_clip_s_seating_prior(solved):
     free = model.free.copy()
     free[ac.I_D5] = True
     assert math.degrees(_sigmas(model, p, free)[ac.I_D5]) > 0.1
+
+
+# ── without a handheld lens the solve is the parent's; with one the lens is held (D89-1) ──
+# What ArmCheckModel without a handheld lens solved on the quiet kit's fixed-seed inputs at the parent 4277005e,
+# before a handheld lens was held fixed (scratch/build-WP-15F/noprior_digest.py): the sha256 of the solution and
+# its 1σ (float64, in order) and the values (12 significant digits). The bits are pinned on the stack they were
+# taken on; float64 last bits are not portable across BLAS, SIMD and NumPy builds (NumPy 2.4.6 on the same Mac
+# lands 1.4e-9 away), so on any stack the values must hold to 1e-7 (one ulp in the observations moves them by at
+# most 2e-9).
+_PARENT_STACK = ('darwin', 'arm64', '1.26.4')
+_PARENT_NO_LENS = {
+    'v1': (
+        'ecc4489369b2bd4e7732215a8deebba4d2dbc924d83889c9fb1192d26c43928d',
+        np.array([
+            977.831735795, 1.00192963125, 942.350056805, 520.077623268, -0.00434249604701,
+            0.0872875520663, 1.67071015183, -2.40261770765, 0.390584717645, 0.0583070495299,
+            0.0604611235287, 0.585867540272, 0, -0.000844152338066, 0.00411604824933, 0.0164289782718,
+            0, -0.00207561134347, 0, -0.00119623923912, -0.00429865953053, 0.000218051505083,
+            -0.000734336221398, -0.00400990175973, 0.00129766702711, 0.00422528264405,
+            -5.94056695941e-05, 0.000193915975489, 0.00051602898239, -0.0027336047074,
+            -0.00178821376362, -0.00075329763814, -6.7494794502e-05, 0.016479107226, 1.00512752228,
+            0.00045]),
+        np.array([
+            0.555941358205, 8.879184596e-05, 0.411230775321, 0.516943018085, 0.00105933338358,
+            0.00188749965018, 0.000271155649307, 0.000380557302328, 0.0007507544431, 0.000241461871609,
+            0.000300959553912, 0.000190159421054, 0.000224991037244, 0.000277085778956,
+            0.000341462232228, 0.000215785209623, 0.000121006521004, 0.000244070554332,
+            0.000307822320445, 0.000330677609024, 0.000425971335784, 0.000406179639231,
+            0.000298313975862, 2.64222286725e-05, 1.0855490512e-05, 2.26475289543e-05,
+            0.000223315376437, 0.000191290430432, 4.05152386768e-05, 4.91143279089e-05,
+            0.000175832487903, 0.000350649154531])),
+    'omx': (
+        '292bd071cdd8c0fa5946a6ec8daf97d6f8e19c15ab25004fcb8b81cedd64a086',
+        np.array([
+            982.264797375, 1.00188533572, 943.757510627, 516.604371332, -0.00221145235762,
+            0.0843738980011, 1.64483388834, -2.42209049851, 0.399138996522, 0.0541373777049,
+            0.0517302471602, 0.591526296241, 0, -0.00119466333928, -0.000273059165817, 0.0152890433834,
+            0, 0.000771949488652, 0, -3.47022625531e-05, 0.00176475142408, -0.00117027261661,
+            -7.94400569428e-07, -0.00802551290319, -0.00030831542689, -0.00589105351078,
+            0.000990167354472, 0.000294942628255, 0.00022279988727, -0.00176415885549,
+            -0.00180832460211, -0.00133522765598, 0.00121991051654, -0.00536900358337, 1.0025546247,
+            0.00045]),
+        np.array([
+            0.665625551479, 0.000113574340287, 0.685659571965, 0.712721573892, 0.00188893547066,
+            0.00559977215993, 0.000323264666627, 0.000543001342189, 0.00110792982933, 0.000403532234468,
+            0.000417720360439, 0.000256218238102, 0.000194617919956, 0.000331547645482,
+            0.000329318842815, 0.000198543413072, 9.93538528779e-05, 0.000269232202172,
+            0.000228408781666, 0.000295341886559, 0.000339903121702, 0.000343970856495,
+            0.000268088467472, 2.47988321744e-05, 1.01878993545e-05, 1.6496159226e-05,
+            0.000377015592403, 0.00028990572831, 4.16691558653e-05, 5.57578686033e-05,
+            0.000204773559057, 0.000340159509323])),
+}
+
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_without_a_handheld_lens_the_arm_check_solves_exactly_as_before(kind):
+    """An arm check without a pending handheld lens solves as at the parent: the same parameters and 1σ, bit for
+    bit on the stack the digest was taken on."""
+    kit, rng = _kit(kind)
+    inp = S.arm_check_inputs(kit, rng, QUIET)
+    sol = ac.build_model(ac.prepare(kind, inp.records, inp.looks)).solve()
+    sig = lm.sigmas(sol.jacobian)
+    digest, p, s = _PARENT_NO_LENS[kind]
+    np.testing.assert_allclose(sol.p, p, rtol=1e-9, atol=1e-7)
+    np.testing.assert_allclose(sig, s, rtol=1e-7, atol=0.0)
+    if (sys.platform, platform.machine(), np.__version__) == _PARENT_STACK:
+        assert hashlib.sha256(np.concatenate([sol.p, sig]).tobytes()).hexdigest() == digest
+
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_a_handheld_lens_is_held_fixed_and_stored_as_it_is(kind):
+    """FAILS FIRST (S4, conductor D89-1): with a pending handheld lens the six lens parameters are not free —
+    here one 0.8 px off the kit's true focal length, which the arm check's own data would pull back — and the
+    stored lens is that lens to the bit; everything else is solved as without one."""
+    kit, rng = _kit(kind)
+    c = kit.cam
+    lens = {'kb': {'f': c.f + 0.8, 'aspect': c.a, 'cx': c.cx - 0.6, 'cy': c.cy + 0.4, 'k1': c.k1, 'k2': c.k2}}
+    inp = S.arm_check_inputs(kit, rng, QUIET)
+    r = ac.run(inp.records, inp.looks, profile_id=S.PROFILE[kind], lens_prior=lens)
+    assert r.ok, r.code
+    assert r.calibration['kb'] == lens['kb']
+    model = ac.build_model(ac.prepare(kind, inp.records, inp.looks), lens_prior=lens)
+    assert not model.free[:6].any() and int(model.free.sum()) == 32 - 6
 
 
 # ── the field the software unprojects ────────────────────────────────────────

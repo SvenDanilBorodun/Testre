@@ -49,10 +49,11 @@ from physical_ai_server.workflow.autocal import texts_de as T
 
 KINDS = ('v1', 'omx')
 PROFILE = {'v1': 'v1_studio', 'omx': 'omx_full'}
-# Quiet kits with a third of the pixel noise: the capture's 0.4 px stability
-# rule is judged per corner, and 0.15 px per look makes most tags "move".
+# Quiet kits (no axis misalignment, no encoder non-linearity, the camera at the contract pose, no decentering,
+# the tower at its place) at autocal_sim's full pixel noise, 0.15 px per corner and look: the capture's 0.4 px
+# stillness rule judges each tag's centre (conductor D89-2; judged per corner it needed a third of the noise).
 QUIET = replace(S.Options(), skew_deg=0.0, inl_deg=0.0, cam_lens_m=0.0, cam_rot_deg=0.0, decenter=0.0,
-                tower_place=False, noise=1.0 / 3.0)
+                tower_place=False)
 NO_DROOP = replace(QUIET, droop_scale=0.0)
 CAMERA_STATE = {'v': 1, 'profile': 'tower_v1', 'state': 'streaming', 'width': 1920, 'height': 1080, 'fps': 30.0,
                 'fps_low': False, 'passthrough': True, 'outside': SF.OUTSIDE, 'profile_id': '0123456789ab',
@@ -260,6 +261,19 @@ def _stored(env):
     return ST.Store(env.svc.calib_dir).read(PROFILE[env.kind], (1920, 1080))
 
 
+def _plate_moved(ids, own, k, motion, step_px=0.5):
+    """The target's corners ``own`` (``{tag id: (4, 2)}``) after ``k`` looks of a plate moving ``step_px`` per
+    look: ``'shift'`` along the image's u, or ``'turn'`` about the plate centre (the centre tag ``ids[4]`` of the
+    3 × 3 plate) so that the nearest outer tags' centres move ``step_px`` (the corner tags √2 as far)."""
+    if motion == 'shift':
+        return {tid: np.asarray(c, float) + (k * step_px, 0.0) for tid, c in own.items()}
+    pivot = np.mean(own[ids[4]], axis=0)
+    d = min(float(np.linalg.norm(np.mean(c, axis=0) - pivot)) for tid, c in own.items() if tid != ids[4])
+    a = k * 2.0 * math.asin(step_px / 2.0 / d)
+    turn = np.array([[math.cos(a), -math.sin(a)], [math.sin(a), math.cos(a)]])
+    return {tid: (np.asarray(c, float) - pivot) @ turn.T + pivot for tid, c in own.items()}
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # starting the arm check
 # ══════════════════════════════════════════════════════════════════════════
@@ -406,6 +420,46 @@ def test_a_pose_is_captured_only_when_still_and_seen(kind, tmp_path):
         jittery.clock.advance(0.1)
         jittery.svc.capture_tick()
     assert 1 not in jittery.svc._run.captured and 1 not in jittery.svc._run.rested
+
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_every_pose_is_captured_at_full_detector_noise(kind, tmp_path):
+    """FAILS FIRST (S4, conductor D89-2): at autocal_sim's full pixel noise (0.15 px per corner and look) a
+    still target is captured at every pose within its dwell, in each of 20 seeded runs. Judged by the largest
+    of a tag's four corner moves, the same runs captured 61 % of the poses and none of them all 20."""
+    assert QUIET.noise == 1.0
+    for seed in range(20):
+        env = _Env(kind, seed=seed, calib_dir=tmp_path / str(seed))
+        assert env.svc.start('arm_check')[0]
+        assert env.play(finish=False) == 'finished'
+        assert sorted(env.svc._run.captured) == list(range(20)), seed
+
+
+@pytest.mark.parametrize('motion', ('shift', 'turn'))
+@pytest.mark.parametrize('kind', KINDS)
+def test_a_target_moving_half_a_pixel_per_look_is_never_captured(kind, motion, tmp_path):
+    """The centre rule keeps its grip on a real motion: with the arm at rest at every pose, a target that moves
+    0.5 px per look — shifted, or turned about the plate centre so that the outer tags' centres move 0.5 px —
+    is captured at no pose, at full detector noise."""
+    env = _Env(kind, calib_dir=tmp_path)
+    looks = {}
+    real = env.detect
+
+    def detect(frame, roi=None):
+        found = real(frame, roi)
+        if roi is None:                                 # the full-frame look of the mat and the fixture
+            return found
+        k = looks[env.at] = looks.get(env.at, -1) + 1
+        own = {tid: obs.corners for tid, obs in found.tags.items() if tid in env.target_ids}
+        tags = dict(found.tags)
+        tags.update({tid: TG.TagObs(c, 80.0) for tid, c in _plate_moved(env.target_ids, own, k, motion).items()})
+        return TG.Frame(found.width, found.height, found.mean_grey, tags)
+    env.svc._detect = detect
+    assert env.svc.start('arm_check')[0]
+    assert env.play(finish=False) == 'finished'
+    run = env.svc._run
+    assert run.captured == {} and sorted(run.rested) == list(range(20))
+    assert min(looks.values()) >= SV.CAPTURE_LOOKS                  # every pose was looked at often enough
 
 
 # ══════════════════════════════════════════════════════════════════════════

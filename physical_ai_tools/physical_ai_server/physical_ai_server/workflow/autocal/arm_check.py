@@ -14,7 +14,8 @@ full-frame looks of the field and fixture tags. :func:`run` then
 1. counts the captured poses and the tags (``too_few_poses``,
    ``tags_hidden``, ``fixture_hidden``);
 2. solves one Levenberg–Marquardt problem (:class:`ArmCheckModel`) over the
-   camera (``f``, aspect, ``cx, cy, k1, k2``; pose), the joint offsets
+   camera (``f``, aspect, ``cx, cy, k1, k2`` — held fixed at a pending
+   handheld lens; pose), the joint offsets
    ``d2 … d4``, five joint-axis tilts (``j2b`` fixed at 0: a joint-1 zero
    offset), the target's mount, the mat's slope ``ta, tb``, its pose
    ``dx, dy, dpsi`` and print scale; the mat height is the design value;
@@ -60,7 +61,7 @@ from physical_ai_server.workflow.autocal.mat_check import (
     project,
 )
 
-# ── the capture rule's static half (S4; stillness and the three looks are the service's) ──
+# ── the capture rule (S4): its static half and the stillness of two looks (the three looks are the service's) ──
 CAPTURE_JOINT_TOL_RAD = 0.15
 CAPTURE_MIN_TARGET_TAGS = 6
 
@@ -126,10 +127,24 @@ class PoseRecord(NamedTuple):
 def capturable(commanded, measured, target_tags: int) -> bool:
     """The capture rule's static half: the measured arm joints within
     :data:`CAPTURE_JOINT_TOL_RAD` of the contract pose and at least
-    :data:`CAPTURE_MIN_TARGET_TAGS` target tags seen. (Stillness and the three
-    looks are the capture thread's.)"""
+    :data:`CAPTURE_MIN_TARGET_TAGS` target tags seen. (The three looks are
+    the capture thread's; their stillness is :func:`still_between`.)"""
     err = np.abs(np.asarray(measured, dtype=np.float64)[:5] - np.asarray(commanded, dtype=np.float64)[:5])
     return bool(np.all(err <= CAPTURE_JOINT_TOL_RAD) and int(target_tags) >= CAPTURE_MIN_TARGET_TAGS)
+
+
+def still_between(prev, own, stable_px) -> bool:
+    """The capture rule's stillness between two consecutive looks (``{tag id:
+    (4, 2) corners}``, the arm check's and the handheld capture's alike): at
+    least :data:`CAPTURE_MIN_TARGET_TAGS` tags of ``own`` seen in ``prev`` too
+    whose CENTRE, the mean of the four corners, moved less than ``stable_px``
+    (S4, conductor D89-2). The detector's noise is independent per corner and
+    averages down in the centre, while a real motion carries the whole tag; the
+    largest of the four corner moves broke the streak of a still plate about
+    half the time per tag at 0.15 px of noise."""
+    steady = sum(1 for tid, c in own.items() if tid in prev
+                 and float(np.linalg.norm(np.mean(c, axis=0) - np.mean(prev[tid], axis=0))) < stable_px)
+    return steady >= CAPTURE_MIN_TARGET_TAGS
 
 
 def droop_envelope(records) -> np.ndarray:
@@ -163,9 +178,12 @@ class ArmCheckModel:
     ``Q`` are the measured joints of the fit poses, ``target_obs`` /
     ``target_mask`` their target corners in the model's order (``(N, 36, 2)``,
     ``(N, 36)``), ``field_ids`` / ``field_obs`` the field tags and their median
-    corners. ``lens_prior`` = a handheld lens (``{'kb': {...}}``) held under its
-    tight prior. ``free`` may be edited before :meth:`solve` (the
-    identifiability test frees ``j2b``, ``d5`` or the mat height)."""
+    corners. ``lens_prior`` = a handheld lens (``{'kb': {...}}``): its six
+    parameters are held FIXED, not free (S4, conductor D89-1 — a σ 0.5 px
+    prior on ``f`` was outweighed by the arm check's own data, which
+    determines ``f`` to about 0.6 px). ``free`` may be edited before
+    :meth:`solve` (the identifiability test frees ``j2b``, ``d5`` or the mat
+    height)."""
 
     def __init__(self, arm_key, Q, target_obs, target_mask, field_ids, field_obs, *, lens_prior=None):
         self.kind = arm_key
@@ -183,6 +201,9 @@ class ArmCheckModel:
         lens = _sf.LENS_NOMINAL
         p0 = np.zeros(N_PARAMS)
         p0[:6] = (lens['f_px'], lens['aspect'], lens['cx'], lens['cy'], lens['k1'], lens['k2'])
+        if lens_prior is not None:
+            kb = lens_prior['kb']
+            p0[:6] = (kb['f'], kb['aspect'], kb['cx'], kb['cy'], kb['k1'], kb['k2'])
         p0[S_CAM_R] = chain.rvec_of(R0)
         p0[S_CAM_T] = t0
         p0[I_SCALE] = 1.0
@@ -190,10 +211,6 @@ class ArmCheckModel:
         mean = p0.copy()
         sig = np.full(N_PARAMS, np.inf)
         sig[:6] = (60.0, 0.005, 40.0, 40.0, 0.15, 0.15)
-        if lens_prior is not None:
-            kb = lens_prior['kb']
-            p0[:6] = mean[:6] = (kb['f'], kb['aspect'], kb['cx'], kb['cy'], kb['k1'], kb['k2'])
-            sig[:6] = (0.5, 0.005, 0.5, 0.5, 0.005, 0.005)
         sig[13:16] = math.radians(3.0)
         sig[S_TILT] = math.radians(1.0)
         sig[S_MOUNT_R] = math.radians(0.3)
@@ -205,6 +222,8 @@ class ArmCheckModel:
         self.steps[:6] = (0.5, 1e-4, 0.2, 0.2, 1e-3, 1e-3)
         free = np.ones(N_PARAMS, dtype=bool)
         free[[I_D1, I_D5, I_J2B, I_HEIGHT]] = False
+        if lens_prior is not None:
+            free[:6] = False
         self.free = free
 
     # -- the forward model --

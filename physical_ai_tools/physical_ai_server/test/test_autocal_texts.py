@@ -142,6 +142,23 @@ def test_the_sentences_with_fields_and_the_rest_of_the_table():
     assert t.BY_CODE['rms'] == t.BY_CODE['lens']           # a failed RMS gate offers the handheld step too
 
 
+def test_the_service_s_own_sentences_live_here_and_the_service_still_names_them():
+    """The four sentences the spec does not word (WP-13's two, WP-15's two) live in this module, wording
+    unchanged (conductor D89); ``service`` keeps the names."""
+    from physical_ai_server.workflow.autocal import service
+    own = {
+        'ARM_CHECK_BUSY_DE': 'Der Arm-Check läuft gerade – bitte warten, bis er fertig ist.',
+        'CHECK_FAILED_DE': 'Die Kalibrierung konnte gerade nicht geprüft werden. Bitte noch einmal versuchen.',
+        'HANDHELD_BUSY_DE': 'Die Kamera wird gerade von Hand vermessen – bitte zuerst fertig vermessen oder '
+                            'abbrechen.',
+        'HANDHELD_STOPPED_DE': 'Vermessen der Kamera abgebrochen. Es wurde nichts gespeichert.',
+    }
+    for name, text in own.items():
+        assert getattr(t, name) == text, name
+        assert getattr(service, name) is getattr(t, name), name
+        assert name in _constants()                                  # held to the lint rules below
+
+
 def test_every_constant_follows_the_german_lint_rules():
     texts = _rendered()
     assert len(texts) >= 45

@@ -5,7 +5,8 @@
 # Proprietary and confidential. Licensed under the EduBotics End-User
 # Licence Agreement; see LICENSE at the repository root.
 """Every sentence the automatic calibration shows a student or a teacher
-(spec 40 S4, its table and the sentences defined beside their codes).
+(spec 40 S4, its table and the sentences defined beside their codes, and the
+calibration service's few the spec does not word).
 
 Verbatim, German, typographic quotes („…“, Rule §1). ``{…}`` are format
 fields, filled by the helpers below. :data:`BY_CODE` maps a result code (a
@@ -83,6 +84,14 @@ HANDHELD_FAILED_DE = ('Die Kamera konnte nicht vermessen werden. Bitte das Kalib
                       'weg zeigen und wiederholen.')
 LAST_RESULT_WARNING_DE = '[WARNUNG] Die Marker der Matte sind verdeckt – es gilt die letzte Prüfung.'
 TRIM_SKIPPED_WARNING_DE = '[WARNUNG] Der Arm ist nicht genau angekommen – die Feinkorrektur wurde ausgelassen.'
+
+# The calibration service's own sentences, which the spec does not word: a second start while an arm check (its
+# program, its pose-1 way home or its solve) is under way, a check that failed for a reason of its own (logged
+# in English), a start while the handheld step is under way, and the handheld step cancelled.
+ARM_CHECK_BUSY_DE = 'Der Arm-Check läuft gerade – bitte warten, bis er fertig ist.'
+CHECK_FAILED_DE = 'Die Kalibrierung konnte gerade nicht geprüft werden. Bitte noch einmal versuchen.'
+HANDHELD_BUSY_DE = 'Die Kamera wird gerade von Hand vermessen – bitte zuerst fertig vermessen oder abbrechen.'
+HANDHELD_STOPPED_DE = 'Vermessen der Kamera abgebrochen. Es wurde nichts gespeichert.'
 
 # Result code (mat check refusal, arm-check gate, note) -> its sentence.
 BY_CODE = {

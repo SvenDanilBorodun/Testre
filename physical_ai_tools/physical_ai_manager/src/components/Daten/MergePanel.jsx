@@ -4,7 +4,7 @@
 // Licence Agreement; see LICENSE at the repository root.
 
 // „Zusammenführen" (the mockup's merge panel, spec §D5): the picked datasets,
-// the seven compatibility checks BEFORE anything starts, the new dataset's
+// the compatibility checks (datenContract.MERGE_CHECKS) BEFORE anything starts, the new dataset's
 // name and where it will be saved (always the student's own namespace, §D2).
 // The button stays disabled while any check fails or the name is unusable.
 

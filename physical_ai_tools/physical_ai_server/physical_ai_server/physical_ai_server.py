@@ -147,6 +147,7 @@ from physical_ai_server.utils.parameter_utils import (
     log_parameters,
     parse_topic_list_with_names,
 )
+from physical_ai_server.workflow.studio_camera import STUDIO_CAMERA, StudioCamera
 
 import numpy as np
 import rclpy
@@ -576,6 +577,18 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # per delivered message; a SingleThreadedExecutor dispatches one in
         # ~0.18 ms. Never put a high-rate subscription back on the main node.
         self._ensure_sensor_executor()
+
+        # Roboter Studio's tower camera (spec 40 S1, D63): its OWN node and
+        # executor, never this node or the sensor node. Built here, outside any
+        # try (the constructor touches no ROS), so the recorder's provider
+        # always has it; a start failure leaves it inert: no studio picture,
+        # profile unknown (nothing stamped, nothing refused).
+        self.studio_camera = StudioCamera(
+            rclpy.create_node, SingleThreadedExecutor, time.monotonic, time.sleep)
+        try:
+            self.studio_camera.start()
+        except Exception as e:  # noqa: BLE001 — never fatal at boot
+            self.get_logger().error(f'studio camera not started: {type(e).__name__}: {e}')
 
         # EduBotics teleop force/collision e-stop (Rule §2 software guard, teleop-only).
         # Arms the read-only force monitor + the safe-home/resync orchestration.
@@ -1646,10 +1659,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         if daten is not None:
             self.data_manager._dataset_lease = daten.claim_record_lease
             self.data_manager._sync_download = daten.start_sync_download
-        # D58: the scene camera this robot records with, with or without Daten
-        # (no tower camera in this release: the constant legacy provider).
-        from physical_ai_server import scene_provenance
-        self.data_manager._scene_camera_profile = scene_provenance.LEGACY_PROVIDER
+        # D58: the scene camera this robot records with, with or without Daten:
+        # the arm container's statement through the studio camera (D63). No
+        # studio camera = no provider = unknown (nothing stamped, nothing refused).
+        studio_camera = getattr(self, 'studio_camera', None)
+        self.data_manager._scene_camera_profile = (
+            studio_camera.provider if studio_camera is not None else None)
         self.communicator.clear_latest_data()
 
         # D19: a second START used to replace the manager and leave the first run's timer
@@ -4259,7 +4274,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         or None when no frame has arrived yet / decode fails. Delegates to
         ``Communicator.get_latest_bgr_frame``, which decodes the cached
         ``CompressedImage`` JPEG via cv2.imdecode.
+
+        ``'scene_studio'`` (the tower camera's own picture, Roboter Studio
+        only) is answered by the studio camera, which subscribes on demand and
+        may wait up to its first-frame wait; every other camera keeps this path.
         """
+        if camera == STUDIO_CAMERA:
+            found = self.studio_camera.latest_frame(math.inf)
+            return None if found is None else found[0]
         if self.communicator is None:
             return None
         getter = getattr(self.communicator, 'get_latest_bgr_frame', None)
@@ -4278,6 +4300,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     def _get_camera_frame_age(self, camera: str):
         """Age (seconds) of the latest frame for the named camera, or None.
         Drives the workflow perception staleness gate (reject a frozen camera)."""
+        if camera == STUDIO_CAMERA:
+            return self.studio_camera.frame_age()
         if self.communicator is None:
             return None
         getter = getattr(self.communicator, 'get_camera_msg_age_s', None)
@@ -8895,8 +8919,10 @@ def main(args=None):
         # Cleanup HF API Worker before destroying node
         node._cleanup_hf_api_worker()
         # The sensor executor and its node go first: stop flag, executor
-        # shutdown, sensor node destroyed — all before the main node.
+        # shutdown, sensor node destroyed — all before the main node; the
+        # studio camera's node the same way.
         node._shutdown_sensor_executor()
+        node.studio_camera.shutdown()
         executor.shutdown()
         node.destroy_node()
         # try_shutdown, never shutdown: on an environment stop (SIGINT/SIGTERM)

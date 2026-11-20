@@ -408,6 +408,8 @@ class _Node:
         self._enqueue_dataset_upload = None
         self.timer_callback_dict = {'inference': lambda: None}
         self.communicator = types.SimpleNamespace(clear_latest_data=lambda: None, camera_topic_msgs={})
+        # R-C (WP-08): the provider is the studio camera's (the arm container's statement).
+        self.studio_camera = types.SimpleNamespace(provider=lambda: None)
 
     def get_logger(self):
         return _Log()
@@ -437,13 +439,13 @@ class TheNodeInjectsTheProvider(BoundedTestCase):
 
     def test_a_node_without_daten_still_injects_the_provider(self):
         node = self.run_init(None)          # a DatenService that failed to build
-        self.assertIs(node.data_manager._scene_camera_profile, self.P.LEGACY_PROVIDER)
+        self.assertIs(node.data_manager._scene_camera_profile, node.studio_camera.provider)
         self.assertIsNone(node.data_manager._dataset_lease)
 
     def test_a_node_with_daten_injects_it_beside_the_lease(self):
         daten = types.SimpleNamespace(claim_record_lease=object(), start_sync_download=object())
         node = self.run_init(daten)
-        self.assertIs(node.data_manager._scene_camera_profile, self.P.LEGACY_PROVIDER)
+        self.assertIs(node.data_manager._scene_camera_profile, node.studio_camera.provider)
         self.assertIs(node.data_manager._dataset_lease, daten.claim_record_lease)
 
     def test_the_provider_answers_legacy(self):

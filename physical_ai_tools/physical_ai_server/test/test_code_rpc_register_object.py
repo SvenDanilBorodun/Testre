@@ -135,6 +135,26 @@ def test_collision_with_the_built_in_tag_is_a_german_refusal(server):
     server.close_run(session)
 
 
+def test_a_tag_id_reserved_for_the_calibration_is_refused_by_the_validator(server):
+    """(WP-02 (8), 56 N-17) ids 400..586 are the calibration's (scene_fixture.RESERVED_TAG_IDS), so a
+    Greifobjekt's tag_ids are 0..399: [450] is refused by the row's own validation, in German, before any
+    merge; 399 is accepted. The catalog's own merge refuses 400 (test_object_catalog.py)."""
+    for language, name in (('python', 'tag_ids'), ('java', 'tagIds')):
+        ctx = _ctx('omx_full')
+        ctx.code_language = language
+        session = server.open_run(ctx)
+        r = _register(session, 'banane', 'Banane', [450], 0.04, 0.015, close=-0.4)
+        assert r['ok'] is False, r
+        assert r['e'] == f'Greifobjekt: „{name}“ muss eine Liste mit 1 bis 16 Marker-IDs (0 bis 399) sein.', r['e']
+        assert ctx.object_catalog is None
+        r = _register(session, 'banane', 'Banane', [399], 0.04, 0.015, close=-0.4)
+        assert r['ok'] is True, r
+        server.close_run(session)
+    from physical_ai_server.workflow import scene_fixture
+    assert code_rpc._TAG_ID_MAX == 399
+    assert scene_fixture.RESERVED_TAG_IDS[0] == 400
+
+
 def test_band_is_per_family(server):
     # -0.4 (negative close) is valid on OMX, refused on the Feetech band.
     for pid, ok_neg in (('omx_full', True), ('v1_studio', False)):

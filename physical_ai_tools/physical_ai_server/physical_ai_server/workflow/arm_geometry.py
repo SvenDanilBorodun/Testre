@@ -297,6 +297,33 @@ def _box_gap(corners_a, corners_b, rot_a, rot_b) -> float:
     return float(best)
 
 
+def separating_axis_gaps(corners_a, rot_a, corners_b, rot_b):
+    """:func:`_box_gap`'s measure for many box pairs at once, axis by axis —
+    the oriented-box measure the tower guard (``fixture_guard``) judges the
+    arm against the tower's oriented boxes with.
+
+    ``corners_* (T, 8, 3)``, ``rot_* (T, 3, 3)`` (columns are the box axes).
+    Returns ``(axes (T, 15, 3), gaps (T, 15), valid (T, 15))``: the 3 + 3 face
+    normals as given and the 9 edge cross products normalised, and the
+    projection gap on each; an edge pair too close to parallel to give an axis
+    (norm ≤ 1e-9) is ``valid = False``, exactly the axis ``_box_gap`` drops. The
+    largest valid gap of a pair is its ``_box_gap``.
+    """
+    ca = np.asarray(corners_a, dtype=np.float64)
+    cb = np.asarray(corners_b, dtype=np.float64)
+    ra = np.asarray(rot_a, dtype=np.float64)
+    rb = np.asarray(rot_b, dtype=np.float64)
+    faces = [ra[:, :, k] for k in range(3)] + [rb[:, :, k] for k in range(3)]
+    edges = np.stack([np.cross(ra[:, :, k], rb[:, :, m]) for k in range(3) for m in range(3)], 1)
+    norm = np.linalg.norm(edges, axis=2)
+    valid = np.concatenate([np.ones((len(ca), 6), dtype=bool), norm > 1e-9], 1)
+    axes = np.concatenate([np.stack(faces, 1), edges / np.maximum(norm, 1e-12)[:, :, None]], 1)
+    pa = np.matmul(axes, ca.transpose(0, 2, 1))
+    pb = np.matmul(axes, cb.transpose(0, 2, 1))
+    gaps = np.maximum(pb.min(2) - pa.max(2), pa.min(2) - pb.max(2))
+    return axes, gaps, valid
+
+
 def resolve_geometry(source) -> Optional[ArmGeometry]:
     """Build the :class:`ArmGeometry` for a ctx (or a bare solver), or ``None``.
 

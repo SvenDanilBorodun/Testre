@@ -272,7 +272,7 @@ _KIND_POINT_DE = ('„{p}“ muss ein Punkt aus drei Zahlen x, y, z in Metern se
 _KIND_TARGET_DE = ('„{p}“ muss ein Punkt aus drei Zahlen x, y, z in Metern oder der '
                    'Name eines gemerkten Ziels sein.')
 _KIND_ZIEL_DE = '„{p}“ muss ein Greifziel sein — das Ergebnis von find.'
-_KIND_TAGIDS_DE = '„{p}“ muss eine Liste mit 1 bis 16 Marker-IDs (0 bis 586) sein.'
+_KIND_TAGIDS_DE = '„{p}“ muss eine Liste mit 1 bis 16 Marker-IDs (0 bis 399) sein.'
 _KIND_OBJ_DE = ('„{p}“ muss ein Objekt-Name aus Buchstaben ohne Umlaute (a–z), Ziffern '
                 'und _ sein (höchstens 24 Zeichen).')
 # F18: an object named by its LABEL („Würfel") — the type it means (a German
@@ -288,7 +288,7 @@ _EMPTY_DE = '„{p}“ darf nicht leer sein.'
 # An enumerated parameter: the value is one of these names (C3).
 _CHOICE_DE = '„{p}“ muss eines davon sein: {choices}.'
 
-_TAG_ID_MAX = 586          # tag36h11's id space
+_TAG_ID_MAX = 399          # tag36h11's ids below the calibration's (scene_fixture.RESERVED_TAG_IDS, 400..586)
 _TAG_IDS_MAX = 16
 _POINT_ABS_MAX_M = 1.0
 _TARGET_NAME_RE = re.compile(robot_api.DESTINATION_NAME_RE)

@@ -15,7 +15,9 @@ the back-projected edges. Inputs:
 
 * the 4 sub-pixel tag corners (``perception.Detection.corners_px``, pupil's
   native counter-clockwise order),
-* the per-rig camera intrinsics ``K`` + distortion ``dist``,
+* the per-rig camera intrinsics ``K`` + distortion ``dist`` (an OpenCV
+  distortion vector, or the tower lens' ``KBDistortion``, which is passed on
+  untouched because the projection dispatches on its type),
 * the scene extrinsic ``T_cam_to_base`` (4x4 — the SAME transform the table
   projection uses; ``calibration_manager`` stores it cam→base),
 * the plane the tag lies in (``plane_z`` = ``board_table_z + object_height``, or
@@ -62,6 +64,7 @@ from typing import Optional
 
 import numpy as np
 
+from physical_ai_server.workflow.autocal.camera_model import KBDistortion
 from physical_ai_server.workflow.projection import project_pixel_to_table
 
 _logger = logging.getLogger(__name__)
@@ -142,11 +145,15 @@ def _project_corners_to_plane(
         T = np.asarray(T_cam_to_base, dtype=np.float64).reshape(4, 4)
     except (ValueError, TypeError):
         return None
-    dist_arr = None if dist is None else np.asarray(dist, dtype=np.float64)
+    # A ``KBDistortion`` goes on untouched: coercing it to an array would raise
+    # and would hide its type from the projection's dispatch. An OpenCV vector
+    # is coerced as before (cv2 refuses a plain list as distCoeffs).
+    if dist is not None and not isinstance(dist, KBDistortion):
+        dist = np.asarray(dist, dtype=np.float64)
     pts = np.empty((4, 3), dtype=np.float64)
     for i in range(4):
         p = project_pixel_to_table(
-            float(img[i, 0]), float(img[i, 1]), K, dist_arr, T, float(plane_z),
+            float(img[i, 0]), float(img[i, 1]), K, dist, T, float(plane_z),
             plane=plane,
         )
         if p is None:

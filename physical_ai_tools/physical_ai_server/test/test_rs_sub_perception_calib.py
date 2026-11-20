@@ -51,9 +51,12 @@ class _FakeDetector:
         return self._results
 
 
-# A tag whose true centre sits deliberately OFF the integer pixel grid.
+# A tag whose true centre sits deliberately OFF the integer pixel grid. The
+# reported centre is where the corners' diagonals cross (A13), so the corners
+# are placed for their diagonals to cross exactly there, as pupil's are.
 _TRUE_CX, _TRUE_CY = 279.857040324862, 179.8803672052664
-_CORNERS = [[260.4, 160.3], [299.6, 160.4], [299.5, 199.7], [260.3, 199.6]]
+_CORNERS = [[_TRUE_CX - 19.6, _TRUE_CY - 19.6], [_TRUE_CX + 19.6, _TRUE_CY - 19.55],
+            [_TRUE_CX + 19.6, _TRUE_CY + 19.6], [_TRUE_CX - 19.6, _TRUE_CY + 19.55]]
 
 
 def _detect_one(monkeypatch):

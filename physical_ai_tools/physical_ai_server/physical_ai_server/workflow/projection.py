@@ -12,6 +12,11 @@ return the resulting (x, y, z_table) point in base coordinates. This is
 THE path that turns a detected cube pixel into a base-frame grasp point
 for ``handlers.motion.pickup`` / ``drop_at``.
 
+``dist`` is either an OpenCV distortion vector (``cv2.undistortPoints``) or an
+``autocal.camera_model.KBDistortion``, the tower camera's Kannala-Brandt lens,
+which is inverted by its own Newton step and answers ``None`` for a pixel
+beyond the model's valid field.
+
 ``project_base_to_pixel`` (the reverse) has NO live caller — the
 gripper-cam grasp refine that would have used it was cancelled with the
 WS4 scene-cam-only calibration decision (2026-06-17; the gripper camera
@@ -24,12 +29,17 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from physical_ai_server.workflow.autocal.camera_model import (
+    KBDistortion,
+    unproject_normalised,
+)
+
 
 def project_pixel_to_table(
     px: float,
     py: float,
     K: np.ndarray,
-    dist: np.ndarray,
+    dist: np.ndarray | KBDistortion,
     T_cam_to_base: np.ndarray,
     z_table: float,
     plane: tuple[float, float, float] | None = None,
@@ -43,14 +53,20 @@ def project_pixel_to_table(
     with the flat plane ``z = z_table``.
 
     Returns the (x, y, z) base-frame point, or ``None`` if the ray is parallel
-    to the plane (camera looking along the horizon) or the intersection is
-    behind the camera.
+    to the plane (camera looking along the horizon), the intersection is
+    behind the camera, or (Kannala-Brandt lens) the pixel lies beyond the
+    model's valid field.
     """
-    pixel = np.array([[[px, py]]], dtype=np.float32)
-    undistorted = cv2.undistortPoints(pixel, K, dist).reshape(-1)
+    if isinstance(dist, KBDistortion):
+        direction_cam = _kb_ray(px, py, K, dist)
+        if direction_cam is None:
+            return None
+    else:
+        pixel = np.array([[[px, py]]], dtype=np.float32)
+        undistorted = cv2.undistortPoints(pixel, K, dist).reshape(-1)
 
-    # Ray in camera frame (homogeneous); origin at (0, 0, 0).
-    direction_cam = np.array([undistorted[0], undistorted[1], 1.0])
+        # Ray in camera frame (homogeneous); origin at (0, 0, 0).
+        direction_cam = np.array([undistorted[0], undistorted[1], 1.0])
 
     R = T_cam_to_base[:3, :3]
     t = T_cam_to_base[:3, 3]
@@ -78,6 +94,16 @@ def project_pixel_to_table(
 
     point_base = origin_base + s * direction_base
     return np.array([point_base[0], point_base[1], z_table])
+
+
+def _kb_ray(px: float, py: float, K, dist: KBDistortion) -> np.ndarray | None:
+    """The camera-frame unit ray through a pixel of a Kannala-Brandt lens, or
+    ``None`` beyond its valid field."""
+    n = np.linalg.solve(np.asarray(K, dtype=np.float64).reshape(3, 3), [float(px), float(py), 1.0])
+    ray = unproject_normalised(n[0] / n[2], n[1] / n[2], dist.k1, dist.k2)
+    if not np.all(np.isfinite(ray)):
+        return None
+    return ray
 
 
 def project_base_to_pixel(

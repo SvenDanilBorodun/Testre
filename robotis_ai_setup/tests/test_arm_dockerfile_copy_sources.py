@@ -70,7 +70,7 @@ class TestArmDockerfileCopySources(unittest.TestCase):
         copied = {dest for _src, dest in _copies()}
         for name in ('feetech_arm_node.py', 'feetech_geometry.py',
                      'feetech_bus.py', 'identify_arm.py', 'activation_agent.py',
-                     'scene_split.py'):
+                     'scene_split.py', 'scene_camera_node.py'):
             self.assertIn(f'/usr/local/bin/{name}', copied, name)
 
 

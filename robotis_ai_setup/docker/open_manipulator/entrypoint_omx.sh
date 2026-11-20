@@ -125,10 +125,14 @@ export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
 #      i5-class student PCs.
 #
 #   2. A NATIVE USB host controller (native Linux, no WSL bridge; measured
-#      on the retired classroom Jetson Orin Nano). The wire bandwidth is
-#      real USB 2.0 isoch, ~25 MB/s per controller. Two yuyv cameras
-#      still fit (18.4 MB/s × 2 fits across two controllers; usb_cam does
-#      no decode → minimal CPU).
+#      on the retired classroom Jetson Orin Nano). The wire is real USB 2.0
+#      isoch: ~25 MB/s is the ceiling of ONE camera's high-bandwidth
+#      endpoint (3 × 1024 B per 125 µs microframe = 24.6 MB/s), not of the
+#      controller, whose bus reserves at most ≈ 48 MB/s for periodic
+#      transfers (80 % of 60 MB/s). A yuyv 640×480×30 stream needs 18.4 MB/s;
+#      two of them fit across two controllers (on ONE bus they meet the
+#      periodic budget's edge, depending on the alternate setting each camera
+#      reserves); usb_cam does no decode → minimal CPU.
 #      mjpeg2rgb would burn ~60 % of one ARM core for no benefit.
 #
 # We therefore default to `mjpeg2rgb` on WSL2 and `yuyv` on real
@@ -706,6 +710,32 @@ wait_for_camera() {
     return 1
 }
 
+# The tower scene camera (spec 40 S1). With EDUBOTICS_SCENE_CAMERA_PROFILE
+# reading tower_v1 the slot named `scene` is captured by scene_camera_node.py
+# (the tower camera's 1920x1080 MJPEG stream, cut to the recorded 640x480
+# picture on the same /scene/image_raw/compressed) instead of by usb_cam.
+# Returns 0 only for NAME `scene` and a PROFILE that reads tower_v1 by the ONE
+# value table every reader of the key uses (scene_split.normalise_profile):
+# blanks and quotes stripped at both ends, then lower-cased. Anything else —
+# legacy, empty, unset, a typo — keeps usb_cam exactly as before. Plain bash 3:
+# tests/test_entrypoint_scene_slot.py and tests/test_scene_profile_value_table.py
+# run it from this file against normalise_profile.
+scene_slot_uses_tower_node() {
+    local name="$1" profile="$2" strip
+    [ "$name" = "scene" ] || return 1
+    strip=$' \t\r\n\v\f"\''
+    while [ -n "$profile" ] && [[ "$strip" == *"${profile:0:1}"* ]]; do
+        profile="${profile:1}"
+    done
+    while [ -n "$profile" ] && [[ "$strip" == *"${profile: -1}"* ]]; do
+        profile="${profile:0:${#profile}-1}"
+    done
+    case "$profile" in
+        [Tt][Oo][Ww][Ee][Rr]_[Vv]1) return 0 ;;
+    esac
+    return 1
+}
+
 # Audit Gap-D 2026-05-23: refuse to launch when two configured cameras
 # resolve to the same underlying /dev/videoN. The Innomaker U20CAM-720P
 # pair both report USB serial "SN0001" and udev creates one shared
@@ -772,6 +802,15 @@ for i in 1 2; do
     fi
     SEEN_REAL_DEV[$real_dev]="$i:$name"
     echo "[LAUNCH] Starting camera $i ($name on $device)..."
+    if scene_slot_uses_tower_node "$name" "${EDUBOTICS_SCENE_CAMERA_PROFILE:-}"; then
+        # The tower camera's capture owner instead of usb_cam (see the
+        # function above). Same topic for the recorder, plus the Roboter-Studio
+        # picture and the camera state; it reads no environment variable.
+        echo "[LAUNCH] Camera $i is the tower camera — scene_camera_node.py instead of usb_cam."
+        python3 /usr/local/bin/scene_camera_node.py --device "$device" --name "$name" &
+        PIDS="$PIDS $!"
+        continue
+    fi
     # Audit F22: declare an explicit resolution + format here instead
     # of relying on whatever upstream `params_1.yaml` defaults to. Two
     # webcams with different native modes used to share params_1.yaml,

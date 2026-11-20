@@ -15,19 +15,29 @@ profiles: the camera on the tower while the arm container states ``legacy``
 
 ``READERS`` maps each reader to a function of the container environment (a
 dict; a missing key is the unset variable) answering the profile it selects.
-Today it holds the two readers that exist: ``scene_split.normalise_profile``
+Today it holds the readers that exist: ``scene_split.normalise_profile``
 (the derivation's own, as the ingest node calls it on
-``os.environ.get(...)``) and ``activation_agent.scene_profile_from_env`` (the
-statement on ``/edubotics/scene_camera_profile``, WP-PROF). The entrypoint's
-shell function (WP-07) and the V1 driver's reading (WP-T1) each join as one
-more entry.
+``os.environ.get(...)``), ``activation_agent.scene_profile_from_env`` (the
+statement on ``/edubotics/scene_camera_profile``, WP-PROF), the entrypoint's
+shell function ``scene_slot_uses_tower_node`` (which hands the scene slot to
+the tower node, WP-07; run under bash with the loop's own argument) and the
+Orange Pi agent's ``config_generator.scene_camera_profile_of`` (what the
+System tab shows and the start pre-flight judges, WP-07). The V1 driver's
+reading (WP-T1) joins as one more entry.
 """
 
 import importlib.util
 import os
+import sys
 import unittest
 
 from test_activation_agent import _load_agent_namespace
+from test_entrypoint_scene_slot import entrypoint_profile
+
+_SETUP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if _SETUP_DIR not in sys.path:
+    sys.path.insert(0, _SETUP_DIR)
+from pi_agent import config_generator as pi_config_generator  # noqa: E402
 
 _ARM_DIR = os.path.abspath(os.path.join(
     os.path.dirname(__file__), '..', 'docker', 'open_manipulator'))
@@ -68,9 +78,18 @@ def _agent(env):
     return reader(dict(env))
 
 
+def _pi_agent(env):
+    reader = getattr(pi_config_generator, 'scene_camera_profile_of', None)
+    if reader is None:
+        raise AssertionError('pi_agent/config_generator.py defines no scene_camera_profile_of')
+    return reader(env.get(KEY))
+
+
 READERS = {
     'scene_split.normalise_profile': _normalise_profile,
     'activation_agent.scene_profile_from_env': _agent,
+    'entrypoint_omx.sh scene_slot_uses_tower_node': entrypoint_profile,
+    'pi_agent config_generator.scene_camera_profile_of': _pi_agent,
 }
 
 
@@ -105,6 +124,13 @@ class ThePythonReadersAgreeBeyondTheTable(unittest.TestCase):
             env = {KEY: raw}
             with self.subTest(value=raw):
                 self.assertEqual(_agent(env), _normalise_profile(env))
+
+    def test_the_pi_agent_answers_as_normalise_profile(self):
+        # The Pi agent keeps a stdlib copy too (it ships without scene_split).
+        for raw in self.VALUES:
+            env = {KEY: raw}
+            with self.subTest(value=raw):
+                self.assertEqual(_pi_agent(env), _normalise_profile(env))
 
 
 if __name__ == '__main__':

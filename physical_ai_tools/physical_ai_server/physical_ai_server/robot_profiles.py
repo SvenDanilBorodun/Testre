@@ -179,12 +179,13 @@ class ArmProfile:
     # Rule §2; see motion.PICKUP_CLOSE_RAD for the
     # measurement, the disclosed trade-off and the one-variable rollback.
     pickup_close_rad: Optional[float] = None
-    # Observation pose the „Solange sichtbar" loop retreats to between passes.
-    # WorkflowContext has ALWAYS stamped this onto ctx via getattr(profile,
-    # 'observe_pose_joints', None) — but the field did not exist, so the stamp was
-    # a dead getattr and motion._observe_joints always fell through to HOME.
-    # Declared here so the seam is real; every profile deliberately leaves it None,
-    # which is byte-identical to the previous behaviour.
+    # Observation pose the „Solange sichtbar" loop retreats to between passes
+    # (encoder radians; WorkflowContext stamps it onto ctx). Every shipped
+    # profile carries the camera tower's fixture contract value
+    # (scene_fixture.ARM_*['observe_joints_rad'], spec 40 S6.4, decision D34):
+    # the arm out of the tower camera's view, 0.28 m (V1) / 0.24 m (OMX) behind
+    # the joint-1 axis. A literal here, held equal to the contract by
+    # tests/test_robot_profile_lockstep.py; None → HOME.
     observe_pose_joints: Optional[tuple] = None
     # Sim-arm grasp classifier values (None → sim_arm OMX module constants):
     sim_close_threshold_rad: Optional[float] = None
@@ -253,7 +254,12 @@ _OMX_FULL = ArmProfile(
     # number holds there.
     reach_inner_m=0.10,
     reach_outer_m=0.25,
+    # Joint 1 is windowed to ±100° in Roboter Studio (the camera tower stands
+    # behind the arm, spec 40 S6.3), so the editor draws that sector (§6.1 O4).
+    reach_sector_deg=(-100, 100),
     urdf_asset_id='omx_f',
+    # The camera tower's observation pose (spec 40 S6.4; the contract's).
+    observe_pose_joints=(0.0, -1.75, 0.0, -0.3, 0.0),
 )
 
 _OMX_FOLLOWER = ArmProfile(
@@ -288,7 +294,11 @@ _OMX_FOLLOWER = ArmProfile(
     # number holds there.
     reach_inner_m=0.10,
     reach_outer_m=0.25,
+    # Joint 1 is windowed to ±100° in Roboter Studio (spec 40 S6.3, §6.1 O4).
+    reach_sector_deg=(-100, 100),
     urdf_asset_id='omx_f',
+    # The camera tower's observation pose (spec 40 S6.4; the contract's).
+    observe_pose_joints=(0.0, -1.75, 0.0, -0.3, 0.0),
     # A follower-only Roboter-Studio kit's LONE camera is the SCENE camera, not
     # the gripper cam (perception + the config topics hang off the role name —
     # 'gripper' first broke every RS kit's single-camera auto-assign). 'gripper'
@@ -364,6 +374,9 @@ _V1_STUDIO = ArmProfile(
     # Joint 1 turns ±90° only: the arm cannot reach behind itself, so the editor
     # draws a sector, not a ring (N6), and snaps a tap behind into it.
     reach_sector_deg=(-90, 90),
+    # The camera tower's observation pose (spec 40 S6.4; the contract's): the
+    # way there and back is the ladder (direct, else via HOME; D57 Q2).
+    observe_pose_joints=(0.0, 0.1, 2.2, -1.61, 0.0),
     # gripper_mm_per_rad is deliberately OMITTED (→ the jog row keeps its degree
     # display). This is a ROTATING claw: the jaw gap is affine in the servo
     # angle, so a pure mm/rad factor would print a number that is wrong by the

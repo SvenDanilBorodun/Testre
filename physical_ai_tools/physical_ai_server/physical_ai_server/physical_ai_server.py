@@ -596,6 +596,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         except Exception as e:  # noqa: BLE001 — never fatal at boot
             self.get_logger().error(f'studio camera not started: {type(e).__name__}: {e}')
 
+        # Roboter Studio's tower calibration (spec 40 S4, WP-13): the mat check,
+        # the arm check as a program, the program-start gate. Built outside any
+        # try (the constructor touches no ROS); its state topic inside one.
+        self.scene_calibration = self._build_scene_calibration()
+        try:
+            self._init_calibration_state()
+        except Exception as e:  # noqa: BLE001 — never fatal at boot
+            self.get_logger().error(f'calibration state not started: {type(e).__name__}: {e}')
+
         # EduBotics teleop force/collision e-stop (Rule §2 software guard, teleop-only).
         # Arms the read-only force monitor + the safe-home/resync orchestration.
         self._init_collision_monitor()
@@ -4367,7 +4376,123 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             return None
         return getattr(ik, 'approach_axis_local', None)
 
+    # ------------------------------------------------------------------
+    # The tower calibration (spec 40 S4; WP-13)
+    # ------------------------------------------------------------------
+    def _build_scene_calibration(self):
+        """The calibration service of this arm, or None for an arm the fixture
+        contract does not know (no tower kit exists for it: nothing changes)."""
+        from physical_ai_server.workflow import scene_fixture
+        from physical_ai_server.workflow.autocal import service as calibration_service
+        profile = getattr(self, '_arm_profile', None)
+        if scene_fixture.arm_key(getattr(profile, 'profile_id', None)) is None:
+            return None
+        return calibration_service.SceneCalibration(
+            profile, self.studio_camera,
+            os.environ.get('EDUBOTICS_CALIB_DIR', '/root/.cache/edubotics/calibration'),
+            detect=lambda frame, roi=None: calibration_service.detect_tags(self._build_perception(), frame, roi),
+            get_joints=lambda: (self.communicator.get_latest_follower_joints()
+                                if self.communicator is not None else None),
+            fk=lambda q: self._build_ik_solver().fk(q),
+            guard_parts=self._calibration_guard_parts,
+            start_program=self._start_calibration_program,
+            stop_program=self._stop_calibration_program,
+            log=self._calibration_log,
+            log_internal=lambda text: self.get_logger().warning(str(text)),
+            on_state=self._publish_calibration_state)
+
+    def _calibration_guard_parts(self, calibration):
+        """The arm check's last gate (``guard_margin``, spec 40 S4): the solved
+        arm model — this profile's solver with the solve's joint offsets, axis
+        tilts and mat slopes, the contract's fingertip and joint-1 window — and
+        the tower guard on it with the calibrated residual, the tower where the
+        arm check placed it and the gate's droop envelope."""
+        from physical_ai_server.workflow import arm_model, fixture_guard, scene_fixture
+        from physical_ai_server.workflow.autocal import service as calibration_service
+        profile = getattr(self, '_arm_profile', None) or robot_profiles.resolve(None)
+        kind = scene_fixture.arm_key(profile.profile_id)
+        model = arm_model.CalibratedIK(
+            self._build_profile_ik(profile), offsets=calibration['joint_offsets_rad'],
+            axis_tilts=calibration['axis_tilts_rad'], slopes=calibration['tilt'],
+            fingertip_m=scene_fixture.FINGERTIP_BELOW_EE_M[kind],
+            joint1_window_deg=scene_fixture.ARMS[kind]['joint1_window_deg'])
+        guard = fixture_guard.make_guard(
+            profile.profile_id, model.guard_frames, base_axis_x=model.base_axis_x,
+            arm_check={'tower_pose': calibration['tower_pose'],
+                       'droop_envelope_rad': calibration_service.guard_margin_envelope(calibration, kind)},
+            contract_hash=calibration.get('contract_hash'))
+        return model, guard
+
+    def _init_calibration_state(self):
+        """``/edubotics/calibration_state`` (std_msgs/String, JSON): latched and
+        re-published at 1 Hz from its own callback group, and at once on every
+        change of the service's state."""
+        service = getattr(self, 'scene_calibration', None)
+        if service is None:
+            return
+        from physical_ai_server.workflow.autocal import service as calibration_service
+        qos = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST, reliability=ReliabilityPolicy.RELIABLE,
+                         durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self._calibration_state_publisher = self.create_publisher(String, calibration_service.STATE_TOPIC, qos)
+        self._calibration_state_timer = self.create_timer(
+            1.0, self._publish_calibration_state, callback_group=MutuallyExclusiveCallbackGroup())
+        self._publish_calibration_state()
+
+    def _publish_calibration_state(self, _state=None):
+        service = getattr(self, 'scene_calibration', None)
+        publisher = getattr(self, '_calibration_state_publisher', None)
+        if service is None or publisher is None:
+            return
+        try:
+            msg = String()
+            msg.data = service.state_json()
+            publisher.publish(msg)
+        except Exception as e:  # noqa: BLE001 — a state publish never breaks its caller
+            self.get_logger().warning(f'calibration state not published: {type(e).__name__}: {e}')
+
+    def _calibration_log(self, text):
+        """A German line of the calibration service in the Protokoll."""
+        self._emit_workflow_status({'log_message': str(text)})
+
+    def _start_calibration_program(self, workflow_json, workflow_id):
+        """The calibration service's internal program (the arm check, its way
+        home), through the ordinary program start: mode arbitration, the leader
+        gate, the torque assertion and every guard of a real run apply."""
+        import types
+        request = types.SimpleNamespace(workflow_json=workflow_json, workflow_id=workflow_id)
+        response = types.SimpleNamespace(success=False, message='', unreachable_block_ids=[],
+                                         unreachable_messages=[])
+        self.workflow_start_callback(request, response)
+        return bool(response.success), str(response.message or '')
+
+    def _stop_calibration_program(self, workflow_id):
+        """Stop the real manager's run when it is still the service's program."""
+        manager = getattr(self, 'workflow_manager', None)
+        if manager is not None and manager.is_running and manager.workflow_id == workflow_id:
+            manager.stop()
+
+    def _workflow_start_gate(self, workflow_json, workflow_id):
+        """The real manager's start gate: the mat check of every real program."""
+        service = getattr(self, 'scene_calibration', None)
+        if service is None:
+            return None
+        return service.program_start_gate(workflow_json, workflow_id)
+
+    def _on_workflow_run_end(self, workflow_id, phase):
+        """The real manager's run ended (``phase`` None: never started)."""
+        self._workflow_scene_camera = 'scene'
+        service = getattr(self, 'scene_calibration', None)
+        if service is not None:
+            service.on_program_end(workflow_id, phase)
+
     def calibration_start_callback(self, request, response):
+        # The tower calibration's steps (spec 40 S4): the mat check (three
+        # frames, no motion), the arm check (a program: the workflow start's own
+        # arbitration applies, never on_calibration) and the target's removal.
+        service = getattr(self, 'scene_calibration', None)
+        if service is not None and request.step in service.STEPS:
+            response.success, response.message = service.start(request.step)
+            return response
         ok, msg = self._assert_no_other_active('calibration')
         if not ok:
             response.success = False
@@ -4824,6 +4949,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         camera; otherwise narrows to the named camera. Also signals
         ``_calibration_stop_event`` so an in-flight touch-off capture
         halts within ≤50 ms instead of running to completion."""
+        # An arm check under way is stopped first: nothing is written and the
+        # arm stays where it is (spec 40 S4).
+        service = getattr(self, 'scene_calibration', None)
+        cancelled = service.cancel() if service is not None else None
+        if cancelled is not None:
+            response.success, response.message = cancelled
+            return response
         camera = request.camera if request.camera else None
         # Set BEFORE dropping buffers so a mid-flight chunked_publish
         # observes the stop on its next poll without racing the manager.
@@ -4873,7 +5005,25 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         (the colour-detection workflow was removed — named-object grasping is
         AprilTag-only). The current frontend gate (WorkshopPage.js) requires
         only scene intrinsics + scene extrinsic + the touch-off.
+
+        Under the tower camera (the arm container states ``tower_v1``) the
+        three scene fields all mean „a valid arm check exists" and the message
+        is the calibration state's sentence (spec 40 S4).
         """
+        service = getattr(self, 'scene_calibration', None)
+        camera = getattr(self, 'studio_camera', None)
+        if service is not None and camera is not None and camera.profile() == 'tower_v1':
+            calibrated, message = service.status()
+            response.has_gripper_intrinsics = True
+            response.has_gripper_handeye = True
+            response.has_color_profile = True
+            response.has_scene_intrinsics = calibrated
+            response.has_scene_handeye = calibrated
+            if hasattr(response, 'has_table_plane'):
+                response.has_table_plane = calibrated
+            response.success = True
+            response.message = message
+            return response
         try:
             from physical_ai_server.workflow.calibration_manager import (
                 CalibrationManager,
@@ -4919,139 +5069,173 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
     def mark_destination_callback(self, request, response):
         """Project a pixel click on a calibrated camera to a base-frame
-        point on the table plane."""
-        manager = self._get_or_create_calibration_manager()
-        if manager is None or not manager.has_intrinsics(request.camera):
-            response.success = False
-            response.message = (
-                f'Kamera {request.camera} ist nicht kalibriert.'
-            )
-            return response
-        try:
-            import cv2
-            from physical_ai_server.workflow.projection import project_pixel_to_table
-            handeye_path = manager._handeye_path(request.camera)
-            if not handeye_path.exists():
-                response.success = False
-                response.message = (
-                    f'Hand-Auge-Kalibrierung der {request.camera}-Kamera fehlt.'
-                )
-                return response
-            fs = cv2.FileStorage(str(handeye_path), cv2.FILE_STORAGE_READ)
-            T = fs.getNode('transform').mat()
-            z_table_node = fs.getNode('z_table')
-            # No 0.0 fallback — refuse if the grasp height was never measured.
-            z_table = float(z_table_node.real()) if not z_table_node.empty() else None
-            # board_table_z = the SURFACE height — the plane the click ray is
-            # intersected with to recover (x, y). z_table = the MEASURED grasp
-            # height — what move_to/drop_at descend to. Don't conflate them.
-            board_z_node = fs.getNode('board_table_z')
-            board_table_z = (
-                float(board_z_node.real()) if not board_z_node.empty() else None
-            )
-            # The MEASURED table tilt (a, b, c) from the touch-off, written into
-            # this same YAML by CalibrationManager._write_table_plane. Read here
-            # so a pinned destination can store the table height at ITS OWN
-            # (x, y) instead of the scalar taken at the tap centroid — see the
-            # comment on the persist below.
-            plane_node = fs.getNode('table_plane')
-            table_plane = None
-            if not plane_node.empty():
-                try:
-                    raw_plane = plane_node.mat()
-                    if raw_plane is not None and len(raw_plane.ravel()) >= 3:
-                        table_plane = tuple(
-                            float(v) for v in raw_plane.ravel()[:3])
-                except Exception:  # noqa: BLE001 — a bad plane falls back below
-                    table_plane = None
-            fs.release()
-            # The grasp height (z_table) is what move_to/drop_at descend to, so a
-            # destination is only meaningful once the touch-off has run.
-            if z_table is None:
-                response.success = False
-                response.message = (
-                    'Die Tischhöhe ist noch nicht vermessen — bitte zuerst den '
-                    'Schritt „Tisch vermessen" abschließen.'
-                )
-                return response
-            K = manager._intrinsics[request.camera]['K']
-            dist = manager._intrinsics[request.camera]['dist']
-            # Recover (x, y) by intersecting the ray with the table SURFACE
-            # (board_table_z), NOT the grasp height — same tilted-camera lateral
-            # error fix as perception. Then store z = z_table so the descend is
-            # correct. Fall back to z_table for the projection plane only when an
-            # old YAML predates board_table_z (better than refusing the click).
-            surface_z = board_table_z if board_table_z is not None else z_table
-            point = project_pixel_to_table(
-                float(request.pixel_x), float(request.pixel_y), K, dist, T,
-                surface_z,
-            )
-            if point is None:
-                response.success = False
-                response.message = (
-                    'Klick konnte nicht auf den Tisch projiziert werden.'
-                )
-                return response
-            # W5 — apply the ground-truth XY correction (identity when the
-            # accuracy-verify step was never run) so a pinned destination gets
-            # the SAME correction a named grasp does. z / table_plane unchanged.
-            corr_x, corr_y = float(point[0]), float(point[1])
+        point on the table plane.
+
+        Under the tower camera's scope (spec 40 S4, A17) a click on the scene
+        camera lands on the outside stream: the calibration service maps it to
+        the studio pixel and projects it with the tower calibration onto the
+        mat; its height is the fixture's grasp height (S5)."""
+        service = getattr(self, 'scene_calibration', None)
+        tower = None
+        if service is not None:
             try:
-                corr = manager.read_verify_correction(request.camera)
-                if corr is not None and corr.get('xy_correction') is not None:
-                    from physical_ai_server.workflow.calibration_manager import (
-                        CalibrationManager,
-                    )
-                    corr_x, corr_y = CalibrationManager.apply_xy_correction(
-                        (corr_x, corr_y), corr['xy_correction']
-                    )
+                tower = service.click(request.camera, request.pixel_x, request.pixel_y)
             except Exception as e:
-                self.get_logger().warning(
-                    f'mark_destination correction skipped: {e}'
+                self.get_logger().error(f'mark_destination failed: {e}')
+                response.success = False
+                response.message = 'Projektion fehlgeschlagen — bitte Kalibrierung prüfen.'
+                return response
+        if tower is not None and tower.message_de is not None:
+            response.success = False
+            response.world_x = 0.0
+            response.world_y = 0.0
+            response.world_z = 0.0
+            response.message = tower.message_de
+            return response
+        if tower is None:
+            manager = self._get_or_create_calibration_manager()
+            if manager is None or not manager.has_intrinsics(request.camera):
+                response.success = False
+                response.message = (
+                    f'Kamera {request.camera} ist nicht kalibriert.'
                 )
-            # The grasp height AT THIS PIN, not at the tap centroid. The scalar
-            # z_table is `a·cx + b·cy + c` evaluated at the touch-off CENTROID,
-            # so on a tilted table every pin elsewhere inherited the middle of
-            # the table's height. Measured (tap centroid (0.18, 0), pin 12 cm
-            # further out): 4° → local surface +8.39 mm while the pin stored
-            # 0.00 mm, and the workspace-floor guard — which DOES evaluate the
-            # plane at the target's own (x, y) — did not object. Higher up,
-            # the same guard refuses the pin with „Zielpunkt liegt unter der
-            # Tischebene.", a message the student cannot act on because the
-            # destination they pinned is on the table. Re-derived 2026-09-08
-            # over that same 12 cm lever, WORKSPACE_FLOOR_MARGIN_M = 0.01 and a
-            # stored pin z of 0.00 — the threshold is per CONSUMER, because each
-            # adds its own clearance:
-            #
-            #   consumer          added    under the surface at   REFUSED at
-            #   move_to <pin>     0        0.00°                   4.76°
-            #   pickup <pin>      0.012    5.71°                  10.39°
-            #   named grasp       0.015    7.13°                  11.77°
-            #
-            # An earlier revision said „from ~7° up the same guard refuses EVERY
-            # such pin". 7.13° is neither pin refusal — it is where the
-            # NAMED-OBJECT grasp (a different path, a different clearance) first
-            # drops below the surface.
-            #
-            # motion.table_z_at is the ONE shared answer to "how high is the
-            # table here" (Implementer B owns it); it is duck-typed on
-            # table_plane + z_table, honours the single rollback knob
-            # EDUBOTICS_GRASP_Z_FROM_PLANE, and falls back to the scalar for a
-            # malformed/absent plane — so this is byte-identical to the old
-            # behaviour on an untilted table or with the knob off.
-            pin_z = float(z_table)
-            try:
-                import types as _types
-                from physical_ai_server.workflow.handlers.motion import table_z_at
-                holder = _types.SimpleNamespace(
-                    table_plane=table_plane, z_table=z_table)
-                resolved = table_z_at(holder, corr_x, corr_y)
-                if resolved is not None and math.isfinite(resolved):
-                    pin_z = float(resolved)
-            except Exception as e:  # noqa: BLE001 — never fail a click on this
-                self.get_logger().warning(
-                    f'mark_destination plane height skipped: {e}'
+                return response
+        try:
+            if tower is not None:
+                from physical_ai_server.workflow.projection import project_pixel_to_table
+                lens = tower.calibration['intrinsics']
+                point = project_pixel_to_table(tower.u_full, tower.v_full, lens['K'], lens['dist'],
+                                               tower.calibration['T_cam_to_w'], tower.surface_z)
+                if point is None:
+                    response.success = False
+                    response.message = 'Klick konnte nicht auf den Tisch projiziert werden.'
+                    return response
+                corr_x, corr_y, pin_z = float(point[0]), float(point[1]), tower.grasp_z
+            else:
+                import cv2
+                from physical_ai_server.workflow.projection import project_pixel_to_table
+                handeye_path = manager._handeye_path(request.camera)
+                if not handeye_path.exists():
+                    response.success = False
+                    response.message = (
+                        f'Hand-Auge-Kalibrierung der {request.camera}-Kamera fehlt.'
+                    )
+                    return response
+                fs = cv2.FileStorage(str(handeye_path), cv2.FILE_STORAGE_READ)
+                T = fs.getNode('transform').mat()
+                z_table_node = fs.getNode('z_table')
+                # No 0.0 fallback — refuse if the grasp height was never measured.
+                z_table = float(z_table_node.real()) if not z_table_node.empty() else None
+                # board_table_z = the SURFACE height — the plane the click ray is
+                # intersected with to recover (x, y). z_table = the MEASURED grasp
+                # height — what move_to/drop_at descend to. Don't conflate them.
+                board_z_node = fs.getNode('board_table_z')
+                board_table_z = (
+                    float(board_z_node.real()) if not board_z_node.empty() else None
                 )
+                # The MEASURED table tilt (a, b, c) from the touch-off, written into
+                # this same YAML by CalibrationManager._write_table_plane. Read here
+                # so a pinned destination can store the table height at ITS OWN
+                # (x, y) instead of the scalar taken at the tap centroid — see the
+                # comment on the persist below.
+                plane_node = fs.getNode('table_plane')
+                table_plane = None
+                if not plane_node.empty():
+                    try:
+                        raw_plane = plane_node.mat()
+                        if raw_plane is not None and len(raw_plane.ravel()) >= 3:
+                            table_plane = tuple(
+                                float(v) for v in raw_plane.ravel()[:3])
+                    except Exception:  # noqa: BLE001 — a bad plane falls back below
+                        table_plane = None
+                fs.release()
+                # The grasp height (z_table) is what move_to/drop_at descend to, so a
+                # destination is only meaningful once the touch-off has run.
+                if z_table is None:
+                    response.success = False
+                    response.message = (
+                        'Die Tischhöhe ist noch nicht vermessen — bitte zuerst den '
+                        'Schritt „Tisch vermessen" abschließen.'
+                    )
+                    return response
+                K = manager._intrinsics[request.camera]['K']
+                dist = manager._intrinsics[request.camera]['dist']
+                # Recover (x, y) by intersecting the ray with the table SURFACE
+                # (board_table_z), NOT the grasp height — same tilted-camera lateral
+                # error fix as perception. Then store z = z_table so the descend is
+                # correct. Fall back to z_table for the projection plane only when an
+                # old YAML predates board_table_z (better than refusing the click).
+                surface_z = board_table_z if board_table_z is not None else z_table
+                point = project_pixel_to_table(
+                    float(request.pixel_x), float(request.pixel_y), K, dist, T,
+                    surface_z,
+                )
+                if point is None:
+                    response.success = False
+                    response.message = (
+                        'Klick konnte nicht auf den Tisch projiziert werden.'
+                    )
+                    return response
+                # W5 — apply the ground-truth XY correction (identity when the
+                # accuracy-verify step was never run) so a pinned destination gets
+                # the SAME correction a named grasp does. z / table_plane unchanged.
+                corr_x, corr_y = float(point[0]), float(point[1])
+                try:
+                    corr = manager.read_verify_correction(request.camera)
+                    if corr is not None and corr.get('xy_correction') is not None:
+                        from physical_ai_server.workflow.calibration_manager import (
+                            CalibrationManager,
+                        )
+                        corr_x, corr_y = CalibrationManager.apply_xy_correction(
+                            (corr_x, corr_y), corr['xy_correction']
+                        )
+                except Exception as e:
+                    self.get_logger().warning(
+                        f'mark_destination correction skipped: {e}'
+                    )
+                # The grasp height AT THIS PIN, not at the tap centroid. The scalar
+                # z_table is `a·cx + b·cy + c` evaluated at the touch-off CENTROID,
+                # so on a tilted table every pin elsewhere inherited the middle of
+                # the table's height. Measured (tap centroid (0.18, 0), pin 12 cm
+                # further out): 4° → local surface +8.39 mm while the pin stored
+                # 0.00 mm, and the workspace-floor guard — which DOES evaluate the
+                # plane at the target's own (x, y) — did not object. Higher up,
+                # the same guard refuses the pin with „Zielpunkt liegt unter der
+                # Tischebene.", a message the student cannot act on because the
+                # destination they pinned is on the table. Re-derived 2026-09-08
+                # over that same 12 cm lever, WORKSPACE_FLOOR_MARGIN_M = 0.01 and a
+                # stored pin z of 0.00 — the threshold is per CONSUMER, because each
+                # adds its own clearance:
+                #
+                #   consumer          added    under the surface at   REFUSED at
+                #   move_to <pin>     0        0.00°                   4.76°
+                #   pickup <pin>      0.012    5.71°                  10.39°
+                #   named grasp       0.015    7.13°                  11.77°
+                #
+                # An earlier revision said „from ~7° up the same guard refuses EVERY
+                # such pin". 7.13° is neither pin refusal — it is where the
+                # NAMED-OBJECT grasp (a different path, a different clearance) first
+                # drops below the surface.
+                #
+                # motion.table_z_at is the ONE shared answer to "how high is the
+                # table here" (Implementer B owns it); it is duck-typed on
+                # table_plane + z_table, honours the single rollback knob
+                # EDUBOTICS_GRASP_Z_FROM_PLANE, and falls back to the scalar for a
+                # malformed/absent plane — so this is byte-identical to the old
+                # behaviour on an untilted table or with the knob off.
+                pin_z = float(z_table)
+                try:
+                    import types as _types
+                    from physical_ai_server.workflow.handlers.motion import table_z_at
+                    holder = _types.SimpleNamespace(
+                        table_plane=table_plane, z_table=z_table)
+                    resolved = table_z_at(holder, corr_x, corr_y)
+                    if resolved is not None and math.isfinite(resolved):
+                        pin_z = float(resolved)
+                except Exception as e:  # noqa: BLE001 — never fail a click on this
+                    self.get_logger().warning(
+                        f'mark_destination plane height skipped: {e}'
+                    )
             # Persist into the WorkflowManager so the next workflow run
             # can resolve "ablegen bei <label>" without a second click.
             # ORDER: the persist runs BEFORE `response.success = True`, because
@@ -7186,6 +7370,16 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     # Roboter Studio — workflow runtime services
     # ------------------------------------------------------------------
     def _emit_workflow_status(self, payload: dict) -> None:
+        # The calibration service follows its arm-check program's blocks (WP-13).
+        service = getattr(self, 'scene_calibration', None)
+        if service is not None:
+            try:
+                service.on_workflow_status(payload)
+            except Exception as e:  # noqa: BLE001 — never in the way of the status
+                self.get_logger().warning(f'calibration status hook failed: {type(e).__name__}: {e}')
+        # A run on the tower camera's own picture detects in studio pixels; the
+        # page shows the outside stream (A17), so its overlay gets those.
+        studio = getattr(self, '_workflow_scene_camera', 'scene') == STUDIO_CAMERA
         try:
             msg = WorkflowStatus()
             msg.workflow_id = str(payload.get('workflow_id', ''))
@@ -7203,6 +7397,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 try:
                     cx, cy = d.centroid_px
                     bx, by, bw, bh = d.bbox_px
+                    if studio:
+                        from physical_ai_server.workflow.autocal import service as calibration_service
+                        cx, cy = calibration_service.outside_pixel(cx, cy)
+                        bw, bh = calibration_service.outside_size(bw, bh)
                     det = Detection()
                     det.cx = int(cx)
                     det.cy = int(cy)
@@ -7326,9 +7524,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             load_calibration=self._load_workflow_calibration,
             emit_status=self._emit_workflow_status,
             on_finished=self._on_workflow_finished,
-            get_scene_frame=lambda: self._get_latest_camera_frame('scene'),
+            # The run's scene camera: the tower camera's own picture
+            # ('scene_studio') when the run has the tower calibration, else the
+            # outside stream (``_load_workflow_calibration`` decides per run).
+            get_scene_frame=lambda: self._get_latest_camera_frame(
+                getattr(self, '_workflow_scene_camera', 'scene')),
             get_gripper_frame=lambda: self._get_latest_camera_frame('gripper'),
-            get_scene_frame_age=lambda: self._get_camera_frame_age('scene'),
+            get_scene_frame_age=lambda: self._get_camera_frame_age(
+                getattr(self, '_workflow_scene_camera', 'scene')),
             get_current_pose_xyz=self._get_current_gripper_xyz,
             # Audit S2: lambda so the call is deferred to workflow start
             # time (communicator may not yet be wired at WorkflowManager
@@ -7354,6 +7557,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # The camera tower (spec 40 S6.2, WP-12): each run's guard, scoped by
             # the stated scene-camera profile (None under legacy).
             fixture_guard_provider=getattr(self, '_fixture_guard', None),
+            # The tower calibration (spec 40 S4, WP-13): the mat check at the
+            # start of every real program, and the run's end for its service.
+            start_gate=getattr(self, '_workflow_start_gate', None),
+            on_run_end=getattr(self, '_on_workflow_run_end', None),
         )
         return self.workflow_manager
 
@@ -8070,7 +8277,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
           target for motion.pickup — NOT a projection plane.
         - ``table_plane`` = ``None``: the plane is horizontal.
         A profile the contract does not know gets none of the three, so grasps
-        refuse rather than guess."""
+        refuse rather than guess.
+
+        THE TOWER CALIBRATION TAKES PRECEDENCE (spec 40 S4, WP-13): when the
+        calibration service's start gate approved this run, the camera is the
+        tower camera's own picture (``scene_studio``) with the arm check's lens
+        and the mat check's pose, and ``image_size`` (guard G4). Under the
+        tower's scope (any statement but ``legacy``) the legacy YAMLs and their
+        ground-truth correction are not read."""
         from pathlib import Path
         import os
         import cv2
@@ -8082,7 +8296,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         scene_handeye_path = calib_dir / 'scene_handeye.yaml'
 
         result: dict = {}
-        if scene_intrinsic_path.exists():
+        service = getattr(self, 'scene_calibration', None)
+        tower = service.run_calibration() if service is not None else None
+        self._workflow_scene_camera = STUDIO_CAMERA if tower is not None else 'scene'
+        legacy = service is None or not service.tower_scope()
+        if tower is not None:
+            result['scene_intrinsics'] = tower['intrinsics']
+            result['scene_extrinsics'] = tower['T_cam_to_w']
+            result['image_size'] = tower['image_size']
+        if legacy and scene_intrinsic_path.exists():
             try:
                 fs = cv2.FileStorage(str(scene_intrinsic_path), cv2.FILE_STORAGE_READ)
                 K = fs.getNode('camera_matrix').mat()
@@ -8105,7 +8327,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self.get_logger().warning(
                     f'scene_intrinsics.yaml load failed: {e}'
                 )
-        if scene_handeye_path.exists():
+        if legacy and scene_handeye_path.exists():
             try:
                 fs = cv2.FileStorage(str(scene_handeye_path), cv2.FILE_STORAGE_READ)
                 T = fs.getNode('transform').mat()
@@ -8132,7 +8354,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         result['xy_correction'] = None
         result['yaw_bias_rad'] = 0.0
         try:
-            manager = self._get_or_create_calibration_manager()
+            manager = self._get_or_create_calibration_manager() if legacy else None
             if manager is not None:
                 corr = manager.read_verify_correction('scene')
                 if corr is not None:

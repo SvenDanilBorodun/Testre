@@ -399,6 +399,11 @@ class WorkflowContext:
     # misses the target by more than IK_REFINE_ACCEPT_M — the sector edge) was
     # already said THIS RUN (motion._warn_refinement): once per target per run.
     refine_warned: set = field(default_factory=set)
+    # The (width, height) of the scene frames the run's calibration was made
+    # for — the tower calibration's ``image_size`` (spec 40 S1 guard G4) — or
+    # None (the legacy calibration, the simulator): then a frame of any size
+    # is looked at. perception_blocks refuses a frame of another size in German.
+    scene_image_size: tuple | None = None
 
 
 MAX_WORKFLOW_JSON_BYTES = 256 * 1024  # 256 KiB; see plan §2.5
@@ -527,8 +532,20 @@ class WorkflowManager:
         code_rpc: Any | None = None,
         simulated: bool = False,
         fixture_guard_provider: Callable[[], Any] | None = None,
+        start_gate: Callable[[str, str], str | None] | None = None,
+        on_run_end: Callable[[str, str | None], None] | None = None,
     ) -> None:
         self._publisher = publisher
+        # The tower calibration (spec 40 S4, WP-13): asked at every start(),
+        # with the refusal guards, before anything of the run exists:
+        # ``start_gate(workflow_json, workflow_id)`` answers None (start) or the
+        # German refusal. The node passes the calibration service's gate for the
+        # REAL manager only (the mat check at the start of every real program).
+        self._start_gate = start_gate
+        # Fired after ``on_finished`` with ``(workflow_id, terminal phase)`` when
+        # a run ends, and with ``(workflow_id, None)`` when a start that passed
+        # the gate never became a run (the node: the calibration service's hook).
+        self._on_run_end = on_run_end
         # The camera tower (spec 40 S6.2 'Where'; WP-12): asked at every start()
         # for the run's guard (None: nothing judged). The node passes one for the
         # real and the simulator manager, scoped by the stated scene-camera
@@ -649,6 +666,11 @@ class WorkflowManager:
         if self._stop_event.is_set():
             return False
         return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def workflow_id(self) -> str | None:
+        """The id of the run this manager started last (it stays after the run ends)."""
+        return self._workflow_id
 
     def _prev_run_threads_alive(self) -> bool:
         """True while ANY thread of the PREVIOUS run is still running.
@@ -976,6 +998,15 @@ class WorkflowManager:
                 return False, (
                     'Zu viele Ereignis-Blöcke (Maximum 16).'
                 ), []
+            # The calibration gate is the last refusal guard (the mat check at
+            # the start of a real program, spec 40 S4). From here on every way
+            # out reports the run's end (the ``finally`` and ``_run``).
+            gated = False
+            if self._start_gate is not None:
+                refusal = self._start_gate(workflow_json, workflow_id)
+                if refusal is not None:
+                    return False, str(refusal), []
+                gated = True
 
             # EVERY path out of here restores the flag unless a run actually
             # took ownership of it — see the ``finally`` below.
@@ -1138,6 +1169,8 @@ class WorkflowManager:
                     board_table_z=calib.get('board_table_z'),
                     scene_intrinsics=calib.get('scene_intrinsics'),
                     scene_extrinsics=calib.get('scene_extrinsics'),
+                    scene_image_size=(tuple(int(v) for v in calib['image_size'])
+                                      if calib.get('image_size') is not None else None),
                     table_plane=calib.get('table_plane'),
                     # W5 — ground-truth accuracy correction (None/0.0 when never run).
                     xy_correction=calib.get('xy_correction'),
@@ -1305,6 +1338,8 @@ class WorkflowManager:
                     # silently un-stopped and any handler this call already
                     # started exits at once.
                     self._stop_event.set()
+                    if gated:
+                        self._report_run_end(workflow_id, None)
 
     def _start_joint_seed_watchdog(self, ctx: WorkflowContext) -> None:
         """Keep seeding ``ctx.last_full_joints`` until a real readback arrives.
@@ -2326,7 +2361,7 @@ class WorkflowManager:
                 # flood from this poll), which does not belong in a trigger check.
                 # The reclaim DOES belong here — see the all-claimed branch below.
                 from physical_ai_server.workflow.handlers.perception_blocks import (
-                    _excluded_ids, reclaim_from_detections, reclaim_only,
+                    _excluded_ids, frame_size_error, reclaim_from_detections, reclaim_only,
                 )
                 tag_ids = {int(i) for i in recipe.tag_ids}
                 wanted = tag_ids - {int(i) for i in _excluded_ids(ctx)}
@@ -2362,6 +2397,10 @@ class WorkflowManager:
                     time.sleep(0.2)
                     return False
                 frame = ctx.get_scene_frame()
+                if frame is not None and frame_size_error(ctx, frame) is not None:
+                    # G4: a frame the run's calibration was not made for is no
+                    # observation (the main stack's looking blocks say why).
+                    frame = None
                 if frame is None:
                     # NOT a dropped frame — that returns the cached previous
                     # image (see the docstring). This is "no frame has arrived
@@ -2415,6 +2454,8 @@ class WorkflowManager:
 
     def _run(self, interpreter: Interpreter, ctx: WorkflowContext) -> None:
         terminal_phase = 'error'
+        # Read once: a start after this run released on_workflow may set the next id.
+        workflow_id = self._workflow_id
         # Audit fix #6: ctx.last_full_joints is seeded synchronously in
         # start() before any handler thread spawns, so this block no
         # longer needs to redo the work here.
@@ -2518,6 +2559,15 @@ class WorkflowManager:
                 self._on_finished(terminal_phase)
             except Exception:
                 pass
+            self._report_run_end(workflow_id, terminal_phase)
+
+    def _report_run_end(self, workflow_id, phase) -> None:
+        if self._on_run_end is None:
+            return
+        try:
+            self._on_run_end(workflow_id, phase)
+        except Exception:  # noqa: BLE001 — the run is over either way
+            pass
 
     def _await_hat_handlers(self, ctx: WorkflowContext) -> None:
         """Keep the run alive for its hat handlers after the main stack ends.

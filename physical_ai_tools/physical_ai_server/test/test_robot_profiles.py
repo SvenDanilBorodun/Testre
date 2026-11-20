@@ -70,9 +70,10 @@ def test_caps_json_exact_full():
     assert obj['gripper_closed_rad'] == -0.5
     # None-valued optionals are OMITTED, never sent as null. Intent kept; since
     # the semantics round (D6, N11) the OMX carries its measured reach shape
-    # (0.10 / 0.25 m, no sector), so the omitted example is gripper_mm_per_rad.
+    # (0.10 / 0.25 m) and since the camera tower its joint-1 window as its
+    # sector (spec 40 §6.1 O4), so the omitted example is gripper_mm_per_rad.
     assert obj['reach_inner_m'] == 0.10 and obj['reach_outer_m'] == 0.25
-    assert 'reach_sector_deg' not in obj
+    assert obj['reach_sector_deg'] == [-100, 100]
     assert 'gripper_mm_per_rad' not in obj
 
 
@@ -269,7 +270,8 @@ def test_omx_profiles_keep_default_seam_values():
         assert prof.torque_service == '/dynamixel_hardware_interface/set_dxl_torque'
         assert prof.grasp_held_margin_rad is None
         assert prof.sim_close_threshold_rad is None
-        assert prof.observe_pose_joints is None
+        # The camera tower's observation pose (spec 40 S6.4), the contract's.
+        assert prof.observe_pose_joints == (0.0, -1.75, 0.0, -0.3, 0.0)
     # camera_roles is the ONE seam that diverges between the two OMX profiles:
     # omx_full is a two-camera kit (gripper first); omx_follower's lone camera is
     # the SCENE camera (audit fix — 'gripper' first broke every follower-only RS
@@ -521,18 +523,19 @@ def test_cloud_inference_equals_inferable(pid):
     keys = list(obj)
     assert keys[keys.index('code_languages') + 1] == 'cloud_inference'
     assert set(_CAP_KEYS) <= set(keys)
-    # The OMX sends 18 keys (the six booleans, the geometry and identity keys,
-    # code_languages, cloud_inference, its reach shape, help_de); the V1 21 (+ its
-    # reach sector, sim close threshold and tool_tip_tracks_gripper).
-    expected_count = {'omx_full': 18, 'omx_follower': 18, 'v1_studio': 21}[pid]
+    # The OMX sends 19 keys (the six booleans, the geometry and identity keys,
+    # code_languages, cloud_inference, its reach shape and sector, help_de); the
+    # V1 21 (+ its sim close threshold and tool_tip_tracks_gripper).
+    expected_count = {'omx_full': 19, 'omx_follower': 19, 'v1_studio': 21}[pid]
     assert len(keys) == expected_count, keys
 
 
 def test_the_v1_manifest_carries_its_reach_sector():
     """N6: the V1 turns ±90° only; the editor draws that sector. A list on the
-    wire (JSON); the OMX, which turns further, sends none."""
+    wire (JSON); the OMX sends its Roboter-Studio joint-1 window, ±100° (spec 40
+    §6.1 O4)."""
     obj = json.loads(rp.capabilities_json(rp.resolve('v1_studio')))
     assert obj['reach_sector_deg'] == [-90, 90]
     assert obj['reach_inner_m'] == 0.10 and obj['reach_outer_m'] == 0.34
     omx = json.loads(rp.capabilities_json(rp.resolve('omx_full')))
-    assert 'reach_sector_deg' not in omx
+    assert omx['reach_sector_deg'] == [-100, 100]

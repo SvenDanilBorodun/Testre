@@ -209,16 +209,39 @@ def _ensure_perception(ctx):
         )
 
 
+def frame_size_error(ctx, frame) -> Optional[str]:
+    """Guard G4 (spec 40 S1): the German refusal when ``frame`` is not the
+    size the run's calibration was made for (``ctx.scene_image_size``, the
+    tower calibration's ``image_size``), else ``None``. A run without one (the
+    legacy calibration, the simulator) looks at a frame of any size."""
+    want = getattr(ctx, 'scene_image_size', None)
+    if want is None:
+        return None
+    shape = getattr(frame, 'shape', None)
+    try:
+        size = (int(shape[1]), int(shape[0]))
+    except (TypeError, ValueError, IndexError):
+        size = None
+    if size == tuple(int(v) for v in want):
+        return None
+    from physical_ai_server.workflow.autocal import texts_de
+    return texts_de.IMAGE_SIZE_DE
+
+
 def _scene_frame(ctx):
     """Fetch a FRESH scene-camera frame, or raise a German error. Rejects a
     frozen/stale frame (camera down mid-workflow) — not just a never-arrived
-    one — via the optional ctx.get_scene_frame_age getter."""
+    one — via the optional ctx.get_scene_frame_age getter, and a frame of
+    another size than the run's calibration (G4)."""
     getter = getattr(ctx, 'get_scene_frame', None)
     bgr = getter() if getter else None
     if bgr is None:
         raise WorkflowError(
             'Kein aktuelles Szenenbild verfügbar — bitte die Szenen-Kamera prüfen.'
         )
+    size_error = frame_size_error(ctx, bgr)
+    if size_error is not None:
+        raise WorkflowError(size_error)
     age_getter = getattr(ctx, 'get_scene_frame_age', None)
     if callable(age_getter):
         try:
@@ -1605,6 +1628,9 @@ def _wait_frame_usable(ctx, state: dict):
             _scene_frame(ctx)            # raises the missing-picture sentence
         return None
     state.pop('none_since', None)
+    size_error = frame_size_error(ctx, frame)
+    if size_error is not None:
+        raise WorkflowError(size_error)
     age_getter = getattr(ctx, 'get_scene_frame_age', None)
     age = None
     if callable(age_getter):

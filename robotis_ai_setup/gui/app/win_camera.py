@@ -9,11 +9,16 @@ OpenCV VideoCapture configuration; the streaming lives in camera_bridge.py.
 
 Backend (see `_capture_backend`): we use MSMF, not DirectShow. DSHOW was the
 original choice (stable enumeration, topology monikers) but was measured to
-hard-cap these cameras at ~14 fps and refuse to leave YUY2; MSMF sustains ~25.
-Enumeration and capture share the backend so device indices stay consistent.
+refuse to leave YUY2 on these cameras. Enumeration and capture share the
+backend so device indices stay consistent.
 cv2 is imported lazily so importing this module never hard-fails if OpenCV is
 somehow missing from a build — callers get a clear German error when they
 actually try to use a camera.
+
+The tower scene camera (``EDUBOTICS_SCENE_CAMERA_PROFILE=tower_v1``) is opened
+by ``open_scene_capture`` in one frozen mode, 1920x1080 at 30 fps with the
+camera's own JPEG passed through; this module is the only place under
+``gui/app`` that sets a capture property (guard G10).
 
 Disambiguating two identical cameras (R1): the Innomaker U20CAM-720P pair both
 report identical name/VID/PID/serial, so we cannot tell "gripper" from "scene"
@@ -30,6 +35,8 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
+from . import scene_split
+
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 _SUBPROCESS_KWARGS = {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
@@ -38,22 +45,30 @@ _SUBPROCESS_KWARGS = {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "wi
 # without making the probe (which opens each device briefly) too slow.
 _MAX_PROBE = 8
 
+# OpenCV's ids of the three capture properties (cv::VideoCaptureProperties),
+# spelled out because cv2 is imported lazily.
+_CAP_PROP_FRAME_WIDTH, _CAP_PROP_FRAME_HEIGHT, _CAP_PROP_FPS = 3, 4, 5
+
+# The tower camera's open-method constant (spec 40 S1): MSMF negotiates the
+# mode while it opens the device, 1920x1080 at 30 fps.
+SCENE_OPEN_PARAMS = (_CAP_PROP_FRAME_WIDTH, scene_split.CAPTURE_W,
+                     _CAP_PROP_FRAME_HEIGHT, scene_split.CAPTURE_H,
+                     _CAP_PROP_FPS, scene_split.CAPTURE_FPS)
+
 
 def _capture_backend(cv2):
     """OpenCV capture backend for BOTH enumeration and capture.
 
-    Measured on Sven's classroom rig 2026-05-24 (Innomaker U20CAM-720P,
-    640x480): the **MSMF** backend sustains ~25 fps per camera (and ~26 each
-    with both open concurrently — no contention penalty), whereas **DSHOW**
-    hard-caps at ~14 fps for the same camera/format and silently refuses to
-    leave YUY2 even when MJPG is requested. Decode is never the limiter (the
-    grab-only rate equals the read rate; a separate decode runs at >400 fps).
-    So 30 fps is physically unreachable here — ~25 is the camera/USB/MSMF
-    ceiling — and MSMF nearly doubles the usable rate. We therefore default to
-    MSMF. Enumeration AND capture MUST use the same backend, because the OpenCV
-    device-index order can differ between backends (index N under DSHOW may be a
-    different physical camera than index N under MSMF), which would scramble the
-    student's gripper/scene role pick.
+    MSMF by default. On Sven's classroom rig (2026-05-24, Innomaker
+    U20CAM-720P, 640x480) **DSHOW** silently refused to leave YUY2 even when
+    MJPG was requested and delivered fewer frames than MSMF for the same
+    camera and format, so MSMF is the default. This docstring states no frame
+    rate: how fast the legacy camera really runs on a school PC is rig gate
+    RG-4's measurement, taken with the legacy camera first, on the same PC,
+    before the tower camera. Enumeration AND capture MUST use the same
+    backend, because the OpenCV device-index order can differ between backends
+    (index N under DSHOW may be a different physical camera than index N under
+    MSMF), which would scramble the student's gripper/scene role pick.
 
     Override with EDUBOTICS_CAMERA_BACKEND=dshow for rollback (e.g. if a future
     rig's MSMF driver is flaky — MSMF can emit a transient async ReadSample
@@ -313,3 +328,38 @@ def open_capture(index: int, width: int, height: int, fps: float):
     # callers don't false-warn about a "non-MJPG" format on the MSMF path.
     info["msmf"] = is_msmf
     return cap, info
+
+
+def open_scene_capture(index: int):
+    """Open the tower scene camera in its one mode (spec 40 S1, decision D4).
+
+    MSMF: ``cv2.VideoCapture(index, cv2.CAP_MSMF, SCENE_OPEN_PARAMS)``, so the
+    mode is negotiated while the device opens. With
+    ``EDUBOTICS_CAMERA_BACKEND=dshow`` the DSHOW order of ``open_capture``
+    instead (size and rate first, the MJPG fourcc last). Then
+    ``CAP_PROP_CONVERT_RGB`` 0, so the backend hands over the camera's own JPEG
+    (PLAUSIBLY a 1xN uint8 sample on MSMF, rig gate RG-1); a frame with three
+    dimensions is the decoded fallback. Nothing is read back: the capture
+    worker's verifier judges the frames themselves.
+
+    Returns the VideoCapture; raises CameraUnavailableError if the device does
+    not open.
+    """
+    cv2 = _import_cv2()
+    backend = _capture_backend(cv2)
+    if backend == cv2.CAP_MSMF:
+        cap = cv2.VideoCapture(index, backend, list(SCENE_OPEN_PARAMS))
+    else:
+        cap = cv2.VideoCapture(index, backend)
+    if not cap.isOpened():
+        cap.release()
+        raise CameraUnavailableError(
+            f"Kamera mit Index {index} konnte nicht geöffnet werden."
+        )
+    if backend != cv2.CAP_MSMF:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, scene_split.CAPTURE_W)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, scene_split.CAPTURE_H)
+        cap.set(cv2.CAP_PROP_FPS, scene_split.CAPTURE_FPS)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
+    return cap

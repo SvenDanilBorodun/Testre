@@ -375,6 +375,11 @@ from . import theme as theme_mod
 from . import camera_bridge as camera_bridge_mod
 from . import phone_camera as phone_camera_mod
 from . import phone_cert as phone_cert_mod
+from .scene_split import (
+    PROFILE_LEGACY,
+    PROFILE_TOWER,
+    normalise_profile as normalise_scene_profile,
+)
 from .constants import (
     APP_VERSION,
     UPDATE_API_URL,
@@ -631,6 +636,12 @@ ARM_FAMILY_MISMATCH_DE = (
 )
 ARM_FAMILY_MISMATCH_STATUS_DE = "Robotertyp gewechselt — bitte die Arme neu scannen."
 
+# „Turm-Kamera (Turm-Kit)" ticked with no native scene camera to probe.
+TOWER_NEEDS_SCENE_CAMERA_DE = (
+    "Bitte zuerst die Szenen-Kamera scannen und auswählen, dann „Turm-Kamera "
+    "(Turm-Kit)“ ankreuzen."
+)
+
 # Protokoll buffer cap. Insert-only and unbounded before this, the pane grew for
 # the whole classroom day. Generous enough that no real diagnosis is truncated.
 LOG_MAX_LINES = 5000
@@ -781,6 +792,18 @@ class EduBoticsApp:
         # can raise "main thread is not in main loop" on stricter tk builds.
         self._robot_profile_selected = _saved_profile
         self._rs_robot_type = _saved_profile
+        # The scene camera's profile (spec 40 S1): the „Turm-Kamera (Turm-Kit)"
+        # box, stored like the robot type in a MANAGED .env key at "Umgebung
+        # starten" and read back here, so the box survives a restart.
+        # _rs_scene_profile is the session's value: the camera bridge and the
+        # RS leader toggle's .env regen reuse it.
+        _saved_scene_profile = normalise_scene_profile(
+            config_generator.read_env_var("EDUBOTICS_SCENE_CAMERA_PROFILE", ENV_FILE))
+        self.tower_camera_enabled = tk.BooleanVar(
+            value=_saved_scene_profile == PROFILE_TOWER)
+        self._rs_scene_profile = _saved_scene_profile
+        # True while ticking the box probes the scene camera.
+        self._tower_probe_running = False
         # True while THIS GUI is mid-leader-toggle (rewriting the .env +
         # recreating the arm container). The bridge refuses a second switch and
         # _rs_get_status reports the in-flight state instead of the optimistic
@@ -1132,6 +1155,18 @@ class EduBoticsApp:
         self.camera_role_frame = ttk.Frame(camera_frame)
         self.camera_role_frame.pack(fill=tk.X, pady=5)
         self._preview_role_vars = []
+
+        # The tower scene camera (Turm-Kit). Ticking it probes the scene-role
+        # camera once (_on_tower_camera_toggled); the value is fixed at
+        # „Umgebung starten" (EDUBOTICS_SCENE_CAMERA_PROFILE). Shown only for a
+        # robot type with a scene camera (_update_tower_camera_check).
+        self.tower_camera_check = ttk.Checkbutton(
+            camera_frame,
+            text="Turm-Kamera (Turm-Kit)",
+            variable=self.tower_camera_enabled,
+            command=self._on_tower_camera_toggled,
+        )
+        self.tower_camera_check.pack(anchor=tk.W, pady=(6, 0))
 
         # Optional: phone as a 3rd camera. The phone's browser streams over
         # HTTPS to EduBotics.exe, which forwards the frames into the container
@@ -1549,7 +1584,10 @@ class EduBoticsApp:
             # Factory Reset needs only a ready distro, no hardware scan —
             # it must work in cloud-only mode and on a half-configured rig.
             self.btn_factory_reset.config(state=tk.NORMAL)
-            if self.cloud_only.get():
+            if self._tower_probe_running:
+                # The probe holds the scene camera the start would open.
+                self.btn_start.config(state=tk.DISABLED)
+            elif self.cloud_only.get():
                 self.btn_start.config(state=tk.NORMAL)
             elif self._hardware_ready():
                 self.btn_start.config(state=tk.NORMAL)
@@ -1563,11 +1601,34 @@ class EduBoticsApp:
         and in CLOUD-ONLY mode (no robot, so the type is irrelevant). Restores
         the readonly (dropdown) state otherwise. Main-thread only; tolerant of a
         not-yet-built widget so early prereq ticks can't raise."""
-        disabled = self.running or self.cloud_only.get()
+        disabled = self.running or self.cloud_only.get() or self._tower_probe_running
         try:
             self.robot_type_combo.config(
                 state="disabled" if disabled else "readonly")
         except (tk.TclError, AttributeError):
+            pass
+        self._update_tower_camera_check()
+
+    def _update_tower_camera_check(self):
+        """Show „Turm-Kamera (Turm-Kit)" only for a robot type with a scene
+        camera, and freeze it while its value is in use: a running environment
+        (the profile is fixed at „Umgebung starten"), cloud-only mode and the
+        probe of a tick. Main-thread only; tolerant of a not-yet-built widget."""
+        check = getattr(self, "tower_camera_check", None)
+        if check is None:
+            return
+        roles = ROBOT_PROFILES.get(self._selected_robot_profile(), {}).get(
+            "camera_roles", ())
+        try:
+            if "scene" not in roles:
+                check.pack_forget()
+                return
+            if not check.winfo_manager():
+                check.pack(anchor=tk.W, pady=(6, 0), before=self.phone_cam_check)
+            frozen = (self.running or self.cloud_only.get()
+                      or self._tower_probe_running)
+            check.state(["disabled"] if frozen else ["!disabled"])
+        except tk.TclError:
             pass
 
     def _on_mode_changed(self):
@@ -3992,6 +4053,9 @@ class EduBoticsApp:
         ~5 Hz; previews stop before the bridge claims the devices.
         """
         self._stop_camera_previews()
+        # What _restart_camera_previews re-opens after the tower probe.
+        self._preview_cameras = list(cameras)
+        self._preview_row = None
         if not cameras:
             return
 
@@ -4025,6 +4089,7 @@ class EduBoticsApp:
 
         preview_row = ttk.Frame(self.camera_role_frame)
         preview_row.pack(fill=tk.X, pady=(6, 2))
+        self._preview_row = preview_row
         targets = []
         for position, cam in enumerate(cameras):
             color, cam_label = (
@@ -4212,6 +4277,72 @@ class EduBoticsApp:
             self._preview_after_id = self.root.after(
                 100, self._poll_camera_previews)
 
+    # ── Turm-Kamera (Turm-Kit) ───────────────────────────────────────
+
+    def _on_tower_camera_toggled(self):
+        """„Turm-Kamera (Turm-Kit)" ticked or cleared (main thread).
+
+        Clearing needs nothing. Ticking runs one bounded probe of the
+        scene-role camera (`camera_bridge.probe_scene_camera`: 20 frames of
+        1920x1080 MJPEG) off the main thread and clears the box again with the
+        reason when the camera cannot deliver them. The previews hold the
+        cameras, so they are released for the probe and re-opened after it;
+        the camera step and the start are frozen meanwhile. The value itself is
+        stored at „Umgebung starten", like the robot type."""
+        if not self.tower_camera_enabled.get() or self._tower_probe_running:
+            return
+        scene = next((cam for cam in self.hardware.cameras
+                      if cam.role == "scene" and cam.win_index >= 0), None)
+        if scene is None:
+            self.tower_camera_enabled.set(False)
+            messagebox.showwarning("Turm-Kamera", TOWER_NEEDS_SCENE_CAMERA_DE)
+            return
+        self._stop_camera_previews()
+        self._tower_probe_running = True
+        self._set_frame_state(self.camera_frame, tk.DISABLED)
+        self._update_start_button()
+        self._log(f"Turm-Kamera wird geprüft ({scene.name}) …")
+        index = scene.win_index
+
+        def _probe():
+            try:
+                reason = camera_bridge_mod.probe_scene_camera(index)
+            except Exception:  # noqa: BLE001 — never leave the camera step frozen
+                reason = camera_bridge_mod.SCENE_PROBE_REFUSED_DE
+            self.root.after(0, lambda: self._finish_tower_probe(reason))
+
+        threading.Thread(target=_probe, daemon=True).start()
+
+    def _finish_tower_probe(self, reason: str):
+        """The probe's outcome, on the main thread: ``''`` keeps the box,
+        anything else clears it and says why."""
+        self._tower_probe_running = False
+        self._set_frame_state(
+            self.camera_frame, tk.DISABLED if self.cloud_only.get() else tk.NORMAL)
+        if reason:
+            self.tower_camera_enabled.set(False)
+            self._log(f"[WARNUNG] {reason}")
+            messagebox.showwarning("Turm-Kamera", reason)
+        else:
+            self._log("Turm-Kamera geprüft: 1920 × 1080 MJPEG. Sie wird ab dem "
+                      "nächsten Start verwendet.")
+        self._restart_camera_previews()
+        self._update_start_button()
+
+    def _restart_camera_previews(self):
+        """Re-open the previews `_stop_camera_previews` released for the probe,
+        for the same cameras and with the roles the student set
+        (`_on_cameras_changed` would reset a two-camera pick to its default)."""
+        row = getattr(self, "_preview_row", None)
+        cameras = getattr(self, "_preview_cameras", None)
+        if row is None or not cameras:
+            return
+        try:
+            row.destroy()
+        except tk.TclError:
+            pass
+        self._start_camera_previews(cameras)
+
     # ── Start Environment ────────────────────────────────────────────
 
     def _start_environment(self):
@@ -4239,6 +4370,15 @@ class EduBoticsApp:
             else:
                 messagebox.showwarning("Fehlende Hardware", "Bitte den Follower-Arm scannen und identifizieren, bevor du startest.")
             return
+
+        # The scene camera's profile is fixed here too, like the robot type: the
+        # .env below and the camera bridge take it. A robot type without a scene
+        # camera has no tower camera, whatever the (hidden) box says.
+        scene_roles = ROBOT_PROFILES.get(self._rs_robot_type, {}).get("camera_roles", ())
+        self._rs_scene_profile = (
+            PROFILE_TOWER
+            if self.tower_camera_enabled.get() and "scene" in scene_roles
+            else PROFILE_LEGACY)
 
         self.btn_start.config(state=tk.DISABLED)
         self.running = True
@@ -4300,7 +4440,8 @@ class EduBoticsApp:
                 if is_cloud_only:
                     env_content = config_generator.generate_cloud_only_env(
                         ENV_FILE, phone_camera=phone_enabled,
-                        robot_type=self._rs_robot_type)
+                        robot_type=self._rs_robot_type,
+                        scene_camera_profile=self._rs_scene_profile)
                 else:
                     # The initial FOLLOWER_ONLY is DERIVED from the robot type
                     # (omx_full → both arms; omx_follower → follower only). On
@@ -4308,7 +4449,8 @@ class EduBoticsApp:
                     # at RUNTIME via the React leader toggle (_rs_set_leader_mode).
                     env_content = config_generator.generate_env_file(
                         self.hardware, ENV_FILE, phone_camera=phone_enabled,
-                        robot_type=self._rs_robot_type)
+                        robot_type=self._rs_robot_type,
+                        scene_camera_profile=self._rs_scene_profile)
                 self._log(f"Konfiguration geschrieben: {ENV_FILE}")
                 for line in env_content.strip().splitlines():
                     self._log(f"  {_redact_secret_env_line(line)}")
@@ -4419,7 +4561,8 @@ class EduBoticsApp:
             phone_slot = self._start_phone_server()
 
         try:
-            self.camera_bridge = camera_bridge_mod.CameraBridge(role_to_index)
+            self.camera_bridge = camera_bridge_mod.CameraBridge(
+                role_to_index, scene_profile=self._rs_scene_profile, log=self._log)
             if phone_slot is not None:
                 # register_external_source MUST precede start().
                 self.camera_bridge.register_external_source(PHONE_CAM_ID, phone_slot)
@@ -4808,12 +4951,14 @@ class EduBoticsApp:
         try:
             # EDUBOTICS_ROBOT_TYPE is MANAGED (stripped + re-emitted) — pass the
             # session's type on BOTH the forward regen AND the rollback below, or
-            # a switch would silently rewrite it to the default (omx_full).
+            # a switch would silently rewrite it to the default (omx_full). The
+            # same holds for EDUBOTICS_SCENE_CAMERA_PROFILE (default legacy).
             config_generator.generate_env_file(
                 self.hardware, ENV_FILE,
                 phone_camera=self._rs_phone_enabled,
                 robot_type=self._rs_robot_type,
                 follower_only=follower_only,
+                scene_camera_profile=self._rs_scene_profile,
             )
         except Exception as e:  # noqa: BLE001
             return False, f"Konfiguration konnte nicht erstellt werden: {e}"
@@ -4836,6 +4981,7 @@ class EduBoticsApp:
                     phone_camera=self._rs_phone_enabled,
                     robot_type=self._rs_robot_type,
                     follower_only=prev_follower_only,
+                    scene_camera_profile=self._rs_scene_profile,
                 )
                 log("Moduswechsel fehlgeschlagen — Konfiguration zurückgesetzt.")
             except Exception as e:  # noqa: BLE001

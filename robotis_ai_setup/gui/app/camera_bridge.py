@@ -25,6 +25,18 @@ Each sender is a CLIENT: it connects to the container's TCP server (published
 as 127.0.0.1:5557 via the WSL2 NAT localhost-forwarder) and reconnects with
 backoff, so a container restart or a late "Umgebung starten" both recover
 without restarting the GUI.
+
+The tower scene camera (``EDUBOTICS_SCENE_CAMERA_PROFILE=tower_v1``, spec 40
+S1): ``_SceneCaptureWorker`` replaces ``_CaptureWorker`` for the scene camera
+only. It opens the camera in one frozen mode (``win_camera.open_scene_capture``)
+and lets a frame out only once ``scene_split.CaptureVerifier`` streams. Each
+frame then becomes the recorded 640x480 outside frame (cam_id 1, sent by the
+unchanged ``_SenderWorker``), the camera's own JPEG for Roboter Studio (cam_id
+16, at most 15 Hz) and the camera state (cam_id 17, JSON). The senders of ids
+16 and 17 (``_HelloSenderWorker``) speak first: one hello frame
+``[255][1][0][0x01]`` the ingest node answers with ``0x01``; an older image
+answers nothing and they stay idle. Connections of ids 0, 1 and 2 never send or
+receive anything new, and ``legacy`` (the default) builds today's bridge.
 """
 
 from __future__ import annotations
@@ -34,12 +46,45 @@ import struct
 import threading
 import time
 
-from . import constants, win_camera
+from . import constants, scene_split, win_camera
 
 # Header layout matches camera_ingest_node.py _HEADER exactly.
 _HEADER = struct.Struct(">BIQ")
 _RECONNECT_BACKOFF_S = (0.5, 1.0, 2.0, 3.0, 5.0)  # capped, then repeats last
 _MAX_READ_FAILURES = 10  # consecutive read() failures before reopening (phosphobot uses the same threshold)
+
+# The tower scene camera (spec 40 S1).
+HELLO_WAIT_S = 1.0                  # how long a sender of id 16/17 waits for the hello's answer
+STATE_RESEND_S = 1.0                # the camera state goes out on every change and at least this often
+STUDIO_FALLBACK_JPEG_QUALITY = 90   # the studio frame of a decoded (not passed-through) stream
+_FAILED_READ_WAIT_S = 0.005         # a read that returned nothing, before the next one
+_IDLE_WAIT_S = 0.1                  # the worker's pace while it waits to retry a fault
+
+SCENE_SELFTEST_FAILED_DE = (
+    "Selbsttest der Bildaufbereitung fehlgeschlagen — die Turm-Kamera bleibt "
+    "aus. Bitte EduBotics aktualisieren.")
+SCENE_OPEN_FAILED_DE = (
+    "Die Turm-Kamera wird von einem anderen Programm verwendet oder ist nicht "
+    "angeschlossen.")
+SCENE_WRONG_MODE_DE = (
+    "Die Turm-Kamera liefert kein MJPEG-Bild mit 1920 × 1080 Bildpunkten und "
+    "mindestens 10 Bildern pro Sekunde — sie wird erneut geöffnet.")
+SCENE_NO_FRAMES_DE = "Die Turm-Kamera liefert keine Bilder — sie wird erneut geöffnet."
+SCENE_BAD_FRAMES_DE = "Die Turm-Kamera liefert beschädigte Bilder — sie wird erneut geöffnet."
+SCENE_STREAMING_DE = "Turm-Kamera: 1920×1080 MJPG, {fps:.1f} Bilder/s, Direktdurchleitung {passthrough}"
+_NOT_ACTIVATED_DE = "Die Turm-Kamera wurde nicht aktiviert."
+SCENE_PROBE_REFUSED_DE = (
+    f"Diese Kamera liefert kein Bild mit 1920 × 1080 Bildpunkten. {_NOT_ACTIVATED_DE}")
+OLDER_IMAGE_DE = (
+    "Das Roboter-Abbild ist älter als die Software — Roboter Studio bekommt kein "
+    "Bild der Turm-Kamera.")
+_SCENE_FAULT_DE = {
+    scene_split.FAULT_SELFTEST: SCENE_SELFTEST_FAILED_DE,
+    scene_split.FAULT_OPEN_FAILED: SCENE_OPEN_FAILED_DE,
+    scene_split.FAULT_WRONG_MODE: SCENE_WRONG_MODE_DE,
+    scene_split.FAULT_NO_FRAMES: SCENE_NO_FRAMES_DE,
+    scene_split.FAULT_BAD_FRAMES: SCENE_BAD_FRAMES_DE,
+}
 
 
 def crop_to_target_aspect(frame):
@@ -369,14 +414,341 @@ class _ExternalSenderWorker(_ConnectMixin, threading.Thread):
                 pass
 
 
+class _Slot:
+    """A latest-wins hand-over from the tower worker to one sender: the newest
+    item and a sequence that moves with every put. ``wait_new`` blocks while
+    the sequence still equals the caller's, so a sender never spins (D21)."""
+
+    def __init__(self):
+        self._cond = threading.Condition()
+        self._item = None
+        self._seq = 0
+
+    def put(self, item):
+        with self._cond:
+            self._item = item
+            self._seq += 1
+            self._cond.notify_all()
+
+    def latest(self):
+        with self._cond:
+            return self._item, self._seq
+
+    def wait_new(self, last_seq, timeout):
+        with self._cond:
+            if self._seq == last_seq:
+                self._cond.wait(timeout)
+            return self._item, self._seq
+
+    def wake(self):
+        """Wake every waiter (the bridge is stopping)."""
+        with self._cond:
+            self._cond.notify_all()
+
+
+class _SceneCaptureWorker(threading.Thread):
+    """The tower scene camera's capture owner on Windows (spec 40 S1).
+
+    Runs ``scene_split.selftest()`` once, then opens the camera with
+    ``win_camera.open_scene_capture`` and feeds every frame to a
+    ``scene_split.CaptureVerifier``. Only a frame the verifier releases (in
+    ``streaming``) leaves: its outside frame into the slot today's
+    ``_SenderWorker`` sends as camera id 1 (``latest``/``wait_new``, the
+    ``_CaptureWorker`` surface), the camera's own JPEG into ``studio`` at most
+    ``scene_split.STUDIO_MAX_HZ`` times a second (a decoded frame is encoded at
+    ``STUDIO_FALLBACK_JPEG_QUALITY``). The state message goes into
+    ``state_slot`` on every change of state or fault and once a second. A fault
+    closes the device, which is opened again when the verifier's back-off is
+    due; a failed self-test is final and the device is never opened. ``clock``
+    is the monotonic clock the verifier runs on; ``log`` gets the one
+    Protokoll line of the first ``streaming``.
+    """
+
+    def __init__(self, cam_id: int, role: str, index: int, log=None, clock=time.monotonic):
+        super().__init__(name=f"cam-{role}-tower", daemon=True)
+        self.cam_id = cam_id
+        self.role = role
+        self.index = index
+        self._halt = threading.Event()  # never `_stop`, see _CaptureWorker
+        self._log = log
+        self._clock = clock
+        self.verifier = scene_split.CaptureVerifier("windows", constants.CAMERA_JPEG_QUALITY)
+        self._outside = _Slot()   # (outside frame BGR, capture_ns) for camera id 1
+        self.studio = _Slot()     # (camera JPEG bytes, capture_ns) for camera id 16
+        self.state_slot = _Slot()  # (state message bytes, send time ns) for camera id 17
+        self._studio_rate = scene_split.RateLimiter(scene_split.STUDIO_MAX_HZ)
+        self._seen_generation = None
+        self._state_at = None
+        self._announced = False
+        # What CameraBridge.status() reads, as on _CaptureWorker.
+        self.fps = 0.0
+        self.negotiated_fps = 0.0
+        self.last_error_de = ""
+        self.format_warn_de = ""
+
+    def latest(self):
+        return self._outside.latest()
+
+    def wait_new(self, last_seq, timeout):
+        return self._outside.wait_new(last_seq, timeout)
+
+    def stop(self):
+        self._halt.set()
+        for slot in (self._outside, self.studio, self.state_slot):
+            slot.wake()
+
+    def run(self):
+        if scene_split.selftest():
+            self.verifier.selftest_failed(self._clock())
+            self._note(self._clock())
+            return
+        cap = None
+        try:
+            while not self._halt.is_set():
+                if cap is None:
+                    cap = self._open_when_due()
+                    continue
+                ok, frame = cap.read()
+                now = self._clock()
+                capture_ns = time.time_ns()
+                if not ok or frame is None:
+                    self.verifier.frame(now, None)
+                    self._halt.wait(_FAILED_READ_WAIT_S)
+                elif self.verifier.frame(now, frame):
+                    self._hand_over(now, frame, capture_ns)
+                self._note(now)
+                if self.verifier.state == scene_split.STATE_FAULT:
+                    cap.release()
+                    cap = None
+        finally:
+            if cap is not None:
+                cap.release()
+
+    def _open_when_due(self):
+        """The opened device, or None while a fault's back-off runs or when
+        the open failed (the fault ``open_failed``)."""
+        verifier = self.verifier
+        now = self._clock()
+        if verifier.state == scene_split.STATE_FAULT and not verifier.retry_due(now):
+            self._note(now)
+            self._halt.wait(_IDLE_WAIT_S)
+            return None
+        verifier.opening(now)
+        try:
+            cap = win_camera.open_scene_capture(self.index)
+        except Exception:  # noqa: BLE001 — every open failure is the fault open_failed
+            verifier.open_failed(self._clock())
+            cap = None
+        else:
+            verifier.opened(self._clock())
+        self._note(self._clock())
+        return cap
+
+    def _hand_over(self, now, frame, capture_ns):
+        """A frame the verifier released: the outside frame and, rate-limited,
+        the studio frame."""
+        try:
+            if self.verifier.passthrough:
+                outside = scene_split.outside_from_jpeg(frame)
+            else:
+                outside = scene_split.outside_from_bgr(frame)
+        except scene_split.SplitError:
+            self.verifier.split_failed(now)
+            return
+        self._outside.put((outside, capture_ns))
+        if self._studio_rate.allow(now):
+            studio = self._studio_jpeg(frame)
+            if studio is not None:
+                self.studio.put((studio, capture_ns))
+
+    def _studio_jpeg(self, frame):
+        """The camera's own JPEG bytes, unchanged; a decoded frame encoded."""
+        if self.verifier.passthrough:
+            return frame.tobytes() if hasattr(frame, "tobytes") else bytes(frame)
+        import cv2
+        ok, buf = cv2.imencode(
+            ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, STUDIO_FALLBACK_JPEG_QUALITY])
+        return buf.tobytes() if ok else None
+
+    def _note(self, now):
+        """React to a change of the verifier (the German error, the Protokoll
+        line) and keep the state message fresh."""
+        verifier = self.verifier
+        fps = verifier.fps
+        self.fps = 0.0 if fps is None else fps
+        if verifier.generation != self._seen_generation:
+            self._seen_generation = verifier.generation
+            if verifier.state == scene_split.STATE_STREAMING:
+                self.last_error_de = ""
+                if not self._announced and self._log is not None:
+                    self._log(SCENE_STREAMING_DE.format(
+                        fps=self.fps, passthrough="aktiv" if verifier.passthrough else "aus"))
+                self._announced = True
+            elif verifier.state == scene_split.STATE_FAULT:
+                self.last_error_de = _SCENE_FAULT_DE.get(verifier.fault, "")
+        elif self._state_at is not None and now - self._state_at < STATE_RESEND_S:
+            return
+        self._state_at = now
+        self.state_slot.put(
+            (scene_split.state_message(**verifier.state_fields()), time.time_ns()))
+
+
+class _HelloSenderWorker(_ConnectMixin, threading.Thread):
+    """Sends one tower slot verbatim as ``cam_id`` (16: the studio frame, 17:
+    the camera state) over its OWN TCP connection, and only to an ingest node
+    that answered the hello (guard G7).
+
+    After connecting it sends ``[255][len 1][capture_ns 0][0x01]`` and waits
+    ``HELLO_WAIT_S`` for the one-byte answer ``scene_split.HELLO``. No answer
+    is an image older than this GUI (it publishes the hello nowhere): the
+    sender calls ``on_unanswered`` and stays idle until the bridge stops. A
+    connection that ends during the hello (nothing behind the forwarder yet)
+    is made again. Like ``_SenderWorker`` it starts at the slot's sequence and
+    sends only what is newer; with ``resend_s`` it also sends the newest item
+    at once after the hello and again when nothing newer came for that long
+    (the camera state).
+    """
+
+    def __init__(self, source: _Slot, cam_id: int, host: str, port: int,
+                 stop_event: threading.Event, on_unanswered, resend_s=None):
+        super().__init__(name=f"cam-send-tower-{cam_id}", daemon=True)
+        self.source = source
+        self.cam_id = cam_id
+        self.host = host
+        self.port = port
+        self._halt = stop_event  # never `_stop`, see _CaptureWorker
+        self._on_unanswered = on_unanswered
+        self.resend_s = resend_s
+        self.connected = False
+        self.idle = False
+        self.last_error_de = ""
+
+    def _hello(self, sock):
+        """True: answered; False: no answer (an older image); None: the
+        connection ended."""
+        timeout = sock.gettimeout()
+        try:
+            sock.sendall(_HEADER.pack(scene_split.HELLO_CAM_ID, len(scene_split.HELLO), 0)
+                         + scene_split.HELLO)
+            sock.settimeout(HELLO_WAIT_S)
+            answer = sock.recv(len(scene_split.HELLO))
+        except socket.timeout:
+            return False
+        except OSError:
+            return None
+        finally:
+            try:
+                sock.settimeout(timeout)
+            except OSError:
+                pass
+        if not answer:
+            return None
+        return answer == scene_split.HELLO
+
+    def _resend_due(self, sent_at):
+        return self.resend_s is not None and (
+            sent_at is None or time.monotonic() - sent_at >= self.resend_s)
+
+    def _wait_s(self, sent_at):
+        if self.resend_s is None or sent_at is None:
+            return 0.5
+        return min(0.5, max(0.0, self.resend_s - (time.monotonic() - sent_at)))
+
+    def run(self):
+        _, last_seq = self.source.latest()
+        sent_at = None
+        sock = None
+        while not self._halt.is_set():
+            if sock is None:
+                sock = self._connect()
+                if sock is None:
+                    break  # stopped while connecting
+                answered = self._hello(sock)
+                if not answered:
+                    self.connected = False
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+                    sock = None
+                    if answered is None:
+                        if self._halt.wait(_RECONNECT_BACKOFF_S[0]):
+                            break
+                        continue
+                    self.idle = True
+                    self._on_unanswered()
+                    self._halt.wait()
+                    break
+                sent_at = None
+            if self._resend_due(sent_at):
+                item, seq = self.source.latest()
+            else:
+                item, seq = self.source.wait_new(last_seq, self._wait_s(sent_at))
+                if seq == last_seq:
+                    continue
+            if item is None:
+                self.source.wait_new(seq, self._wait_s(sent_at))
+                continue
+            payload, capture_ns = item
+            header = _HEADER.pack(self.cam_id, len(payload), capture_ns & 0xFFFFFFFFFFFFFFFF)
+            try:
+                sock.sendall(header + payload)
+                last_seq = seq
+                sent_at = time.monotonic()
+            except OSError as exc:
+                self.connected = False
+                self.last_error_de = f"Kamera-Verbindung verloren: {exc}"
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                sock = None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+def probe_scene_camera(index: int, clock=time.monotonic) -> str:
+    """The „Turm-Kamera" box's capability probe (spec 40 S1): open the camera
+    as the tower worker does and read until ``scene_split.VERIFY_FRAMES``
+    frames passed the frame check, within the verifier's bounds (3 s for the
+    frames, 2 s of silence). ``''`` when the camera delivers them, else the
+    German reason. The device is always released."""
+    verifier = scene_split.CaptureVerifier("windows", constants.CAMERA_JPEG_QUALITY)
+    verifier.opening(clock())
+    try:
+        cap = win_camera.open_scene_capture(index)
+    except Exception:  # noqa: BLE001 — every open failure refuses the box
+        return f"{SCENE_OPEN_FAILED_DE} {_NOT_ACTIVATED_DE}"
+    try:
+        verifier.opened(clock())
+        while verifier.state == scene_split.STATE_VERIFYING:
+            ok, frame = cap.read()
+            verifier.frame(clock(), frame if ok else None)
+            if not ok or frame is None:
+                time.sleep(_FAILED_READ_WAIT_S)
+    finally:
+        cap.release()
+    return "" if verifier.state == scene_split.STATE_STREAMING else SCENE_PROBE_REFUSED_DE
+
+
 class CameraBridge:
     """Owns one capture worker + one sender (own TCP connection) per camera.
 
     May ALSO carry one external sender (the phone receiver's latest-slot →
-    cam_id 2) registered via register_external_source() before start()."""
+    cam_id 2) registered via register_external_source() before start().
+
+    ``scene_profile`` is the session's ``EDUBOTICS_SCENE_CAMERA_PROFILE``:
+    with ``tower_v1`` the scene camera is captured by ``_SceneCaptureWorker``
+    and gets the two senders of ids 16 and 17 besides its own; anything else
+    is ``legacy``, today's bridge. ``log`` takes the tower camera's Protokoll
+    lines."""
 
     def __init__(self, role_to_index: dict[str, int],
-                 host: str | None = None, port: int | None = None):
+                 host: str | None = None, port: int | None = None,
+                 scene_profile: str = scene_split.PROFILE_LEGACY, log=None):
         self.host = host or constants.CAMERA_INGEST_HOST
         self.port = port or constants.PORT_CAMERA_INGEST
         self.workers: list[_CaptureWorker] = []
@@ -384,17 +756,40 @@ class CameraBridge:
         self._timer_raised = False
         self._senders: list[_SenderWorker] = []
         self._external_senders: list[_ExternalSenderWorker] = []
+        self._tower_senders: list[_HelloSenderWorker] = []
+        self._log = log
+        self._older_image_lock = threading.Lock()
+        self._older_image_said = False
+        tower = scene_split.normalise_profile(scene_profile) == scene_split.PROFILE_TOWER
         for role, index in role_to_index.items():
             if index is None:
                 continue
             if role not in constants.CAMERA_BRIDGE_ROLES:
                 raise ValueError(f"Unbekannte Kamerarolle: {role!r}")
             cam_id = constants.CAMERA_BRIDGE_ROLES.index(role)
-            worker = _CaptureWorker(cam_id, role, index)
+            if tower and role == "scene":
+                worker = _SceneCaptureWorker(cam_id, role, index, log=log)
+                self._tower_senders.append(_HelloSenderWorker(
+                    worker.studio, scene_split.STUDIO_CAM_ID, self.host, self.port,
+                    self._stop, self._older_image))
+                self._tower_senders.append(_HelloSenderWorker(
+                    worker.state_slot, scene_split.STATE_CAM_ID, self.host, self.port,
+                    self._stop, self._older_image, resend_s=STATE_RESEND_S))
+            else:
+                worker = _CaptureWorker(cam_id, role, index)
             self.workers.append(worker)
             self._senders.append(
                 _SenderWorker(worker, self.host, self.port, self._stop))
         self.last_error_de = ""
+
+    def _older_image(self):
+        """A sender of id 16 or 17 got no answer to its hello: say so once."""
+        with self._older_image_lock:
+            if self._older_image_said:
+                return
+            self._older_image_said = True
+        if self._log is not None:
+            self._log(OLDER_IMAGE_DE)
 
     def register_external_source(self, cam_id: int, slot) -> None:
         """Register an external JPEG source (the phone receiver's latest-slot)
@@ -442,6 +837,8 @@ class CameraBridge:
             w.start()
         for s in self._senders:
             s.start()
+        for ts in self._tower_senders:
+            ts.start()
         for es in self._external_senders:
             es.start()
 
@@ -454,6 +851,9 @@ class CameraBridge:
         for s in self._senders:
             if s.ident is not None:
                 s.join(timeout=join_timeout)
+        for ts in self._tower_senders:
+            if ts.ident is not None:
+                ts.join(timeout=join_timeout)
         for es in self._external_senders:
             if es.ident is not None:
                 es.join(timeout=join_timeout)

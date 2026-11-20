@@ -81,6 +81,9 @@ class RsSetLeaderModeTest(unittest.TestCase):
         method = _load_method("_rs_set_leader_mode", ns)
         owner = types.SimpleNamespace(
             _rs_robot_type="omx_full",
+            # The session's scene-camera profile, which the regen carries too
+            # (WP-06; its carry is tested in test_gui_scene_camera_profile.py).
+            _rs_scene_profile="legacy",
             hardware=types.SimpleNamespace(leader=object(), follower=object()),
             _rs_phone_enabled=False,
             _rs_switch_in_flight=False,

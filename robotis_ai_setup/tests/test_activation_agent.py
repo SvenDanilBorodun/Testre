@@ -17,6 +17,7 @@ Two halves, both here:
 
 import ast
 import io
+import json
 import math
 import os
 import re
@@ -54,7 +55,8 @@ def _load_agent_namespace():
     for the Feetech driver."""
     source = _read(_AGENT)
     tree = ast.parse(source)
-    ns = {'__name__': 'activation_agent_pure', 'math': math}
+    # json: profile_payload serialises with the agent's own top-level import.
+    ns = {'__name__': 'activation_agent_pure', 'math': math, 'json': json}
     for node in tree.body:
         if isinstance(node, ast.Assign):
             try:
@@ -697,6 +699,216 @@ class TestStructuralGate(unittest.TestCase):
             nxt = text.index('  physical_ai_server:')
             self.assertLess(head, text.index(needle), path)
             self.assertLess(text.index(needle), nxt, path)
+
+
+_PROFILE_KEY = 'EDUBOTICS_SCENE_CAMERA_PROFILE'
+
+
+def _expr(source):
+    return ast.parse(source, mode='eval').body
+
+
+def _same(node, source):
+    return ast.dump(node) == ast.dump(_expr(source))
+
+
+def _agent_methods(tree):
+    cls = next(n for n in tree.body
+               if isinstance(n, ast.ClassDef) and n.name == 'ActivationAgent')
+    return {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
+
+
+def _self_call(node, attr=None):
+    """``attr`` when ``node`` is the statement ``self.<attr>()``, else None."""
+    call = node.value if isinstance(node, ast.Expr) else None
+    if (isinstance(call, ast.Call) and not call.args and not call.keywords
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == 'self'
+            and (attr is None or call.func.attr == attr)):
+        return call.func.attr
+    return None
+
+
+def _self_attr(node):
+    if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+            and node.value.id == 'self'):
+        return node.attr
+    return None
+
+
+class TestSceneProfileStatement(unittest.TestCase):
+    """D63: the arm container STATES the configured scene-camera profile.
+
+    The tower guard's scope and the dataset stamp take the profile from
+    /edubotics/scene_camera_profile and from nothing else, and silence there
+    is „unknown" (the guard ON), never `legacy` (spec 40 S1, revision 4). So
+    the statement exists on every rig and every profile, latched and re-sent
+    on the 1 Hz timer, and says exactly what the environment configured.
+
+    The agent cannot be imported without rclpy, so the publish path is a pure
+    function (`profile_payload`) and a plain-value constant (`PROFILE_QOS`),
+    tested directly, and their wiring into the node is checked on the AST."""
+
+    def _fn(self, name):
+        fn = _N.get(name)
+        self.assertIsNotNone(fn, f'activation_agent.py defines no {name}')
+        return fn
+
+    def test_a_quoted_tower_value_states_the_tower(self):
+        # config_generator.upsert_env_var writes every value in double quotes.
+        payload = self._fn('profile_payload')({_PROFILE_KEY: '"tower_v1"'})
+        self.assertEqual(payload, b'{"v":1,"profile":"tower_v1"}')
+
+    def test_an_unset_key_states_legacy(self):
+        self.assertEqual(self._fn('profile_payload')({}),
+                         b'{"v":1,"profile":"legacy"}')
+
+    def test_every_other_value_states_legacy(self):
+        for raw in ('legacy', '', '  ', 'tower', 'TOWER_V2', 'tower_v1x'):
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    self._fn('profile_payload')({_PROFILE_KEY: raw}),
+                    b'{"v":1,"profile":"legacy"}')
+
+    def test_the_payload_is_compact_json_with_its_keys_in_order(self):
+        payload = self._fn('profile_payload')({_PROFILE_KEY: 'tower_v1'})
+        self.assertIsInstance(payload, bytes)
+        self.assertEqual(list(json.loads(payload.decode('utf-8'))), ['v', 'profile'])
+        self.assertNotIn(b' ', payload)
+
+    def test_the_qos_is_reliable_latched_depth_one(self):
+        self.assertEqual(_N.get('PROFILE_QOS'), ('RELIABLE', 'TRANSIENT_LOCAL', 1))
+
+    def test_the_qos_names_are_the_members_the_state_publisher_uses(self):
+        """PROFILE_QOS holds the NAMES of rclpy's enum members. The state
+        publisher, which runs on every rig today, reads exactly these two
+        attributes, so a typo here cannot pass as a member that exists."""
+        tree = ast.parse(_read(_AGENT))
+        state = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == 'create_publisher' and len(n.args) == 3
+                 and _same(n.args[1], 'STATE_TOPIC')]
+        self.assertEqual(len(state), 1)
+        kw = {k.arg: k.value for k in state[0].args[2].keywords}
+        self.assertTrue(_same(kw['reliability'], 'ReliabilityPolicy.RELIABLE'))
+        self.assertTrue(_same(kw['durability'], 'DurabilityPolicy.TRANSIENT_LOCAL'))
+        qos = _N.get('PROFILE_QOS')
+        self.assertIsNotNone(qos, 'activation_agent.py defines no PROFILE_QOS')
+        self.assertEqual((qos[0], qos[1]),
+                         (kw['reliability'].attr, kw['durability'].attr))
+
+    def test_one_publisher_on_the_topic_created_with_profile_qos(self):
+        tree = ast.parse(_read(_AGENT))
+        topic = _N.get('PROFILE_TOPIC')
+        self.assertEqual(topic, '/edubotics/scene_camera_profile')
+        calls = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == 'create_publisher' and len(n.args) >= 2
+                 and (_same(n.args[1], 'PROFILE_TOPIC')
+                      or (isinstance(n.args[1], ast.Constant)
+                          and n.args[1].value == topic))]
+        self.assertEqual(len(calls), 1, 'exactly one publisher on the topic')
+        call = calls[0]
+        # through the constant the lockstep with scene_provenance pins
+        self.assertTrue(_same(call.args[1], 'PROFILE_TOPIC'))
+        self.assertTrue(_same(call.args[0], 'String'))
+        self.assertEqual((len(call.args), call.keywords), (3, []))
+        qos = call.args[2]
+        self.assertTrue(_same(qos.func, 'QoSProfile'))
+        self.assertEqual(qos.args, [])
+        expected = {
+            'depth': 'PROFILE_QOS[2]',
+            'reliability': 'getattr(ReliabilityPolicy, PROFILE_QOS[0])',
+            'durability': 'getattr(DurabilityPolicy, PROFILE_QOS[1])',
+        }
+        self.assertEqual({k.arg: ast.dump(k.value) for k in qos.keywords},
+                         {k: ast.dump(_expr(v)) for k, v in expected.items()})
+        # created unconditionally: a top-level statement of __init__, so on
+        # every robot type, gate setting and rig
+        init = _agent_methods(tree)['__init__']
+        stores = [s for s in init.body
+                  if isinstance(s, ast.Assign) and s.value is call]
+        self.assertEqual(len(stores), 1)
+        self.assertEqual(_self_attr(stores[0].targets[0]), '_profile_pub')
+
+    def test_it_is_published_at_start_and_on_the_existing_1_hz_timer(self):
+        tree = ast.parse(_read(_AGENT))
+        methods = _agent_methods(tree)
+        init = methods['__init__']
+
+        # the payload is computed ONCE, in __init__, from the environment
+        made = [n for n in ast.walk(tree)
+                if isinstance(n, ast.Call) and _same(n.func, 'profile_payload')]
+        self.assertEqual(len(made), 1, 'profile_payload is called once')
+        self.assertEqual(len(made[0].args), 1)
+        self.assertTrue(_same(made[0].args[0], 'os.environ'))
+        stores = [s for s in init.body if isinstance(s, ast.Assign)
+                  and any(n is made[0] for n in ast.walk(s.value))]
+        self.assertEqual(len(stores), 1,
+                         'stored by a top-level statement of __init__')
+        self.assertTrue(_same(stores[0].value,
+                              "profile_payload(os.environ).decode('utf-8')"))
+        data_attr = _self_attr(stores[0].targets[0])
+        self.assertIsNotNone(data_attr)
+
+        # one method publishes it: a String carrying those bytes, on _profile_pub
+        sends = {name: fn for name, fn in methods.items()
+                 if any(isinstance(n, ast.Call)
+                        and _same(n.func, 'self._profile_pub.publish')
+                        for n in ast.walk(fn))}
+        self.assertEqual(len(sends), 1, 'exactly one method publishes the statement')
+        (send_name, send), = sends.items()
+        body = [ast.dump(s) for s in send.body if not isinstance(s, ast.Expr)
+                or not isinstance(s.value, ast.Constant)]
+        self.assertEqual(body, [
+            ast.dump(ast.parse('msg = String()').body[0]),
+            ast.dump(ast.parse(f'msg.data = self.{data_attr}').body[0]),
+            ast.dump(ast.parse('self._profile_pub.publish(msg)').body[0]),
+        ])
+
+        # at start: __init__ calls it after creating the publisher and the data
+        index = {id(s): i for i, s in enumerate(init.body)}
+        start = [s for s in init.body if _self_call(s, send_name)]
+        self.assertEqual(len(start), 1, 'published once at start')
+        created = [s for s in init.body if isinstance(s, ast.Assign)
+                   and _self_attr(s.targets[0]) == '_profile_pub']
+        self.assertEqual(len(created), 1)
+        self.assertLess(index[id(created[0])], index[id(start[0])])
+        self.assertLess(index[id(stores[0])], index[id(start[0])])
+
+        # …and on the agent's ONE timer, the existing 1 Hz one, which still
+        # publishes the activation state as before
+        timers = [n for n in ast.walk(tree)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                  and n.func.attr == 'create_timer']
+        self.assertEqual(len(timers), 1, 'no second timer')
+        self.assertTrue(_same(timers[0].args[0], '1.0'))
+        tick = _self_attr(timers[0].args[1])
+        self.assertIn(tick, methods)
+        ticked = {_self_call(s) for s in methods[tick].body}
+        self.assertIn('_publish_state', ticked)
+        self.assertIn(send_name, ticked)
+
+    def test_the_statement_needs_neither_numpy_nor_cv2(self):
+        """The agent's failure is silent and total (the healthcheck proves
+        topics exist, not that this node runs), so the module that computes
+        the statement imports neither numpy nor cv2 — nor scene_split, whose
+        pixel functions import both: the rule is the agent's own stdlib copy,
+        held to scene_split's by tests/test_scene_profile_value_table.py."""
+        tree = ast.parse(_read(_AGENT))
+        defined = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+        for name in ('scene_profile_from_env', 'profile_payload'):
+            self.assertIn(name, defined, f'activation_agent.py defines no {name}')
+        roots = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                roots.update(alias.name.split('.')[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                roots.add((node.module or '').split('.')[0])
+        self.assertEqual(roots & {'numpy', 'cv2', 'scene_split', 'importlib'}, set())
+        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        self.assertNotIn('__import__', names)
 
 
 if __name__ == '__main__':

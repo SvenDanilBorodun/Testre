@@ -12,7 +12,11 @@ size cap, and over one table of stamp bodies the same verdict as the robot's own
 reader. The page's hook ``hooks/useSceneCameraProfile.js`` names the topic and
 the profile values, and the page calls the two cameras what the robot calls them.
 
-R-B constants only; R-C's WP-PROF adds the arm container's topic.
+R-C (WP-PROF, decision D63): the arm container's activation agent STATES the
+profile on that topic, and the key's one value table
+(``scene_split.PROFILE_VALUES``) selects exactly the robot's profiles. Both
+arm-container files are read without importing ROS: the agent's topic as a
+literal, ``scene_split`` by file path (its module top is stdlib only).
 
 The API module is imported in a CHILD interpreter: the GUI's tests own another
 package named ``app``.
@@ -40,6 +44,9 @@ API_SESSIONS = API_ROOT / 'app' / 'services' / 'inference_sessions.py'
 SRC = REPO_ROOT / 'physical_ai_tools' / 'physical_ai_manager' / 'src'
 HOOK = SRC / 'hooks' / 'useSceneCameraProfile.js'
 CLOUD_COPY = SRC / 'components' / 'CloudInference' / 'cloudCopy.js'
+ARM_DIR = REPO_ROOT / 'robotis_ai_setup' / 'docker' / 'open_manipulator'
+AGENT = ARM_DIR / 'activation_agent.py'
+SCENE_SPLIT = ARM_DIR / 'scene_split.py'
 
 TOWER = '{"v":1,"scene_camera_profile":"tower_v1","profile_id":"3efca10f3a05","platform":"windows"}'
 
@@ -115,7 +122,7 @@ class SceneProvenanceLockstep(BoundedTestCase):
 
     @classmethod
     def setUpClass(cls):
-        for path in (PROVENANCE, RECORD_TEXTS, API_SESSIONS, HOOK, CLOUD_COPY):
+        for path in (PROVENANCE, RECORD_TEXTS, API_SESSIONS, HOOK, CLOUD_COPY, AGENT, SCENE_SPLIT):
             if not path.is_file():
                 raise AssertionError(f'missing: {path.relative_to(REPO_ROOT)}')
         cls.P = _load(PROVENANCE, '_edubotics_lockstep_scene_provenance')
@@ -171,6 +178,13 @@ class SceneProvenanceLockstep(BoundedTestCase):
         self.assertIsNotNone(m, 'cloudCopy.sceneCameraNames')
         page = dict(re.findall(r"(\w+): '([^']*)'", m.group(1)))
         self.assertEqual(page, names)
+
+    def test_the_arm_container_states_on_the_robots_topic(self):
+        self.assertEqual(_assigned(AGENT, 'PROFILE_TOPIC'), self.P.PROFILE_TOPIC)
+
+    def test_the_profile_key_selects_the_robots_profiles(self):
+        split = _load(SCENE_SPLIT, '_edubotics_lockstep_scene_split')
+        self.assertEqual(set(split.PROFILE_VALUES.values()), set(self.P.PROFILES))
 
 
 if __name__ == '__main__':

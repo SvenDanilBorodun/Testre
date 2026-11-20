@@ -341,19 +341,15 @@ def _field_angle(kind, X):
     return np.arctan2(np.hypot(Xc[:, 0], Xc[:, 1]), Xc[:, 2])
 
 
-@pytest.mark.parametrize('kind', (
-    pytest.param('v1', marks=pytest.mark.xfail(strict=True, reason=(
-        'spec 40 WP-10: "every point the software unprojects on purpose lies within LENS_FIELD_MIN_RAD / 1.1 '
-        '(0.727 rad) of the contract camera axis, both arms (probe P-R19: largest 0.692 rad)". P-R19 ran at the '
-        'revision-1 lens (0.68 m); at placement B the V1 target at contract pose AC12 reaches 0.734 rad (field tags '
-        '0.620, zone 0.612, fixture 0.429) — inside the 0.80 rad gate, outside its 10 % margin. Reported, not '
-        'moved.'))),
-    'omx',
-))
+@pytest.mark.parametrize('kind', KINDS)
 def test_every_point_unprojected_on_purpose_lies_inside_the_lens_gate_s_field(kind):
     """Field-tag and fixture-tag corners, the zone at 0 … 0.10 m, the target's
     corners in the 20 arm-check poses: within ``LENS_FIELD_MIN_RAD / 1.1`` of
-    the contract camera's axis (probe P-R19: largest 0.692 rad, the V1's target)."""
+    the contract camera's axis (probe P-R19 at the revision-1 lens: largest
+    0.692 rad). At placement B the V1's target at pose AC12 read 0.734 rad;
+    D84 moved AC12 inward (joint 3 by −5°): now 0.695 rad, the V1's largest
+    (field tags 0.620, zone 0.612, fixture 0.429); the OMX's largest is its
+    target at AC20, 0.591 rad."""
     spec = sf.ARMS[kind]
     ax = chain.BASE_AXIS_X[kind]
     field = mc.field_model_corners(spec, sorted(spec['mat_tags_f'])).reshape(-1, 3) + (ax, 0.0, sf.MAT_THICKNESS_M)

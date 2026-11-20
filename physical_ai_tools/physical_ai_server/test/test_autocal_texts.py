@@ -59,7 +59,8 @@ SPEC_TABLE = {
     'needs_arm_check/camera_moved': 'Die Kamera wurde verdreht. Bitte den Arm-Check starten.',
     'needs_arm_check/fixture_changed': 'Die Marker neben dem Turm sitzen anders als beim letzten Arm-Check. Bitte den '
                                        'Arm-Check starten.',
-    'mat_not_flat': 'Die Matte liegt nicht flach. Bitte glatt auflegen und an den Ecken fixieren.',
+    'mat_not_flat': 'Die Matte liegt nicht flach. Bitte glatt auflegen und an den Ecken fixieren. Hilft das nicht, bitte '
+                    'den Arm-Check starten.',
     'mat_misplaced': 'Die Matte liegt nicht an der Grundplatte an. Bitte bis zum Anschlag an die Grundplatte schieben.',
     'mat_moved': 'Matte verschoben – automatisch nachgeführt.',
     'camera_followed': 'Kamera leicht verschoben – automatisch nachgeführt.',

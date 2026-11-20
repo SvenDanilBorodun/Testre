@@ -7,11 +7,12 @@
 """The fixture contract (spec 40 §3, revision 4 as revision 6 restores it).
 
 ``scene_fixture.py`` carries the contract block byte for byte: its sha256 is
-the one the spec states, its values are the block's values, and the derived
-rules (the tower placed by a measured pose, the pose fit, the lens a pose
-carries, the cut work zone, the contract hash) behave as §3 says. The React
-copy ``sceneFixture.json`` and the zone case table ``sceneFixture.cases.json``
-are fresh renders of this module (``tools/export_scene_fixture.py``).
+the one the spec states with D84's V1 pose AC12, its values are the block's
+values, and the derived rules (the tower placed by a measured pose, the pose
+fit, the lens a pose carries, the cut work zone, the contract hash) behave as
+§3 says. The React copy ``sceneFixture.json`` and the zone case table
+``sceneFixture.cases.json`` are fresh renders of this module
+(``tools/export_scene_fixture.py``).
 """
 
 from __future__ import annotations
@@ -33,9 +34,10 @@ _EXPORT = _REPO / 'tools' / 'export_scene_fixture.py'
 _FIXTURE_DIR = (_REPO / 'physical_ai_tools' / 'physical_ai_manager' / 'src' / 'components'
                 / 'Workshop' / 'fixture')
 
-# 40 §3 revision 4 (= revision 6, D77): sha256 of the block between the fences
-# plus its final line break (the convention of scratch/r8/probes/contract_check.py).
-CONTRACT_BLOCK_SHA256 = 'bc29fce3dc3c341980501b915f3e7b63e422b9912f6b838eea6be7dd4666a46a'
+# 40 §3 revision 4 (= revision 6, D77) with D84's V1 pose AC12 (joint 3 1.5396 -> 1.4523): sha256 of the block
+# between the fences plus its final line break (the convention of scratch/r8/probes/contract_check.py). Revision 4's
+# block itself read bc29fce3dc3c341980501b915f3e7b63e422b9912f6b838eea6be7dd4666a46a.
+CONTRACT_BLOCK_SHA256 = '9ea025fa8b05f202ce6763dcc64bdaded264f0b0464d1422384d1d19821d5105'
 BEGIN = '# ---- BEGIN CONTRACT BLOCK (40 §3; byte for byte, never edit by hand) ----\n'
 END = '# ---- END CONTRACT BLOCK ----\n'
 
@@ -127,7 +129,7 @@ def test_the_module_imports_the_standard_library_only():
 # contract_hash
 # ══════════════════════════════════════════════════════════════════════════
 
-CONTRACT_HASH = '120402f01b0be086269858df2e0358b1616f840faa9e92c322411fd0e7c39da4'
+CONTRACT_HASH = '0087eb45f8e74b0c831d11123ea3c48ed5e9c2a6a39c30ac6d8ff0fa0c8ce79c'   # D84 (AC12); was 120402f0…
 
 
 def test_contract_hash_is_stable_and_pinned():

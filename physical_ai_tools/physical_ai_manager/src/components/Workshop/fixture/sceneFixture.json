@@ -426,7 +426,7 @@
     [
      -1.0472,
      1.3466,
-     1.5396,
+     1.4523,
      -1.3638,
      -0.4363
     ],
@@ -1097,6 +1097,6 @@
   ],
   "TOWER_TOP_ROTATION_M": 0.0026
  },
- "contract_hash": "120402f01b0be086269858df2e0358b1616f840faa9e92c322411fd0e7c39da4",
+ "contract_hash": "0087eb45f8e74b0c831d11123ea3c48ed5e9c2a6a39c30ac6d8ff0fa0c8ce79c",
  "source": "physical_ai_tools/physical_ai_server/physical_ai_server/workflow/scene_fixture.py (rendered by tools/export_scene_fixture.py; never edit by hand)"
 }

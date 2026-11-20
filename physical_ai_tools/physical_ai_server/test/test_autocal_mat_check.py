@@ -156,12 +156,27 @@ def test_an_arc_tag_lifted_2_mm_is_kept(case):
     assert 0.9 < r.details['per_tag_px'][tid] < mc.TAG_DROP_PX      # placement B: 1.26 (V1) / 1.20 (OMX) px
 
 
+def test_the_v1_s_farthest_arc_tag_lifted_2_mm_is_dropped_with_a_note():
+    """D84 accepts it: tag 403 (the field tag farthest from the lens) lifted
+    2 mm reads 1.84 px at placement B, above ``TAG_DROP_PX``: dropped with the
+    note, the check ``ok`` (one dropped tag is a note). The az-0 tag the probe
+    lifted (above) stays below the line."""
+    lens = np.asarray(sf.LENS_F[:2])
+    tags_f = sf.ARM_V1['mat_tags_f']
+    assert max(tags_f, key=lambda t: np.linalg.norm(np.asarray(tags_f[t]) - lens)) == 403
+    kit = _kit('v1')
+    r = _run('v1', _frames(kit, lift={403: 0.002}), S.ideal_calibration(kit))
+    assert r.ok and r.code == 'ok' and r.notes == ('tag_dropped',)
+    assert mc.TAG_DROP_PX < r.details['per_tag_px'][403] < 2.2
+
+
 def test_two_arc_tags_lifted_4_mm_are_mat_not_flat(case):
     kind, kit, cal = case
     ids = sorted(sf.ARMS[kind]['mat_tags_f'])
     r = _run(kind, _frames(kit, lift={ids[6]: 0.004, ids[3]: 0.004}), cal)
     assert r.code == 'mat_not_flat'
-    assert r.message_de == 'Die Matte liegt nicht flach. Bitte glatt auflegen und an den Ecken fixieren.'
+    assert r.message_de == ('Die Matte liegt nicht flach. Bitte glatt auflegen und an den Ecken fixieren. Hilft das '
+                            'nicht, bitte den Arm-Check starten.')
 
 
 def test_a_stored_lens_that_no_longer_fits_is_inconsistent():
@@ -172,17 +187,23 @@ def test_a_stored_lens_that_no_longer_fits_is_inconsistent():
     assert r.code == 'inconsistent' and r.rms_px > mc.RMS_MAX_PX
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    'spec 40 WP-10: "the stored k1 off by 0.15 -> inconsistent (probe: 0.85-1.3 px)". At placement B the per-tag '
-    'mean residuals reach 3.5 px (V1) / 2.3 px (OMX), so the drop rule of step 2 (one tag above 1.5 px dropped, a '
-    'second -> mat_not_flat) answers mat_not_flat before the RMS gate (RMS 1.46 / 1.05 px). The probe measured the '
-    'RMS only and never ran the drop rule. Reported, not moved.'))
-def test_the_stored_k1_off_by_0_15_is_inconsistent(case):
+def test_the_stored_k1_off_by_0_15_is_refused_as_mat_not_flat_whose_sentence_offers_the_arm_check(case):
+    """D84: a stored lens that no longer fits lands in step 2's drop rule
+    before the RMS gate: the worst tag is dropped (note ``tag_dropped``), the
+    refit still leaves tags above ``TAG_DROP_PX``, so the answer is
+    ``mat_not_flat`` — although the RMS (placement B: 1.46 px V1, 1.05 px OMX)
+    is above ``RMS_MAX_PX`` too (the probe measured only the RMS and expected
+    ``inconsistent``). The sentence therefore ends in the way out: the
+    Arm-Check."""
     kind, kit, cal = case
     cal['kb'] = dict(cal['kb'], k1=cal['kb']['k1'] + 0.15)
     r = _run(kind, _frames(kit), cal)
-    assert r.code == 'inconsistent'
-    assert 0.8 < r.rms_px < 1.6
+    assert not r.ok and r.code == 'mat_not_flat'
+    assert 'tag_dropped' in r.notes
+    assert sum(1 for v in r.details['per_tag_px'].values() if v > mc.TAG_DROP_PX) >= 2
+    assert mc.RMS_MAX_PX < r.rms_px < 1.6
+    assert 'Arm-Check' in r.message_de
+    assert r.message_de.endswith('Hilft das nicht, bitte den Arm-Check starten.')
 
 
 # ── step 3: the fixture tags and the mat ─────────────────────────────────────
@@ -233,15 +254,31 @@ def test_a_real_focal_length_1_5_percent_above_the_stored_one_is_tower_displaced
     assert r.code == 'tower_displaced' and r.rms_px < 0.2
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    'spec 40 WP-10: "a real focal length 1.5 % above the stored one -> tower_displaced with an RMS below 0.2 px '
-    '(probe: 12 mm of drift along the axis)". The probe P-R8 ran at the revision-1 lens height (0.68 m); at placement '
-    'B (0.575 m) the drift is the lens distance times 1.5 %: 10.6 mm on the V1 (refused) but 9.9 mm on the OMX, under '
-    'LENS_FOLLOW_MAX_M (10 mm), so the OMX answers ok. Reported, not moved.'))
-def test_a_real_focal_length_1_5_percent_above_the_stored_one_is_tower_displaced_omx():
+def test_a_real_focal_length_1_5_percent_above_the_stored_one_is_followed_on_the_omx():
+    """D84 accepts it: the drift is the lens distance times the change. At
+    placement B (0.575 m) 1.5 % moves the OMX's solved lens 9.9 mm, under
+    ``LENS_FOLLOW_MAX_M``, so the mat check follows it with the note (the V1
+    reads 10.6 mm and is refused, above). The revision-1 probe (0.68 m) saw
+    12 mm. It sits on the bound: over noise seeds 1–20 the OMX reads
+    9.84–10.01 mm."""
     kit = _kit('omx')
     r = _run('omx', _frames(kit, cam=kit.cam.moved(f_scale=1.015)), S.ideal_calibration(kit))
-    assert r.code == 'tower_displaced' and r.rms_px < 0.2
+    assert r.ok and r.code == 'ok' and r.notes == ('camera_followed',)
+    assert 9.5 < r.lens_drift_mm < sf.LENS_FOLLOW_MAX_M * 1000.0      # placement B: 9.9 mm
+    assert r.rms_px < 0.2
+
+
+@pytest.mark.parametrize('kind,drift_mm', (('v1', 14.1), ('omx', 13.1)))
+def test_a_real_focal_length_2_percent_above_the_stored_one_is_tower_displaced(kind, drift_mm):
+    """D84: 2.0 % is refused on both arms by the lens rule, not by the
+    residuals: the RMS stays far below ``RMS_MAX_PX``. Placement B, this noise
+    seed: 0.214 px (V1; 0.194 noise-free) and 0.187 px (OMX) — the spec's
+    "below 0.2 px on both arms" holds for the OMX only."""
+    kit = _kit(kind)
+    r = _run(kind, _frames(kit, cam=kit.cam.moved(f_scale=1.02)), S.ideal_calibration(kit))
+    assert r.code == 'tower_displaced'
+    assert abs(r.lens_drift_mm - drift_mm) < 0.5
+    assert r.rms_px < 0.25
 
 
 def test_a_stored_lens_9_mm_along_the_axis_from_lens_f_and_nothing_moved_is_ok_without_a_note(case):

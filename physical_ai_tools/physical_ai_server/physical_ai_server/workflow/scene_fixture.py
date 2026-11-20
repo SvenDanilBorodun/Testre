@@ -10,10 +10,11 @@ literals plus pure rules, the single source every other layer reads.
 WHAT IT IS. The block between the two marker lines below is the spec's
 contract block BYTE FOR BYTE (its sha256 is pinned by
 ``test/test_scene_fixture.py``; revision 6 of the spec restored revision 4's
-block, decision D77). It places the tower, the lens, the mats, the fixture
-tags and the clip-on target in the fixture frame F (origin on the joint-1
-axis at the table surface, x forward, y left, z up), and carries the tower
-guard's allowance constants and both arms' tables. Nothing in it is computed;
+block, decision D77; decision D84 then moved the V1's arm-check pose AC12).
+It places the tower, the lens, the mats, the fixture tags and the clip-on
+target in the fixture frame F (origin on the joint-1 axis at the table
+surface, x forward, y left, z up), and carries the tower guard's allowance
+constants and both arms' tables. Nothing in it is computed;
 to change a value, change the spec, then this block, then re-render the React
 copy (``tools/export_scene_fixture.py``).
 
@@ -151,7 +152,7 @@ ARM_V1 = {
         (-0.34202, 0.0, -0.939693, -0.11),
         (0.0, 0.0, 0.0, 1.0),
     ),
-    "arm_check_poses_rad": (   # PINNED (C10): the screened 0.570 list, identical at 0.575; never regenerated from the grid rule
+    "arm_check_poses_rad": (   # PINNED (C10): the screened 0.570 list, identical at 0.575; never regenerated from the grid rule; AC12 moved for D84
         (1.0472, 1.3248, 1.2474, -1.0934, 0.4363),
         (0.3491, 0.8936, 0.8943, -1.1715, 0.0000),
         (0.3491, 1.3248, 1.2474, -1.4934, 0.0000),
@@ -163,7 +164,7 @@ ARM_V1 = {
         (-0.3491, 1.3466, 1.5396, -1.7638, 0.8727),
         (-0.3491, 1.7882, 2.0447, -1.4274, 0.4363),
         (-1.0472, 1.7391, 1.7097, -1.5414, 0.0000),
-        (-1.0472, 1.3466, 1.5396, -1.3638, -0.4363),
+        (-1.0472, 1.3466, 1.4523, -1.3638, -0.4363),   # AC12, D84: joint 3 -5 deg (was 1.5396), so its target lies within LENS_FIELD_MIN_RAD / 1.1 of the camera axis (0.695 rad, was 0.734)
         (-1.0472, 0.9448, 1.2022, -1.8282, -0.4363),
         (-0.3491, 1.3248, 1.2474, -1.4934, 0.0000),
         (-0.3491, 0.8936, 0.8943, -1.5715, 0.4363),

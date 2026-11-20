@@ -36,7 +36,9 @@ NEEDS_ARM_CHECK_CAMERA_MOVED_DE = 'Die Kamera wurde verdreht. Bitte den Arm-Chec
 NEEDS_ARM_CHECK_FIXTURE_CHANGED_DE = ('Die Marker neben dem Turm sitzen anders als beim letzten Arm-Check. '
                                       'Bitte den Arm-Check starten.')
 TARGET_NOT_CONFIRMED_DE = 'Bitte das Kalibrier-Ziel vom Greifer abnehmen und bestätigen.'
-MAT_NOT_FLAT_DE = 'Die Matte liegt nicht flach. Bitte glatt auflegen und an den Ecken fixieren.'
+# D84: a stored lens that no longer fits lands here too (step 2's drop rule answers first), hence the way out.
+MAT_NOT_FLAT_DE = ('Die Matte liegt nicht flach. Bitte glatt auflegen und an den Ecken fixieren. '
+                   'Hilft das nicht, bitte den Arm-Check starten.')
 MAT_MISPLACED_DE = 'Die Matte liegt nicht an der Grundplatte an. Bitte bis zum Anschlag an die Grundplatte schieben.'
 INCONSISTENT_DE = ('Das Kamerabild passt nicht zur gespeicherten Kalibrierung. Bitte prüfen, ob die Matte '
                    'flach liegt; sonst den Arm-Check starten.')

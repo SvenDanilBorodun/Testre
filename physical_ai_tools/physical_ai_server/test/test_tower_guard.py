@@ -494,7 +494,11 @@ def test_legacy_is_unchanged_because_nothing_calls_the_guard_yet():
                         importers.setdefault(mod, set()).add(path.relative_to(_PKG).as_posix())
     assert importers.get('fixture_guard', set()) == set()
     assert importers.get('arm_cells', set()) == {'workflow/fixture_guard.py'}
-    assert importers.get('scene_fixture', set()) == {'workflow/fixture_guard.py', 'workflow/object_catalog.py'}
+    # WP-10's calibration core reads the contract too (the tower pose, the lens it carries, the hash); pure
+    # modules on no motion path.
+    assert importers.get('scene_fixture', set()) == {
+        'workflow/fixture_guard.py', 'workflow/object_catalog.py', 'workflow/autocal/arm_check.py',
+        'workflow/autocal/mat_check.py', 'workflow/autocal/store.py', 'workflow/autocal/tags.py'}
 
 
 def test_the_guard_imports_only_numpy_arm_geometry_arm_cells_and_scene_fixture():

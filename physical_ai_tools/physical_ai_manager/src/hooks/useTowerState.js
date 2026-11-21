@@ -14,6 +14,8 @@
 // Both are std_msgs/String, latched and re-sent at 2 Hz, and exist only for
 // `v1_studio` under the tower camera (`tower_v1`); every other profile and the
 // legacy camera see no topic at all (D1). Callers subscribe only on the V1.
+// For „Stoppen" the System tab also reads the arm container's statement of the
+// profile it RUNS with (/edubotics/scene_camera_profile, D63; X-C5).
 //
 // NO TOPIC IS TODAY'S UI. Until a verdict arrives the answer is null and every
 // surface behaves as before the hint existed: the driver and the server refuse
@@ -32,12 +34,14 @@ import * as reactRedux from 'react-redux';
 import ROSLIB from 'roslib';
 
 import rosConnectionManager from '../utils/rosConnectionManager';
+import { parseSceneCameraStatement, SCENE_CAMERA_PROFILE_TOPIC } from './useSceneCameraProfile';
 
 export const TOWER_STATE_TOPIC = '/edubotics/tower_state';
 export const HOME_GLIDE_STATE_TOPIC = '/edubotics/home_glide_state';
 
-// The one robot the tower exists for.
+// The one robot the tower exists for, and the scene-camera profile it exists under.
 export const TOWER_ARM_PROFILE = 'v1_studio';
+export const TOWER_SCENE_PROFILE = 'tower_v1';
 
 export const GLIDE_CLEAR = 'clear';
 export const GLIDE_REFUSED = 'refused';
@@ -107,6 +111,21 @@ export function stopNeedsTowerWarning(state) {
   return !state || state.fall !== FALL_FORWARD;
 }
 
+/**
+ * Whether the RUNNING robot tier has the camera tower (X-C5). The agent's
+ * stored profile counts from the NEXT start and may have changed since this
+ * tier started, so what runs decides: a /edubotics/tower_state message proves
+ * the tower (the V1 driver publishes it only under `tower_v1`), else the arm
+ * container's statement of the profile it started with; while neither has
+ * arrived, the stored profile.
+ *
+ * @param {{towerState: ?object, statement: ?string, stored: ?string}} facts
+ */
+export function towerTierRunning({ towerState, statement, stored }) {
+  if (towerState) return true;
+  return (statement ?? stored) === TOWER_SCENE_PROFILE;
+}
+
 function useVerdictTopic(topicName, parse, enabled, rosbridgeUrl) {
   const [state, setState] = useState(null);
   const active = !!enabled && !!rosbridgeUrl;
@@ -172,6 +191,19 @@ export default function useTowerState({ enabled = true, rosbridgeUrl = '' } = {}
  */
 export function useHomeGlideState({ enabled = true, rosbridgeUrl = '' } = {}) {
   return useVerdictTopic(HOME_GLIDE_STATE_TOPIC, parseHomeGlideState, enabled, rosbridgeUrl);
+}
+
+/**
+ * The scene-camera profile the running arm container states
+ * (/edubotics/scene_camera_profile, latched + 1 Hz), with the rosbridge URL
+ * passed in like the two above (the System tab renders without a Provider in
+ * its tests): 'legacy' | 'tower_v1' | null while nothing readable arrived.
+ *
+ * @param {{enabled?: boolean, rosbridgeUrl?: string}} opts
+ * @returns {?string}
+ */
+export function useRunningSceneProfile({ enabled = true, rosbridgeUrl = '' } = {}) {
+  return useVerdictTopic(SCENE_CAMERA_PROFILE_TOPIC, parseSceneCameraStatement, enabled, rosbridgeUrl);
 }
 
 const NO_STORE_SUBSCRIBE = () => () => {};

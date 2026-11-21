@@ -217,8 +217,21 @@ def test_one_step_press_releases_exactly_one_parked_waiter():
             # Let every thread reach the gate before the single token lands.
             time.sleep(0.02)
 
+            pressed_at = time.monotonic()
             assert mgr.step()[0] is True
-            time.sleep(0.05)
+            # Wait for the step's own release, bounded: a fixed 50 ms was
+            # shorter than the token's consumption under a loaded parallel run
+            # (the R-C verification saw 0.02-181 ms), and the trial then
+            # counted 0 releases.
+            deadline = pressed_at + 2.0
+            while time.monotonic() < deadline:
+                with released_lock:
+                    if released:
+                        break
+                time.sleep(0.001)
+            # Then give a wrong SECOND release as long to land as the first
+            # took (at least 50 ms) before the stop wakes every waiter.
+            time.sleep(max(0.05, time.monotonic() - pressed_at))
             stop_at = time.monotonic()
             # Release the rest so the trial can join; anything after stop_at is
             # the stop, not the step.

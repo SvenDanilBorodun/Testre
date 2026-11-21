@@ -19,9 +19,9 @@ import { Provider } from 'react-redux';
 
 import useTowerState, {
   FALL_BACK, FALL_FORWARD, FALL_UNKNOWN, GLIDE_CLEAR, GLIDE_REFUSED, GLIDE_UNJUDGEABLE,
-  HOME_GLIDE_STATE_TOPIC, TOWER_ARM_PROFILE, TOWER_FALLS, TOWER_GLIDES,
-  TOWER_STATE_TOPIC, parseHomeGlideState, parseTowerState, stopNeedsTowerWarning,
-  useHomeGlideState, useOptionalRosbridgeUrl,
+  HOME_GLIDE_STATE_TOPIC, TOWER_ARM_PROFILE, TOWER_FALLS, TOWER_GLIDES, TOWER_SCENE_PROFILE,
+  TOWER_STATE_TOPIC, parseHomeGlideState, parseTowerState, stopNeedsTowerWarning, towerTierRunning,
+  useHomeGlideState, useOptionalRosbridgeUrl, useRunningSceneProfile,
 } from '../useTowerState';
 
 vi.mock('../../utils/rosConnectionManager', () => ({
@@ -72,6 +72,15 @@ describe('the contract with the robot', () => {
     expect(server).toContain(`_HOME_GLIDE_STATE_TOPIC = '${HOME_GLIDE_STATE_TOPIC}'`);
     expect(server).toContain("json.dumps({'v': 1, 'glide': judged[1], 'gen': self._home_glide_gen})");
     expect(server).toContain("camera.profile() != 'tower_v1'");
+  });
+
+  it('the driver publishes tower_state only under the tower profile (what X-C5 reads as proof of it)', () => {
+    const driver = read('robotis_ai_setup', 'docker', 'open_manipulator', 'feetech_arm_node.py');
+    const split = read('robotis_ai_setup', 'docker', 'open_manipulator', 'scene_split.py');
+    expect(driver).toMatch(/ {8}if tower_check_on\(\):\n {12}self\._tower_pub = self\.create_publisher\(\n {16}String, TOWER_STATE_TOPIC,/);
+    expect(driver.match(/create_publisher\(\s*String, TOWER_STATE_TOPIC/g)).toHaveLength(1);
+    expect(driver).toContain('return scene_profile_from_env(env) == scene_split.PROFILE_TOWER');
+    expect(split).toContain(`PROFILE_LEGACY, PROFILE_TOWER = 'legacy', '${TOWER_SCENE_PROFILE}'`);
   });
 
   it('the vocabularies are frozen and complete', () => {
@@ -127,6 +136,50 @@ describe('stopNeedsTowerWarning', () => {
     expect(stopNeedsTowerWarning({ fall: FALL_BACK })).toBe(true);
     expect(stopNeedsTowerWarning({ fall: FALL_UNKNOWN })).toBe(true);
     expect(stopNeedsTowerWarning(null)).toBe(true);
+  });
+});
+
+describe('towerTierRunning (X-C5: the running tier, not the next start\'s profile)', () => {
+  const verdict = { glide: 'clear', fall: 'forward', part: null, gen: 1 };
+
+  it('a tower_state message proves the tower, whatever else is known', () => {
+    for (const statement of [null, 'legacy', 'tower_v1']) {
+      for (const stored of [null, 'legacy', 'tower_v1']) {
+        expect(towerTierRunning({ towerState: verdict, statement, stored })).toBe(true);
+      }
+    }
+  });
+
+  it('without one, the running statement decides; with neither, the stored profile', () => {
+    expect(towerTierRunning({ towerState: null, statement: 'tower_v1', stored: 'legacy' })).toBe(true);
+    expect(towerTierRunning({ towerState: null, statement: 'legacy', stored: 'tower_v1' })).toBe(false);
+    expect(towerTierRunning({ towerState: null, statement: null, stored: 'tower_v1' })).toBe(true);
+    expect(towerTierRunning({ towerState: null, statement: null, stored: 'legacy' })).toBe(false);
+    expect(towerTierRunning({ towerState: null, statement: null, stored: null })).toBe(false);
+  });
+});
+
+describe('useRunningSceneProfile', () => {
+  it('reads the arm container\'s statement with the URL it is given', async () => {
+    const { result } = renderHook(() => useRunningSceneProfile({ enabled: true, rosbridgeUrl: URL }));
+    await waitFor(() => expect(mockTopics).toHaveLength(1));
+    expect(mockTopics[0].opts).toMatchObject({
+      name: '/edubotics/scene_camera_profile', messageType: 'std_msgs/msg/String', queue_length: 1,
+    });
+    expect(result.current).toBeNull();
+    act(() => mockTopics[0].cb(msg({ v: 1, profile: 'tower_v1' })));
+    expect(result.current).toBe('tower_v1');
+    act(() => mockTopics[0].cb(msg({ v: 1, profile: 'legacy' })));
+    expect(result.current).toBe('legacy');
+    act(() => mockTopics[0].cb(msg({ v: 1, profile: 'tower_v2' })));
+    expect(result.current).toBeNull();
+  });
+
+  it('disabled, or no URL: no subscription', async () => {
+    renderHook(() => useRunningSceneProfile({ enabled: false, rosbridgeUrl: URL }));
+    renderHook(() => useRunningSceneProfile({ enabled: true, rosbridgeUrl: '' }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(mockTopics).toHaveLength(0);
   });
 });
 

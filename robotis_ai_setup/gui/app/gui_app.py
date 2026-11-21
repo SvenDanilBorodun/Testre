@@ -756,6 +756,9 @@ class EduBoticsApp:
         # first dialog — and `_scanning` is not set yet at that point. See
         # `_confirm_arm_scan_closes_window`.
         self._scan_confirm_open = False
+        # Set while the camera tower's limp-fall check (`_ask_tower_fall_first`)
+        # runs or its dialog is up: one check at a time.
+        self._tower_check_running = False
         self._prerequisites_done = False
         # Cloud-only mode: skip arm/camera scan, only start physical_ai_manager
         # so the user can open the Cloud tab without any robot hardware.
@@ -825,7 +828,7 @@ class EduBoticsApp:
         webview_window.set_exit_callback(self._on_student_window_closed)
 
         self._build_ui()
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close_after_tower_check)
         self._check_prerequisites()
 
     # ── UI Construction ──────────────────────────────────────────────
@@ -1085,7 +1088,8 @@ class EduBoticsApp:
         leader_row = ttk.Frame(leader_frame)
         leader_row.pack(fill=tk.X, pady=5)
 
-        self.btn_scan_leader = ttk.Button(leader_row, text="Arme scannen", command=self._scan_arms)
+        self.btn_scan_leader = ttk.Button(
+            leader_row, text="Arme scannen", command=self._scan_arms_after_tower_check)
         self.btn_scan_leader.pack(side=tk.LEFT)
 
         self.leader_status_var = tk.StringVar(value="Nicht gescannt")
@@ -1114,7 +1118,7 @@ class EduBoticsApp:
         # worker race the first onto the same /dev/serial ports. Singular
         # wording, matching the Pi's card („Arm scannen").
         self.btn_scan_arm = ttk.Button(
-            follower_row, text="Arm scannen", command=self._scan_arms)
+            follower_row, text="Arm scannen", command=self._scan_arms_after_tower_check)
 
         self.follower_status_var = tk.StringVar(value="Nicht gescannt")
         self.follower_status_label = ttk.Label(
@@ -3465,7 +3469,7 @@ class EduBoticsApp:
         ttk.Button(
             self.arm_repair_frame,
             text="Erneut scannen",
-            command=self._scan_arms,
+            command=self._scan_arms_after_tower_check,
         ).pack(anchor=tk.W, pady=(2, 0))
 
     def _prompt_bind_arms(self, unbound: "list[device_manager.USBDevice]"):
@@ -3494,7 +3498,7 @@ class EduBoticsApp:
         self._run_bind_devices_elevated(
             hw_ids,
             status="Arme werden freigegeben (UAC-Zustimmung erforderlich)...",
-            on_done=lambda: self.root.after(200, self._scan_arms),
+            on_done=lambda: self.root.after(200, self._scan_arms_after_tower_check),
         )
 
     # ── Camera Scanning ──────────────────────────────────────────────
@@ -5000,44 +5004,121 @@ class EduBoticsApp:
         Spec 40 WP-GUISTOP, 52 §5.3 (c) and §6.3, D56 (c). Stopping
         de-energises the arm, and a V1 whose limp arm falls BACK falls toward
         the camera tower. On ``v1_studio`` + ``tower_v1`` (not in cloud-only
-        mode, where no robot runs) the driver's verdict is read ONCE on a
-        worker thread (``docker_manager.read_tower_fall``, bounded at
-        TOWER_STATE_EXEC_TIMEOUT_S): "back" or "unknown" shows
-        ``tower_stop_dialog`` on the Tk thread, "forward" or "none" stops at
-        once. Every other rig calls ``_stop_environment`` straight away and
-        never reaches WSL. The check ends before ``_stop_environment`` starts,
-        and that method is untouched: the stop's order (VA-07) and its budget
-        stay as they are. „Abbrechen" stops nothing; a dialog that cannot be
-        shown never blocks the stop.
+        mode, where no robot runs) ``_ask_tower_fall_first`` reads the
+        driver's verdict once and asks on "back" or "unknown"; the two buttons
+        stay disabled meanwhile and come back on „Abbrechen". Every other rig
+        calls ``_stop_environment`` straight away and never reaches WSL. The
+        check ends before ``_stop_environment`` starts, and that method is
+        untouched: the stop's order (VA-07) and its budget stay as they are.
         """
         if self.cloud_only.get() or not tower_stop_dialog.applies(
                 self._rs_robot_type, self._rs_scene_profile):
             self._stop_environment()
             return
-        self.btn_stop.config(state=tk.DISABLED)
-        self.btn_open_browser.config(state=tk.DISABLED)
+
+        def _hold_buttons():
+            self.btn_stop.config(state=tk.DISABLED)
+            self.btn_open_browser.config(state=tk.DISABLED)
+
+        def _give_buttons_back():
+            self.btn_stop.config(state=tk.NORMAL)
+            self.btn_open_browser.config(state=tk.NORMAL)
+
+        self._ask_tower_fall_first(
+            self._stop_environment, tower_stop_dialog.CANCELLED_DE,
+            on_start=_hold_buttons, on_cancel=_give_buttons_back)
+
+    def _on_close_after_tower_check(self):
+        """The window's close button: on the V1 under the camera tower, ask first where the limp arm falls.
+
+        X-C4 (verifier C-4). ``_on_close`` stops the containers when the stack
+        is up, which takes the V1's torque off exactly like „Stoppen". So on
+        ``v1_studio`` + ``tower_v1`` (not cloud-only) the same check runs
+        first, after a probe that the stack is up (a stack that is down
+        closes at once, WSL never asked); „Abbrechen" closes nothing and
+        stops nothing. ``_on_close`` itself, with its own question, its VA-07
+        order and its fail-closed probe, is untouched.
+        """
+        if self.cloud_only.get() or not tower_stop_dialog.applies(
+                self._rs_robot_type, self._rs_scene_profile):
+            self._on_close()
+            return
+        self._ask_tower_fall_first(
+            self._on_close, tower_stop_dialog.CLOSE_CANCELLED_DE, probe_stack=True)
+
+    def _scan_arms_after_tower_check(self):
+        """„Arme scannen" (every entry): on the V1 under the camera tower, ask first where the limp arm falls.
+
+        X-C4 (verifier C-4). The scan stops a running environment to free the
+        servo bus (``_scan_arms._do_scan`` → ``ensure_environment_stopped``),
+        which takes the V1's torque off exactly like „Stoppen". So on
+        ``v1_studio`` + ``tower_v1`` (not cloud-only) the same check runs
+        first, after a probe that the stack is up; „Abbrechen" scans nothing
+        and stops nothing. A scan that would not run anyway (one already
+        running or being confirmed, setup unfinished) goes straight to
+        ``_scan_arms``, which refuses it as before. ``_scan_arms`` itself, its
+        confirmation and its teardown, is untouched.
+        """
+        if (self.cloud_only.get() or self._scanning or self._scan_confirm_open
+                or self._scan_blocked_reason()
+                or not tower_stop_dialog.applies(self._rs_robot_type, self._rs_scene_profile)):
+            self._scan_arms()
+            return
+        self._ask_tower_fall_first(
+            self._scan_arms, tower_stop_dialog.SCAN_CANCELLED_DE, probe_stack=True)
+
+    def _ask_tower_fall_first(self, proceed, cancelled_de, *, probe_stack=False,
+                              on_start=None, on_cancel=None):
+        """Run ``proceed`` on the Tk thread once the V1's limp fall allows it.
+
+        The one check before „Stoppen", the window's close button and „Arme
+        scannen" (spec 40 WP-GUISTOP, 52 §5.3 (c) and §6.3, D56 (c); X-C4);
+        the caller has decided it applies. On a worker thread: with
+        ``probe_stack``, whether the stack is up (``self.running`` or one
+        bounded ``docker ps``, which fails closed — a stack that is down has
+        no energised arm, so "none" and WSL is never asked), then the
+        driver's verdict ONCE (``docker_manager.read_tower_fall``, bounded at
+        TOWER_STATE_EXEC_TIMEOUT_S). On the Tk thread: "back" or "unknown"
+        shows ``tower_stop_dialog``; „Abbrechen" calls ``on_cancel``, gives
+        the status back and logs ``cancelled_de``, and nothing else runs;
+        "forward", "none", „Trotzdem stoppen" and a dialog that cannot be
+        shown give the status back and run ``proceed``. One check at a time:
+        a press while one runs (its dialogs included) is ignored.
+        """
+        if self._tower_check_running:
+            return
+        self._tower_check_running = True
+        if on_start is not None:
+            on_start()
         status = self.status_var.get()
         self._set_status(tower_stop_dialog.CHECKING_DE)
 
         def _decide(fall):
-            if tower_stop_dialog.asks_first(fall):
-                if fall == docker_manager.TOWER_FALL_UNKNOWN:
-                    self._log(tower_stop_dialog.UNKNOWN_DE)
-                try:
-                    stop = tower_stop_dialog.ask(self.root)
-                except Exception:  # noqa: BLE001 — a hint never blocks the stop
-                    self._log(tower_stop_dialog.DIALOG_FAILED_DE)
-                    stop = True
-                if not stop:
-                    self.btn_stop.config(state=tk.NORMAL)
-                    self.btn_open_browser.config(state=tk.NORMAL)
-                    self._set_status(status)
-                    self._log(tower_stop_dialog.CANCELLED_DE)
-                    return
-            self._stop_environment()
+            try:
+                if tower_stop_dialog.asks_first(fall):
+                    if fall == docker_manager.TOWER_FALL_UNKNOWN:
+                        self._log(tower_stop_dialog.UNKNOWN_DE)
+                    try:
+                        go_on = tower_stop_dialog.ask(self.root)
+                    except Exception:  # noqa: BLE001 — a hint never blocks the stop
+                        self._log(tower_stop_dialog.DIALOG_FAILED_DE)
+                        go_on = True
+                    if not go_on:
+                        if on_cancel is not None:
+                            on_cancel()
+                        self._set_status(status)
+                        self._log(cancelled_de)
+                        return
+                self._set_status(status)
+                proceed()
+            finally:
+                self._tower_check_running = False
 
         def _check():
-            fall = docker_manager.read_tower_fall()
+            if probe_stack and not (self.running or docker_manager.any_container_running()):
+                fall = docker_manager.TOWER_FALL_NONE
+            else:
+                fall = docker_manager.read_tower_fall()
             self.root.after(0, lambda: _decide(fall))
 
         threading.Thread(target=_check, daemon=True).start()

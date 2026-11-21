@@ -270,5 +270,96 @@ class ThePayload(BoundedTestCase):
         self.assertEqual(state['fall'], DRIVER.fg.limp_fall_direction(FALLEN_BACK[:5]))
 
 
+def _path(start, end, steps):
+    """``steps`` readings from ``start`` to ``end`` (both included), every one more than two ticks from the last."""
+    return [tuple(a + (b - a) * k / (steps - 1) for a, b in zip(start, end)) for k in range(steps)]
+
+
+class TheGlideIsJudgedAgainOnlyAtRest(BoundedTestCase):
+    """X-C2 (verifier C-2): one judgement of the glide is tens of milliseconds of pure Python (more on an Orange
+    Pi), and a program motion moves the pose by more than two ticks every period, so a thread that re-judged
+    whenever the arm moved took the interpreter from the 50 Hz read and write loops for as long as a program ran.
+    While a trajectory executes (torque on and the command rail holding one) the thread keeps the verdict it
+    judged at rest and publishes only the cheap ``fall`` anew; at rest again it judges once. A limp or hand-guided
+    arm (torque off) is judged as before. The activation glide's refusal never reads this state: run_home judges
+    the pose it reads at the press (``test_feetech_tower_check.RunHomeJudgesTheGlide``)."""
+
+    HOME_OPEN = HOME + (0.90,)
+
+    def _publish(self, node, positions):
+        node._last_positions = None if positions is None else list(positions)
+        with scene_profile('tower_v1'):
+            node._publish_tower_state()
+        return json.loads(node.publishers_on(TOPIC)[0].published[-1].data)
+
+    @staticmethod
+    def _program_motion(node):
+        node._torque_on = True
+        node._traj_points = [(list(TheGlideIsJudgedAgainOnlyAtRest.HOME_OPEN), 0.0), (list(FALLEN_BACK), 3.0)]
+
+    @staticmethod
+    def _judge():
+        return mock.patch.object(DRIVER.fg, 'tower_glide_decision', wraps=DRIVER.fg.tower_glide_decision)
+
+    def test_no_judgement_while_a_trajectory_executes_and_the_fall_stays_live(self):
+        node = make_node('tower_v1')
+        self.assertEqual(self._publish(node, self.HOME_OPEN)['glide'], 'clear')    # judged at rest
+        self._program_motion(node)
+        poses = _path(self.HOME_OPEN, FALLEN_BACK, 8)[1:]
+        with self._judge() as judge:
+            states = [self._publish(node, pose) for pose in poses]
+        self.assertEqual(judge.call_count, 0, 'the glide was judged while a trajectory executed')
+        self.assertEqual({s['glide'] for s in states}, {'clear'})                   # the verdict judged at rest
+        self.assertEqual({s['part'] for s in states}, {None})
+        self.assertEqual([s['fall'] for s in states],
+                         [DRIVER.fg.limp_fall_direction(list(p)[:5]) for p in poses])
+        self.assertEqual(states[-1]['fall'], 'back')                                # computed for the live pose
+        self.assertEqual([s['gen'] for s in states], list(range(2, 2 + len(poses))))
+
+    def test_at_rest_again_it_judges_once(self):
+        node = make_node('tower_v1')
+        self._publish(node, self.HOME_OPEN)
+        self._program_motion(node)
+        for pose in _path(self.HOME_OPEN, FALLEN_BACK, 6)[1:]:
+            self._publish(node, pose)
+        node._traj_points = []                          # the write loop dropped the finished trajectory
+        with self._judge() as judge:
+            first = self._publish(node, FALLEN_BACK)
+            again = self._publish(node, FALLEN_BACK)
+        self.assertEqual(judge.call_count, 1)
+        self.assertEqual((first['glide'], first['part']), ('refused', 'column'))
+        self.assertEqual(again, dict(first, gen=first['gen'] + 1))
+
+    def test_a_limp_or_holding_arm_is_judged_as_before(self):
+        """torque off (hand-guided; a re-torque clears the rail) or torque on with an empty rail."""
+        for torque_on in (False, True):
+            with self.subTest(torque_on=torque_on):
+                node = make_node('tower_v1')
+                node._torque_on = torque_on
+                poses = _path(self.HOME_OPEN, FALLEN_BACK, 4)
+                with self._judge() as judge:
+                    states = [self._publish(node, pose) for pose in poses]
+                self.assertEqual(judge.call_count, len(poses))
+                self.assertEqual(states[-1]['glide'], 'refused')
+
+    def test_the_first_reading_is_judged_even_while_moving(self):
+        """nothing judged yet (the thread's first tick, the EDUBOTICS_REQUIRE_ACTIVATION=0 boot glide): one
+        judgement, then none until the motion ends."""
+        node = make_node('tower_v1')
+        self._program_motion(node)
+        with self._judge() as judge:
+            states = [self._publish(node, pose) for pose in _path(self.HOME_OPEN, FALLEN_BACK, 5)]
+        self.assertEqual(judge.call_count, 1)
+        self.assertEqual({s['glide'] for s in states}, {'clear'})
+
+    def test_a_lost_reading_reads_unjudgeable_at_once_even_while_moving(self):
+        node = make_node('tower_v1')
+        self._publish(node, self.HOME_OPEN)
+        self._program_motion(node)
+        node._bus_fault = True
+        state = self._publish(node, self.HOME_OPEN)
+        self.assertEqual((state['glide'], state['fall'], state['part']), ('unjudgeable', 'unknown', None))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -511,6 +511,7 @@ class TheStopAsksOnlyOnTheV1UnderTheTower(unittest.TestCase):
             running=True,
             _rs_robot_type=robot_type,
             _rs_scene_profile=scene_profile,
+            _tower_check_running=False,
         )
         docker = types.SimpleNamespace(
             read_tower_fall=docker_manager.read_tower_fall,
@@ -528,6 +529,7 @@ class TheStopAsksOnlyOnTheV1UnderTheTower(unittest.TestCase):
             "tower_stop_dialog": tower_stop_dialog,
         }
         owner._stop_environment = types.MethodType(_load("_stop_environment", dict(ns)), owner)
+        owner._ask_tower_fall_first = types.MethodType(_load("_ask_tower_fall_first", dict(ns)), owner)
         handler = types.MethodType(_load("_stop_environment_after_tower_check", ns), owner)
         with mock.patch.object(docker_manager.wsl_bridge, "run", run), \
                 mock.patch.object(tower_stop_dialog, "ask", ask):
@@ -668,6 +670,299 @@ class TheStopButtonGoesThroughTheCheck(unittest.TestCase):
         self.assertEqual(set(callers), {"_stop_environment_after_tower_check"}, callers)
 
 
+def _self_attribute_owners(tree, attr):
+    """The top-level method of every ``self.<attr>`` reference in gui_app's classes (a reference in a closure
+    counts for the method that defines it)."""
+    owners = []
+
+    def walk(node, owner):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef):
+                walk(child, owner or child.name)
+                continue
+            if (isinstance(child, ast.Attribute) and child.attr == attr
+                    and isinstance(child.value, ast.Name) and child.value.id == "self"):
+                owners.append(owner)
+            walk(child, owner)
+
+    for cls in (n for n in tree.body if isinstance(n, ast.ClassDef)):
+        walk(cls, None)
+    return owners
+
+
+def _wired_close_handler(tree):
+    """The method ``self.root.protocol("WM_DELETE_WINDOW", …)`` is given (the window's close button)."""
+    handlers = [ast.unparse(node.args[1]) for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "protocol" and len(node.args) == 2
+                and isinstance(node.args[0], ast.Constant) and node.args[0].value == "WM_DELETE_WINDOW"
+                and ast.unparse(node.func.value) == "self.root"]
+    if len(handlers) != 1 or not handlers[0].startswith("self."):
+        raise AssertionError(f"the main window's close button is wired to {handlers}")
+    return handlers[0][len("self."):]
+
+
+def _wired_scan_handlers(tree):
+    """Every scan entry: what a scan button's ``command=`` names and what ``root.after`` re-runs after the
+    elevated arm bind."""
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for kw in node.keywords:
+            if kw.arg == "command" and ast.unparse(kw.value).startswith("self._scan_arms"):
+                found.append(ast.unparse(kw.value))
+        if (isinstance(node.func, ast.Attribute) and node.func.attr == "after" and len(node.args) == 2
+                and ast.unparse(node.args[1]).startswith("self._scan_arms")):
+            found.append(ast.unparse(node.args[1]))
+    return found
+
+
+class EveryOtherWayToTakeTheTorqueOffGoesThroughTheCheck(unittest.TestCase):
+    """X-C4 (verifier C-4): closing the GUI window stops the containers (``_on_close``) and „Arme scannen" stops
+    the environment to free the bus (``_scan_arms._do_scan`` → ``ensure_environment_stopped``); both take the
+    V1's torque off like „Stoppen". Each is entered through a wrapper that asks the same check first; the
+    methods that stop (``_on_close``, ``_scan_arms``) stay as they are."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tree = ast.parse(_GUI_APP_SRC.read_text(encoding="utf-8"))
+
+    def test_the_window_close_button_runs_the_check(self):
+        self.assertEqual(_wired_close_handler(self.tree), "_on_close_after_tower_check")
+        self.assertEqual(set(_self_attribute_owners(self.tree, "_on_close")), {"_on_close_after_tower_check"})
+
+    def test_every_scan_entry_runs_the_check(self):
+        """the two scan buttons, „Erneut scannen" and the re-scan after „Arme freigeben"."""
+        entries = _wired_scan_handlers(self.tree)
+        self.assertEqual(len(entries), 4, entries)
+        self.assertEqual(set(entries), {"self._scan_arms_after_tower_check"}, entries)
+        self.assertEqual(set(_self_attribute_owners(self.tree, "_scan_arms")), {"_scan_arms_after_tower_check"})
+
+
+class _CloseScanRig:
+    """The shipped close and scan entries with the shipped ``_on_close``, executed against recording doubles
+    and the REAL read_tower_fall over a patched ``wsl_bridge.run``; ``_scan_arms`` itself is a recorder (its
+    worker is fenced elsewhere)."""
+
+    STATUS = "Aktiv — Umgebung läuft"
+    HELPERS = ("_ask_tower_fall_first", "_on_close_after_tower_check", "_scan_arms_after_tower_check")
+
+    def __init__(self, *, robot_type=V1, scene_profile=TOWER, cloud_only=False, running=True, any_running=True,
+                 sentinel=None, answer=None, ask_raises=None, generic_answer=True, scanning=False,
+                 blocked=None):
+        self.rec = rec = _Recorder()
+        self.sentinel = sentinel
+        self.answer = answer
+        self.ask_raises = ask_raises
+        note = rec.note
+
+        def after(_delay, fn=None, *args):
+            rec.calls.append("after>")
+            if fn is not None:
+                fn(*args)
+            rec.calls.append("<after")
+
+        def askyesno(*a, **k):
+            rec.calls.append("askyesno")
+            return generic_answer
+
+        def any_container_running():
+            rec.calls.append("ps")
+            return any_running
+
+        self.owner = owner = types.SimpleNamespace(
+            root=types.SimpleNamespace(after=after, destroy=note("root.destroy")),
+            status_var=types.SimpleNamespace(get=lambda: self.STATUS),
+            _set_status=lambda msg: rec.calls.append(("status", msg)),
+            _log=lambda msg: rec.calls.append(("log", msg)),
+            _stop_camera_previews=note("previews"),
+            _stop_camera_bridge=note("camera_bridge"),
+            _stop_camera_health_poll=note("health_poll"),
+            _stop_phone_server=note("phone_server"),
+            _stop_rs_control_server=note("rs_control"),
+            _scan_arms=note("scan"),
+            _scan_blocked_reason=lambda: blocked,
+            _scanning=scanning,
+            _scan_confirm_open=False,
+            _tower_check_running=False,
+            cloud_only=types.SimpleNamespace(get=lambda: cloud_only),
+            gpu_available=False,
+            running=running,
+            _rs_robot_type=robot_type,
+            _rs_scene_profile=scene_profile,
+        )
+        docker = types.SimpleNamespace(
+            read_tower_fall=docker_manager.read_tower_fall,
+            TOWER_FALL_UNKNOWN=docker_manager.TOWER_FALL_UNKNOWN,
+            TOWER_FALL_NONE=docker_manager.TOWER_FALL_NONE,
+            any_container_running=any_container_running,
+            stop_containers=note("containers"),
+            stop_cloud_only=note("containers"),
+            stop_keepalive=note("keepalive"),
+        )
+        self.ns = {
+            "threading": types.SimpleNamespace(
+                Thread=lambda target=None, daemon=None: _SyncThread(rec, target, daemon)),
+            "tk": types.SimpleNamespace(DISABLED="disabled", NORMAL="normal"),
+            "webview_window": types.SimpleNamespace(destroy_all=note("webview")),
+            "docker_manager": docker,
+            "tower_stop_dialog": tower_stop_dialog,
+            "messagebox": types.SimpleNamespace(askyesno=askyesno),
+        }
+        src = _GUI_APP_SRC.read_text(encoding="utf-8")
+        defined = {n.name for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef)}
+        for name in ("_on_close",) + self.HELPERS:
+            if name in defined:
+                setattr(owner, name, types.MethodType(_load(name, dict(self.ns)), owner))
+
+    def press(self, name):
+        def run(cmd, timeout=None, check=True, **kw):
+            self.rec.calls.append("wsl")
+            return types.SimpleNamespace(stdout=f"EDUBOTICS_TOWER_FALL={self.sentinel}\n", stderr="",
+                                         returncode=0)
+
+        def ask(parent):
+            self.rec.calls.append("ask")
+            if self.ask_raises is not None:
+                raise self.ask_raises
+            return self.answer
+
+        with mock.patch.object(docker_manager.wsl_bridge, "run", run), \
+                mock.patch.object(tower_stop_dialog, "ask", ask):
+            getattr(self.owner, name)()
+        return self.rec
+
+
+class ClosingTheWindowAsksOnlyOnTheV1UnderTheTower(unittest.TestCase):
+    """The window's close button, as wired, with the shipped ``_on_close`` behind it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.handler = _wired_close_handler(ast.parse(_GUI_APP_SRC.read_text(encoding="utf-8")))
+
+    def _close(self, **kw):
+        return _CloseScanRig(**kw).press(self.handler)
+
+    def test_back_and_unknown_ask_before_anything_stops_and_abbrechen_keeps_it_all_running(self):
+        """C-4's repro: the V1 under the tower with the stack up, the limp arm falling back."""
+        for sentinel in ("back", "unknown"):
+            with self.subTest(sentinel=sentinel):
+                rec = self._close(sentinel=sentinel, answer=False)
+                names = rec.names()
+                self.assertEqual(names.count("ask"), 1, rec.calls)
+                for stopped in ("previews", "askyesno", "containers", "webview", "camera_bridge", "phone_server",
+                                "rs_control", "keepalive", "root.destroy"):
+                    self.assertNotIn(stopped, names, rec.calls)
+                statuses = [c for c in rec.calls if isinstance(c, tuple) and c[0] == "status"]
+                self.assertEqual(statuses, [("status", tower_stop_dialog.CHECKING_DE),
+                                            ("status", _CloseScanRig.STATUS)])
+                self.assertIn(("log", tower_stop_dialog.CLOSE_CANCELLED_DE), rec.calls)
+
+    def test_trotzdem_stoppen_runs_the_unchanged_close_after_the_check(self):
+        rec = self._close(sentinel="back", answer=True)
+        names = rec.names()
+        self.assertEqual(names.count("ask"), 1)
+        self.assertLess(names.index("wsl"), names.index("ask"))
+        self.assertLess(names.index("ask"), names.index("previews"))   # _on_close's first step
+        self.assertEqual(names.count("askyesno"), 1)                   # _on_close's own question, unchanged
+        containers = names.index("containers")
+        for first in ("rs_control", "webview", "health_poll"):
+            self.assertLess(names.index(first), containers, names)
+        for source in ("camera_bridge", "phone_server"):
+            self.assertGreater(names.index(source), containers, names)
+        self.assertEqual(names[-1], "root.destroy")
+
+    def test_the_read_runs_on_a_worker_and_the_dialog_on_the_tk_thread(self):
+        """the stack probe and the read on a worker (`self.running` False: the probe asks docker)."""
+        calls = self._close(running=False, sentinel="back", answer=False).trace()
+        self.assertLess(calls.index("thread>"), calls.index("ps"))
+        self.assertLess(calls.index("ps"), calls.index("wsl"))
+        self.assertLess(calls.index("wsl"), calls.index("after>"))
+        self.assertLess(calls.index("after>"), calls.index("ask"))
+
+    def test_forward_or_no_arm_container_closes_as_today(self):
+        for sentinel in ("forward", "none"):
+            with self.subTest(sentinel=sentinel):
+                names = self._close(sentinel=sentinel, answer=False).names()
+                self.assertNotIn("ask", names)
+                self.assertEqual(names.count("askyesno"), 1)
+                self.assertEqual(names[-1], "root.destroy")
+
+    def test_a_stack_that_is_down_never_reaches_wsl(self):
+        names = self._close(running=False, any_running=False, sentinel="back", answer=False).names()
+        self.assertNotIn("wsl", names)
+        self.assertNotIn("ask", names)
+        self.assertNotIn("containers", names)
+        self.assertEqual(names[-1], "root.destroy")
+
+    def test_omx_legacy_and_cloud_only_close_as_today_and_never_reach_wsl(self):
+        cases = [(robot_type, scene, False) for robot_type in ROBOT_PROFILES
+                 for scene in (TOWER, LEGACY) if (robot_type, scene) != (V1, TOWER)]
+        cases.append((V1, TOWER, True))
+        for robot_type, scene, cloud_only in cases:
+            with self.subTest(robot_type=robot_type, scene=scene, cloud_only=cloud_only):
+                names = self._close(robot_type=robot_type, scene_profile=scene, cloud_only=cloud_only,
+                                    sentinel="back", answer=False).names()
+                self.assertNotIn("wsl", names)
+                self.assertNotIn("ask", names)
+                self.assertEqual(names.count("askyesno"), 1)
+                self.assertEqual(names[-1], "root.destroy")
+
+    def test_a_dialog_that_cannot_be_shown_never_blocks_the_close(self):
+        rec = self._close(sentinel="back", ask_raises=RuntimeError("no Tk"))
+        self.assertEqual(rec.names()[-1], "root.destroy")
+        self.assertIn(("log", tower_stop_dialog.DIALOG_FAILED_DE), rec.calls)
+
+    def test_a_second_click_while_the_check_runs_is_ignored(self):
+        rig = _CloseScanRig(sentinel="back", answer=False)
+        rig.owner._tower_check_running = True
+        names = rig.press(self.handler).names()
+        self.assertEqual(names, [])
+
+
+class ScanningArmsAsksOnlyOnTheV1UnderTheTower(unittest.TestCase):
+    """„Arme scannen" through its entry: the check, then ``_scan_arms`` (which confirms and refuses as before)."""
+
+    def _scan(self, **kw):
+        return _CloseScanRig(**kw).press("_scan_arms_after_tower_check")
+
+    def test_back_and_unknown_ask_first_and_abbrechen_scans_nothing(self):
+        for sentinel in ("back", "unknown"):
+            with self.subTest(sentinel=sentinel):
+                rec = self._scan(sentinel=sentinel, answer=False)
+                self.assertEqual(rec.names().count("ask"), 1, rec.calls)
+                self.assertNotIn("scan", rec.names())
+                self.assertIn(("log", tower_stop_dialog.SCAN_CANCELLED_DE), rec.calls)
+                statuses = [c for c in rec.calls if isinstance(c, tuple) and c[0] == "status"]
+                self.assertEqual(statuses[-1], ("status", _CloseScanRig.STATUS))
+
+    def test_trotzdem_stoppen_scans(self):
+        names = self._scan(sentinel="back", answer=True).names()
+        self.assertEqual(names.count("scan"), 1)
+        self.assertLess(names.index("ask"), names.index("scan"))
+
+    def test_forward_none_or_a_stack_that_is_down_scan_at_once(self):
+        for kw in ({"sentinel": "forward"}, {"sentinel": "none"},
+                   {"sentinel": "back", "running": False, "any_running": False}):
+            with self.subTest(**kw):
+                names = self._scan(answer=False, **kw).names()
+                self.assertNotIn("ask", names)
+                self.assertEqual(names.count("scan"), 1)
+        self.assertNotIn("wsl", self._scan(sentinel="back", running=False, any_running=False).names())
+
+    def test_omx_legacy_cloud_only_a_running_or_refused_scan_never_reach_wsl(self):
+        cases = [{"robot_type": robot_type, "scene_profile": scene} for robot_type in ROBOT_PROFILES
+                 for scene in (TOWER, LEGACY) if (robot_type, scene) != (V1, TOWER)]
+        cases += [{"cloud_only": True}, {"scanning": True}, {"blocked": "Die Einrichtung läuft gerade."}]
+        for kw in cases:
+            with self.subTest(**kw):
+                names = self._scan(sentinel="back", answer=False, **kw).names()
+                self.assertNotIn("wsl", names)
+                self.assertNotIn("ask", names)
+                self.assertEqual(names, ["scan"])
+
+
 class TheDecisions(unittest.TestCase):
 
     def test_only_the_v1_on_the_tower_applies(self):
@@ -714,7 +1009,9 @@ class BothPlatformsSayTheSameThing(unittest.TestCase):
     def test_the_guis_own_lines_are_german_with_literal_umlauts(self):
         self.assertIn("geprüft", tower_stop_dialog.CHECKING_DE)
         self.assertIn("fällt", tower_stop_dialog.CHECKING_DE)
-        self.assertIn("läuft", tower_stop_dialog.CANCELLED_DE)
+        for text in (tower_stop_dialog.CANCELLED_DE, tower_stop_dialog.CLOSE_CANCELLED_DE,
+                     tower_stop_dialog.SCAN_CANCELLED_DE):
+            self.assertIn("läuft", text)
         self.assertTrue(tower_stop_dialog.UNKNOWN_DE.startswith("[INFO] "))
         self.assertTrue(tower_stop_dialog.DIALOG_FAILED_DE.startswith("[WARNUNG] "))
         for text in (tower_stop_dialog.UNKNOWN_DE, tower_stop_dialog.DIALOG_FAILED_DE):

@@ -24,7 +24,8 @@ import {
 import LegalLinks from '../components/LegalLinks';
 import { TowerStopDialog } from '../components/TowerHint/TowerHint';
 import useTowerState, {
-  stopNeedsTowerWarning, TOWER_ARM_PROFILE, useOptionalRosbridgeUrl,
+  stopNeedsTowerWarning, TOWER_ARM_PROFILE, towerTierRunning, useOptionalRosbridgeUrl,
+  useRunningSceneProfile,
 } from '../hooks/useTowerState';
 
 // The typed confirmation a factory reset needs (owner decision 5, the agent's
@@ -256,13 +257,21 @@ export default function SystemPage() {
   // „Stoppen" on the V1 under the camera tower (spec 40 WP-HINT, 52 §5.3 (c),
   // §6): stopping takes the torque off the arm, so the page asks first unless
   // the driver says the limp arm falls forward. Only while the robot tier (and
-  // so the driver) runs, on `v1_studio` + `tower_v1`; every other rig stops as
-  // today. No answer from the robot (no session, no topic) asks too (§6.3).
-  const towerStopApplies = !!agentStatus?.robot_tier_up
+  // so the driver) runs, on `v1_studio` with the tower; every other rig stops
+  // as today. No answer from the robot (no session, no topic) asks too (§6.3).
+  // The tower is the RUNNING tier's (X-C5): the stored `scene_camera_profile`
+  // counts from the next start, so a V1 tier listens to what it runs with
+  // (towerTierRunning). The robot type cannot change while the tier runs
+  // (POST /robot-type refuses then); an agent without the key has no tower.
+  const v1TierRunning = !!agentStatus?.robot_tier_up
     && agentStatus?.robot_type === TOWER_ARM_PROFILE
-    && sceneCameraProfile === SCENE_PROFILE_TOWER;
+    && sceneCameraProfile !== null;
   const rosbridgeUrl = useOptionalRosbridgeUrl();
-  const towerState = useTowerState({ enabled: towerStopApplies, rosbridgeUrl });
+  const towerState = useTowerState({ enabled: v1TierRunning, rosbridgeUrl });
+  const runningSceneProfile = useRunningSceneProfile({ enabled: v1TierRunning, rosbridgeUrl });
+  const towerStopApplies = v1TierRunning && towerTierRunning({
+    towerState, statement: runningSceneProfile, stored: sceneCameraProfile,
+  });
   const [towerStopOpen, setTowerStopOpen] = useState(false);
 
   useEffect(() => {

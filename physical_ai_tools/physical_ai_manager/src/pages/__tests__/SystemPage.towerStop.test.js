@@ -26,6 +26,7 @@ const TOWER_HINT_STOP_DE = 'Beim Stoppen wird der Arm weich. Aus dieser Lage wü
   + 'zum Kameraturm fallen. Fahre ihn zuerst in die Grundstellung (Roboter Studio → Steuern → '
   + 'Grundstellung) oder halte ihn beim Stoppen fest.';
 const TOWER_STATE_TOPIC = '/edubotics/tower_state';
+const SCENE_CAMERA_PROFILE_TOPIC = '/edubotics/scene_camera_profile';
 
 const refreshAgentStatus = vi.fn(() => Promise.resolve(null));
 let mockPi;
@@ -120,6 +121,13 @@ async function deliverFall(fall, glide = 'clear') {
   await act(async () => { live[0].cb({ data: JSON.stringify({ v: 1, glide, fall, part: null, gen: 1 }) }); });
 }
 
+const statementTopics = () => mockTopics.filter((t) => t.opts.name === SCENE_CAMERA_PROFILE_TOPIC);
+async function deliverStatement(profile) {
+  const live = statementTopics().filter((t) => !t.unsubscribed);
+  expect(live).toHaveLength(1);
+  await act(async () => { live[0].cb({ data: JSON.stringify({ v: 1, profile }) }); });
+}
+
 const stopPosts = () => global.fetch.mock.calls.filter((c) => String(c[0]).includes('/environment/stop'));
 const stopButton = () => screen.getByRole('button', { name: 'Stoppen' });
 
@@ -202,14 +210,65 @@ describe('SystemPage — „Stoppen" on the V1 under the camera tower', () => {
   });
 });
 
+describe('SystemPage — the RUNNING tier decides, not the next start\'s profile (X-C5)', () => {
+  // The agent's `scene_camera_profile` is the stored .env value: „Gilt ab dem nächsten „Umgebung starten“", so
+  // a teacher may untick or tick the box while a tier runs. The dialog follows what runs: a tower_state message
+  // (the V1 driver publishes it only under `tower_v1`), else the arm container's statement of its profile.
+  it('a tower tier whose box was unticked since its start: fall back asks (C-5\'s repro)', async () => {
+    await renderWith(statusFixture({ scene_camera_profile: 'legacy' }));
+    await deliverFall('back');
+    await userEvent.click(stopButton());
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+    expect(screen.getByText(TOWER_HINT_STOP_DE)).toBeInTheDocument();
+    expect(stopPosts()).toHaveLength(0);
+  });
+
+  it('a running tier that states tower_v1, no fall yet: unknown asks', async () => {
+    await renderWith(statusFixture({ scene_camera_profile: 'legacy' }));
+    await deliverStatement('tower_v1');
+    await userEvent.click(stopButton());
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+    expect(stopPosts()).toHaveLength(0);
+  });
+
+  it('a running tower tier whose limp arm falls forward stops at once', async () => {
+    await renderWith(statusFixture({ scene_camera_profile: 'legacy' }));
+    await deliverStatement('tower_v1');
+    await deliverFall('forward');
+    await userEvent.click(stopButton());
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    await flush();
+    expect(stopPosts()).toHaveLength(1);
+  });
+
+  it('a running tier that states legacy never asks, though the box was ticked since its start', async () => {
+    await renderWith(statusFixture({ scene_camera_profile: 'tower_v1' }));
+    await deliverStatement('legacy');
+    await userEvent.click(stopButton());
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    await flush();
+    expect(stopPosts()).toHaveLength(1);
+  });
+
+  it('a running tier that has said nothing yet: the stored profile decides, as before', async () => {
+    await renderWith(statusFixture({ scene_camera_profile: 'legacy' }));
+    expect(statementTopics()).toHaveLength(1);
+    expect(towerTopics()).toHaveLength(1);
+    await userEvent.click(stopButton());
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    await flush();
+    expect(stopPosts()).toHaveLength(1);
+  });
+});
+
 describe('SystemPage — every other rig stops as today', () => {
   it.each([
     ['OMX under the tower', { robot_type: 'omx_full', follower_only: false }],
-    ['V1 with the legacy camera', { scene_camera_profile: 'legacy' }],
     ['an agent without the scene-camera key', { scene_camera_profile: undefined }],
   ])('%s: no dialog, and nothing subscribes to the tower', async (_label, overrides) => {
     await renderWith(statusFixture(overrides));
     expect(towerTopics()).toHaveLength(0);
+    expect(statementTopics()).toHaveLength(0);
     await userEvent.click(stopButton());
     expect(screen.queryByRole('alertdialog')).toBeNull();
     await flush();
@@ -219,5 +278,6 @@ describe('SystemPage — every other rig stops as today', () => {
   it('the robot tier down (nothing is energised): nothing subscribes to the tower', async () => {
     await renderWith(statusFixture({ robot_tier_up: false }));
     expect(towerTopics()).toHaveLength(0);
+    expect(statementTopics()).toHaveLength(0);
   });
 });

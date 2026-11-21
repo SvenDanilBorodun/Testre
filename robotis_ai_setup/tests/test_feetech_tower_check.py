@@ -402,6 +402,19 @@ class RunHomeJudgesTheGlide(BoundedTestCase):
                 self.assertEqual(tower._traj_points, legacy._traj_points)
                 self.assertEqual(tower._traj_points, DRIVER.build_boot_home(pose))
 
+    def test_the_press_judges_the_pose_it_reads_never_the_published_state(self):
+        """X-C2: /edubotics/tower_state keeps the verdict it judged at rest while a trajectory executes; run_home
+        never reads it. A stale `clear` published for HOME does not let a fallen-back reading glide."""
+        node = self._node('tower_v1', FALLEN_BACK)
+        node._last_positions = list(HOME) + [0.90]
+        with scene_profile('tower_v1'):
+            node._publish_tower_state()
+            self.assertEqual(json.loads(node.publishers_on('/edubotics/tower_state')[0].published[-1].data)['glide'],
+                             'clear')
+            ok, message = node.run_home()
+        self.assertEqual((ok, message), (False, DRIVER.TOWER_GLIDE_REFUSAL_DE))
+        self.assertEqual(node._traj_gen, 0)
+
     def test_under_legacy_or_without_the_key_nothing_is_judged(self):
         for profile in ('legacy', None):
             with self.subTest(profile=profile):

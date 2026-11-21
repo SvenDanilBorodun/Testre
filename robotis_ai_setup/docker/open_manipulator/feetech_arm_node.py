@@ -1207,8 +1207,10 @@ TOWER_STATE_PERIOD_S = 0.5
 # A held servo's reading dithers by a tick, and judging a glide is tens of
 # milliseconds of pure Python (more on an Orange Pi): the published state is
 # judged again once a joint (or the claw) has moved by more than two ticks
-# from the reading it was judged for. That is the HINT's resolution only —
-# run_home judges the exact pose at the press.
+# from the reading it was judged for, and never while a trajectory executes
+# (X-C2: every program motion moves more than that each period, and judging
+# then took the interpreter from the 50 Hz read and write loops). That is the
+# HINT's resolution only — run_home judges the exact pose at the press.
 TOWER_STATE_REJUDGE_RAD = 2 * RAD_PER_TICK
 TOWER_GLIDE_REFUSAL_DE = (
     '[FEHLER] Grundstellungs-Fahrt entfällt: aus dieser Lage würde der Arm '
@@ -1297,16 +1299,23 @@ def boot_home_resend_refusal(cur, off, env=None):
             'erneuter Anlauf. ' + reason.removeprefix('[FEHLER] '))
 
 
-def tower_state(positions):
-    """``(glide, fall, part)`` for the live pose ``positions`` (arm joints +
-    claw; ``None`` when there is no current reading): run_home's own verdict
-    for the glide from there, where a limp arm would fall, and the tower part
-    a refusal binds at."""
+def tower_glide_state(positions):
+    """``(glide, part)`` for the live pose ``positions`` (arm joints + claw;
+    ``None`` when there is no current reading): run_home's own verdict for the
+    glide from there and the tower part a refusal binds at. The expensive half
+    of the state."""
     if positions is None:
-        return fg.TOWER_UNJUDGEABLE, 'unknown', None
+        return fg.TOWER_UNJUDGEABLE, None
     verdict, _margin, part = tower_glide_from(positions)
-    fall = fg.limp_fall_direction(list(positions)[:N_ARM_JOINTS])
-    return verdict, fall, part if verdict == fg.TOWER_REFUSED else None
+    return verdict, part if verdict == fg.TOWER_REFUSED else None
+
+
+def tower_fall(positions):
+    """Where a limp arm at ``positions`` would fall (``'unknown'`` without a
+    reading). The cheap half of the state, computed for every message."""
+    if positions is None:
+        return 'unknown'
+    return fg.limp_fall_direction(list(positions)[:N_ARM_JOINTS])
 
 
 def _tower_reading_moved(judged, positions):
@@ -1430,8 +1439,8 @@ class FeetechArmNode(Node):
         # TRANSIENT_LOCAL. Only on the tower; under any other profile the
         # topic does not exist. Its own thread, never a timer of the
         # executor: judging a glide must not hold back a trajectory or a
-        # service callback. `_tower_judged` is the reading the state was last
-        # judged for, with that state.
+        # service callback. `_tower_judged` is the reading the glide was last
+        # judged for, with that verdict.
         self._tower_gen = 0
         self._tower_judged = None
         self._tower_thread = None
@@ -2279,17 +2288,30 @@ class FeetechArmNode(Node):
             except Exception as e:  # noqa: BLE001
                 self.get_logger().warning(f'tower state not published: {e}')
 
+    def _trajectory_executing(self) -> bool:
+        """Torque on and the command rail holding a trajectory (the write loop
+        keeps a finished one for a second, holding its goal)."""
+        with self._traj_lock:
+            return self._torque_on and bool(self._traj_points)
+
     def _publish_tower_state(self) -> None:
-        """One message of /edubotics/tower_state: the tower verdict for the
-        pose the read loop last published (none while the bus is faulted),
-        judged again only when that pose moved (TOWER_STATE_REJUDGE_RAD)."""
+        """One message of /edubotics/tower_state for the pose the read loop
+        last published (none while the bus is faulted): where a limp arm would
+        fall, every time, and the glide's verdict, judged again only when that
+        pose moved (TOWER_STATE_REJUDGE_RAD) and not while a trajectory
+        executes — the verdict judged at rest stands until the arm is at rest
+        again. A lost reading is unjudgeable at once (no judgement to run)."""
         positions = None if self._bus_fault else self._last_positions
         judged = self._tower_judged
-        if judged is None or _tower_reading_moved(judged[0], positions):
-            judged = self._tower_judged = (positions, tower_state(positions))
+        if judged is None or (_tower_reading_moved(judged[0], positions)
+                              and (positions is None
+                                   or not self._trajectory_executing())):
+            judged = self._tower_judged = (positions, tower_glide_state(positions))
+        glide, part = judged[1]
         self._tower_gen += 1
         msg = String()
-        msg.data = tower_state_payload(*judged[1], self._tower_gen)
+        msg.data = tower_state_payload(glide, tower_fall(positions), part,
+                                       self._tower_gen)
         self._tower_pub.publish(msg)
 
     # ── bus loops ────────────────────────────────────────────────────────────

@@ -12,7 +12,9 @@ the GUI reads the driver's verdict once before anything stops
 shows this dialog — the limp fall rendered from the real V1 URDF (WP-ART's
 frames) and two buttons, „Abbrechen" (stops nothing) and „Trotzdem stoppen"
 (the stop as today); ``forward`` or ``none`` (no arm container) stops at once.
-Every other robot type and the legacy camera never ask.
+Every other robot type and the legacy camera never ask. Closing the window and
+„Arme scannen" take the torque off too and ask the same way (X-C4;
+``gui_app._ask_tower_fall_first``).
 
 The dialog's texts are the Pi's (``TowerHint/towerHintCopy.js``), byte for
 byte: both platforms say the same thing (``tests/test_gui_tower_stop.py``).
@@ -50,6 +52,8 @@ UNKNOWN_DE = (
     "deshalb die Rückfrage."
 )
 CANCELLED_DE = "Stoppen abgebrochen — die Umgebung läuft weiter."
+CLOSE_CANCELLED_DE = "Beenden abgebrochen — die Umgebung läuft weiter."
+SCAN_CANCELLED_DE = "Scannen abgebrochen — die Umgebung läuft weiter."
 DIALOG_FAILED_DE = (
     "[WARNUNG] Die Rückfrage vor dem Stoppen konnte nicht angezeigt werden — "
     "die Umgebung wird trotzdem gestoppt."

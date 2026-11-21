@@ -22,6 +22,10 @@ import {
   noteUnauthorized, PI_AUTH_PHASE, setPiResetCode, usePiAuth,
 } from '../features/piAuth/piAuth';
 import LegalLinks from '../components/LegalLinks';
+import { TowerStopDialog } from '../components/TowerHint/TowerHint';
+import useTowerState, {
+  stopNeedsTowerWarning, TOWER_ARM_PROFILE, useOptionalRosbridgeUrl,
+} from '../hooks/useTowerState';
 
 // The typed confirmation a factory reset needs (owner decision 5, the agent's
 // _FACTORY_RESET_CONFIRM_WORD): compared case-insensitively, umlaut included.
@@ -249,6 +253,18 @@ export default function SystemPage() {
       ? agentStatus.scene_camera_hint
       : null;
 
+  // „Stoppen" on the V1 under the camera tower (spec 40 WP-HINT, 52 §5.3 (c),
+  // §6): stopping takes the torque off the arm, so the page asks first unless
+  // the driver says the limp arm falls forward. Only while the robot tier (and
+  // so the driver) runs, on `v1_studio` + `tower_v1`; every other rig stops as
+  // today. No answer from the robot (no session, no topic) asks too (§6.3).
+  const towerStopApplies = !!agentStatus?.robot_tier_up
+    && agentStatus?.robot_type === TOWER_ARM_PROFILE
+    && sceneCameraProfile === SCENE_PROFILE_TOWER;
+  const rosbridgeUrl = useOptionalRosbridgeUrl();
+  const towerState = useTowerState({ enabled: towerStopApplies, rosbridgeUrl });
+  const [towerStopOpen, setTowerStopOpen] = useState(false);
+
   useEffect(() => {
     previewRef.current = previewDevice;
   }, [previewDevice]);
@@ -442,7 +458,7 @@ export default function SystemPage() {
     }
   }, [cloudOnly, stopPreview, refreshAgentStatus]);
 
-  const handleStopEnv = useCallback(async () => {
+  const stopEnvironment = useCallback(async () => {
     setStoppingEnv(true);
     try {
       const { ok, data } = await sysFetch('/environment/stop', { method: 'POST' });
@@ -455,6 +471,20 @@ export default function SystemPage() {
       refreshAgentStatus();
     }
   }, [refreshAgentStatus]);
+
+  const handleStopEnv = useCallback(() => {
+    if (towerStopApplies && stopNeedsTowerWarning(towerState)) {
+      setTowerStopOpen(true);
+      return;
+    }
+    stopEnvironment();
+  }, [towerStopApplies, towerState, stopEnvironment]);
+
+  const cancelTowerStop = useCallback(() => setTowerStopOpen(false), []);
+  const confirmTowerStop = useCallback(() => {
+    setTowerStopOpen(false);
+    stopEnvironment();
+  }, [stopEnvironment]);
 
   // ── Update (ACK-early job + poll, via the shared useAgentUpdate hook) ───────
   const handleUpdate = useCallback(async () => {
@@ -1055,6 +1085,12 @@ export default function SystemPage() {
               {stoppingEnv ? 'Wird gestoppt …' : 'Stoppen'}
             </Btn>
           </div>
+          <TowerStopDialog
+            open={towerStopOpen}
+            profile={TOWER_ARM_PROFILE}
+            onCancel={cancelTowerStop}
+            onConfirm={confirmTowerStop}
+          />
           {!cloudOnly && !canStart && (
             <p className="mt-2 text-[13px] text-[var(--ink-2)]">
               {scanRequiresLeader

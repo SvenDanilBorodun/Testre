@@ -11,8 +11,13 @@ import React, {
 import ReactDOM from 'react-dom';
 import toast from 'react-hot-toast';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
+import {
+  GLIDE_REFUSED, TOWER_ARM_PROFILE, useHomeGlideState, useOptionalRosbridgeUrl,
+} from '../../hooks/useTowerState';
 import Icon from '../icons/Icon';
 import { toastIcon } from '../icons/toast';
+import TowerHint from '../TowerHint/TowerHint';
+import { TOWER_HINT_HOME_DE, TOWER_HINT_HOME_TITLE_DE } from '../TowerHint/towerHintCopy';
 
 // The warned glide to the Grundstellung after a RE-LOCK.
 //
@@ -30,6 +35,15 @@ import { toastIcon } from '../icons/toast';
 // („Hier stehen lassen"), or stop a running glide („Stopp" → hand_guide(false),
 // the universal manual exit, which also makes the server hold the arm where it
 // stopped). Nothing here moves the arm without the countdown having been shown.
+//
+// THE V1 UNDER THE CAMERA TOWER (spec 40 WP-HINT, 52 §5.3 (b)). The server
+// publishes on /edubotics/home_glide_state what the press would get from the
+// live pose (the tower guard as a rung condition of the same planner). While
+// that says `refused`, nothing counts down and nothing is offered but staying:
+// the warning shows the animation and how to bring the arm forward, and the
+// full countdown starts only once the verdict clears. Only the page's provider
+// on `v1_studio` subscribes; every other profile never does (D1), and no topic
+// is today's prompt.
 
 export const HOME_GLIDE_COUNTDOWN_S = 5;
 
@@ -43,10 +57,12 @@ function secondsLabel(n) {
 }
 
 export function HomeGlideDialog({
-  phase, secondsLeft, onGoNow, onStay, onStop, stopping,
+  phase, secondsLeft, onGoNow, onStay, onStop, stopping, towerHintProfile = null,
 }) {
   if (phase !== 'countdown' && phase !== 'moving') return null;
   const moving = phase === 'moving';
+  // The tower refuses the glide from here: no countdown, no „Jetzt fahren".
+  const held = !moving && !!towerHintProfile;
   // Portalled to <body>: the callers live inside the dock and the Vormachen
   // overlay, and a `fixed` overlay is only viewport-fixed while no ancestor
   // establishes a containing block (transform, filter, contain). A warning that
@@ -65,17 +81,22 @@ export function HomeGlideDialog({
           <h2 id="home-glide-title" className="text-xl font-bold text-amber-700">
             {moving
               ? 'Der Arm fährt in die Grundstellung …'
-              : 'Achtung: Der Arm fährt gleich in die Grundstellung'}
+              : (held
+                ? TOWER_HINT_HOME_TITLE_DE
+                : 'Achtung: Der Arm fährt gleich in die Grundstellung')}
           </h2>
+          {held && <TowerHint profile={towerHintProfile} scene="forward" />}
           <p id="home-glide-text" className="text-sm text-gray-700">
             {moving
               ? 'Bitte Abstand halten. Mit „Stopp" hält der Arm sofort an und '
                 + 'bleibt an seiner Position.'
-              : 'Der Arm ist wieder fest und hält seine Position. Gleich fährt er '
-                + 'langsam in die Grundstellung zurück. Nimm jetzt die Hände vom '
-                + 'Arm und räume den Bereich um den Arm frei.'}
+              : (held
+                ? TOWER_HINT_HOME_DE
+                : 'Der Arm ist wieder fest und hält seine Position. Gleich fährt er '
+                  + 'langsam in die Grundstellung zurück. Nimm jetzt die Hände vom '
+                  + 'Arm und räume den Bereich um den Arm frei.')}
           </p>
-          {!moving && (
+          {!moving && !held && (
             <p className="text-base font-semibold text-gray-900" role="timer" aria-live="polite">
               Start in {secondsLabel(secondsLeft)}
             </p>
@@ -91,13 +112,15 @@ export function HomeGlideDialog({
             </button>
           ) : (
             <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
-              <button
-                type="button"
-                onClick={onGoNow}
-                className="rounded-xl bg-amber-600 px-5 py-2.5 text-sm font-semibold text-white shadow hover:bg-amber-700"
-              >
-                Jetzt fahren
-              </button>
+              {!held && (
+                <button
+                  type="button"
+                  onClick={onGoNow}
+                  className="rounded-xl bg-amber-600 px-5 py-2.5 text-sm font-semibold text-white shadow hover:bg-amber-700"
+                >
+                  Jetzt fahren
+                </button>
+              )}
               <button
                 type="button"
                 onClick={onStay}
@@ -137,6 +160,13 @@ export function useHomeGlidePrompt(robotProfile = null) {
   // The arm of the robot the student started with draws the „stays here" toast.
   const profileRef = useRef(robotProfile);
   profileRef.current = robotProfile;
+  // The server's tower verdict for the glide from the live pose (V1 only).
+  const towerOn = robotProfile === TOWER_ARM_PROFILE;
+  const rosbridgeUrl = useOptionalRosbridgeUrl();
+  const homeGlideState = useHomeGlideState({ enabled: towerOn, rosbridgeUrl });
+  const towerRefused = towerOn && homeGlideState !== null && homeGlideState.glide === GLIDE_REFUSED;
+  const towerRefusedRef = useRef(towerRefused);
+  towerRefusedRef.current = towerRefused;
   const [phase, setPhase] = useState('idle'); // 'idle' | 'countdown' | 'moving'
   const [secondsLeft, setSecondsLeft] = useState(HOME_GLIDE_COUNTDOWN_S);
   const [stopping, setStopping] = useState(false);
@@ -181,8 +211,8 @@ export function useHomeGlidePrompt(robotProfile = null) {
 
   const startGlide = useCallback(async () => {
     // Exactly ONE glide per offer: the countdown reaching zero and a click on
-    // „Jetzt fahren" can land in the same tick.
-    if (phaseRef.current !== 'countdown') return;
+    // „Jetzt fahren" can land in the same tick. Never while the tower refuses.
+    if (phaseRef.current !== 'countdown' || towerRefusedRef.current) return;
     setPhaseBoth('moving');
     stopRequestedRef.current = false;
     const fn = homeArmRef.current;
@@ -218,13 +248,18 @@ export function useHomeGlidePrompt(robotProfile = null) {
 
   useEffect(() => {
     if (phase !== 'countdown') return undefined;
+    if (towerRefused) {
+      // Held: once the verdict clears, the warning starts again in full.
+      setSecondsLeft(HOME_GLIDE_COUNTDOWN_S);
+      return undefined;
+    }
     if (secondsLeft <= 0) {
       startGlide();
       return undefined;
     }
     const id = setTimeout(() => setSecondsLeft((s) => s - 1), 1000);
     return () => clearTimeout(id);
-  }, [phase, secondsLeft, startGlide]);
+  }, [phase, secondsLeft, startGlide, towerRefused]);
 
   const stay = useCallback(() => {
     if (phaseRef.current !== 'countdown') return;
@@ -252,6 +287,7 @@ export function useHomeGlidePrompt(robotProfile = null) {
       onStay={stay}
       onStop={stop}
       stopping={stopping}
+      towerHintProfile={towerRefused ? robotProfile : null}
     />
   );
 

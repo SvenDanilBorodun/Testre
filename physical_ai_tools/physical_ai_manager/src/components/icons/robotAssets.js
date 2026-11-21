@@ -13,17 +13,20 @@
 // first status tick, or an id this build has no picture for) draws NOTHING —
 // never another robot as a stand-in: a V1 student must not see an OMX.
 //
-// Two kinds of picture live in public/robots/:
+// Three kinds of picture live in public/robots/:
 //   * the glyph sheet `glyphs.png`: four 64 px tonal alpha cells (RobotGlyph
 //     paints one with CSS mask-image in `currentColor`, like a Lucide icon);
 //   * the phase pictures, sprite strips and a still: Aufnahme's warm-up and
 //     reset, and the collision modal's (warm-up is one still, reset 24
 //     frames). They exist only for a profile that reaches that screen
 //     (recording and the collision e-stop are `omx_full` only), so
-//     `phasePicture` answers null for every other profile.
+//     `phasePicture` answers null for every other profile;
+//   * the V1's camera-tower hint strips (`towerHintPicture`, below), which
+//     exist only for `v1_studio`.
 //
 // All of it is rendered by tools/frontend-harness/render-robot-pictures.sh
-// (dev only, deterministic). The numbers below are that script's output; the
+// (dev only, deterministic; the tower strips by WP-ART's extension of it,
+// render-tower-hint.sh). The numbers below are that script's output; the
 // robotAssets test reads the shipped files and fails when they drift apart.
 
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
@@ -95,4 +98,41 @@ export function phasePicture(profile, kind) {
   if (typeof kind !== 'string' || !hasOwn(set, kind)) return null;
   const pic = set[kind];
   return { ...pic, url: `${process.env.PUBLIC_URL || ''}/robots/${pic.file}` };
+}
+
+// The V1's camera-tower hint (spec 40 WP-HINT, rendered by WP-ART from the
+// shipped V1 URDF and the tower's CAD; owner decision D88: forward only). Two
+// strips of 24 frames, each with a cream `_light` twin for dark screens:
+//   * `forward`: the arm lying back toward the tower (a start WP-T1 refuses),
+//     lifted by hand and laid forward (a start it clears) — the Startseite and
+//     the home-glide prompt;
+//   * `fall`: where a limp arm falls — back toward the tower from the
+//     observation pose, then forward from the Grundstellung — the stop dialog.
+// `safeFrame` is the last frame, the safe pose of both strips: reduced motion
+// shows it still.
+const towerStrip = (file, fileLight) => Object.freeze({
+  file, fileLight, frames: 24, width: 400, height: 295, safeFrame: 23,
+});
+
+export const TOWER_HINT_PICTURES = Object.freeze({
+  v1_studio: Object.freeze({
+    forward: towerStrip('v1_tower_hint_forward.webp', 'v1_tower_hint_forward_light.webp'),
+    fall: towerStrip('v1_tower_hint_fall.webp', 'v1_tower_hint_fall_light.webp'),
+  }),
+});
+
+export const TOWER_HINT_SCENES = Object.freeze(['forward', 'fall']);
+
+/**
+ * The tower-hint strip of `scene` ('forward' | 'fall') for a profile, as
+ * `{url, file, frames, width, height, safeFrame}` — the cream variant with
+ * `light` — or null for a profile without the tower (every one but the V1).
+ */
+export function towerHintPicture(profile, scene, { light = false } = {}) {
+  if (typeof profile !== 'string' || !hasOwn(TOWER_HINT_PICTURES, profile)) return null;
+  const set = TOWER_HINT_PICTURES[profile];
+  if (typeof scene !== 'string' || !hasOwn(set, scene)) return null;
+  const { fileLight, ...pic } = set[scene];
+  const file = light ? fileLight : pic.file;
+  return { ...pic, file, url: `${process.env.PUBLIC_URL || ''}/robots/${file}` };
 }

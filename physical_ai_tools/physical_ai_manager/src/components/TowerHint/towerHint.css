@@ -1,0 +1,43 @@
+/*
+ * Copyright 2026 Sven Danil Borodun (EduBotics). All rights reserved.
+ *
+ * Proprietary and confidential. Licensed under the EduBotics End-User
+ * Licence Agreement; see LICENSE at the repository root.
+ */
+
+/* The V1's camera-tower hint (spec 40 WP-HINT): a strip of 24 frames rendered
+ * from the real V1 URDF (WP-ART), stepped through by CSS like Aufnahme's reset
+ * picture. The PLAIN style is the last frame — the safe pose — so wherever the
+ * animation does not run (reduced motion: this media query, the component's
+ * `.tower-hint--still`, the Sucher scope's global rule) the arm stands in the
+ * pose the hint asks for. 4.8 s loop: hold the start, step 23 frames, hold the
+ * end (the strips carry their own short holds too). */
+.tower-hint { position: relative; width: min(320px, 100%); }
+.tower-hint__clip { position: absolute; inset: 0; overflow: hidden; }
+/* The strip's width is DECLARED (frames × the box), never taken from the decoded
+ * image: a percentage translate on an image that has not loaded yet resolves
+ * against 0. */
+.tower-hint__strip {
+  display: block;
+  height: 100%;
+  width: calc(var(--tower-hint-frames, 24) * 100%);
+  max-width: none;
+  user-select: none;
+  pointer-events: none;
+  transform: translateX(-95.8333%);
+  animation: tower-hint-play 4.8s infinite;
+}
+/* ONE keyframe rule carries both the value and the steps(): split in two,
+ * Chrome drops the easing. */
+@keyframes tower-hint-play {
+  0% { transform: translateX(0); }
+  10% { transform: translateX(0); animation-timing-function: steps(23, end); }
+  72%, 100% { transform: translateX(-95.8333%); }
+}
+.tower-hint--still .tower-hint__strip { animation: none; }
+@media (prefers-reduced-motion: reduce) {
+  .tower-hint__strip { animation: none; }
+}
+/* On the Startseite the strip sits on a small dark screen (the cream arm). */
+.tower-hint-panel__screen { width: min(320px, 100%); padding: 6px; }
+.tower-hint-panel__screen .tower-hint { width: 100%; }

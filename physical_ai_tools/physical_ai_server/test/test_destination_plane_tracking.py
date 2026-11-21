@@ -5,8 +5,8 @@ Audit `docs/plans/audit-G10-G12.md` §9.2(a) / §9.3 answer (2), owner-approved.
 
 A camera pin's z was baked into TWO carriers — the saved workflow's Z field and
 ``WorkflowManager._persisted_destinations``, which only ``set_destination``
-writes and nothing ever clears — while ``EDUBOTICS_FORCE_RECALIBRATION`` ships 1
-and re-draws the table plane at the start of every lesson. Measured (§9.2(a)): a
+writes and nothing ever clears — while the touch-off (since removed) re-drew the
+table plane at the start of every lesson. Measured (§9.2(a)): a
 persisted plane-evaluated pin carries ~2.3x the re-calibration variance of a
 persisted scalar at a 12 cm lever, growing linearly with it. So the pin keeps
 (x, y) and its height is re-asked from the plane in force, exactly as
@@ -178,7 +178,7 @@ def test_the_baked_field_no_longer_decides_anything_on_a_calibrated_rig():
 
 def test_a_service_pinned_destination_follows_a_later_touch_off():
     """`_persisted_destinations` is written only by `set_destination` and never
-    cleared, so a mid-session „Tisch vermessen" used to leave it stale. Intent
+    cleared, so a mid-session re-measured table used to leave it stale. Intent
     kept; the arm hovers the release height above the plane's point (Q3)."""
     mgr, arm, status = _manager({'z_table': 0.0, 'table_plane': _plane(11)})
     # The click happened while the table was still believed level.

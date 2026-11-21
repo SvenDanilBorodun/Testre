@@ -1022,8 +1022,8 @@ def _legacy_yamls(calib_dir):
 
 def test_load_workflow_calibration_takes_the_tower_calibration_the_gate_approved(tmp_path, monkeypatch):
     """FAILS FIRST: a run the gate approved gets the tower camera (its own picture), the arm check's lens, the
-    mat check's pose and image_size, and no legacy YAML or ground-truth correction; under the tower's scope
-    without an approval no legacy YAML either; under legacy today's YAMLs."""
+    mat check's pose and image_size, and no legacy YAML or ground-truth correction; without an approval no
+    legacy YAML either, under the tower's scope and under legacy (decision D15)."""
     from physical_ai_server.workflow.autocal.camera_model import KBDistortion
     monkeypatch.setenv('EDUBOTICS_CALIB_DIR', str(tmp_path))
     _legacy_yamls(str(tmp_path))
@@ -1035,14 +1035,14 @@ def test_load_workflow_calibration_takes_the_tower_calibration_the_gate_approved
     assert isinstance(got['scene_intrinsics']['dist'], KBDistortion)
     assert got['scene_extrinsics'] is cal['T_cam_to_w'] and got['image_size'] == (1920, 1080)
     assert node._workflow_scene_camera == _STUDIO
-    assert got['board_table_z'] == SF.MAT_THICKNESS_M and got['xy_correction'] is None
+    assert got['board_table_z'] == SF.MAT_THICKNESS_M and 'xy_correction' not in got
     node.scene_calibration = _ApprovingService(None)
     got = node._load_workflow_calibration()
     assert 'scene_intrinsics' not in got and 'scene_extrinsics' not in got and 'image_size' not in got
     assert node._workflow_scene_camera == 'scene'
     node.scene_calibration = _ApprovingService(None, scope=False)
     got = node._load_workflow_calibration()
-    assert got['scene_intrinsics']['K'][0, 0] == 600.0 and 'image_size' not in got
+    assert 'scene_intrinsics' not in got and 'scene_extrinsics' not in got and 'image_size' not in got
 
 
 class _Perception:
@@ -1144,7 +1144,7 @@ def test_a_click_on_the_scene_stream_is_projected_from_the_studio_pixel(tmp_path
     monkeypatch.setattr(svc, '_usable_calibration', lambda: (None, [], T.NEEDS_ARM_CHECK_NONE_DE))
     res = node.mark_destination_callback(req, types.SimpleNamespace())
     assert not res.success and res.message == T.NEEDS_ARM_CHECK_NONE_DE and len(wfm.pins) == 1
-    # under legacy the click is today's (here: no legacy calibration manager)
+    # under legacy the click is refused (decision D15: no legacy calibration)
     svc_legacy = SV.SceneCalibration(RP.ROBOT_PROFILES['v1_studio'], _Camera(profile='legacy'), str(tmp_path),
                                      detect=None, get_joints=None, fk=None, guard_parts=None, start_program=None,
                                      stop_program=None)
@@ -1291,11 +1291,10 @@ def test_the_calibration_services_route_the_tower_steps_to_the_service():
     res = node.calibration_status_callback(types.SimpleNamespace(), types.SimpleNamespace(has_table_plane=False))
     assert res.success and res.has_scene_intrinsics and res.has_scene_handeye and res.has_table_plane
     assert res.message == T.OK_DE
-    # a legacy step still reaches the legacy path
-    node._assert_no_other_active = lambda mode: (False, 'refused by the arbiter')
+    # a step of the removed legacy wizard is refused and asks for no mode (decision D15)
     res = node.calibration_start_callback(types.SimpleNamespace(camera='scene', step='intrinsic'),
                                           types.SimpleNamespace())
-    assert (res.success, res.message) == (False, 'refused by the arbiter')
+    assert (res.success, res.message) == (False, 'Diesen Kalibrier-Schritt gibt es für diesen Roboter nicht.')
 
 
 def test_the_state_topic_is_latched_republished_and_published_on_change():

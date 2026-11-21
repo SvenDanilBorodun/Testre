@@ -1483,7 +1483,7 @@ def _floor_z_at(ctx, x: float, y: float) -> float | None:
 # Rule §2 — WHERE THE GRIPPER DESCENDS on a tilted table. ONE knob, ONE helper,
 # for EVERY site that needs "how high is the table at this (x, y)".
 #
-# ``ctx.z_table`` is a SCALAR: ``calibration_manager.solve_table_plane`` sets it
+# ``ctx.z_table`` is a SCALAR: the touch-off (removed, decision D15) set it
 # to ``a·cx + b·cy + c`` evaluated at the TAP CENTROID. The workspace floor
 # (``_floor_z_at``) already evaluates the measured plane at the TARGET's own
 # (x, y) — but the GRASP height did not, so on a tilted table the two disagreed
@@ -1501,7 +1501,7 @@ def _floor_z_at(ctx, x: float, y: float) -> float | None:
 # refuses, because the floor refusal only fires at
 # ``plane(x, y) − z_table > WORKSPACE_FLOOR_MARGIN_M``. Over the SAME 12 cm
 # lever the table has already eaten the whole 15 mm grasp depth at 7.13°, and
-# nothing bounds the plane slope (``TABLE_TOUCH_MAX_TILT_DEG`` gates per-tap
+# nothing bounded the plane slope (the touch-off's tilt gate judged per-tap
 # GRIPPER verticality, not slope). An earlier revision of this line said „3.4°
 # over a 25 cm lever is already 15 mm" — arithmetically true (0.25·tan 3.4° =
 # 14.85 mm) but a DIFFERENT lever from the table three lines above, which reads
@@ -1512,10 +1512,9 @@ def _floor_z_at(ctx, x: float, y: float) -> float | None:
 # rather than a second copy of the plane evaluation:
 #   * ``handlers/perception_blocks._attach_named_world`` — the named-object grasp
 #     height (this repo half);
-#   * ``physical_ai_server.py::mark_destination_callback`` — a PINNED
-#     destination's persisted z, which ``pickup`` then descends to plus
-#     ``GRASP_CLEARANCE_M``, so a pin at the far corner of a tilted table
-#     inherits the identical error.
+#   * ``resolve_destination_z`` — a PINNED destination's z, which ``pickup``
+#     then descends to plus ``GRASP_CLEARANCE_M``, so a pin at the far corner of
+#     a tilted table inherits the identical error.
 # ``capture_pose_callback`` is deliberately NOT a caller: it persists a MEASURED
 # FK height at that very point, which is already the right answer.
 #
@@ -1561,12 +1560,11 @@ def table_z_at(ctx, x: float, y: float) -> float | None:
 # THIS run", and the difference is provenance.
 #
 # A destination pinned by clicking the scene camera is a point ON THE TABLE. Its
-# height was never independently measured — it was READ OFF the table plane the
-# touch-off had drawn at the moment of the click. `entry['z']` is therefore a
-# CACHED answer to a question the plane already answers, and
-# `EDUBOTICS_FORCE_RECALIBRATION` ships 1, so "Tisch vermessen" re-runs and
-# re-draws that plane at the start of every lesson while NOTHING invalidates the
-# cache: a pin baked in September is descended to under October's plane. Both
+# height was never independently measured — it was READ OFF the table plane in
+# force at the moment of the click. `entry['z']` is therefore a CACHED answer to
+# a question the plane already answers, and when the calibration changes
+# NOTHING invalidates the cache: a pin baked in September would be descended to
+# under October's plane. Both
 # carriers stale independently — the saved workflow's Z field and
 # `WorkflowManager._persisted_destinations`, which only `set_destination` writes
 # and nothing ever clears.
@@ -1576,8 +1574,8 @@ def table_z_at(ctx, x: float, y: float) -> float | None:
 # pin carries several times the re-calibration variance of a persisted scalar at
 # that lever, growing linearly with it. The scalar half is 1.51 mm SD at the
 # shipped 4-tap gate and reproduces on every layout tried. For the PLANE half,
-# quote the shipped number `calibration_manager.py` already carries for the same
-# quantity under the same method — **5.10 mm SD at 4 taps** — and do not restate
+# quote the number the touch-off's module carried for the same quantity under
+# the same method — **5.10 mm SD at 4 taps** — and do not restate
 # it here; an independent re-run got 5.4-9.6 mm across plausible random layouts,
 # i.e. that file's figure, not the 3.48 mm an earlier revision of this comment
 # claimed (3.48 reproduces only under a FIXED diamond layout, which is not the
@@ -2163,6 +2161,12 @@ def sim_greifbereich_de(ctx, text: Any) -> Any:
     return text.replace(_MARKED_GREIFBEREICH_DE, _SIM_GREIFBEREICH_DE)
 
 
+# Spec 40 S7: the ONE sentence where a block or the jog needs the grasp height
+# and the run has none (it replaced every sentence that sent a student to the
+# removed touch-off step).
+CALIBRATION_FIRST_DE = 'Bitte zuerst die Kalibrierung abschließen (Roboter Studio → Kalibrierung).'
+
+
 def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
     """Turn an evaluated input value into a base-frame (x, y, z) point.
 
@@ -2195,7 +2199,7 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
     # see/count blocks keep working) when the calibration is incomplete:
     # ctx.z_table / scene_intrinsics / scene_extrinsics is missing. Name the
     # exact missing step instead of the generic "could not evaluate" message,
-    # so the student knows to finish the touch-off rather than re-running the
+    # so the student knows to finish the calibration rather than re-running the
     # detect block. (Both the dict shape with a None world_xyz_m and the
     # Detection object shape land here.)
     has_world_key = (
@@ -2206,7 +2210,7 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
         # Distinguish the two reasons world_xyz_m is unset so the student fixes
         # the RIGHT step. The camera→table projection needs intrinsics +
         # extrinsics + the board surface height; the grasp DESCEND additionally
-        # needs the measured touch-off z_table. With per-rig intrinsics now
+        # needs the grasp height z_table. With per-rig intrinsics now
         # mandatory (#1), "camera not calibrated" is the common early case and
         # must not be mislabelled as a missing table measurement.
         cam_uncalibrated = (
@@ -2226,10 +2230,10 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
         # project_pixel_to_table, leaving world_xyz_m unset — indistinguishable
         # here from "never projected". Measured 2026-09-07 with intrinsics,
         # extrinsics AND board_table_z all present: „sehe ich" → True, „Anzahl"
-        # → 1, and „finde"/„Greife" → „bitte zuerst „Tisch vermessen"
-        # abschließen." — a touch-off the student had already done. The
-        # perception side now stamps the reason on the detection so this branch
-        # can tell the two apart.
+        # → 1, and „finde"/„Greife" asked for the missing grasp height — a
+        # calibration step the student had already done. The perception side
+        # now stamps the reason on the detection so this branch can tell the
+        # two apart.
         reason = None
         if isinstance(value, dict):
             extras = value.get('extras')
@@ -2244,10 +2248,7 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
                 'Kamera-Ausrichtung („Kamera einmessen") neu machen und darauf '
                 'achten, dass die Kamera schräg von oben auf den Tisch schaut.'
             )
-        raise WorkflowError(
-            'Für diesen Block muss die Tischhöhe kalibriert sein — bitte '
-            'zuerst „Tisch vermessen" abschließen.'
-        )
+        raise WorkflowError(CALIBRATION_FIRST_DE)
     raise WorkflowError('Ziel-Wert konnte nicht ausgewertet werden.')
 
 

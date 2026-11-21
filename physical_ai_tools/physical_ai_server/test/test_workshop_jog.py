@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from physical_ai_server.workflow.handlers.motion import WorkflowError
+from physical_ai_server.workflow.handlers.motion import CALIBRATION_FIRST_DE, WorkflowError
 from physical_ai_server.workflow.ik_solver import IKSolver
 
 _SERVER_PY = (
@@ -158,7 +158,7 @@ def test_drive_to_refused_when_floor_unknown():
     # table.
     with pytest.raises(WorkflowError) as e:
         _compute(_Stub(), _req('drive_to', tx=0.15, ty=0.0, tz=0.05))
-    assert 'vermessen' in str(e.value)
+    assert str(e.value) == CALIBRATION_FIRST_DE
 
 
 def test_unknown_mode_refused():

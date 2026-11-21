@@ -108,12 +108,6 @@ ALLOWLIST: dict[str, str] = {
     'WHILE_SETTLE_S': _TIER2,
     'WHILE_STALL_PASSES': _TIER2,
     '_COUNTER_MAX': _TIER2,
-    # ── workflow/calibration_manager.py ──────────────────────────────────
-    'EXTRINSIC_BURST_FRAMES': _TIER2,
-    'EXTRINSIC_BURST_INTERVAL_S': _TIER2,
-    'EXTRINSIC_BURST_MIN_PASS': _TIER2,
-    'TABLE_TOUCH_MAX_TILT_DEG': _TIER2,
-    'VERIFY_SCALE_MAX': _TIER2,
     # ── geometry / kinematics: pinned by the golden fixtures instead ─────
     'BASE_AXIS_X_WORLD': (
         'kinematics: any drift shows up as a golden-fixture failure '
@@ -179,17 +173,6 @@ _SHIPPED_DEFAULTS = [
     ('workflow/handlers/motion.py', '_APPROACH_WARN_FRAC', '0.25'),
     ('workflow/handlers/motion.py', 'GRASP_SETTLE_MAX_S', '2.0'),
     ('workflow/handlers/perception_blocks.py', '_TAG_YAW_FRAMES_MAX', '30'),
-    ('workflow/calibration_manager.py', 'VERIFY_MIN_POINTS', '3'),
-    # Both added after a mutation sweep found them SURVIVING the full suite:
-    # no test named either, so `referenced => pinned` never saw them.
-    # INTRINSIC 20 -> 1 fits the RATIONAL_MODEL's 8 distortion terms from one
-    # view, reports success, and silently wrongs every later grasp on that rig.
-    # REPROJ 1.5 -> 1e9 passes every frame of the extrinsic burst, including a
-    # mirrored or 90deg-rotated solve _check_extrinsic_orientation cannot catch.
-    ('workflow/calibration_manager.py', 'INTRINSIC_FRAMES_REQUIRED', '20'),
-    ('workflow/calibration_manager.py', 'SCENE_EXTRINSIC_MAX_REPROJ_PX', '1.5'),
-    ('workflow/calibration_manager.py', 'TABLE_TOUCH_POINTS_REQUIRED', '4'),
-    ('workflow/calibration_manager.py', 'TABLE_TOUCH_MAX_RESIDUAL_M', '0.008'),
     ('workflow/workflow_manager.py', 'MAX_BROADCAST_BACKLOG', '32'),
     ('workflow/workflow_manager.py', 'MAX_HAT_CONSECUTIVE_ERRORS', '5'),
     ('workflow/workflow_manager.py', 'MAX_HAT_HANDLERS', '16'),

@@ -157,7 +157,7 @@ class ArmProfile:
     gripper_mm_per_rad: Optional[float] = None   # jaw-opening display factor
     # True when the TCP's HEIGHT below the tool frame depends on the gripper
     # command — a ROTATING claw, where the fingertip swings back as the jaws
-    # open. The TCP is defined at the CLOSED tip, so „Tisch vermessen" measures
+    # open. The TCP is defined at the CLOSED tip, so a table touch measures
     # the table too low unless the student closes the claw first, and that is a
     # student-facing INSTRUCTION, not something any guard can enforce. False on
     # every parallel-jaw arm (OMX), where the tip height is constant.
@@ -383,7 +383,7 @@ _V1_STUDIO = ArmProfile(
     # offset at every opening. A degree read-out is honest; a fabricated
     # millimetre is not.
     # The claw ROTATES: its tip sits 108.6 mm below the tool frame closed but
-    # higher when open. The touch-off must therefore be taught with the claw
+    # higher when open. A table touch must therefore be taught with the claw
     # CLOSED (rig gate VR8) — this flag is what puts that sentence in front of
     # the student, and only on the arm it is true for.
     tool_tip_tracks_gripper=True,

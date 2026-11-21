@@ -141,16 +141,17 @@ class WorkflowContext:
     # workflow with no replay block never touches it).
     trajectories: dict[str, Any] = field(default_factory=dict)
     # DUAL Z-KEY (don't conflate):
-    #   z_table        — MEASURED end-effector grasp height (touch-off). Used by
-    #                    motion.pickup as the descend target. NOT a projection plane.
-    #   board_table_z  — table SURFACE height (extrinsic solve). The plane the
+    #   z_table        — end-effector height with the fingertips on the table (spec
+    #                    40 S5). Used by motion.pickup as the descend target. NOT a
+    #                    projection plane.
+    #   board_table_z  — table SURFACE height (the mat's top). The plane the
     #                    camera ray intersects to recover an object's (x, y); the
     #                    object sits on the surface, not at the gripper grasp height.
     z_table: float | None = None
     board_table_z: float | None = None
     scene_intrinsics: dict | None = None
     scene_extrinsics: Any | None = None
-    # Touch-off MEASURED EE-frame table tilt (a, b, c) for z = a·x + b·y + c. Used
+    # EE-frame table tilt (a, b, c) for z = a·x + b·y + c (None: level). Used
     # by motion's descend; NOT used for object projection (it is offset above the
     # surface by the finger length, so projecting onto it reintroduces lateral
     # error on a tilted camera — perception projects onto board_table_z instead).
@@ -256,15 +257,6 @@ class WorkflowContext:
     # blocks runs fine without a catalog; a named block fails loud at the block.
     object_catalog: Any | None = None
     object_catalog_error: str | None = None
-    # W5 — ground-truth accuracy correction (from the "Genauigkeit prüfen" step).
-    # xy_correction is a 2x3 affine (numpy) mapping detected base XY -> corrected
-    # base XY (None → no correction / identity); yaw_bias_rad is added to the
-    # measured tag yaw before commanding the wrist roll (0.0 → no change). Both
-    # are consumed via getattr by perception_blocks (_apply_xy_correction /
-    # _apply_yaw_bias), so they are safe to read before/after this attribute
-    # exists. Threaded from the calib dict in start(), mirroring z_table.
-    xy_correction: Any | None = None
-    yaw_bias_rad: float = 0.0
     # Per-run claimed/skipped tag-id sets for the „Solange <Typ> sichtbar" loop:
     # a tag id is CLAIMED after a successful grasp (so a placed object re-entering
     # view is never re-grabbed and the loop terminates) and SKIPPED after a
@@ -736,7 +728,7 @@ class WorkflowManager:
         ``plane_tracked`` says the z is a CACHED reading off the table plane (a
         camera click) rather than a MEASURED height (a „Position merken" FK
         snapshot), so ``motion.resolve_destination_z`` re-asks the plane in force
-        at run time instead of descending to a value the next touch-off
+        at run time instead of descending to a value a later calibration
         invalidates. It defaults False — the conservative direction, and what
         every pre-existing caller and every hand-built test dict keeps.
 
@@ -1177,9 +1169,6 @@ class WorkflowManager:
                     scene_image_size=(tuple(int(v) for v in calib['image_size'])
                                       if calib.get('image_size') is not None else None),
                     table_plane=calib.get('table_plane'),
-                    # W5 — ground-truth accuracy correction (None/0.0 when never run).
-                    xy_correction=calib.get('xy_correction'),
-                    yaw_bias_rad=float(calib.get('yaw_bias_rad', 0.0) or 0.0),
                     # The arm check's droop envelope (the arrival trim; None → no trim).
                     arm_trim_envelope_rad=calib.get('droop_envelope_rad'),
                     should_stop=self._stop_event.is_set,

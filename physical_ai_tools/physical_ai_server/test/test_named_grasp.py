@@ -387,66 +387,6 @@ def test_attach_named_world_edge_gate_keeps_orientation_when_size_matches():
     assert out[0].extras['tag_yaw'] is not None
 
 
-# ── W5: ground-truth XY correction + yaw bias ────────────────────────────────
-def test_xy_correction_applied_to_world_xy():
-    # A pure-translation affine (+0.05 in x, -0.03 in y) shifts the recovered
-    # world XY by exactly that; identity (no attr) leaves it unchanged.
-    det = _make_detection(20, (0.20, 0.0), 0.0, 0.024, _overhead_T(), 0.040)
-    base = pb._detect_named(_Ctx([det]), 'banane')[0]
-    bx, by, _bz = base.world_xyz_m
-
-    ctx = _Ctx([_make_detection(20, (0.20, 0.0), 0.0, 0.024, _overhead_T(), 0.040)])
-    ctx.xy_correction = np.array([[1.0, 0.0, 0.05], [0.0, 1.0, -0.03]], dtype=np.float64)
-    out = pb._detect_named(ctx, 'banane')[0]
-    assert out.world_xyz_m[0] == pytest.approx(bx + 0.05, abs=1e-9)
-    assert out.world_xyz_m[1] == pytest.approx(by - 0.03, abs=1e-9)
-    # z unchanged by the XY correction
-    assert out.world_xyz_m[2] == pytest.approx(_bz, abs=1e-9)
-
-
-def test_xy_correction_with_rotation_scale():
-    # A 2x2 linear part (90° rot) maps detected (x,y) -> (-y, x); verify the
-    # full affine is applied as M @ [x,y,1].
-    det = _make_detection(20, (0.20, 0.0), 0.0, 0.024, _overhead_T(), 0.040)
-    base = pb._detect_named(_Ctx([det]), 'banane')[0]
-    bx, by, _bz = base.world_xyz_m
-    ctx = _Ctx([_make_detection(20, (0.20, 0.0), 0.0, 0.024, _overhead_T(), 0.040)])
-    ctx.xy_correction = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float64)
-    out = pb._detect_named(ctx, 'banane')[0]
-    assert out.world_xyz_m[0] == pytest.approx(-by, abs=1e-9)
-    assert out.world_xyz_m[1] == pytest.approx(bx, abs=1e-9)
-
-
-def test_malformed_xy_correction_falls_back_to_raw():
-    det = _make_detection(20, (0.20, 0.0), 0.0, 0.024, _overhead_T(), 0.040)
-    base = pb._detect_named(_Ctx([det]), 'banane')[0]
-    bx, by, _bz = base.world_xyz_m
-    ctx = _Ctx([_make_detection(20, (0.20, 0.0), 0.0, 0.024, _overhead_T(), 0.040)])
-    ctx.xy_correction = np.array([1.0, 2.0])  # wrong shape -> ignored
-    out = pb._detect_named(ctx, 'banane')[0]
-    assert out.world_xyz_m[0] == pytest.approx(bx, abs=1e-9)
-    assert out.world_xyz_m[1] == pytest.approx(by, abs=1e-9)
-
-
-def test_yaw_bias_added_to_tag_yaw():
-    det = _make_detection(20, (0.20, 0.0), 0.4, 0.024, _overhead_T(), 0.040)
-    base_yaw = pb._detect_named(_Ctx([det]), 'banane')[0].extras['tag_yaw']
-    ctx = _Ctx([_make_detection(20, (0.20, 0.0), 0.4, 0.024, _overhead_T(), 0.040)])
-    ctx.yaw_bias_rad = 0.10
-    biased = pb._detect_named(ctx, 'banane')[0].extras['tag_yaw']
-    d = (biased - base_yaw + math.pi) % (2 * math.pi) - math.pi
-    assert abs(d - 0.10) < 1e-6
-
-
-def test_yaw_bias_wraps():
-    # A near-π yaw plus a positive bias must re-wrap into (-π, π].
-    det = _make_detection(20, (0.20, 0.0), math.pi - 0.05, 0.024, _overhead_T(), 0.040)
-    ctx = _Ctx([det])
-    ctx.yaw_bias_rad = 0.2
-    biased = pb._detect_named(ctx, 'banane')[0].extras['tag_yaw']
-    assert -math.pi < biased <= math.pi
-
-
 # ── W3b: multi-frame yaw resultant gate at grasp time ────────────────────────
 class _NoisyYawPerception:
     """Stub that returns the SAME tag id but at a per-call ROTATED yaw, so the

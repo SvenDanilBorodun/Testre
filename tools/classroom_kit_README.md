@@ -7,138 +7,38 @@ Roboter-Studio-Modul vorzubereiten. Aufbauzeit: ~15 Minuten.
 
 | Komponente | Quelle | Anzahl |
 |---|---|---|
-| ChArUco-Tafel (7×5, DICT_5X5_250) | `tools/generate_charuco.py` → PDF, ausdrucken | 1 |
-| Foam-Board / starker Karton, mind. A4 | Schreibwarenladen | 1 |
-| **Ausricht-Winkel (L-Jig)** für die Tafel | 3D-Druck (`tools/` STL) **oder** Papp-Winkel | 1 |
-| **Arbeits-Matte** mit Greifbereich + Tafel-Platz | ausdrucken/zeichnen (siehe unten) | 1 |
+| **Turm-Kit** (Kameraturm mit Turm-Kamera, Szenen-Matte, Kalibrier-Ziel, Turm-Marker) | fertig geliefert (Druckdateien: Abschnitt „Turm-Kit“ unten) | 1 |
 | AprilTag-Bogen (tag36h11, **exakt die Katalog-IDs**, 24 mm) | `tools/generate_apriltags.py` → PDF (liest den festen Objekt-Katalog) | 1 |
 | Katalog-Objekte (aktuell: Würfel ~30 mm, je 1 Tag oben aufgeklebt) | Bastelladen oder 3D-Druck | je Tag-ID 1 |
 | Eimer/Schüsseln zum Sortieren | Klassenraum | 2–3 |
 
-> **Stand 2026-07-10 — wichtige Änderungen:**
+> **Wichtig:**
 > - Roboter Studio läuft **nur mit dem Follower-Arm**. In der Web-Oberfläche
 >   schaltest du den **Leader-Arm ab** („Leader abschalten") — der Arm-Container
 >   startet kurz neu (~15–20 s), dann steuert Roboter Studio den Follower allein.
 >   Zum Aufnehmen/Teleoperieren später „Leader verbinden".
-> - Die **Tischhöhe wird gemessen** (Schritt „Tisch vermessen"), nicht
->   angenommen — der Arm tippt selbst auf den Tisch.
-> - Der **intrinsische Schritt ist Pflicht** (20 Bilder pro Rig) — es gibt
->   keine voreingestellten Kamera-Innenwerte mehr.
-> - Es wird **nur die Szenen-Kamera** verwendet (kein Greifer-ChArUco-Adapter).
+> - Kalibriert wird **mit dem Turm-Kit**: Beim Öffnen von Roboter Studio prüft
+>   der Roboter die Kalibrierung von selbst, den **Arm-Check** startet man einmal
+>   pro Kit (Roboter Studio → Kalibrierung). Die ChArUco-Tafel, die alten
+>   Arbeits-Matten und der Schritt „Tisch vermessen“ sind entfallen.
+> - Es wird **nur die Szenen-Kamera** verwendet (die Turm-Kamera).
 > - Objekte werden **über AprilTags erkannt** (fester Objekt-Katalog) — es gibt
 >   **kein Farbprofil** mehr; farbige Würfel ohne Tag werden nicht erkannt.
 
 ## Aufbau
 
-### 1. Szenen-Kamera montieren (wichtig!)
+### 1. Turm-Kit aufbauen und kalibrieren
 
-Die Szenen-Kamera muss **fest** und **steil von oben** auf den Arbeitsbereich
-schauen:
+- Roboter, Kameraturm und Szenen-Matte aufbauen: die Matte bis zum Anschlag an
+  die Grundplatte schieben, glatt auflegen und an den Ecken fixieren.
+- In der Einrichtung als Szenen-Kamera **„Turm-Kamera“** auswählen.
+- Roboter Studio öffnen: Die Kalibrierung wird von selbst geprüft. Beim ersten Mal
+  **„Arm-Check starten“**: das Kalibrier-Ziel auf den Greifer klipsen, den Tisch
+  frei räumen, 30 cm hinter dem Roboter frei lassen und Abstand halten — der Arm
+  fährt seine Posen selbst an. Danach das Kalibrier-Ziel abnehmen und bestätigen.
+- Wurde die Kamera verdreht, verlangt diese Prüfung einen neuen Arm-Check.
 
-- Auf einem Stativ/Klemmarm montieren, Blickwinkel **40–70° von der Waagerechten**
-  (steiler = besser), ca. **30–60 cm** über dem Tisch.
-- **Fest mit derselben Grundplatte wie der Roboter** — die Kamera darf sich
-  nach der Kalibrierung **nicht mehr relativ zum Arm bewegen** (ein Stoß macht
-  die Kalibrierung ungültig).
-- Das Sichtfeld muss den **Greifbereich** (siehe Matte) **und den Tafel-Platz**
-  abdecken.
-
-> Warum steil von oben? Roboter Studio greift Objekte senkrecht von oben. Je
-> steiler die Kamera schaut, desto kleiner der Versatz zwischen Objekt-Oberseite
-> und Greifpunkt — desto genauer der Griff.
-
-### 2. ChArUco-Tafel + Ausricht-Winkel
-
-```bash
-cd Testre
-python tools/generate_charuco.py --out classroom_kit/charuco.pdf
-```
-
-PDF im Adobe Reader öffnen → Drucken **mit „Tatsächliche Größe"** (KEIN
-„An Seite anpassen"!). Die Quadrate müssen exakt **30 mm** breit sein — mit
-Lineal nachmessen. Bogen faltenfrei auf das Foam-Board kleben.
-
-Der **L-Jig** (ein rechtwinkliger Anschlag) sorgt dafür, dass die Tafel
-**immer gleich, gerade und am selben Platz** liegt — das ist der ganze
-Genauigkeits-Trick: nicht „ungefähr mit Klebeband", sondern **mechanisch
-festgelegt**. Den Jig am markierten Tafel-Platz fixieren (siehe Matte). Ohne
-3D-Drucker: einen stabilen Papp-/Holz-Winkel verwenden, der die Tafel an zwei
-Kanten anschlägt.
-
-### 3. Arbeits-Matte (Greifbereich + Tafel-Platz)
-
-Für den **ROBOTIS OpenMANIPULATOR-X (OMX)** gibt es eine maßstabsgetreue A4-Positionierschablone, die direkt unter die Basis gelegt wird:
-
-```bash
-cd Testre
-python tools/generate_omx_mat.py --out classroom_kit/omx_mat.pdf
-```
-
-Das PDF auf **DIN A4 mit „Tatsächliche Größe"** drucken (100-mm-Linie nachmessen). Die Vorlage unter die Roboterbasis legen: Sie bildet den exakten CAD-Sockel ab und positioniert die ChArUco-Tafel bei **exakt 180 mm** mit Ursprungsecke (Marker 0 vorne links), Anschlagkante und Schnitt-/Faltlinie.
-
-Alternativ direkt auf den Tisch mit Klebeband markieren:
-
-- **Greif-Ring markieren:** ein Ring etwa **10–28 cm vor/um die Roboterbasis**
-  (genaue Werte beim Erst-Test prüfen, siehe unten). Objekte **nur in diesen
-  Ring** legen — außerhalb meldet der Roboter „nicht erreichbar".
-- **Tafel-Platz markieren:** der Anschlag des L-Jigs, standardmäßig **ca. 18 cm
-  vor der Roboterbasis**, **mittig** auf der Vorwärts-Mittellinie. Die Tafel
-  liegt flach, bedruckte Seite nach oben, so dass die **lange Kante (7 Felder)
-  vom Roboter weg verläuft** (vorne–hinten) und die **kurze Kante (5 Felder)
-  quer liegt** (links–rechts). Die **Ursprungs-Ecke (Marker 0)** zeigt nach
-  **vorne links** — dem Roboter am nächsten, auf seiner linken Seite. Über
-  `EDUBOTICS_BOARD_ORIGIN_X_M`, `EDUBOTICS_BOARD_ORIGIN_Y_M` und (falls der Jig
-  die Tafel gedreht hält) `EDUBOTICS_BOARD_YAW_DEG` anpassbar.
-
-#### 3b. Arbeits-Matte für den **V1** (v1_studio)
-
-> ⚠️ **Der OMX-Greif-Ring aus Schritt 3 ist für diesen Arm FALSCH.** Der V1 dreht
-> sich am Gelenk 1 nur **±90°**, sein Arbeitsbereich ist also ein **Halbkreis vor dem
-> Arm**, kein Ring. Eine Ring-Matte lädt dazu ein, Objekte hinter den Arm zu legen,
-> wo er sie nie erreicht.
-
-Matte drucken (maßstabsgetreu, alle Maße kommen direkt aus dem Code):
-
-```bash
-cd Testre
-python tools/generate_v1_mat.py            # -> classroom_kit/v1_mat.pdf (+ .png)
-```
-
-Das Werkzeug liest Reichweite, Sockel-Umriss, Tafel-Position und Würfel aus dem
-Code und gibt die Maße beim Zeichnen aus. Mit den Standardwerten (Kamera 1280 × 720,
-78° horizontales Sichtfeld — `--hfov`, `--cam-width`, `--cam-height` ändern das):
-
-| Größe | Wert | warum |
-|---|---|---|
-| Fächer | **180°** (±90°) | Grenze von Gelenk 1 |
-| Reichweite des Arms | **34 cm** | der äußere Radius, den der Löser auf Greif- **und** Anfahrhöhe noch löst |
-| grün — **Greifzone** | Reichweite **und** Kamera erkennt den 24-mm-Tag (20–36 px) | nur hier Würfel hinlegen; außerhalb erreicht der Arm sie zwar, die Kamera sieht den Tag aber zu klein |
-| rot — **Sperrbereich** | **10 cm** um die Drehachse | der **offene** Greifer stößt hier an den Sockel; der Roboter verweigert ein Ziel darin **nicht** von selbst — deshalb ist es auf der Matte gesperrt |
-| Kamera-Turm | **55 cm** vor der Achse, Objektiv **45 cm** über dem Tisch, ca. **54°** nach unten | gehört zur Halterung: wer den Turm bewegt, muss neu kalibrieren |
-| Blattgröße | ca. **78 × 81 cm** | größer als A1 — auf **A0** drucken lassen oder gekachelt drucken und zusammenkleben |
-
-- Den Roboter auf den **grauen Umriss** stellen (Pfeil nach vorne); das Fadenkreuz
-  liegt genau auf der **Achse von Gelenk 1**.
-- Objekte zum **Greifen** nur in die **grüne Greifzone** legen, nie in den roten
-  Sperrbereich.
-- Nach dem Aufbau prüfen, dass alle **sechs grünen Prüfkreuze** im Kamerabild zu sehen
-  sind.
-- **Im 100-%-Maßstab drucken** („Tatsächliche Größe", nie „an Seite anpassen") und
-  danach die aufgedruckte **100-mm-Marke mit einem Lineal nachmessen**. Ein
-  skalierter Druck verschiebt jeden Radius und der Sperrbereich passt nicht mehr.
-
-Die **ChArUco-Tafel** liegt wie beim OMX bei **18 cm** vor der Basis (Ursprungs-Ecke
-bei x = 18 cm, y = 7,5 cm); auf der Matte ist ihr Platz blau gestrichelt und die
-`Ursprungs-Ecke` markiert. Sie ist eine Referenz für die **Kamera**, kein Greifziel,
-und wird nach dem Kalibrieren abgenommen.
-
-> **Noch offen (Rig-Test VR10):** ob die Tafel-Ursprungsecke auf dem gedruckten Umriss
-> genau dort liegt, wo der Code sie erwartet, ist nur aus dem CAD abgeleitet. Falls
-> die Szenen-Kamera nicht **beide** gut im Bild hat (Greifzone *und* Tafel),
-> `EDUBOTICS_BOARD_ORIGIN_X_M` / `EDUBOTICS_BOARD_ORIGIN_Y_M` einmal pro
-> Klassenraum anpassen — kein Code-Umbau.
-
-### 4. AprilTags drucken und aufkleben
+### 2. AprilTags drucken und aufkleben
 
 ```bash
 cd Testre
@@ -162,34 +62,25 @@ Druckdateien“ unten.
 - Bei nicht-runden/nicht-würfelförmigen Objekten: den Tag auf **jeder Kopie
   gleich ausgerichtet** aufkleben — der Greifer richtet sich nach dem Tag aus.
 
-### 5. Beleuchtung
+### 3. Beleuchtung
 
 Kalibrierung und Marker-Erkennung sind beleuchtungsempfindlich:
 
 - **Diffuses Licht**, KEIN direktes Sonnen-/Spotlicht (Reflexionen auf der
-  Tafel oder den Tags stören die Erkennung).
+  Matte oder den Tags stören die Erkennung).
 
-### 6. Erst-Test mit der Lehrkraft
+### 4. Erst-Test mit der Lehrkraft
 
 Bevor die Klasse startet:
 
 1. Umgebung starten, Web-Oberfläche öffnen, **Roboter-Studio-Tab**.
 2. **„Leader abschalten"** klicken — der Arm-Container startet kurz neu.
-3. Die Kalibrier-Schritte durchspielen:
-   - **Intrinsisch** — Pflicht (20 Bilder, Tafel aus verschiedenen Winkeln,
-     Reprojektionsfehler < 1 px).
-   - **Extrinsik** — die Tafel in den L-Jig legen, **ein Bild** erfassen →
-     „Berechnen & speichern". Der Arm bewegt sich nicht.
-   - **Tisch vermessen** — „Starten" (Arm wird weich), Greifer von Hand an
-     **≥ 3 verteilten Stellen** auf den Tisch tippen + „Punkt erfassen",
-     dann „Berechnen & speichern" (Arm wird wieder fest).
-   - **(Optional) Genauigkeit prüfen** — bekannte Punkte auflegen und die
-     XY-/Dreh-Korrektur speichern.
-4. **Greif-Ring prüfen:** ein Katalog-Objekt an den Innen- und Außenrand des
-   markierten Rings legen und greifen lassen; falls „nicht erreichbar", den
-   Ring anpassen. Einen bekannten Punkt pinnen und mit dem Maßband prüfen,
-   dass der Arm wirklich dorthin fährt (sonst Extrinsik/Tisch-Schritt
-   wiederholen).
+3. Die Kalibrierung prüfen: Roboter Studio meldet „Kalibrierung in Ordnung.“ —
+   sonst den Arm-Check starten (Schritt 1).
+4. **Greifzone prüfen:** ein Katalog-Objekt an den Innen- und Außenrand der
+   markierten Greifzone legen und greifen lassen. Einen bekannten Punkt pinnen
+   und mit dem Maßband prüfen, dass der Arm wirklich dorthin fährt (sonst den
+   Arm-Check wiederholen).
 5. Mini-Workflow `Greife Würfel → lege ab bei A` testen — dabei einmal den
    Würfel **gedreht** hinlegen und prüfen, dass der Greifer die Drehung
    mitmacht.
@@ -198,18 +89,10 @@ Wenn etwas hakt, vor der Stunde lösen — nicht während 24 Schülerinnen zusch
 
 ## Bei Problemen
 
-- **„Pose der Tafel konnte nicht bestimmt werden" / „Reprojektionsfehler zu
-  hoch"**: Tafel nicht vollständig sichtbar, gewölbt oder schräg. Foam-Board
-  prüfen, Tafel flach in den Jig, ganze Tafel ins Bild.
-- **„Die Kamera scheint nicht über dem Tisch zu liegen"**: Tafel liegt nicht
-  flach mit der bedruckten Seite nach oben am Jig. Korrekt hinlegen, erneut.
-- **„Gemessene Tischhöhe passt nicht zur Kamerakalibrierung"**: Extrinsik und
-  Tisch-Messung widersprechen sich — die Extrinsik (Schritt davor) wiederholen.
-- **„… nicht erreichbar / zu nah / zu weit"**: Objekt außerhalb des Greif-Rings.
-  In den markierten Ring legen.
-- **Objekte werden an der falschen Stelle gegriffen**: meist die Kamera wurde
-  bewegt (Extrinsik ungültig) ODER die Tafel lag nicht im Jig. Extrinsik +
-  Tisch vermessen wiederholen. Steilere Kameraposition hilft.
+- **„… nicht erreichbar / zu nah / zu weit"**: Objekt außerhalb der Greifzone.
+  In die markierte Greifzone der Matte legen.
+- **Objekte werden an der falschen Stelle gegriffen**: meist wurde die Kamera
+  oder der Turm bewegt. Den Arm-Check wiederholen.
 - **Objekte werden nicht erkannt**: Tag verdeckt/spiegelnd, weißer Rand beim
   Ausschneiden entfernt, oder falsche Tag-ID (der Bogen muss die Katalog-IDs
   enthalten — Bogen mit `tools/generate_apriltags.py` neu drucken).

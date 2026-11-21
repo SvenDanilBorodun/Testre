@@ -30,10 +30,10 @@ def test_pinned_xy_lands_in_destinations_and_z_follows_the_live_table():
     """X and Y come from the block; Z does NOT.
 
     The block's Z field was read off the table plane at click time and baked into
-    the saved workflow, while „Tisch vermessen" re-draws that plane every lesson
-    (EDUBOTICS_FORCE_RECALIBRATION ships 1) — so the stored 0.045 is a cached
-    answer to a question the rig can answer freshly. Here the ctx's measured
-    table sits at 0.050, and that is what the run descends to."""
+    the saved workflow, while a later calibration may put that plane elsewhere —
+    so the stored 0.045 is a cached answer to a question the rig can answer
+    freshly. Here the ctx's table sits at 0.050, and that is what the run
+    descends to."""
     ctx = _StubCtx(z_table=0.05)
     destination_pin(ctx, {'name': 'A', 'x': '0.234', 'y': '-0.012', 'z': '0.045'})
     assert ctx.destinations['A'] == {

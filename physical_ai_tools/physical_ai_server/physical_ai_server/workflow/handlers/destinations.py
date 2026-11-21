@@ -175,9 +175,9 @@ def destination_pin(ctx, args: dict[str, Any]) -> None:
         raise WorkflowError(f'Ziel "{name}" hat ungültige Koordinaten.')
     _validate_coordinates(name, x, y, z)
     # PLANE-TRACKED. The block's Z field was READ OFF the table plane at the
-    # moment of the camera click and baked into the saved workflow; the touch-off
-    # re-draws that plane every lesson (EDUBOTICS_FORCE_RECALIBRATION ships 1)
-    # and nothing invalidates the baked value. So the field is kept — removing it
+    # moment of the camera click and baked into the saved workflow; a later
+    # calibration may put that plane elsewhere and nothing invalidates the
+    # baked value. So the field is kept — removing it
     # would be the `workspaces.load` MissingConnection trap CLAUDE.md names three
     # times, and every already-saved workflow carries it — but it is the
     # FALLBACK, not the answer: `resolve_destination_z` re-asks the plane in

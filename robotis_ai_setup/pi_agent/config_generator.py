@@ -369,7 +369,7 @@ _LEGACY_HF_KEYS = ("HF_TOKEN", "HF_TOKEN_MACHINE")
 def _read_unmanaged_lines(path: str) -> list[str]:
     """Return non-managed lines (comments, blanks, unknown KEY=VALUE) from an
     existing .env so a regenerate doesn't wipe operator-added overrides like
-    EDUBOTICS_CAMERA_PIXEL_FORMAT, EDUBOTICS_VCODEC or the calibration knobs.
+    EDUBOTICS_CAMERA_PIXEL_FORMAT, EDUBOTICS_VCODEC or EDUBOTICS_TAG_SIZE_M.
 
     ONE exception to "everything unmanaged is preserved verbatim": the legacy
     ``HF_TOKEN`` / ``HF_TOKEN_MACHINE`` pair is ALWAYS dropped (see

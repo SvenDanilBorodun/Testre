@@ -383,10 +383,9 @@ services:
       # ROS executor (slower on the Pi's PyAV decode, but the dashboard
       # stays responsive — §9). Read by communicator.py; '0' = in-process.
       - EDUBOTICS_DATASET_EDIT_SUBPROCESS=${EDUBOTICS_DATASET_EDIT_SUBPROCESS:-1}
-      # Roboter Studio calibration dir (ChArUco intrinsics + hand-eye
-      # transforms). Default lands inside the edubotics_calib named volume
-      # mounted below. Readers: workflow/calibration_manager.py,
-      # physical_ai_server.py.
+      # Roboter Studio calibration dir (the arm check's and the mat check's
+      # files, workflow/autocal/). Default lands inside the edubotics_calib
+      # named volume mounted below. Reader: physical_ai_server.py.
       - EDUBOTICS_CALIB_DIR=${EDUBOTICS_CALIB_DIR:-/root/.cache/edubotics}
       # Roboter Studio named-object grasping: the object set is a FIXED
       # constant baked into the image (workflow/object_catalog.py::
@@ -451,32 +450,6 @@ services:
       # docker-compose.yml (omx_full default; the current Pi kit is
       # leader-toggle-capable, i.e. omx_full-equivalent).
       - EDUBOTICS_ROBOT_TYPE=${EDUBOTICS_ROBOT_TYPE:-omx_full}
-      # Scene-cam single-shot extrinsic: the known board-on-table placement
-      # (base frame, metres). Read by workflow/calibration_manager.py at
-      # import time — MUST stay forwarded (env-forwarding-guard).
-      - EDUBOTICS_BOARD_ORIGIN_X_M=${EDUBOTICS_BOARD_ORIGIN_X_M:-0.18}
-      - EDUBOTICS_BOARD_ORIGIN_Y_M=${EDUBOTICS_BOARD_ORIGIN_Y_M:-0.075}
-      - EDUBOTICS_BOARD_TABLE_Z_M=${EDUBOTICS_BOARD_TABLE_Z_M:-0.0}
-      # Yaw of the ChArUco board frame about base +Z (0 when the L-jig holds
-      # it square to the base — the default).
-      - EDUBOTICS_BOARD_YAW_DEG=${EDUBOTICS_BOARD_YAW_DEG:-0.0}
-      # Scene-extrinsic orientation sanity gate: the workspace band the
-      # camera's optical axis must hit, so a grossly misplaced board is
-      # rejected. Generous defaults; relax per-rig for an unusual mount.
-      - EDUBOTICS_EXTRINSIC_REGION_X_MIN=${EDUBOTICS_EXTRINSIC_REGION_X_MIN:-0.08}
-      - EDUBOTICS_EXTRINSIC_REGION_X_MAX=${EDUBOTICS_EXTRINSIC_REGION_X_MAX:-0.46}
-      - EDUBOTICS_EXTRINSIC_REGION_Y_ABS=${EDUBOTICS_EXTRINSIC_REGION_Y_ABS:-0.18}
-      # One extrinsic "Bild erfassen" click internally bursts this many
-      # camera reads of the fixed board and averages the solvePnP poses.
-      # =1 reverts to single-shot. INTERVAL spaces the reads past the frame
-      # period. Read by workflow/calibration_manager.py.
-      - EDUBOTICS_EXTRINSIC_BURST_FRAMES=${EDUBOTICS_EXTRINSIC_BURST_FRAMES:-8}
-      - EDUBOTICS_EXTRINSIC_BURST_INTERVAL_S=${EDUBOTICS_EXTRINSIC_BURST_INTERVAL_S:-0.06}
-      # Force a full recalibration on EVERY restart (bench setup changes
-      # constantly). The server reads this ONCE at startup. Set to
-      # 0/false/no/off for the classroom (calibration persists). Read by
-      # physical_ai_server.py — MUST stay forwarded (env-forwarding-guard).
-      - EDUBOTICS_FORCE_RECALIBRATION=${EDUBOTICS_FORCE_RECALIBRATION:-1}
       # Generic grasp: conservative descend clearance above the measured
       # table plane. Rig-tunable.
       - EDUBOTICS_GRASP_CLEARANCE_M=${EDUBOTICS_GRASP_CLEARANCE_M:-0.012}

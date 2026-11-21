@@ -252,13 +252,13 @@ _FLOOR_REFUSAL_DE = (
 
 
 def _floor_fn(ctx):
-    """``(x, y) -> table height``, from the touch-off when there is one.
+    """``(x, y) -> table height``, from the run's table when it has one.
 
     Falls back to ``0.0`` rather than to "unknown", and that is deliberate: on
     this arm z = 0 is not a guess, it is where ``base_link`` is bolted (its mesh
     spans z ∈ [0.0000, 0.0625] m). So the floor guard works on an UNCALIBRATED
     rig too — unlike the Cartesian floor, which has nothing to compare against
-    until „Tisch vermessen" has run.
+    until the run has a table height.
     """
     from physical_ai_server.workflow.handlers import motion as _m
 

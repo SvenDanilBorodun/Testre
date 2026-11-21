@@ -599,7 +599,7 @@ def test_a_projection_failure_names_the_camera_not_the_touch_off():
     d.extras['world_error'] = 'projection'
     with pytest.raises(WorkflowError) as exc:
         motion._resolve_target(d, ctx)
-    assert 'Kamera-Ausrichtung' in str(exc.value)
+    assert str(exc.value) == motion.PROJECTION_FAILED_DE
     assert str(exc.value) != motion.CALIBRATION_FIRST_DE
 
 

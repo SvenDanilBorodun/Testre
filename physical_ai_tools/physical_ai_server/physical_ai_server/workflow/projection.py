@@ -47,10 +47,11 @@ def project_pixel_to_table(
     """Cast a ray from the camera centre through (px, py) and intersect it
     with the table plane.
 
-    When ``plane = (a, b, c)`` is given (the touch-off measured plane
-    ``z = a·x + b·y + c``), the ray is intersected with that TILTED plane —
-    so a non-level table projects correctly. Otherwise the ray is intersected
-    with the flat plane ``z = z_table``.
+    When ``plane = (a, b, c)`` is given (a tilted table ``z = a·x + b·y + c``;
+    no real run carries one since the touch-off was removed: the mat is flat
+    in the world frame and the arm model carries its tilt), the ray is
+    intersected with that TILTED plane. Otherwise the ray is intersected with
+    the flat plane ``z = z_table``.
 
     Returns the (x, y, z) base-frame point, or ``None`` if the ray is parallel
     to the plane (camera looking along the horizon), the intersection is

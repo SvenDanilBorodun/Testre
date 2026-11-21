@@ -59,10 +59,11 @@ class SimPerception:
     def __init__(self, objects: Optional[list[dict[str, Any]]], catalog: Any,
                  world: Any | None = None, table_z: float = 0.0) -> None:
         self._catalog = catalog
-        # The EE height at which the fingertips touch the drawn table — what a
-        # real touch-off measures, and what the node's sim calibration reports
-        # as ``z_table`` (Q13): the solver's ``tool_tip_below_ee_m`` (0.04 on the
-        # OMX, 0 on the Feetech arm, whose EE frame IS the closed fingertip).
+        # The EE height at which the fingertips touch the drawn table — the
+        # quantity a real run's ``z_table`` is, and what the node's sim
+        # calibration reports as ``z_table`` (Q13): the solver's
+        # ``tool_tip_below_ee_m`` (0.04 on the OMX, 0 on the Feetech arm, whose
+        # EE frame IS the closed fingertip).
         # Base z = 0 stays the drawn table surface. Default 0.0 keeps every
         # pre-Q13 construction (unit tests, the golden fixture) unchanged.
         try:

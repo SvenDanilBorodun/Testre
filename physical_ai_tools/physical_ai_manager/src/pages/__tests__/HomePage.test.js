@@ -359,8 +359,8 @@ describe('HomePage — Roboter-Zustand', () => {
 
   it('shows „—" for calibration while /calibration/status has not answered', async () => {
     // The bug this exists for: the Redux calibration flags are hydrated only by
-    // CalibrationWizard, so reading them here would report „0 von 3" about a
-    // rig nobody asked.
+    // Roboter Studio's calibration panel, so reading them here would report
+    // „0 von 3" about a rig nobody asked.
     mockJointsLive = true;
     mockCalibrationThrows = true;
     renderHome({});

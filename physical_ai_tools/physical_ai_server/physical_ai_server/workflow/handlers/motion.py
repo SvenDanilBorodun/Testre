@@ -73,10 +73,10 @@ DEFAULT_APPROACH_HEIGHT_M = 0.06
 GRIPPER_OPEN_RAD = 0.8
 GRIPPER_CLOSED_RAD = -0.5
 
-# Generic grasp (object-agnostic): the gripper descends to the measured table
-# plane (z_table from the touch-off) PLUS this conservative clearance, so the
-# fingertips straddle the lower part of a low-profile object instead of driving
-# into the table. Tuned on the rig (env-overridable).
+# Generic grasp (object-agnostic): the gripper descends to the run's table
+# height (z_table: the fixture contract's, spec 40 S5) PLUS this conservative
+# clearance, so the fingertips straddle the lower part of a low-profile object
+# instead of driving into the table. Tuned on the rig (env-overridable).
 GRASP_CLEARANCE_M = _safe_float('EDUBOTICS_GRASP_CLEARANCE_M', 0.012)
 # Release height ABOVE the destination surface for `drop_at`. Deliberately much
 # higher than the grasp clearance so the held object is dropped from a safe
@@ -1441,11 +1441,13 @@ def _floor_z_at(ctx, x: float, y: float) -> float | None:
     """Return the table-surface z at base-frame (x, y) for the workspace-floor
     refusal, or ``None`` when no table height is known.
 
-    L1 fix: when the touch-off measured a tilted ``table_plane = (a, b, c)``
-    (``z = a·x + b·y + c``) the legitimate grasp z VARIES across the table, so
-    comparing every target against the SCALAR ``z_table`` would falsely refuse
-    a low corner ("Tischebene"). With the plane present we evaluate the plane z
-    at the target's own (x, y); otherwise we fall back to the flat ``z_table``.
+    L1 fix: when a run carries a tilted ``table_plane = (a, b, c)``
+    (``z = a·x + b·y + c``; the removed touch-off measured one, no real run
+    carries one now: the mat is flat and the arm model carries its tilt) the
+    legitimate grasp z VARIES across the table, so comparing every target
+    against the SCALAR ``z_table`` would falsely refuse a low corner
+    ("Tischebene"). With the plane present we evaluate the plane z at the
+    target's own (x, y); otherwise we fall back to the flat ``z_table``.
     """
     plane = getattr(ctx, 'table_plane', None)
     if plane is not None:
@@ -2145,6 +2147,15 @@ def sim_greifbereich_de(ctx, text: Any) -> Any:
 # and the run has none (it replaced every sentence that sent a student to the
 # removed touch-off step).
 CALIBRATION_FIRST_DE = 'Bitte zuerst die Kalibrierung abschließen (Roboter Studio → Kalibrierung).'
+# The two camera sentences of _resolve_target, worded for the tower calibration
+# (the Kalibrierung panel's „Erneut prüfen" is the mat check, „Arm-Check
+# starten" the arm check): a run without the camera calibration, and a complete
+# calibration whose projection of this object failed.
+CAMERA_NOT_CALIBRATED_DE = ('Die Szenen-Kamera ist noch nicht kalibriert — bitte zuerst den Arm-Check '
+                            'starten (Roboter Studio → Kalibrierung).')
+PROJECTION_FAILED_DE = ('Die Position dieses Objekts lässt sich mit der aktuellen Kamera-Kalibrierung nicht '
+                        'auf den Tisch umrechnen — bitte die Kalibrierung erneut prüfen und, wenn das nicht '
+                        'hilft, den Arm-Check starten (Roboter Studio → Kalibrierung).')
 
 
 def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
@@ -2199,10 +2210,7 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
             or getattr(ctx, 'board_table_z', None) is None
         )
         if cam_uncalibrated:
-            raise WorkflowError(
-                'Die Szenen-Kamera ist noch nicht kalibriert — bitte zuerst die '
-                'Kamera-Kalibrierung (intrinsisch + Ausrichtung) abschließen.'
-            )
+            raise WorkflowError(CAMERA_NOT_CALIBRATED_DE)
         # FOURTH cause, and it used to be misattributed to the third: the
         # calibration is COMPLETE and the camera→table projection itself failed
         # (a ray parallel to the table plane, a degenerate extrinsic, a corner
@@ -2222,12 +2230,7 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
         if isinstance(extras, dict):
             reason = extras.get('world_error')
         if reason == 'projection':
-            raise WorkflowError(
-                'Die Position dieses Objekts lässt sich mit der aktuellen '
-                'Kamera-Ausrichtung nicht auf den Tisch umrechnen — bitte die '
-                'Kamera-Ausrichtung („Kamera einmessen") neu machen und darauf '
-                'achten, dass die Kamera schräg von oben auf den Tisch schaut.'
-            )
+            raise WorkflowError(PROJECTION_FAILED_DE)
         raise WorkflowError(CALIBRATION_FIRST_DE)
     raise WorkflowError('Ziel-Wert konnte nicht ausgewertet werden.')
 
@@ -2589,8 +2592,8 @@ def _refuse_position_below_table(ctx, q_end, name) -> None:
 
     Judged by ``home_planner.pose_floor_clearance``: the point model on every
     joint-route arm — the arm's joint points and its fingertip at the CARRIED
-    claw opening ``q_end[n]`` — against the touch-off plane minus the solver's
-    ``tool_tip_below_ee_m``, else the base plane z = 0. A judged point more
+    claw opening ``q_end[n]`` — against the run's table height minus the
+    solver's ``tool_tip_below_ee_m``, else the base plane z = 0. A judged point more
     than ``WORKSPACE_FLOOR_MARGIN_M`` (1 cm, exactly a Ziel's margin) below the
     surface refuses, so a pose taught with the fingertips on the table passes.
     Geometry the model cannot judge is refused too — never an approval.

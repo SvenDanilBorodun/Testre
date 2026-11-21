@@ -593,14 +593,14 @@ def _table_surface_fn(ctx):
     """``(x, y) -> the table SURFACE height under that point``, for judging
     where the arm's OWN parts are (``pose_floor_clearance``).
 
-    The touch-off plane where one exists (``motion._floor_z_at``, the
-    plane-aware refusal helper — never the ``GRASP_Z_FROM_PLANE`` knob) minus
-    the solver's ``tool_tip_below_ee_m``: on the OMX the touch-off's
-    ``z_table`` is the END-EFFECTOR frame's height with the fingertips on the
-    table (0.04 m above the surface), on the Feetech arm the EE frame IS the
-    fingertip (0). With no table measurement, the base plane z = 0. So a kit
-    whose arm stands on a riser is judged by its own measurement, and on a
-    Feetech arm this is exactly :func:`_floor_fn`."""
+    The run's table height (``motion._floor_z_at``, the plane-aware refusal
+    helper — never the ``GRASP_Z_FROM_PLANE`` knob) minus the solver's
+    ``tool_tip_below_ee_m``: ``z_table`` is the END-EFFECTOR frame's height
+    with the fingertips on the table (a real run carries the fixture
+    contract's ``MAT_THICKNESS_M + FINGERTIP_BELOW_EE_M``, the simulator its
+    solver's own fingertip offset), so this answers the mat's surface. With no
+    table height, the base plane z = 0. On a Feetech arm, whose EE frame IS
+    the fingertip (0), this is exactly :func:`_floor_fn`."""
     from physical_ai_server.workflow.handlers import motion as _m
 
     tip = float(getattr(getattr(ctx, 'ik', None), 'tool_tip_below_ee_m', 0.0) or 0.0)
@@ -696,13 +696,13 @@ def plan_floor_checked_home_route(ctx, q_start, q_home_full, duration_s: float,
     if rung.stuck(q_start):
         raise rung.refusal()
     # The point model is judged against z = 0 — the surface the base is bolted to —
-    # NOT the touch-off. On these solvers the touch-off's z_table/plane is the
-    # END-EFFECTOR FRAME's height when the FINGERS touch the table (the grasp
-    # descends that frame, see CLAUDE.md "DUAL Z-KEY CONVENTION"), i.e. ~the
-    # finger length ABOVE the real surface, while link_points already samples the
-    # fingers themselves. Judging the fingers and the elbow against that plane
-    # made a calibrated rig lift or refuse for a table that was ~40 mm lower.
-    # (The box model keeps the touch-off: there the TCP IS the fingertip.)
+    # NOT the run's z_table. On these solvers z_table is the END-EFFECTOR FRAME's
+    # height when the FINGERS touch the table (the grasp descends that frame, see
+    # CLAUDE.md "DUAL Z-KEY CONVENTION"), i.e. ~the finger length ABOVE the real
+    # surface, while link_points already samples the fingers themselves. Judging
+    # the fingers and the elbow against that height made a calibrated rig lift or
+    # refuse for a table that was ~40 mm lower (the touch-off's measurement then).
+    # (The box model keeps z_table: there the TCP IS the fingertip.)
     floor_fn = _base_plane_floor
     q_start = [float(v) for v in q_start]
     q_home_full = [float(v) for v in q_home_full]

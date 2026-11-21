@@ -1214,8 +1214,7 @@ TOWER_GLIDE_REFUSAL_DE = (
     '[FEHLER] Grundstellungs-Fahrt entfällt: aus dieser Lage würde der Arm '
     'dabei dem Kameraturm zu nahe kommen. Der Arm wird in seiner Stellung '
     'gehalten (er ist NICHT weich). Bitte den Arm auf der Startseite lockern, '
-    'nach vorne legen oder aufrichten und festsetzen – die Animation dort '
-    'zeigt, wie.'
+    'nach vorne legen und festsetzen – die Animation dort zeigt, wie.'
 )
 TOWER_GLIDE_UNJUDGEABLE_DE = (
     '[FEHLER] Grundstellungs-Fahrt entfällt: die Lage des Arms kann gerade '

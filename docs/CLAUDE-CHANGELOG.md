@@ -26,7 +26,7 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 **Order with the LeRobot 0.6.1 port** (D62): that port ships after this release and rebases onto it (S9's checklist; the D14 → D58 → codec check → D4 order of 2.40.0's entry stands).
 
-**Still open.** Every rig gate, the fingertip measurement and the A/B study (`docs/KNOWN-ISSUES.md`, „Release 2.41.0"); the two verification findings named there (the driver's „oder aufrichten", X-D88; the motion's copy of the polyline judge, X-WP12-1).
+**Still open.** Every rig gate, the fingertip measurement and the A/B study (`docs/KNOWN-ISSUES.md`, „Release 2.41.0"). The verification round closed the two findings named there at the documentation commit (the driver's „oder aufrichten", X-D88; the motion's copy of the polyline judge, X-WP12-1) and made the start gate refuse a real program on a `legacy` rig (X-LEGACYGATE).
 
 ### 2026-11-19, release 2.40.0: a dataset names its scene camera (D58), shipped dormant
 

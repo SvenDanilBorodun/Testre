@@ -66,9 +66,9 @@ describe('deriveHealth — unknown is not a finding', () => {
 
   it('a null calibration is UNKNOWN, not "nothing is calibrated"', () => {
     // This is the concrete bug the row was written around: the Redux
-    // calibration flags are only hydrated by CalibrationWizard, so on Start
-    // they are all false until Roboter Studio has been opened. Rendering that
-    // as „0 von 3" would invent a fact about the rig.
+    // calibration flags are only hydrated by Roboter Studio's calibration
+    // panel, so on Start they are all false until Roboter Studio has been
+    // opened. Rendering that as „0 von 3" would invent a fact about the rig.
     const h = deriveHealth({ ...healthy, calibration: null });
     expect(row(h, 'calibration').state).toBe(UNKNOWN);
     expect(row(h, 'calibration').value).toBe('—');

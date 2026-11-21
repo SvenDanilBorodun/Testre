@@ -20,7 +20,9 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { configureStore } from '@reduxjs/toolkit';
 import { Provider } from 'react-redux';
 
-import { HOME_GLIDE_COUNTDOWN_S, HomeGlideProvider, useHomeGlide } from '../HomeGlidePrompt';
+import {
+  HOME_GLIDE_COUNTDOWN_S, HomeGlideProvider, useHomeGlide, useHomeGlidePrompt,
+} from '../HomeGlidePrompt';
 
 const TOWER_HINT_HOME_DE = 'Von hier würde die Fahrt in die Grundstellung dem Kameraturm zu nahe '
   + 'kommen. Bring den Arm erst mit „Steuern" nach vorne – dann geht die Grundstellung.';
@@ -171,6 +173,34 @@ describe('HomeGlidePrompt — the V1 under the camera tower', () => {
     expect(screen.queryByRole('button', { name: 'Jetzt fahren' })).toBeNull();
     await advance(HOME_GLIDE_COUNTDOWN_S * 3000);
     expect(mockRos.homeArm).not.toHaveBeenCalled();
+  });
+
+  it('a press handed out before the verdict turned never glides once it is refused', async () => {
+    // startGlide's own guard, the last line before /workshop/jog 'home': the
+    // countdown's effect and the hidden „Jetzt fahren" keep the PAGE from
+    // pressing, but a press already on its way when the verdict turns (the
+    // handler the dialog was rendered with) must stop there too. The server
+    // refuses such a press as well (WP-12); the page never sends it.
+    const seen = { dialog: null };
+    function Probe() {
+      const glide = useHomeGlidePrompt('v1_studio');
+      seen.dialog = glide.homeGlideDialog;
+      return <button type="button" onClick={glide.offerHomeGlide}>anbieten</button>;
+    }
+    render(<Provider store={makeStore()}><Probe /></Provider>);
+    await flush();
+    await deliver('clear');
+    offer();
+    await advance(1000);
+    const pressHandedOut = seen.dialog.props.onGoNow;
+    await deliver('refused');
+    expect(seen.dialog.props.towerHintProfile).toBe('v1_studio');
+    await act(async () => { await pressHandedOut(); });
+    expect(mockRos.homeArm).not.toHaveBeenCalled();
+    expect(seen.dialog.props.phase).toBe('countdown');
+    await deliver('clear');
+    await act(async () => { await seen.dialog.props.onGoNow(); });
+    expect(mockRos.homeArm).toHaveBeenCalledTimes(1);
   });
 
   it('a refused verdict that clears again restarts the FULL warning', async () => {

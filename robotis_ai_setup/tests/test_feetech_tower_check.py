@@ -62,6 +62,13 @@ RANGE = [tuple(r) for r in FIXTURE['range']]
 T1_PARTS = ('block', 'head', 'lens', 'bridge', 'column', 'socket')
 PLACED = [g for g in GLIDES if g['start'][1] > 0.5]
 REFUSED = [g for g in GLIDES if g['refused']]
+# Owner decision D88, verbatim: lay the arm forward, never stand it up.
+TOWER_GLIDE_REFUSAL_D88_DE = (
+    '[FEHLER] Grundstellungs-Fahrt entfällt: aus dieser Lage würde der Arm dabei dem Kameraturm zu nahe kommen. '
+    'Der Arm wird in seiner Stellung gehalten (er ist NICHT weich). Bitte den Arm auf der Startseite lockern, '
+    'nach vorne legen und festsetzen – die Animation dort zeigt, wie.'
+)
+STAND_UP_RE = r'(?i)aufricht|aufstell|stell\w* (ihn|den arm) auf|richte\w* (ihn|den arm) auf'
 
 
 def _api(name):
@@ -425,6 +432,13 @@ class RunHomeJudgesTheGlide(BoundedTestCase):
         self.assertIn('Startseite', DRIVER.TOWER_GLIDE_REFUSAL_DE)
         self.assertIn('neu starten', DRIVER.TOWER_GLIDE_UNJUDGEABLE_DE)
 
+    def test_the_refusal_says_lay_the_arm_forward_only(self):
+        """D88: every V1 tower sentence tells the student to lay the arm FORWARD, never to stand it up (a V1
+        standing straight up on the tower side is refused too)."""
+        self.assertEqual(DRIVER.TOWER_GLIDE_REFUSAL_DE, TOWER_GLIDE_REFUSAL_D88_DE)
+        for text in (DRIVER.TOWER_GLIDE_REFUSAL_DE, DRIVER.TOWER_GLIDE_UNJUDGEABLE_DE):
+            self.assertNotRegex(text, STAND_UP_RE)
+
 
 class TheVerifiersResendIsJudged(BoundedTestCase):
     """``_boot_home_verify`` re-sends the glide from where a stalled arm stands; on the tower that re-send is
@@ -456,6 +470,8 @@ class TheVerifiersResendIsJudged(BoundedTestCase):
         self.assertEqual(len(warnings), 1, warnings)
         self.assertTrue(warnings[0].startswith('[WARNUNG] '))
         self.assertIn('Kameraturm', warnings[0])
+        self.assertIn(TOWER_GLIDE_REFUSAL_D88_DE.removeprefix('[FEHLER] '), warnings[0])
+        self.assertNotRegex(warnings[0], STAND_UP_RE)
 
     def test_a_re_send_into_the_table_is_skipped_on_the_tower(self):
         self.assertFalse(DRIVER.boot_home_floor_decision(self.DIP)[0])

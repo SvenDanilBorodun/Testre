@@ -155,10 +155,10 @@ export function setWorkspaceAccessor(fn) {
 // catalog does not contain to `valid[0]` is what turned a saved „kugel" into
 // „wuerfel" the moment the catalog landed — silently, unundoably (Blockly
 // refuses to set the placeholder back), and on the ORDINARY lesson-start path,
-// since the catalog fetch waits for `calibrated || simMode` while
-// EDUBOTICS_FORCE_RECALIBRATION ships ON. A block the student never touched
-// keeps what the student saved; only „(lädt …)" — which is ours, not theirs —
-// is replaced.
+// since the catalog fetch waits for `calibrated || simMode`, and `calibrated`
+// (the calibration state `ok`) arrives only after the mat check the page runs
+// on entering Roboter Studio. A block the student never touched keeps what the
+// student saved; only „(lädt …)" — which is ours, not theirs — is replaced.
 function refreshObjectTypeDropdowns() {
   const ws = _workspaceAccessor ? _workspaceAccessor() : null;
   if (!ws || typeof ws.getAllBlocks !== 'function') return;

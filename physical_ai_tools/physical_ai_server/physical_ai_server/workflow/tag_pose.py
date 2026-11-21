@@ -19,7 +19,7 @@ the back-projected edges. Inputs:
   distortion vector, or the tower lens' ``KBDistortion``, which is passed on
   untouched because the projection dispatches on its type),
 * the scene extrinsic ``T_cam_to_base`` (4x4 — the SAME transform the table
-  projection uses; ``calibration_manager`` stores it cam→base),
+  projection uses; a real run carries the mat check's camera pose cam→base),
 * the plane the tag lies in (``plane_z`` = ``board_table_z + object_height``, or
   a tilted ``plane = (a, b, c)``).
 

@@ -6,8 +6,9 @@
 # Licence Agreement; see LICENSE at the repository root.
 """Roboter Studio's tower calibration service (spec 40 S4; WP-13).
 
-:class:`SceneCalibration` runs beside the legacy calibration steps (WP-16
-removes those). Like the rest of this package it imports NumPy, the standard
+:class:`SceneCalibration` is Roboter Studio's one calibration: the legacy
+steps (the board extrinsic, the intrinsic photos, the touch-off) are gone
+(spec 40 S7). Like the rest of this package it imports NumPy, the standard
 library and the fixture contract only: the node hands it the studio camera,
 a tag detector, the measured follower joints, the arm model's FK, the
 ``guard_margin`` gate's arm model and guard, the start and stop of an
@@ -24,8 +25,9 @@ tests hand it fakes.
   before a run): there a result that fails only with ``tags_hidden`` or
   ``fixture_hidden`` falls back to the last ``ok`` result of this boot with
   one ``[WARNUNG]``; any other refusal refuses the start with its sentence.
-  Under ``legacy`` the gate says nothing (today's path); with no statement
-  (``None``) the mat check answers ``profile_unknown`` (D63).
+  Under ``legacy`` a real start is refused with ``camera_not_tower`` without
+  a mat check (such a rig has no Roboter-Studio calibration); with no
+  statement (``None``) the mat check answers ``profile_unknown`` (D63).
 * THE ARM CHECK (:meth:`start_arm_check`, decision D8; the arm moves on its
   own, approved by D34): an internal program (:func:`arm_check_program`)
   started through the node's ordinary program start, so mode arbitration, the
@@ -627,9 +629,14 @@ class SceneCalibration:
     # ── the program-start gate ───────────────────────────────────────────────
     def program_start_gate(self, workflow_json, workflow_id):
         """``None`` = the real program may start, else the German refusal. The
-        service's own internal program passes once (its token); under
-        ``legacy`` nothing is judged. An approved start holds the studio
-        picture until :meth:`on_program_end` names it."""
+        service's own internal program passes once (its token). Under
+        ``legacy`` every other real start is refused with the panel's
+        ``camera_not_tower`` sentence, before anything is looked at: such a rig
+        has no Roboter-Studio calibration (S7) while every real run carries the
+        kit's arm model and table height, and the page alone (it holds such a
+        rig in the simulator) is no fence against a start over rosbridge. An
+        approved start holds the studio picture until :meth:`on_program_end`
+        names it."""
         with self._lock:
             internal = self._internal
             if internal is not None and internal == (workflow_id, _digest(str(workflow_json))):
@@ -638,7 +645,7 @@ class SceneCalibration:
                 return None
             self._approved = None
         if self._camera.profile() == 'legacy':
-            return None
+            return _t.CAMERA_NOT_TOWER_DE
         try:
             calibration, warnings, refusal = self._usable_calibration()
         except Exception as e:  # noqa: BLE001 — a gate that raised refuses, never passes

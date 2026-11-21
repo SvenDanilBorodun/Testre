@@ -799,9 +799,52 @@ def test_the_gate_lets_the_arm_check_program_through_and_nothing_else(kind, tmp_
     env.svc.on_program_end(wid, 'stopped')
     assert env.svc.program_start_gate(json.dumps(payload), wid) == T.NEEDS_ARM_CHECK_NONE_DE
     legacy = _Env(kind, calib_dir=tmp_path, camera=_Camera(profile='legacy'))
-    assert legacy.svc.program_start_gate('{}', 'x') is None and legacy.svc.run_calibration() is None
+    assert legacy.svc.program_start_gate('{}', 'x') == T.CAMERA_NOT_TOWER_DE
+    assert legacy.svc.run_calibration() is None
     unknown = _Env(kind, calib_dir=tmp_path, camera=_Camera(profile=None))
     assert unknown.svc.program_start_gate('{}', 'x') == T.PROFILE_UNKNOWN_DE
+
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_a_real_start_under_legacy_is_refused_before_anything_moves(kind, tmp_path):
+    """FAILS FIRST: a rig that states ``legacy`` has no Roboter-Studio calibration any more (S7), while every
+    real run carries the kit's arm model and the contract's table height (``_build_ik_solver``,
+    ``_load_workflow_calibration``). The page holds such a rig in the simulator; a real start that comes past
+    it (rosbridge is untrusted) is refused by the gate with the panel's own camera_not_tower sentence, before
+    the run exists: nothing published, no frame looked at, no picture held, no mat check written. The
+    service's own internal program keeps its one-shot pass, and the simulator's manager has no gate."""
+    from physical_ai_server.workflow.object_catalog import fixed_catalog
+    from physical_ai_server.workflow.workflow_manager import WorkflowManager
+    env = _Env(kind, calib_dir=tmp_path, camera=_Camera(profile='legacy'))
+    published, finished = [], []
+    mgr = WorkflowManager(
+        publisher=published.append, perception_factory=_Perception, load_calibration=lambda: {},
+        emit_status=lambda _s: None, on_finished=finished.append, get_scene_frame=lambda: None,
+        get_scene_frame_age=lambda: 0.0, get_follower_joints=lambda: [0.0, 0.64, 0.64, 0.0, 0.0, 0.9],
+        load_object_catalog=fixed_catalog, start_gate=env.svc.program_start_gate)
+    ok, msg, _ = mgr.start(json.dumps(_count_program()), 'student-legacy')
+    assert (ok, msg) == (False, T.CAMERA_NOT_TOWER_DE)
+    assert not mgr.is_running and published == [] and finished == []
+    assert env.detects == [] and env.camera.frames == 0 and env.camera.holds == 0
+    assert not (tmp_path / 'calibration' / ST.MAT_CHECK_LAST_FILE).exists()   # a mat check would write it
+    assert env.svc.run_calibration() is None
+    # the service's own internal program passes its one-shot token before the profile is asked
+    payload = {'blocks': {'languageVersion': 0, 'blocks': []}}
+    assert env.svc._start_internal(payload, 'armcheck-1') == (True, 'Workflow gestartet.')
+    assert env.programs == [(payload, 'armcheck-1')]
+    assert env.svc.program_start_gate(json.dumps(payload, separators=(',', ':')), 'armcheck-1') == (
+        T.CAMERA_NOT_TOWER_DE)
+    # the gate is the real manager's only: the simulator's manager is built without one
+    built = {}
+    for node in ast.walk(ast.parse(_NODE_SRC)):
+        if isinstance(node, ast.FunctionDef) and node.name in (
+                '_get_or_create_workflow_manager', '_get_or_create_sim_workflow_manager'):
+            built[node.name] = [{kw.arg for kw in call.keywords} for call in ast.walk(node)
+                                if isinstance(call, ast.Call) and getattr(call.func, 'id', None) == 'WorkflowManager']
+    assert len(built['_get_or_create_workflow_manager']) == 1
+    assert 'start_gate' in built['_get_or_create_workflow_manager'][0]
+    assert len(built['_get_or_create_sim_workflow_manager']) == 1
+    assert 'start_gate' not in built['_get_or_create_sim_workflow_manager'][0]
 
 
 # ══════════════════════════════════════════════════════════════════════════

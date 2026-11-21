@@ -194,8 +194,8 @@ class ArmGeometry:
         table. Negative = a link is below the table there.
 
         ``floor_fn(x, y) -> float`` gives the table height under a point, so a
-        tilted table measured by the touch-off is honoured per corner rather
-        than compared against one scalar (the same correctness point
+        tilted table plane, where a run carries one, is honoured per corner
+        rather than compared against one scalar (the same correctness point
         ``motion._floor_z_at`` makes for a Cartesian target).
 
         LINK 0 (``base_link``) IS DELIBERATELY EXCLUDED. It is the fixed mount:

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -284,6 +285,36 @@ def test_resolve_target_uncalibrated_camera_names_calibration():
     msg = str(exc.value)
     assert 'kalibriert' in msg and 'Kamera' in msg
     assert msg != motion.CALIBRATION_FIRST_DE
+
+
+# The two camera sentences name the tower calibration as it exists now: the
+# Kalibrierung panel's „Erneut prüfen" (the mat check) and „Arm-Check starten".
+# The steps they named before — the intrinsic photos, „Kamera einmessen", the
+# camera alignment — were removed with the legacy calibration (spec 40 S7).
+_CAMERA_NOT_CALIBRATED_DE = ('Die Szenen-Kamera ist noch nicht kalibriert — bitte zuerst den Arm-Check '
+                             'starten (Roboter Studio → Kalibrierung).')
+_PROJECTION_FAILED_DE = ('Die Position dieses Objekts lässt sich mit der aktuellen Kamera-Kalibrierung nicht '
+                         'auf den Tisch umrechnen — bitte die Kalibrierung erneut prüfen und, wenn das nicht '
+                         'hilft, den Arm-Check starten (Roboter Studio → Kalibrierung).')
+_REMOVED_STEP_RE = r'(?i)intrinsisch|einmessen|Ausrichtung|Tisch vermessen'
+
+
+def test_the_uncalibrated_camera_sentence_names_the_tower_calibration():
+    with pytest.raises(WorkflowError) as exc:
+        _resolve_target(_FakeDetection(world_xyz_m=None), types.SimpleNamespace(destinations={}))
+    assert str(exc.value) == _CAMERA_NOT_CALIBRATED_DE
+    assert not re.search(_REMOVED_STEP_RE, str(exc.value))
+
+
+def test_the_projection_sentence_names_the_tower_calibration():
+    ctx = _calibrated_ctx()
+    for value in ({'world_xyz_m': None, 'extras': {'world_error': 'projection'}},
+                  types.SimpleNamespace(world_xyz_m=None, extras={'world_error': 'projection'})):
+        with pytest.raises(WorkflowError) as exc:
+            _resolve_target(value, ctx)
+        assert str(exc.value) == _PROJECTION_FAILED_DE
+        assert not re.search(_REMOVED_STEP_RE, str(exc.value))
+        assert str(exc.value) != motion.CALIBRATION_FIRST_DE
 
 
 def test_resolve_target_projected_detection_returns_xyz():

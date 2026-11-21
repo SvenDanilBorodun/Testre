@@ -49,7 +49,13 @@ RUN set -e && \
 # AutoPoseSuggest, ExecuteCalibrationPose, MarkDestination, StartWorkflow,
 # StopWorkflow, WorkflowStatus). The audit also adds Detection.msg, plus
 # changes WorkflowStatus.msg from a parallel-array shape to a typed
-# Detection[] field.
+# Detection[] field. Of the calibration types the node registers only
+# StartCalibration, CancelCalibration and CalibrationStatus since the tower
+# calibration replaced the legacy one (2.41.0); CalibrationCaptureFrame,
+# CalibrationSolve, CalibrationHistory, CalibrationPreview, VerifyCalibration,
+# AutoPoseSuggest and ExecuteCalibrationPose are still generated (and some
+# asserted below) but served by nothing, until the next interfaces change
+# removes them (non-goal N6).
 #
 # Without this step physical_ai_server.py crashes at import time with
 # "ImportError: cannot import name 'StartCalibration'" — meaning the

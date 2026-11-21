@@ -319,6 +319,13 @@ class JpegComplete(unittest.TestCase):
                 ('no SOI', GOOD[2:]),
                 ('EOI before the scan', b'\xff\xd8\xff\xd9' + GOOD[2:]),
                 ('a second SOI before the scan', b'\xff\xd8' + GOOD),
+                # Followed by 00 02, the two markers would read as a valid
+                # length and the walk go on to the real header: only the
+                # SOI/EOI rule itself refuses these.
+                ('EOI before the scan, a length after it',
+                 b'\xff\xd8\xff\xd9\x00\x02' + GOOD[2:]),
+                ('a second SOI before the scan, a length after it',
+                 b'\xff\xd8\xff\xd8\x00\x02' + GOOD[2:]),
                 ('a byte where a marker must start', GOOD[:2] + b'\x00' + GOOD[2:]),
                 ('a length below 2', GOOD[:2] + b'\xff\xe0\x00\x01' + GOOD[2:]),
                 ('a length past the data', GOOD[:2] + b'\xff\xe0\xff\xff' + GOOD[2:200]),
@@ -834,6 +841,43 @@ class VerifierEndOfImage(_Verifier, unittest.TestCase):
         self.assertEqual((v.state, v.dropped), ('streaming', 14))
         v.split_failed(t + 0.5)
         self.assertEqual((v.state, v.fault, v.dropped), ('fault', 'bad_frames', 15))
+
+    def test_a_released_frame_the_split_refuses_continues_the_run(self):
+        """What both owners do: ``frame()`` releases the frame, the split
+        refuses it, ``split_failed()``. The release must not end the run of
+        refused frames, or a camera whose frames all fail the split would read
+        ``streaming`` for ever while nothing leaves."""
+        v, t = self.streaming()
+        for _ in range(ss.BAD_FRAMES_LIMIT - 1):
+            t += 1 / 30
+            self.assertTrue(v.frame(t, GOOD))
+            v.split_failed(t)
+        self.assertEqual((v.state, v.dropped), ('streaming', ss.BAD_FRAMES_LIMIT - 1))
+        t += 1 / 30
+        self.assertTrue(v.frame(t, GOOD))
+        v.split_failed(t)
+        self.assertEqual((v.state, v.fault, v.dropped),
+                         ('fault', 'bad_frames', ss.BAD_FRAMES_LIMIT))
+
+    def test_frames_the_check_and_the_split_refuse_make_one_run(self):
+        v, t = self.streaming()
+        _, t = self.feed(v, [_truncated()] * 7, t + 1 / 30, 30.0)
+        for _ in range(ss.BAD_FRAMES_LIMIT - 7):
+            t += 1 / 30
+            self.assertTrue(v.frame(t, GOOD))
+            v.split_failed(t)
+        self.assertEqual((v.state, v.fault, v.dropped),
+                         ('fault', 'bad_frames', ss.BAD_FRAMES_LIMIT))
+
+    def test_a_frame_that_leaves_ends_the_run(self):
+        v, t = self.streaming()
+        _, t = self.feed(v, [_truncated()] * (ss.BAD_FRAMES_LIMIT - 1), t + 1 / 30, 30.0)
+        t += 1 / 30
+        self.assertTrue(v.frame(t, GOOD))          # split and sent: the run is over
+        t += 1 / 30
+        self.assertTrue(v.frame(t, GOOD))
+        v.split_failed(t)
+        self.assertEqual((v.state, v.dropped), ('streaming', ss.BAD_FRAMES_LIMIT))
 
 
 # --------------------------------------------------------------------------

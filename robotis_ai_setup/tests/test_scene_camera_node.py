@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import types
 import unittest
 from unittest import mock
 
@@ -336,6 +337,19 @@ class ATruncatedFrameIsDropped(_NodeCase):
         self.feed(*([_GOOD] * 33))
         self.assertEqual(self.states()[-1]['dropped'], 1)
 
+    def test_fifteen_the_split_refuses_in_a_row_close_the_device(self):
+        self.stream()
+        scene0 = len(self.published(_SCENE_TOPIC))
+
+        def refuse(_data):
+            raise _MOD.scene_split.SplitError('the half-size decode failed')
+        with mock.patch.object(_MOD.scene_split, 'outside_from_jpeg', refuse):
+            self.feed(*([_GOOD] * _SPLIT.BAD_FRAMES_LIMIT))
+        self.assertEqual(self.states()[-1]['fault'], 'bad_frames')
+        self.assertEqual(self.states()[-1]['dropped'], _SPLIT.BAD_FRAMES_LIMIT)
+        self.assertTrue(self.capture.released)
+        self.assertEqual(len(self.published(_SCENE_TOPIC)), scene0)
+
     def test_fifteen_in_a_row_close_the_device(self):
         self.stream()
         self.feed(*([_TRUNCATED] * _SPLIT.BAD_FRAMES_LIMIT))
@@ -413,6 +427,78 @@ class TheSelfTestAndTheOpen(_NodeCase):
         self.assertEqual(len(self.opened), 2)
         lines = [t for _lvl, t in self.node.get_logger().records[before:] if 'v4l2' in t]
         self.assertEqual(len(lines), 1, lines)
+
+
+class _RecordingCapture:
+
+    def __init__(self, calls, opened):
+        self.calls = calls
+        self.opened = opened
+
+    def isOpened(self):
+        return self.opened
+
+    def set(self, prop, value):
+        self.calls.append(('set', prop, value))
+        return True
+
+    def release(self):
+        self.calls.append(('release',))
+
+
+def _recording_cv2(calls, opened=True):
+    """A stand-in cv2 that records how ``open_capture`` builds and sets the
+    capture; the ids are OpenCV's own."""
+    def video_capture(*args):
+        calls.append(('VideoCapture',) + args)
+        return _RecordingCapture(calls, opened)
+
+    return types.SimpleNamespace(
+        CAP_V4L2=200, CAP_PROP_FRAME_WIDTH=3, CAP_PROP_FRAME_HEIGHT=4, CAP_PROP_FPS=5,
+        CAP_PROP_FOURCC=6, CAP_PROP_CONVERT_RGB=16,
+        VideoCapture=video_capture,
+        VideoWriter_fourcc=lambda *chars: ''.join(chars))
+
+
+class TheV4l2Open(unittest.TestCase):
+    """Spec 40 S1: the Pi opens the tower camera through V4L2 in MJPG 1920x1080
+    at 30 fps with ``CONVERT_RGB`` off. Without the FOURCC the driver keeps the
+    format the device had (YUY2 at 1080p is 5 fps by the manual, refused as
+    ``wrong_mode``); without ``CONVERT_RGB`` 0 OpenCV decodes every frame and
+    the camera's own JPEG never passes through. Every other test of this file
+    replaces ``open_capture``, so this is its one fence."""
+
+    def _open(self, opened=True):
+        calls = []
+        fake = _recording_cv2(calls, opened)
+        with mock.patch.dict(sys.modules, {'cv2': fake}):
+            cap = _MOD.open_capture('/dev/video4')
+        return fake, cap, calls
+
+    def test_the_mode_is_set_after_a_v4l2_open(self):
+        fake, cap, calls = self._open()
+        self.assertIsInstance(cap, _RecordingCapture)
+        self.assertEqual(calls, [
+            ('VideoCapture', '/dev/video4', fake.CAP_V4L2),
+            ('set', fake.CAP_PROP_FOURCC, 'MJPG'),
+            ('set', fake.CAP_PROP_FRAME_WIDTH, 1920),
+            ('set', fake.CAP_PROP_FRAME_HEIGHT, 1080),
+            ('set', fake.CAP_PROP_FPS, 30),
+            ('set', fake.CAP_PROP_CONVERT_RGB, 0),
+        ])
+
+    def test_a_device_that_does_not_open_is_released_and_none(self):
+        fake, cap, calls = self._open(opened=False)
+        self.assertIsNone(cap)
+        self.assertEqual(calls, [('VideoCapture', '/dev/video4', fake.CAP_V4L2), ('release',)])
+
+    def test_the_stand_in_ids_are_opencvs(self):
+        import cv2
+        fake = _recording_cv2([])
+        for name in ('CAP_V4L2', 'CAP_PROP_FRAME_WIDTH', 'CAP_PROP_FRAME_HEIGHT', 'CAP_PROP_FPS',
+                     'CAP_PROP_FOURCC', 'CAP_PROP_CONVERT_RGB'):
+            with self.subTest(name):
+                self.assertEqual(getattr(fake, name), getattr(cv2, name))
 
 
 class TheArguments(unittest.TestCase):

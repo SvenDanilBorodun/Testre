@@ -35,6 +35,7 @@ import unittest
 from unittest import mock
 
 from gui.app import camera_bridge, constants, scene_split, win_camera
+from test_scene_split import _jpeg_header
 from timeout_guard import BoundedTestCase
 
 try:  # numpy/cv2 may be absent on a bare runner.
@@ -264,6 +265,40 @@ class ThePassthroughStream(_Patched):
                 self.assertNotEqual(item[0], cut_bytes)
         self.assertEqual(worker.verifier.dropped, 4)
         self.assertEqual(_state(worker)['dropped'], 4)
+
+    def test_a_frame_only_the_split_refuses_is_dropped_and_counted(self):
+        """A complete 1920x1080 header with no decodable picture: the verifier
+        releases it, ``outside_from_jpeg`` refuses it. It reaches no sender and
+        counts as dropped, and 15 in a row are ``bad_frames``, as on the Pi
+        (test_scene_camera_node)."""
+        whole = _passthrough(self.jpeg)
+        undecodable = _passthrough(_jpeg_header(1920, 1080))
+        self.assertTrue(scene_split.jpeg_complete(undecodable))
+        self.assertEqual(scene_split.jpeg_size(undecodable), (1920, 1080))
+        with self.assertRaises(scene_split.SplitError):
+            scene_split.outside_from_jpeg(undecodable)
+        first_bad = scene_split.VERIFY_FRAMES
+        bad = range(first_bad, first_bad + scene_split.BAD_FRAMES_LIMIT)
+        outside, studio, dropped = [], [], []
+        worker = self._worker()
+
+        def on_read(i):
+            outside.append(worker.latest()[1])
+            studio.append(worker.studio.latest()[1])
+            dropped.append(worker.verifier.dropped)
+            if i == bad[-1]:
+                worker.stop()
+
+        self.cam = _Cam(self.clock, lambda i: undecodable if i in bad else whole, on_read)
+        worker.run()
+        # The 20 whole frames streamed one; none of the 15 added another.
+        self.assertEqual((outside[first_bad], studio[first_bad]), (1, 1))
+        self.assertEqual((worker.latest()[1], worker.studio.latest()[1]), (1, 1))
+        self.assertEqual(dropped[first_bad:], list(range(scene_split.BAD_FRAMES_LIMIT)))
+        self.assertEqual(worker.verifier.dropped, scene_split.BAD_FRAMES_LIMIT)
+        self.assertEqual((worker.verifier.state, worker.verifier.fault), ('fault', 'bad_frames'))
+        self.assertTrue(self.cam.released)
+        self.assertEqual(_state(worker)['fault'], 'bad_frames')
 
     def test_the_state_says_streaming_with_passthrough_and_the_windows_profile_id(self):
         frame = _passthrough(self.jpeg)

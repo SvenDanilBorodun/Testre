@@ -504,6 +504,7 @@ class CaptureVerifier:
         if not ok:
             self._refused(now)
             return False
+        self._run_at_release = self._bad_in_a_row
         self._bad_in_a_row = 0
         if self._kind is None:
             self._kind = kind
@@ -524,8 +525,11 @@ class CaptureVerifier:
 
     def split_failed(self, now):
         """A released frame the split still refused: dropped and counted like a
-        frame the check refused."""
+        frame the check refused. Its release did not end the run of refused
+        frames (nothing left), so the run goes on from where ``frame()`` found
+        it, and ``BAD_FRAMES_LIMIT`` such frames in a row are ``bad_frames``."""
         if self.state == STATE_STREAMING:
+            self._bad_in_a_row = max(self._bad_in_a_row, self._run_at_release)
             self._refused(now)
 
     # -- what the state message reports -----------------------------------
@@ -559,6 +563,7 @@ class CaptureVerifier:
         self._deadline = None if now is None else now + VERIFY_WINDOW_S
         self._good = 0
         self._bad_in_a_row = 0
+        self._run_at_release = 0     # the run of refused frames the last released frame ended
         self._kind = None
         self._times = collections.deque(maxlen=FPS_WINDOW_FRAMES)
 

@@ -1237,6 +1237,35 @@ def _eeprom_window_rad(limits, sign):
 # joint): the tower check refuses it.
 TOWER_WINDOW_RAD = tuple(_eeprom_window_rad(limits, sign)
                          for limits, sign in zip(JOINT_LIMITS_RAD, JOINT_SIGNS))
+# A limp joint may rest a few ticks OUTSIDE its window against a hard stop (a
+# claw squeezed shut, joint 2 on its back stop): the torque-on's seed pulls it
+# to the window edge at SEED_SPEED_STEPS (_seed_goal_from_present_locked), but
+# a reading taken right after the torque-on still lies outside, and judging it
+# refused the press as unjudgeable („neu starten", which cannot help). So
+# run_home re-reads, every TOWER_PULL_IN_POLL_S, until every joint is inside
+# its window, for at most the pull-in that reading needs (its distance at
+# SEED_SPEED_STEPS plus TOWER_PULL_IN_SLACK_S), and judges that reading. The
+# rule is unchanged: a reading still outside then is refused as before, and
+# one further out than the boot band (_DEFAULT_BOOT_POSITION_TOLERANCE_TICKS)
+# or non-finite is no pull-in and is judged at once.
+TOWER_PULL_IN_SLACK_S = 0.25
+TOWER_PULL_IN_POLL_S = 0.02
+
+
+def tower_window_excess_ticks(reading):
+    """How many ticks the furthest joint of ``reading`` (arm joints + claw)
+    lies outside its EEPROM window: 0.0 when every joint is inside, ``None``
+    for a missing, short or non-finite reading."""
+    try:
+        values = [float(v) for v in list(reading)[:N_ARM_JOINTS + 1]]
+    except (TypeError, ValueError):
+        return None
+    if len(values) != len(TOWER_WINDOW_RAD) or not all(
+            math.isfinite(v) for v in values):
+        return None
+    worst = max(max(lo - v, v - hi)
+                for v, (lo, hi) in zip(values, TOWER_WINDOW_RAD))
+    return max(0.0, worst) / RAD_PER_TICK
 
 
 def scene_profile_from_env(env):
@@ -2167,6 +2196,10 @@ class FeetechArmNode(Node):
                        'werden — die Grundstellungs-Fahrt entfällt.')
             self.get_logger().error(message)
             return False, message
+        # On the tower the pose both checks judge, and the glide starts from,
+        # is the one after the torque-on's pull-in (TOWER_PULL_IN_SLACK_S).
+        if tower_check_on():
+            current = self._reading_after_pull_in(current)
         # TABLE-FLOOR PRE-CHECK (Rule §2, see BOOT_HOME_FLOOR_TOL_M). The glide
         # is a straight joint-space line and nothing else judges it; from the
         # pose a limp arm collapses into it can drive a link 16 cm into the
@@ -2201,6 +2234,27 @@ class FeetechArmNode(Node):
         threading.Thread(target=self._boot_home_verify, args=(gen,),
                          name='feetech-boothome-verify', daemon=True).start()
         return True, ''
+
+    def _reading_after_pull_in(self, current: list) -> list:
+        """``current`` once the torque-on has pulled every joint into its
+        EEPROM window (see TOWER_PULL_IN_SLACK_S): re-read until it is, for at
+        most that reading's pull-in time, and return the last reading (a failed
+        re-read keeps the one before). A reading inside its windows, a
+        non-finite one or one beyond the boot band is returned at once."""
+        excess = tower_window_excess_ticks(current)
+        if not excess or excess > _DEFAULT_BOOT_POSITION_TOLERANCE_TICKS:
+            return current
+        deadline = (time.monotonic() + excess / SEED_SPEED_STEPS
+                    + TOWER_PULL_IN_SLACK_S)
+        while time.monotonic() < deadline:
+            time.sleep(TOWER_PULL_IN_POLL_S)
+            fresh = self._read_positions_once()
+            if fresh is None:
+                continue
+            current = fresh
+            if tower_window_excess_ticks(current) == 0.0:
+                break
+        return current
 
     def _home_cb(self, _request, response):
         """/v1/home + /edubotics/home_arm — Trigger, one callback for both.

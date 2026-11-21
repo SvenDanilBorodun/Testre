@@ -863,6 +863,98 @@ def test_wiring_the_low_wall_stays_the_students_only_zone_with_the_provider(monk
     assert ctx.zones == wall
 
 
+@pytest.mark.parametrize('arm', ['v1', 'omx'])
+def test_wiring_the_choke_point_judges_every_leg_no_route_judged(arm, monkeypatch):
+    """Verify R-1 (fails when the choke point judges nothing): ``_publish_motion`` asks the run's guard for a leg no
+    route judged and refuses it before anything is published; a leg ``_publish_route`` publishes is exempt only while
+    that route runs."""
+    monkeypatch.setattr(M, 'chunked_publish', _fast_publish)
+    o = H.GR[arm]['open']
+    a, b = [float(v) for v in H.HOME[arm]] + [o], list(_hover(arm, 0.18, 20.0)) + [o]
+    clear = _Scripted()
+    ctx = _Run(arm, a, guard=clear)
+    M._publish_motion(ctx, a, b, M.DEFAULT_MOVE_DURATION_S)
+    assert clear.legs == 1 and len(ctx.published) == 1
+    refuse = _Scripted(lambda _k, _a, _b: True)
+    ctx = _Run(arm, a, guard=refuse)
+    with pytest.raises(M.WorkflowError) as excinfo:
+        M._publish_motion(ctx, a, b, M.DEFAULT_MOVE_DURATION_S)
+    assert str(excinfo.value) == _TOO_CLOSE_DE
+    assert refuse.legs == 1 and ctx.published == []
+    M._publish_route(ctx, [([(a, b, M.DEFAULT_MOVE_DURATION_S)], False)])
+    assert refuse.legs == 1 and len(ctx.published) == 1
+    with pytest.raises(M.WorkflowError):
+        M._publish_motion(ctx, a, b, M.DEFAULT_MOVE_DURATION_S)
+    assert refuse.legs == 2 and len(ctx.published) == 1
+
+
+def _descend_the_guard_refuses(arm, ik, guard):
+    """verify R-1's p10: a grasp at the mat (about 8 cm from the base, a pin a student program can name) whose hover
+    leg from HOME the guard passes and whose straight descend onto it the guard refuses, the claw open:
+    ``(grasp_xyz, grasp, hover)``, or ``None``."""
+    n = PROFILES[arm].num_arm_joints
+    o = H.GR[arm]['open']
+    home = [float(v) for v in H.HOME[arm]] + [o]
+    z = SF.MAT_THICKNESS_M + SF.FINGERTIP_BELOW_EE_M[arm] + M.GRASP_CLEARANCE_M
+    for r in np.linspace(0.08, 0.30, 45):
+        for az in np.linspace(60.0, 175.0, 116):
+            x, y = r * math.cos(math.radians(az)) + ik.base_axis_x, r * math.sin(math.radians(az))
+            grasp = ik.solve((x, y, z), roll=M.GRASP_ROLL_RAD)
+            hover = ik.solve((x, y, z + M.DEFAULT_APPROACH_HEIGHT_M), roll=M.GRASP_ROLL_RAD)
+            if grasp is None or hover is None:
+                continue
+            if (M.tower_leg_verdict(guard, home, list(hover) + [o], n) is None
+                    and M.tower_leg_verdict(guard, list(hover) + [o], list(grasp) + [o], n) is not None):
+                return (x, y, z), list(grasp), list(hover)
+    return None
+
+
+@pytest.mark.parametrize('arm', ['v1', 'omx'])
+def test_wiring_a_pickup_whose_descend_the_guard_refuses_stops_at_the_hover(arm, monkeypatch):
+    """Verify R-1 (fails when the choke point judges nothing): with the real guard (no arm check yet), a pickup whose
+    hover leg is clear and whose descend the guard refuses — judged only at the publish choke point — is refused
+    with TOWER_TOO_CLOSE_DE after the open and the hover: nothing descends, closes or lifts into the refused
+    region."""
+    monkeypatch.setattr(M, 'chunked_publish', _fast_publish)
+    ik = _arm_ik(arm)
+    guard = _guard_on(arm, ik, calibrated=False)
+    found = _descend_the_guard_refuses(arm, ik, guard)
+    assert found is not None
+    grasp_xyz, grasp, hover = found
+    ctx = _Run(arm, [float(v) for v in H.HOME[arm]] + [H.GR[arm]['open']], guard=guard, ik=ik)
+    with pytest.raises(M.WorkflowError) as excinfo:
+        M._execute_pickup(ctx, grasp_xyz, M.DEFAULT_APPROACH_HEIGHT_M, M.GRASP_ROLL_RAD, H.GR[arm]['closed'])
+    assert str(excinfo.value) == _TOO_CLOSE_DE
+    assert len(ctx.published) == 2
+    assert np.allclose(ctx.published[-1][-1][0][:5], hover, atol=1e-6)
+    assert not any(np.allclose(p[0][:5], grasp, atol=1e-6) for chunk in ctx.published for p in chunk)
+
+
+def test_wiring_a_provider_that_raises_refuses_the_start_in_german(monkeypatch):
+    """Verify R-2 (fails when a raising provider starts the run unjudged): a fixture_guard_provider that raises
+    refuses the start with TOWER_UNJUDGEABLE_DE — the run never starts and nothing is published; the next start
+    with a working provider runs."""
+    from physical_ai_server.workflow.workflow_manager import WorkflowManager
+    monkeypatch.setattr(M, 'chunked_publish', _fast_publish)
+    ik = _arm_ik('omx')
+    start = list(_hover('omx', 0.18, 20.0)) + [H.GR['omx']['open']]
+    published, finished = [], []
+
+    def broken():
+        raise RuntimeError('the arm check cannot be read')
+    wm = WorkflowManager(publisher=published.append, ik_factory=lambda: ik, get_follower_joints=lambda: list(start),
+                         arm_profile=PROFILES['omx'], fixture_guard_provider=broken, on_finished=finished.append)
+    program = json.dumps({'blocks': {'languageVersion': 0, 'blocks': [{'type': 'edubotics_home', 'id': 'h1'}]}})
+    assert wm.start(program, 'turm') == (False, fg().TOWER_UNJUDGEABLE_DE, [])
+    assert wm._thread is None and not wm.is_running
+    assert published == [] and finished == []
+    wm._fixture_guard_provider = lambda: _Scripted()
+    ok, msg, _warnings = wm.start(program, 'turm')
+    assert ok, msg
+    wm._thread.join(30.0)
+    assert finished == ['finished'] and published
+
+
 def _node_fns(*names, extra=None):
     """node methods exec'd from the shipped source (physical_ai_server.py cannot be imported without rclpy)."""
     ns = {'math': math, 'os': os, 'json': json, 'threading': threading, 'time': time, 'robot_profiles': RP}

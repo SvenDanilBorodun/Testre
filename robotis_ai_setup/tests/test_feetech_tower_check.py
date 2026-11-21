@@ -20,8 +20,9 @@ allowance (``feetech_geometry.tower_glide_decision``). Held here:
 * where a limp arm falls (``limp_fall_direction``, from the URDF's masses);
 * what cannot be judged is refused;
 * the node: ``run_home`` refuses a fallen-back start and writes nothing, glides
-  from HOME's neighbourhood as before, and ``_boot_home_verify`` judges its
-  re-send; under ``legacy`` nothing changes.
+  from HOME's neighbourhood as before, judges the pose after the torque-on has
+  pulled a joint resting just outside its window into it, and
+  ``_boot_home_verify`` judges its re-send; under ``legacy`` nothing changes.
 
 ``feetech_geometry`` is pure Python and imported directly; the node is the REAL
 ``feetech_arm_node`` under fake ROS modules (``test_tower_state_topic``).
@@ -451,6 +452,110 @@ class RunHomeJudgesTheGlide(BoundedTestCase):
         self.assertEqual(DRIVER.TOWER_GLIDE_REFUSAL_DE, TOWER_GLIDE_REFUSAL_D88_DE)
         for text in (DRIVER.TOWER_GLIDE_REFUSAL_DE, DRIVER.TOWER_GLIDE_UNJUDGEABLE_DE):
             self.assertNotRegex(text, STAND_UP_RE)
+
+
+def _tick(joint, rad):
+    return int(round(rad * DRIVER.JOINT_SIGNS[joint] / DRIVER.RAD_PER_TICK)) + DRIVER.fb.CENTER_TICK
+
+
+class _PullIn:
+    """A limp V1 at rest with ``ticks`` (one per servo, possibly outside its EEPROM window), energised by
+    ``energise`` at the clock's time then: every reading after it is that rest pulled toward the window edge at
+    SEED_SPEED_STEPS — the servo's clamp of the seeded goal (``_seed_goal_from_present_locked``) — or, with
+    ``pulls=False``, the rest unchanged (a joint the torque-on cannot move)."""
+
+    def __init__(self, clock, ticks, pulls=True):
+        self.clock, self.ticks, self.pulls = clock, list(ticks), pulls
+        self.energised_at = None
+        self.reads = 0
+
+    def energise(self, node):
+        def boot_energise():
+            node._torque_on = True
+            self.energised_at = self.clock.now
+            return True, '', self._reading(self.ticks)
+        return boot_energise
+
+    def _reading(self, ticks):
+        return [DRIVER.tick_to_rad(t, s) for t, s in zip(ticks, DRIVER.JOINT_SIGNS)]
+
+    def read(self):
+        self.reads += 1
+        moved = 0 if self.energised_at is None or not self.pulls else int(
+            DRIVER.SEED_SPEED_STEPS * (self.clock.now - self.energised_at))
+        out = []
+        for t, limits, sign in zip(self.ticks, DRIVER.JOINT_LIMITS_RAD, DRIVER.JOINT_SIGNS):
+            lo, hi = DRIVER.fb.position_limit_window(*limits, sign)
+            out.append(min(lo, t + moved) if t < lo else max(hi, t - moved) if t > hi else t)
+        return self._reading(out)
+
+
+class RunHomeJudgesThePoseAfterThePullIn(BoundedTestCase):
+    """FAILS FIRST (verify R-3): a limp joint resting a few ticks outside its EEPROM window (the claw squeezed shut,
+    joint 2 on its back stop) is pulled into the window by the torque-on; the press judges the pose after that
+    pull-in, never the reading taken before it, and the refusal rule itself is unchanged."""
+
+    HOME_TICKS = [_tick(j, q) for j, q in enumerate(list(HOME) + [0.90])]
+
+    def _run(self, profile, ticks, pulls=True):
+        node = make_node(profile)
+        node._boot_home_verify = lambda _gen: None    # the verifier would advance the shared clock
+        clock = _Clock()
+        arm = _PullIn(clock, ticks, pulls)
+        node.boot_energise = arm.energise(node)
+        node._read_positions_once = arm.read
+        start = clock.now
+        with scene_profile(profile), mock.patch.object(DRIVER, 'time', clock):
+            result = node.run_home()
+        return node, result, arm, clock.now - start
+
+    def test_a_claw_squeezed_shut_below_its_window_glides(self):
+        self.assertEqual(DRIVER.fb.position_limit_window(*DRIVER.JOINT_LIMITS_RAD[5], DRIVER.JOINT_SIGNS[5])[0],
+                         2048)
+        for claw in (2047, 2046, 2030):
+            with self.subTest(claw=claw):
+                ticks = self.HOME_TICKS[:5] + [claw]
+                node, result, arm, _waited = self._run('tower_v1', ticks)
+                self.assertEqual(result, (True, ''))
+                pulled = arm._reading(self.HOME_TICKS[:5] + [2048])
+                self.assertEqual(node._traj_points, DRIVER.build_boot_home(pulled))
+
+    def test_joint_2_behind_its_back_stop_gets_the_lay_forward_sentence(self):
+        ticks = [_tick(j, q) for j, q in enumerate(FALLEN_BACK)]
+        self.assertEqual(ticks[1], 2048)
+        ticks[1] = 2047
+        node, (ok, message), _arm, _waited = self._run('tower_v1', ticks)
+        self.assertEqual((ok, message), (False, DRIVER.TOWER_GLIDE_REFUSAL_DE))
+        self.assertEqual(node._traj_gen, 0)
+        self.assertTrue(node._torque_on)
+
+    def test_a_reading_the_torque_on_cannot_pull_in_is_refused_after_a_bounded_wait(self):
+        node, (ok, message), arm, waited = self._run('tower_v1', self.HOME_TICKS[:5] + [2047], pulls=False)
+        self.assertEqual((ok, message), (False, DRIVER.TOWER_GLIDE_UNJUDGEABLE_DE))
+        self.assertEqual(node._traj_gen, 0)
+        self.assertGreater(arm.reads, 2)
+        self.assertLessEqual(waited, 1 / DRIVER.SEED_SPEED_STEPS + DRIVER.TOWER_PULL_IN_SLACK_S
+                             + DRIVER.TOWER_PULL_IN_POLL_S + 1e-9)
+
+    def test_a_reading_no_pull_in_explains_is_judged_at_once(self):
+        far = self.HOME_TICKS[:5] + [2048 - DRIVER._DEFAULT_BOOT_POSITION_TOLERANCE_TICKS - 1]
+        for ticks in (far, None):
+            with self.subTest(ticks=ticks):
+                node = make_node('tower_v1')
+                node._torque_on = True
+                reads = []
+                pose = (list(HOME) + [math.nan]) if ticks is None else _PullIn(_Clock(), ticks).read()
+                node._read_positions_once = lambda: reads.append(1) or list(pose)
+                with scene_profile('tower_v1'):
+                    self.assertEqual(node.run_home(), (False, DRIVER.TOWER_GLIDE_UNJUDGEABLE_DE))
+                self.assertEqual(len(reads), 1)
+
+    def test_under_legacy_the_first_reading_glides_as_today(self):
+        ticks = self.HOME_TICKS[:5] + [2047]
+        node, result, arm, waited = self._run('legacy', ticks)
+        self.assertEqual(result, (True, ''))
+        self.assertEqual((arm.reads, waited), (1, 0.0))
+        self.assertEqual(node._traj_points, DRIVER.build_boot_home(arm._reading(ticks)))
 
 
 class TheVerifiersResendIsJudged(BoundedTestCase):

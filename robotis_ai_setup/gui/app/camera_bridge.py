@@ -56,6 +56,7 @@ _MAX_READ_FAILURES = 10  # consecutive read() failures before reopening (phospho
 # The tower scene camera (spec 40 S1).
 HELLO_WAIT_S = 1.0                  # how long a sender of id 16/17 waits for the hello's answer
 STATE_RESEND_S = 1.0                # the camera state goes out on every change and at least this often
+STATE_TIMER_S = 0.5                 # the worker judges the camera this often also while a read blocks
 STUDIO_FALLBACK_JPEG_QUALITY = 90   # the studio frame of a decoded (not passed-through) stream
 _FAILED_READ_WAIT_S = 0.005         # a read that returned nothing, before the next one
 _IDLE_WAIT_S = 0.1                  # the worker's pace while it waits to retry a fault
@@ -71,6 +72,7 @@ SCENE_WRONG_MODE_DE = (
     "mindestens 10 Bildern pro Sekunde — sie wird erneut geöffnet.")
 SCENE_NO_FRAMES_DE = "Die Turm-Kamera liefert keine Bilder — sie wird erneut geöffnet."
 SCENE_BAD_FRAMES_DE = "Die Turm-Kamera liefert beschädigte Bilder — sie wird erneut geöffnet."
+SCENE_STOPPED_DE = "Die Turm-Kamera ist ausgefallen — bitte die Umgebung neu starten."
 SCENE_STREAMING_DE = "Turm-Kamera: 1920×1080 MJPG, {fps:.1f} Bilder/s, Direktdurchleitung {passthrough}"
 _NOT_ACTIVATED_DE = "Die Turm-Kamera wurde nicht aktiviert."
 SCENE_PROBE_REFUSED_DE = (
@@ -459,9 +461,16 @@ class _SceneCaptureWorker(threading.Thread):
     ``STUDIO_FALLBACK_JPEG_QUALITY``). The state message goes into
     ``state_slot`` on every change of state or fault and once a second. A fault
     closes the device, which is opened again when the verifier's back-off is
-    due; a failed self-test is final and the device is never opened. ``clock``
-    is the monotonic clock the verifier runs on; ``log`` gets the one
-    Protokoll line of the first ``streaming``.
+    due; a failed self-test is final and the device is never opened. A read
+    that raises is a read that returned nothing. A timer of the worker's own
+    (``STATE_TIMER_S``) judges the camera and refreshes the state while a read
+    blocks, so a silent camera reads ``no_frames`` and never a stale
+    ``streaming`` (the state sender re-sends the newest state). Anything else
+    that ends the loop leaves the state ``closed`` with ``SCENE_STOPPED_DE``.
+    The verifier is driven by the loop and by the timer; every call on it and
+    the state message are made under ``_lock``. ``clock`` is the monotonic
+    clock the verifier runs on; ``log`` gets the one Protokoll line of the
+    first ``streaming``.
     """
 
     def __init__(self, cam_id: int, role: str, index: int, log=None, clock=time.monotonic):
@@ -472,6 +481,7 @@ class _SceneCaptureWorker(threading.Thread):
         self._halt = threading.Event()  # never `_stop`, see _CaptureWorker
         self._log = log
         self._clock = clock
+        self._lock = threading.Lock()
         self.verifier = scene_split.CaptureVerifier("windows", constants.CAMERA_JPEG_QUALITY)
         self._outside = _Slot()   # (outside frame BGR, capture_ns) for camera id 1
         self.studio = _Slot()     # (camera JPEG bytes, capture_ns) for camera id 16
@@ -499,48 +509,89 @@ class _SceneCaptureWorker(threading.Thread):
 
     def run(self):
         if scene_split.selftest():
-            self.verifier.selftest_failed(self._clock())
+            with self._lock:
+                self.verifier.selftest_failed(self._clock())
             self._note(self._clock())
             return
+        timer_done = threading.Event()
+        timer = threading.Thread(target=self._tick_until, args=(timer_done,),
+                                 name=f"cam-{self.role}-tower-state", daemon=True)
+        timer.start()
         cap = None
         try:
             while not self._halt.is_set():
                 if cap is None:
                     cap = self._open_when_due()
                     continue
-                ok, frame = cap.read()
+                try:
+                    ok, frame = cap.read()
+                except Exception:  # noqa: BLE001 — a read that raises returned nothing (K-1)
+                    ok, frame = False, None
                 now = self._clock()
                 capture_ns = time.time_ns()
-                if not ok or frame is None:
-                    self.verifier.frame(now, None)
+                if not ok:
+                    frame = None
+                with self._lock:
+                    released = self.verifier.frame(now, frame)
+                if frame is None:
                     self._halt.wait(_FAILED_READ_WAIT_S)
-                elif self.verifier.frame(now, frame):
+                elif released:
                     self._hand_over(now, frame, capture_ns)
                 self._note(now)
                 if self.verifier.state == scene_split.STATE_FAULT:
-                    cap.release()
+                    _release(cap)
                     cap = None
+        except Exception:
+            timer_done.set()
+            timer.join()
+            self._end_by_error()
+            raise
         finally:
+            timer_done.set()
+            timer.join()
             if cap is not None:
-                cap.release()
+                _release(cap)
+
+    def _tick_until(self, done):
+        """The state timer: judge the camera without a frame (a read that
+        blocks is silence) and refresh the state, until ``done``."""
+        while not done.wait(STATE_TIMER_S):
+            with self._lock:
+                now = self._clock()
+                self.verifier.tick(now)
+            self._note(now)
+
+    def _end_by_error(self):
+        """The loop ended by an exception: the camera stays off until the
+        bridge starts again. The state left behind says so."""
+        now = self._clock()
+        with self._lock:
+            self.verifier.close(now)
+            self.last_error_de = SCENE_STOPPED_DE
+        self._note(now)
 
     def _open_when_due(self):
         """The opened device, or None while a fault's back-off runs or when
         the open failed (the fault ``open_failed``)."""
         verifier = self.verifier
         now = self._clock()
-        if verifier.state == scene_split.STATE_FAULT and not verifier.retry_due(now):
+        with self._lock:
+            waiting = verifier.state == scene_split.STATE_FAULT and not verifier.retry_due(now)
+            if not waiting:
+                verifier.opening(now)
+        if waiting:
             self._note(now)
             self._halt.wait(_IDLE_WAIT_S)
             return None
-        verifier.opening(now)
         try:
             cap = win_camera.open_scene_capture(self.index)
         except Exception:  # noqa: BLE001 — every open failure is the fault open_failed
-            verifier.open_failed(self._clock())
             cap = None
-        else:
-            verifier.opened(self._clock())
+        with self._lock:
+            if cap is None:
+                verifier.open_failed(self._clock())
+            else:
+                verifier.opened(self._clock())
         self._note(self._clock())
         return cap
 
@@ -553,7 +604,8 @@ class _SceneCaptureWorker(threading.Thread):
             else:
                 outside = scene_split.outside_from_bgr(frame)
         except scene_split.SplitError:
-            self.verifier.split_failed(now)
+            with self._lock:
+                self.verifier.split_failed(now)
             return
         self._outside.put((outside, capture_ns))
         if self._studio_rate.allow(now):
@@ -572,25 +624,39 @@ class _SceneCaptureWorker(threading.Thread):
 
     def _note(self, now):
         """React to a change of the verifier (the German error, the Protokoll
-        line) and keep the state message fresh."""
-        verifier = self.verifier
-        fps = verifier.fps
-        self.fps = 0.0 if fps is None else fps
-        if verifier.generation != self._seen_generation:
-            self._seen_generation = verifier.generation
-            if verifier.state == scene_split.STATE_STREAMING:
-                self.last_error_de = ""
-                if not self._announced and self._log is not None:
-                    self._log(SCENE_STREAMING_DE.format(
-                        fps=self.fps, passthrough="aktiv" if verifier.passthrough else "aus"))
-                self._announced = True
-            elif verifier.state == scene_split.STATE_FAULT:
-                self.last_error_de = _SCENE_FAULT_DE.get(verifier.fault, "")
-        elif self._state_at is not None and now - self._state_at < STATE_RESEND_S:
-            return
-        self._state_at = now
-        self.state_slot.put(
-            (scene_split.state_message(**verifier.state_fields()), time.time_ns()))
+        line) and keep the state message fresh. The message is built and put
+        under ``_lock``, so the loop and the timer never put an older state
+        after a newer one."""
+        line = None
+        with self._lock:
+            verifier = self.verifier
+            fps = verifier.fps
+            self.fps = 0.0 if fps is None else fps
+            if verifier.generation != self._seen_generation:
+                self._seen_generation = verifier.generation
+                if verifier.state == scene_split.STATE_STREAMING:
+                    self.last_error_de = ""
+                    if not self._announced and self._log is not None:
+                        line = SCENE_STREAMING_DE.format(
+                            fps=self.fps, passthrough="aktiv" if verifier.passthrough else "aus")
+                    self._announced = True
+                elif verifier.state == scene_split.STATE_FAULT:
+                    self.last_error_de = _SCENE_FAULT_DE.get(verifier.fault, "")
+            elif self._state_at is not None and now - self._state_at < STATE_RESEND_S:
+                return
+            self._state_at = now
+            self.state_slot.put(
+                (scene_split.state_message(**verifier.state_fields()), time.time_ns()))
+        if line is not None:
+            self._log(line)
+
+
+def _release(cap):
+    """Release a capture; a release that fails must not end the loop."""
+    try:
+        cap.release()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class _HelloSenderWorker(_ConnectMixin, threading.Thread):

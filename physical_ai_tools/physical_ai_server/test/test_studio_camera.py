@@ -33,6 +33,7 @@ import pytest
 
 from physical_ai_server import scene_provenance
 from physical_ai_server.workflow import studio_camera as SC
+from physical_ai_server.workflow.autocal import service as SV
 
 _PS = Path(__file__).resolve().parents[1]
 _REPO = _PS.parents[1]
@@ -409,6 +410,49 @@ def test_a_late_message_of_an_ended_subscription_is_dropped(kit):
     stale.callback(types.SimpleNamespace(data=JPEG_A, format='jpeg'))
     assert kit.cam.frame_age() is None
     assert kit.cam.latest_frame(1.0, wait_s=0.0) is None
+
+
+# ── the mat check's looks on a picture subscribed afresh (FIX-K-r1, K-2) ─────
+
+def _mat_check_looks(kit, first_s, count=200, period_s=1.0 / 15.0):
+    """``SceneCalibration._frames(MAT_CHECK_FRAMES)`` on this camera, whose picture the first request
+    subscribes: its first frame arrives ``first_s`` after the subscription, then one every ``period_s`` (15 Hz,
+    ``count`` in all). Returns the looks and the time the call took."""
+    t0 = kit.clock.t
+    for k in range(count):
+        kit.sleep.at(t0 + first_s + k * period_s, lambda: kit.deliver(JPEG_A))
+    calibration = types.SimpleNamespace(_clock=kit.clock, _camera=kit.cam, _sleep=kit.sleep,
+                                        _detect=lambda frame, roi: frame)
+    looks = SV.SceneCalibration._frames(calibration, SV.MAT_CHECK_FRAMES)
+    return looks, kit.clock.t - t0
+
+
+@pytest.mark.parametrize('first_s', [0.05, 0.45, 0.6, 1.0, 1.5])
+def test_the_mat_check_gets_three_looks_however_late_the_first_frame_comes(kit, first_s):
+    """K-2: the picture is released 10 s after the last request, so the mat check of a program started after a
+    pause runs on a picture subscribed afresh. Its window for three distinct looks starts at the first frame: a
+    window counted from the request ended inside the first-frame wait and left one look (before the fix: one look
+    for a first frame 0.45, 0.6, 1.0 and 1.5 s after the subscription)."""
+    assert SV.MAT_FRAMES_WAIT_S == 0.5
+    assert SV._FRAME_POLL_S == 0.01
+    looks, took = _mat_check_looks(kit, first_s)
+    assert len(looks) == SV.MAT_CHECK_FRAMES == 3
+    assert len({id(look) for look in looks}) == 3                 # three distinct frames
+    assert took <= first_s + SV.MAT_FRAMES_WAIT_S + 1e-9
+
+
+def test_a_picture_that_stops_after_its_first_frame_still_ends_the_looks_in_time(kit):
+    """The window still bounds the wait: one frame and then silence ends the looks MAT_FRAMES_WAIT_S after that
+    frame, with the one look."""
+    looks, took = _mat_check_looks(kit, 0.6, count=1)
+    assert len(looks) == 1
+    assert 0.6 + SV.MAT_FRAMES_WAIT_S - 1e-9 <= took <= 0.6 + SV.MAT_FRAMES_WAIT_S + SV._FRAME_POLL_S + 1e-9
+
+
+def test_a_picture_that_never_comes_ends_the_looks_after_the_first_frame_wait(kit):
+    looks, took = _mat_check_looks(kit, 0.0, count=0)
+    assert looks == []
+    assert took == pytest.approx(SC.FIRST_FRAME_WAIT_S, abs=1e-9)
 
 
 # ── start, shutdown and the spin loop ────────────────────────────────────────

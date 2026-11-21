@@ -81,3 +81,47 @@ def test_sigmas_are_the_root_of_the_inverse_normal_matrix_and_keep_a_near_null_d
     J2[:, 3] = J2[:, 2] * (1.0 + 1e-9)
     s = lm.sigmas(J2)
     assert s[3] > 1e6 and s[2] > 1e6
+
+
+def _spd(n, seed):
+    rng = np.random.default_rng(seed)
+    J = rng.normal(size=(n + 20, n))
+    return J.T @ J + np.diag(rng.uniform(1e-6, 1.0, n)), rng.normal(size=n)
+
+
+def test_the_step_solve_is_the_cholesky_solve_of_lapack_at_every_size():
+    """FIX-K-r1 (K-3): above 63 parameters the step's Cholesky is NumPy alone, so it wakes no BLAS thread pool
+    (LAPACK's does from 64 × 64 on); it is LAPACK's factor and solve to rounding, at the handheld solve's 114
+    parameters and beyond. Up to 63 the step keeps LAPACK's factor (the arm check's 32: test_autocal_arm_check's
+    digest). The thread pool itself is test_autocal_handheld's."""
+    assert lm._LAPACK_CHOLESKY_MAX_N == 63
+    for n in (1, 2, 6, 32, 63, 64, 114, 150):
+        A, b = _spd(n, n)
+        L = lm._cholesky(A)
+        assert np.allclose(L, np.linalg.cholesky(A), rtol=1e-10, atol=1e-12), n
+        assert np.array_equal(L, np.tril(L)), n
+        x = lm._solve_spd(A, b)
+        assert np.allclose(x, np.linalg.solve(A, b), rtol=1e-8, atol=1e-10), n
+
+
+def test_a_matrix_that_is_not_positive_definite_raises():
+    """Like LAPACK for an indefinite and a singular matrix; a NaN pivot raises too (OpenBLAS's Cholesky returns a
+    NaN factor there), which lm.solve treats exactly like the NaN step it would have tried: the step is refused and
+    the damping grows."""
+    A, _b = _spd(6, 1)
+    lapack_refuses = (A - np.eye(6) * (np.linalg.eigvalsh(A)[0] + 1.0),   # indefinite
+                      np.zeros((6, 6)))                                     # singular
+    for bad in lapack_refuses + (np.where(np.eye(6, k=-1) > 0, np.nan, A),):   # NaN below the diagonal
+        try:
+            lm._cholesky(bad)
+        except np.linalg.LinAlgError:
+            pass
+        else:
+            raise AssertionError(bad)
+    for bad in lapack_refuses:
+        try:
+            np.linalg.cholesky(bad)
+        except np.linalg.LinAlgError:
+            pass
+        else:
+            raise AssertionError(('LAPACK accepts', bad))

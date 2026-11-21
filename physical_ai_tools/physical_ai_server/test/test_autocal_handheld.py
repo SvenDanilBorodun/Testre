@@ -20,7 +20,12 @@ from __future__ import annotations
 import ast
 import json
 import math
+import os
+import subprocess
+import sys
+import textwrap
 import threading
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -281,6 +286,70 @@ def test_a_lens_outside_the_lens_gates_is_refused(lens):
     result = HH.solve(ten_cell_views(lens, rng).views)
     assert result.rms_px <= HH.RMS_MAX_PX
     assert not result.ok and result.code == 'lens' and result.message_de == T.HANDHELD_FAILED_DE
+
+
+# The solves run in a fresh interpreter with the machine's own BLAS threads (no thread variable set). Between two
+# solves the child waits until no thread but its own uses CPU: a BLAS pool that a call woke keeps its workers
+# spinning for a while, so a solve that wakes it is seen as CPU of other threads while it runs.
+_BLAS_THREAD_VARS = ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS',
+                     'NUMEXPR_NUM_THREADS', 'GOTO_NUM_THREADS')
+_SOLVE_CPU_CHILD = textwrap.dedent('''
+    import json
+    import time
+
+    import numpy as np
+
+    import autocal_sim as S
+    import test_autocal_handheld as TH
+    from physical_ai_server.workflow.autocal import arm_check as AC
+    from physical_ai_server.workflow.autocal import handheld as HH
+
+    capture = TH.ten_cell_views(TH.TRUTH, np.random.default_rng(2026))
+    jobs = {'handheld': lambda: HH.solve(capture.views)}
+    for kind in ('v1', 'omx'):
+        rng = np.random.default_rng([0, 0])
+        inp = S.arm_check_inputs(S.sample_kit(kind, rng, S.Options()), rng, S.Options())
+        jobs['arm check ' + kind] = lambda inp=inp, kind=kind: AC.run(
+            inp.records, inp.looks, profile_id=S.PROFILE[kind], image_size=(S.WIDTH, S.HEIGHT),
+            camera_profile_id='3efca10f3a05', lens_prior=None)
+
+    def quiet():
+        """Until no other thread used CPU for 0.25 s (at most 10 s)."""
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            p0, t0 = time.process_time(), time.thread_time()
+            time.sleep(0.25)
+            if (time.process_time() - p0) - (time.thread_time() - t0) < 0.005:
+                return
+
+    out = {}
+    for name, job in jobs.items():
+        quiet()
+        p0, t0, w0 = time.process_time(), time.thread_time(), time.perf_counter()
+        job()
+        out[name] = [time.process_time() - p0, time.thread_time() - t0, time.perf_counter() - w0]
+    print(json.dumps(out))
+''')
+
+
+def test_the_autocal_solves_keep_to_their_own_thread():
+    """FIX-K-r1 (K-3): the handheld solve and the arm check's solve use the CPU of the thread they run on and
+    wake no BLAS thread pool. The handheld solve's normal matrix is 114 × 114 (18 views); LAPACK's Cholesky of
+    that size woke OpenBLAS's pool, whose workers then spun on every core. Measured before the fix on 18 cores:
+    2.9 s of process CPU for 0.2 s of the solve's own, and 1.7–2.4 s of wall time instead of 0.20–0.23 s beside
+    16 busy processes."""
+    env = {k: v for k, v in os.environ.items() if k not in _BLAS_THREAD_VARS}
+    here = Path(__file__).resolve().parent
+    env['PYTHONPATH'] = os.pathsep.join([str(here), str(here.parent)] + sys.path)
+    child = subprocess.run([sys.executable, '-c', _SOLVE_CPU_CHILD], env=env, capture_output=True, text=True,
+                           timeout=300, cwd=str(here.parent))
+    assert child.returncode == 0, child.stderr
+    measured = json.loads(child.stdout.strip().splitlines()[-1])
+    assert list(measured) == ['handheld', 'arm check v1', 'arm check omx']
+    for name, (process_s, thread_s, wall_s) in measured.items():
+        other_s = process_s - thread_s
+        print(f'{name}: {thread_s:.3f} s on its thread, {other_s:.3f} s on others, {wall_s:.3f} s wall')
+        assert other_s <= 0.25 * thread_s + 0.02, (name, process_s, thread_s, wall_s)
 
 
 # ══════════════════════════════════════════════════════════════════════════

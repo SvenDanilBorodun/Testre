@@ -46,14 +46,41 @@ def _prior_rows(p, idx, mean, sigma):
     return (p[idx][keep] - mean[idx][keep]) / s[keep]
 
 
+# LAPACK's Cholesky runs on one thread up to this size and wakes OpenBLAS's
+# thread pool above it (numpy 1.26.4's OpenBLAS, measured: 63 × 63 one thread,
+# 64 × 64 the pool). Up to it the step keeps LAPACK's factor, so the arm check
+# (32 parameters) and the mat check (6) solve as before to the bit.
+_LAPACK_CHOLESKY_MAX_N = 63
+
+
+def _cholesky(A) -> np.ndarray:
+    """The lower Cholesky factor of a symmetric positive definite ``A``, column
+    by column from its lower triangle, in NumPy alone (no BLAS, no LAPACK).
+    Raises ``LinAlgError`` when ``A`` is not positive definite (a pivot that is
+    not positive, or not finite)."""
+    A = np.asarray(A, dtype=np.float64)
+    n = A.shape[0]
+    L = np.zeros((n, n))
+    for j in range(n):
+        d = A[j, j] - float(np.sum(L[j, :j] * L[j, :j]))
+        if not (math.isfinite(d) and d > 0.0):
+            raise np.linalg.LinAlgError('Matrix is not positive definite')
+        L[j, j] = ljj = math.sqrt(d)
+        L[j + 1:, j] = (A[j + 1:, j] - np.sum(L[j + 1:, :j] * L[j, :j], axis=1)) / ljj
+    return L
+
+
 def _solve_spd(A, b) -> np.ndarray:
     """``A·x = b`` for a symmetric positive definite ``A``: Cholesky and two
     explicit substitutions. LAPACK's general solver (and BLAS's ``Jᵀ·r``) start
-    OpenBLAS's thread pool even for a 32 × 32 system, and its threads then spin
-    on every core for a while after each call — measured, they cost several
-    cores per process for a solve that needs a fraction of one. Raises
-    ``LinAlgError`` when ``A`` is not positive definite."""
-    L = np.linalg.cholesky(A)
+    OpenBLAS's thread pool even for a 32 × 32 system, and LAPACK's Cholesky
+    does above ``_LAPACK_CHOLESKY_MAX_N`` (the handheld solve's system is
+    114 × 114 at 18 views), so a larger system is factored in NumPy alone. The
+    pool's threads spin on every core for a while after each call — measured,
+    they cost several cores per process for a solve that needs a fraction of
+    one, and under load they made the handheld solve about ten times slower.
+    Raises ``LinAlgError`` when ``A`` is not positive definite."""
+    L = np.linalg.cholesky(A) if b.size <= _LAPACK_CHOLESKY_MAX_N else _cholesky(A)
     n = b.size
     y = np.empty(n)
     for i in range(n):

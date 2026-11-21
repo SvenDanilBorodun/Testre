@@ -136,7 +136,7 @@ POSE1_CHECK_S = 3.0
 MAT_CHECK_FRAMES = 3
 # a look older than this is no look of the arm's rest
 LOOK_MAX_AGE_S = 0.5
-# the mat check waits this long in all for three distinct frames, then takes what it has
+# after the picture's first frame the mat check waits this long for three distinct frames, then takes what it has
 MAT_FRAMES_WAIT_S = 0.5
 _FRAME_POLL_S = 0.01
 
@@ -528,15 +528,21 @@ class SceneCalibration:
 
     def _frames(self, n):
         """Up to ``n`` distinct full-resolution looks (the detector's
-        ``tags.Frame``), waiting at most ``MAT_FRAMES_WAIT_S`` for new frames."""
+        ``tags.Frame``): the first once the picture has a frame (the camera's
+        own first-frame wait after a fresh subscription), the others within
+        ``MAT_FRAMES_WAIT_S`` of it. The window starts at the first frame, not
+        at the request: the picture is released when idle, and a window
+        counted from the request ran out during that wait (K-2)."""
         frames, seen = [], []
-        deadline = self._clock() + MAT_FRAMES_WAIT_S
+        deadline = None
         for _ in range(n + int(MAT_FRAMES_WAIT_S / _FRAME_POLL_S)):
             if len(frames) >= n:
                 break
             got = self._camera.latest_frame(math.inf)
             if got is None:
                 break
+            if deadline is None:
+                deadline = self._clock() + MAT_FRAMES_WAIT_S
             frame = got[0]
             if any(frame is s for s in seen):
                 if self._clock() >= deadline:

@@ -1836,6 +1836,75 @@ def stop_cloud_inference_after_window_close(generation, is_current, log=None, *,
     return outcome
 
 
+# ── Where a limp V1 falls, read before „Stoppen" ─────────────────────────────
+#
+# Stopping the environment de-energises the arm. On the V1 under the camera
+# tower (v1_studio + tower_v1) the driver publishes where its limp arm would
+# fall (WP-T1, latched and at 2 Hz), and a V1 that falls BACK falls toward the
+# tower. The GUI has no rosbridge, so before the stop it reads that topic ONCE
+# through a fixed script (spec 40 WP-GUISTOP, 52 §6.3); gui_app asks the
+# student first on "back" or "unknown". "none" is only a stopped ARM container:
+# an arm no container holds cannot be made limp by the stop. Everything else —
+# the server container down, no message within the bound (the topic absent, a
+# slow CLI start), a WSL that fails — is "unknown", which asks.
+
+# Must stay equal to feetech_arm_node.TOWER_STATE_TOPIC; tests/test_gui_tower_stop.py compares them.
+TOWER_STATE_TOPIC = "/edubotics/tower_state"
+# The script prints exactly one `EDUBOTICS_TOWER_FALL=<fall>` line; the GUI
+# reads nothing else (not stderr, not the exit code).
+TOWER_FALL_SENTINEL = "EDUBOTICS_TOWER_FALL="
+TOWER_FALL_FORWARD, TOWER_FALL_BACK, TOWER_FALL_UNKNOWN, TOWER_FALL_NONE = (
+    "forward", "back", "unknown", "none")
+_TOWER_FALL_ANSWERS = (TOWER_FALL_FORWARD, TOWER_FALL_BACK, TOWER_FALL_UNKNOWN,
+                       TOWER_FALL_NONE)
+# One attempt, bounded inside the container (`timeout -k 1 8`) and from the
+# outside by this many seconds for the whole `wsl.exe` round trip, as the
+# token clear and the cloud stop are.
+TOWER_STATE_EXEC_TIMEOUT_S = 15
+
+# Fixed text, nothing interpolated; carried by `wsl_bridge.run` (stdin to
+# `bash`) like _HF_CLEAR_SCRIPT, its `docker exec` reading /dev/null. The echo
+# runs `nice`d and bounded in the server container, which already runs the
+# GUI's ros2 CLI calls; it asks for the publisher's QoS (reliable +
+# transient-local) so the latched message arrives at once. `ros2 topic echo`
+# prints the String on one line as `data: '{"v": 1, "glide": …, "fall":
+# "<fall>", …}'` (the driver's json.dumps; "fall" sits well inside the CLI's
+# 128-character cut).
+TOWER_STATE_SCRIPT = r"""a=open_manipulator
+c=physical_ai_server
+if [ "$(docker inspect -f '{{.State.Running}}' "$a" 2>/dev/null)" != "true" ]; then echo EDUBOTICS_TOWER_FALL=none; exit 0; fi
+out=$(docker exec "$c" bash -c 'source /opt/ros/jazzy/setup.bash && timeout -k 1 8 nice -n 19 ros2 topic echo --once --qos-reliability reliable --qos-durability transient_local /edubotics/tower_state std_msgs/msg/String' </dev/null 2>/dev/null)
+case "$out" in *'"fall": "forward"'*) echo EDUBOTICS_TOWER_FALL=forward;; *'"fall": "back"'*) echo EDUBOTICS_TOWER_FALL=back;; *) echo EDUBOTICS_TOWER_FALL=unknown;; esac
+"""
+
+
+def _tower_fall_outcome(stdout) -> str:
+    """The fall named by the script's sentinel line; anything else is unknown."""
+    if not isinstance(stdout, str):
+        return TOWER_FALL_UNKNOWN
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line.startswith(TOWER_FALL_SENTINEL):
+            fall = line[len(TOWER_FALL_SENTINEL):].strip()
+            return fall if fall in _TOWER_FALL_ANSWERS else TOWER_FALL_UNKNOWN
+    return TOWER_FALL_UNKNOWN
+
+
+def read_tower_fall(timeout: int = TOWER_STATE_EXEC_TIMEOUT_S) -> str:
+    """Where the V1's limp arm would fall if the environment stopped now.
+
+    One attempt. Returns "forward" / "back" / "unknown" / "none". Reads ONLY
+    the stdout sentinel of ``TOWER_STATE_SCRIPT``, maps every failure (a
+    round trip past ``timeout``, a missing WSL, an OSError, anything) to
+    "unknown", never raises and never logs or returns command output.
+    """
+    try:
+        result = wsl_bridge.run(TOWER_STATE_SCRIPT, timeout=timeout, check=False)
+        return _tower_fall_outcome(getattr(result, "stdout", None))
+    except Exception:  # noqa: BLE001 — the contract is "never raises"
+        return TOWER_FALL_UNKNOWN
+
+
 def get_container_status() -> dict[str, str]:
     """Get status of all project containers.
 

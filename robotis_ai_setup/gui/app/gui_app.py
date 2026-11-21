@@ -370,6 +370,7 @@ def _apply_window_icon(root: tk.Tk) -> None:
 
 
 from . import device_manager, docker_manager, health_checker, config_generator, wsl_bridge, update_checker, webview_window
+from . import tower_stop_dialog
 from .roboter_studio_control import RoboterStudioControlServer
 from . import theme as theme_mod
 from . import camera_bridge as camera_bridge_mod
@@ -1199,7 +1200,7 @@ class EduBoticsApp:
 
         self.btn_stop = ttk.Button(
             btn_frame, text="Stoppen",
-            command=self._stop_environment,
+            command=self._stop_environment_after_tower_check,
             state=tk.DISABLED,
         )
         self.btn_stop.pack(side=tk.LEFT, padx=5)
@@ -4992,6 +4993,54 @@ class EduBoticsApp:
                if follower_only else
                "Leader-Arm verbunden — Teleoperation ist wieder verfügbar.")
         return True, msg
+
+    def _stop_environment_after_tower_check(self):
+        """„Stoppen": on the V1 under the camera tower, ask first where the limp arm falls.
+
+        Spec 40 WP-GUISTOP, 52 §5.3 (c) and §6.3, D56 (c). Stopping
+        de-energises the arm, and a V1 whose limp arm falls BACK falls toward
+        the camera tower. On ``v1_studio`` + ``tower_v1`` (not in cloud-only
+        mode, where no robot runs) the driver's verdict is read ONCE on a
+        worker thread (``docker_manager.read_tower_fall``, bounded at
+        TOWER_STATE_EXEC_TIMEOUT_S): "back" or "unknown" shows
+        ``tower_stop_dialog`` on the Tk thread, "forward" or "none" stops at
+        once. Every other rig calls ``_stop_environment`` straight away and
+        never reaches WSL. The check ends before ``_stop_environment`` starts,
+        and that method is untouched: the stop's order (VA-07) and its budget
+        stay as they are. „Abbrechen" stops nothing; a dialog that cannot be
+        shown never blocks the stop.
+        """
+        if self.cloud_only.get() or not tower_stop_dialog.applies(
+                self._rs_robot_type, self._rs_scene_profile):
+            self._stop_environment()
+            return
+        self.btn_stop.config(state=tk.DISABLED)
+        self.btn_open_browser.config(state=tk.DISABLED)
+        status = self.status_var.get()
+        self._set_status(tower_stop_dialog.CHECKING_DE)
+
+        def _decide(fall):
+            if tower_stop_dialog.asks_first(fall):
+                if fall == docker_manager.TOWER_FALL_UNKNOWN:
+                    self._log(tower_stop_dialog.UNKNOWN_DE)
+                try:
+                    stop = tower_stop_dialog.ask(self.root)
+                except Exception:  # noqa: BLE001 — a hint never blocks the stop
+                    self._log(tower_stop_dialog.DIALOG_FAILED_DE)
+                    stop = True
+                if not stop:
+                    self.btn_stop.config(state=tk.NORMAL)
+                    self.btn_open_browser.config(state=tk.NORMAL)
+                    self._set_status(status)
+                    self._log(tower_stop_dialog.CANCELLED_DE)
+                    return
+            self._stop_environment()
+
+        def _check():
+            fall = docker_manager.read_tower_fall()
+            self.root.after(0, lambda: _decide(fall))
+
+        threading.Thread(target=_check, daemon=True).start()
 
     def _stop_environment(self):
         """Alle Container in der EduBotics-Umgebung stoppen."""

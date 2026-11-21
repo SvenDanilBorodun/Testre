@@ -30,7 +30,8 @@ text of its content stream.
 * the clip-on target labels carry their nine ids row-major and the fixture-tag
   sheet 480/481 at 25 mm, every tag's top toward +x of its frame;
 * the five PDFs in ``classroom_kit/`` are the generators' output at 300 dpi (page,
-  tags and cut; not the printed hash, which WP-11 changes on purpose).
+  tags, cut and the printed hash: a contract change regenerates all five,
+  ``tools/classroom_kit_README.md``).
 
 The 600-dpi zone check renders small windows through the same renderer the PDF
 is written from (a whole V1 sheet at 600 dpi is 218 million pixels); the same
@@ -567,9 +568,11 @@ class TheTargetLabelsAndTheFixtureTags(unittest.TestCase):
 class TheKitFiles(unittest.TestCase):
     """The five PDFs in ``classroom_kit/`` are the generators' output at 300 dpi.
 
-    Judged by what does not move with the contract's hash (WP-11 changes the hash
-    on purpose when it enters the measured OMX fingertip offset): the page, the
-    tags and the zone's cut. The printed hash is the one of the day they were made.
+    Judged by the page, the tags, the zone's cut and the printed contract hash. A
+    change of the contract (D84's AC12 pose did it; the measured OMX fingertip
+    offset will) moves the hash, and then all five files are made again
+    (``tools/classroom_kit_README.md``): a kit printed from a stale file names a
+    contract the robot no longer has.
     """
 
     def test_the_mats(self):
@@ -607,6 +610,15 @@ class TheKitFiles(unittest.TestCase):
                 self.assertAlmostEqual(pdf['media_mm'][1], 297.0, delta=0.01)
                 self.assertAlmostEqual(_mm_per_px(pdf)[0], 25.4 / 300, delta=1e-9)
                 self.assertEqual(sorted(t for t, _q in _aruco_read(_gray(pdf))), list(ids))
+
+    def test_each_file_prints_the_contracts_hash(self):
+        """Each of the five names ``FIXTURE_ID`` and exactly the first 8 hex of today's ``contract_hash()``."""
+        want = f'Kit-Vertrag {sf.FIXTURE_ID} · Prüfsumme {sf.contract_hash()[:8]}'
+        for name in ('scene_mat_v1', 'scene_mat_omx', 'calibration_target_v1', 'calibration_target_omx',
+                     'fixture_tags'):
+            with self.subTest(file=name):
+                printed = [t for t in read_pdf(KIT / f'{name}.pdf')['texts'] if 'Prüfsumme' in t]
+                self.assertEqual(printed, [want])
 
 
 class GenerateApriltagsRefusesReservedIds(unittest.TestCase):

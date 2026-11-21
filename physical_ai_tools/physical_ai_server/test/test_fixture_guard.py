@@ -565,6 +565,31 @@ def test_a_skipped_part_enters_with_a_lower_bound_of_its_margin(arm):
             assert np.array_equal(broad.M[live], true.M[live])
 
 
+@pytest.mark.parametrize('arm', ['v1', 'omx'])
+def test_judge_polyline_takes_the_claw_interval_of_the_whole_polyline(arm):
+    """FAILS FIRST (verifier finding X-WP12-1): judge_polyline(waypoints, gripper, gripper_b) judges a polyline whose
+    claw moves between the two values, which is what the wiring's replay check needs for a moving claw (it ran the
+    guard's own travel-bound core itself). Two waypoints are the leg: the verdict is judge_leg's with the same claw
+    values, margin and part included; the order of the two values does not matter; a still claw is the one-value
+    call; a non-finite second value is refused as unjudgeable."""
+    F = fg()
+    g, gr = guard(arm), GR[arm]
+    seen = set()
+    for _fam, a, b, s in q20_legs(arm)[::10]:
+        W = np.stack([a, b])
+        for lo, hi in ((gr['closed'], gr['open']), (gr['holding'], gr['open'])):
+            leg = g.judge_leg(a, b, lo, hi)
+            assert g.judge_polyline(W, lo, hi) == leg
+            assert g.judge_polyline(W, hi, lo) == leg
+            seen.add(leg.refused)
+        assert g.judge_polyline(W, s, s) == g.judge_polyline(W, s) == g.judge_leg(a, b, s, s)
+    assert seen == {True, False}                     # both verdicts were compared
+    a, b = HOME[arm], OBS[arm]
+    for bad in (float('nan'), float('inf'), 'x'):
+        v = g.judge_polyline(np.stack([a, b]), gr['open'], bad)
+        assert v.refused and v.reason == 'unjudgeable' and v.sentence_de == F.TOWER_UNJUDGEABLE_DE, bad
+
+
 def test_unjudgeable_droop_pose_and_masses_refuse_in_german(monkeypatch):
     """(R4-9) sum(theta) >= 0.5 at a sample -> TOWER_DROOP_UNJUDGEABLE_DE; a non-finite tower_pose or a missing
     link_masses -> TOWER_UNJUDGEABLE_DE."""

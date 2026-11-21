@@ -25,9 +25,9 @@ student moves the clip-on target by hand in front of the tower camera.
   homography. Gates: RMS ≤ :data:`RMS_MAX_PX` and the arm check's lens gates
   (focal length, principal point, aspect, ``k``, valid field).
 * THE RESULT: :data:`FILE_NAME` beside ``arm_check.json``
-  (:func:`write`, :func:`read`, :func:`discard`). The next arm check holds
-  that lens fixed (``arm_check.run``'s ``lens_prior``, D89-1); a written arm
-  check uses it up (the service).
+  (:func:`write`, :func:`read`, :func:`discard`). The next arm check under the
+  same ``camera_profile_id`` holds that lens fixed (``arm_check.run``'s
+  ``lens_prior``, D89-1); a written arm check uses it up (the service).
 
 Pure NumPy and the standard library.
 """
@@ -279,13 +279,19 @@ def _real(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def read(calib_dir, image_size):
-    """The pending handheld result for ``image_size``, or ``None`` (none, used
-    up, made at another image size, or malformed)."""
+def read(calib_dir, image_size, *, camera_profile_id):
+    """The pending handheld result for ``image_size`` and the streaming
+    camera's ``camera_profile_id`` (the camera state's ``profile_id``), or
+    ``None`` (none, used up, made at another image size, made under another
+    ``camera_profile_id`` or with it unknown on either side — a lens of
+    unproven provenance is never held fixed —, or malformed)."""
     data = _store._read_json(_path(calib_dir))
     if data is None or data.get('v') != FORMAT_VERSION:
         return None
     if data.get('image_size') != [int(v) for v in image_size]:
+        return None
+    stored = data.get('camera_profile_id')
+    if type(stored) is not str or type(camera_profile_id) is not str or stored != camera_profile_id:
         return None
     kb = data.get('kb')
     if not isinstance(kb, dict) or not all(_real(kb.get(k)) for k in _KB_KEYS):

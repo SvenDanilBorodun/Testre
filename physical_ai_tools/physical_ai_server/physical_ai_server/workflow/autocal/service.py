@@ -52,7 +52,8 @@ tests hand it fakes.
   guard on the solved arm model with the ladder; on success
   ``arm_check.json`` with ``target_removed: false`` and the state
   ``confirm_target_removed``. The droop warning is a warning (D42). A
-  pending handheld lens (``handheld.read``) is held fixed in the solve
+  pending handheld lens made under the camera state's ``profile_id`` the
+  arm check started with (``handheld.read``) is held fixed in the solve
   (``lens_prior``, D89-1), and a written arm check uses it up.
 * THE HANDHELD STEP (:meth:`start_handheld`, decision D9's fallback): the
   node's calibration mode claimed (``claim_mode``: nothing else moves the arm
@@ -1014,7 +1015,7 @@ class SceneCalibration:
     def _solve(self, run):
         try:
             records, looks = self._records(run)
-            handheld = _hh.read(self.calib_dir, _CAPTURE_SIZE)
+            handheld = _hh.read(self.calib_dir, _CAPTURE_SIZE, camera_profile_id=run.camera_profile_id)
             result = _ac.run(records, looks, profile_id=self.profile.profile_id, image_size=_CAPTURE_SIZE,
                              camera_profile_id=run.camera_profile_id, lens_prior=handheld)
             refusal = None if result.ok else (result.code, result.message_de)

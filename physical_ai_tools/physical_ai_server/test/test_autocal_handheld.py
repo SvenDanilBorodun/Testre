@@ -37,6 +37,7 @@ from physical_ai_server.workflow.autocal.camera_model import KB
 from test_autocal_service import _NODE_SRC, CAMERA_STATE, KINDS, _Camera, _Env, _stored, _StubNode, _plate_moved
 
 W, H = 1920, 1080
+CAM_ID = CAMERA_STATE['profile_id']       # the streaming camera's id, the one _result_file's lens was made under
 CELL_W, CELL_H = W / HH.GRID_COLS, H / HH.GRID_ROWS
 LOOK_NOISE_PX = S.SIG_PX
 XT = AC.target_model('v1')[1]          # (36, 3): the plate, the same for both arms
@@ -296,10 +297,12 @@ def test_the_result_is_written_beside_the_arm_check_read_back_and_used_up(tmp_pa
     data = _result_file()
     HH.write(str(tmp_path), data)
     assert (tmp_path / 'calibration' / 'intrinsics_handheld.json').is_file()
-    assert HH.read(str(tmp_path), (W, H)) == data
-    assert HH.read(str(tmp_path), (640, 480)) is None             # another image size is no lens of this camera
+    assert HH.read(str(tmp_path), (W, H), camera_profile_id=CAM_ID) == data
+    assert HH.read(str(tmp_path), (640, 480), camera_profile_id=CAM_ID) is None   # another image size: no lens of it
+    assert HH.read(str(tmp_path), (W, H), camera_profile_id='ffffffffffff') is None   # made under another camera id
+    assert HH.read(str(tmp_path), (W, H), camera_profile_id=None) is None             # the camera's id unknown
     HH.discard(str(tmp_path))
-    assert HH.read(str(tmp_path), (W, H)) is None
+    assert HH.read(str(tmp_path), (W, H), camera_profile_id=CAM_ID) is None
     HH.discard(str(tmp_path))                                      # nothing there: nothing happens
 
 
@@ -313,6 +316,8 @@ _BROKEN = {
     'kb_not_finite': lambda d: d['kb'].update(f=float('nan')),
     'kb_not_a_dict': lambda d: d.update(kb=[1100.0]),
     'no_image_size': lambda d: d.update(image_size=None),
+    'no_camera_profile_id': lambda d: d.update(camera_profile_id=None),
+    'camera_profile_id_not_a_text': lambda d: d.update(camera_profile_id=123456789012),
 }
 
 
@@ -323,7 +328,7 @@ def test_a_malformed_result_reads_as_none(tmp_path, name):
     path = tmp_path / 'calibration' / HH.FILE_NAME
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps(data), encoding='utf-8')
-    assert HH.read(str(tmp_path), (W, H)) is None
+    assert HH.read(str(tmp_path), (W, H), camera_profile_id=CAM_ID) is None
 
 
 def test_result_dict_carries_the_lens_and_the_quality():
@@ -421,7 +426,7 @@ def test_a_full_handheld_run_writes_the_lens_and_asks_for_the_arm_check(kind, tm
     assert env.svc.start('handheld')[0]
     _all_views(env, np.random.default_rng(23))
     assert env.threads.count(SV.WORK_THREAD) == 1
-    got = HH.read(str(tmp_path), (W, H))
+    got = HH.read(str(tmp_path), (W, H), camera_profile_id=CAM_ID)
     assert got is not None and got['quality']['views'] == 18 and got['quality']['cells'] == 10
     assert abs(got['kb']['f'] - env.cam.f) / env.cam.f <= 0.005
     assert got['camera_profile_id'] == CAMERA_STATE['profile_id']
@@ -441,7 +446,7 @@ def test_a_handheld_run_that_fails_its_gates_writes_nothing_and_says_why(kind, t
     env.cam = KB(1180.0, 1.0, 959.5, 539.5, 0.03, -0.05)
     assert env.svc.start('handheld')[0]
     _all_views(env, np.random.default_rng(24))
-    assert HH.read(str(tmp_path), (W, H)) is None
+    assert HH.read(str(tmp_path), (W, H), camera_profile_id=CAM_ID) is None
     state = env.svc.state()
     assert (state['state'], state['code'], state['message_de']) == (
         'needs_arm_check', 'handheld_failed', T.HANDHELD_FAILED_DE)
@@ -456,7 +461,7 @@ def test_cancel_stops_the_handheld_step_writes_nothing_and_releases_everything(k
     assert env.svc.start('handheld')[0]
     _hold(env, pose_in(env.cam, np.random.default_rng(25), (1, 2), 0))
     assert env.svc.cancel() == (True, SV.HANDHELD_STOPPED_DE)
-    assert HH.read(str(tmp_path), (W, H)) is None
+    assert HH.read(str(tmp_path), (W, H), camera_profile_id=CAM_ID) is None
     assert env.camera.holds == 0 and env.mode.calls == ['claim', 'release']
     assert {k: v for k, v in env.svc.state().items() if k != 'camera'} == {
         k: v for k, v in before.items() if k != 'camera'}
@@ -520,7 +525,7 @@ def test_the_next_arm_check_holds_the_handheld_lens_and_a_written_one_uses_it_up
     assert env.play() == 'finished'
     assert _stored(env).status == 'ok', env.svc.state()
     assert seen == [data]
-    assert HH.read(str(tmp_path), (W, H)) is None
+    assert HH.read(str(tmp_path), (W, H), camera_profile_id=CAM_ID) is None
     assert env.svc.start('arm_check')[0]
     assert env.play() == 'finished'
     assert seen == [data, None]
@@ -535,7 +540,7 @@ def test_a_following_arm_check_stores_the_handheld_lens_unchanged(kind, seed, tm
     env = _handheld_env(kind, tmp_path, seed=seed)
     assert env.svc.start('handheld')[0]
     _all_views(env, np.random.default_rng([seed, 23]))
-    handheld = HH.read(str(tmp_path), (W, H))
+    handheld = HH.read(str(tmp_path), (W, H), camera_profile_id=CAM_ID)
     assert handheld is not None, env.svc.state()
     env.svc._detect = env.detect
     assert env.svc.start('arm_check')[0]
@@ -555,12 +560,44 @@ def test_a_refused_arm_check_keeps_the_handheld_lens_for_the_next_one(kind, tmp_
     assert env.svc.start('arm_check')[0]
     assert env.play() == 'finished'
     assert env.svc.state()['code'] == 'too_few_poses'
-    assert HH.read(str(tmp_path), (W, H)) == data
+    assert HH.read(str(tmp_path), (W, H), camera_profile_id=CAM_ID) == data
     env.target_hidden_at = set()
     assert env.svc.start('arm_check')[0]
     assert env.play() == 'finished'
     assert _stored(env).status == 'ok', env.svc.state()
-    assert seen == [data, data] and HH.read(str(tmp_path), (W, H)) is None
+    assert seen == [data, data] and HH.read(str(tmp_path), (W, H), camera_profile_id=CAM_ID) is None
+
+
+# A handheld lens is held only under the camera_profile_id it was made under (the camera state's profile_id: the
+# tower camera's derivation and platform), so the stored id and the streaming camera's must be the same text.
+# (stored id, the camera state's id)
+_OTHER_CAMERA = {'another_camera': ('ffffffffffff', CAMERA_STATE['profile_id']),
+                 'stored_without_id': (None, CAMERA_STATE['profile_id']),
+                 'camera_without_id': (CAMERA_STATE['profile_id'], None)}
+
+
+@pytest.mark.parametrize('case', sorted(_OTHER_CAMERA))
+@pytest.mark.parametrize('kind', KINDS)
+def test_a_handheld_lens_of_another_camera_is_not_held(kind, case, tmp_path, monkeypatch):
+    """FAILS FIRST (verifier finding B-2): a pending handheld lens 3 % off the camera's, made under ANOTHER camera
+    profile id (or with the id unknown on either side), is not held in the next arm check — it solves its own lens
+    and stores that under the streaming camera's id; the handheld file is left as it was."""
+    stored_id, camera_id = _OTHER_CAMERA[case]
+    env = _Env(kind, calib_dir=tmp_path, camera=_Camera(state=dict(CAMERA_STATE, profile_id=camera_id)))
+    lens = _kit_lens(env)
+    data = _result_file(KB(lens.f * 1.03, lens.aspect, lens.cx, lens.cy, lens.k1, lens.k2))
+    data['camera_profile_id'] = stored_id
+    HH.write(str(tmp_path), data)
+    before = (tmp_path / 'calibration' / HH.FILE_NAME).read_bytes()
+    seen = _spy_lens_prior(monkeypatch)
+    assert env.svc.start('arm_check')[0]
+    assert env.play() == 'finished'
+    got = _stored(env)
+    assert got.status == 'ok', env.svc.state()
+    assert seen == [None]
+    assert got.data['camera_profile_id'] == camera_id
+    assert abs(got.data['kb']['f'] - lens.f) / lens.f <= 0.005
+    assert (tmp_path / 'calibration' / HH.FILE_NAME).read_bytes() == before
 
 
 # ══════════════════════════════════════════════════════════════════════════

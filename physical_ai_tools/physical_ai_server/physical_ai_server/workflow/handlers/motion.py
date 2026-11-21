@@ -1087,35 +1087,15 @@ def tower_leg_verdict(guard, q_a, q_b, n):
 def _polyline_verdict(guard, points, n, g_lo, g_hi):
     """One run of a path whose claw stays within ``[g_lo, g_hi]``: the guard's
     travel-bound rule over its waypoints as ONE polyline (spec 40 S6.2: a replay
-    is one polyline whose waypoints are its coarse samples).
-
-    A still claw is ``judge_polyline``'s own case. That call takes ONE claw
-    value, though, and a take's claw moves; for a moving one its own body is used
-    with the run's claw interval (the coarse samples of every pair, then the
-    guard's travel-bound core), so the blades are judged as for a leg: at the
-    middle angle, grown by half the interval. A guard without that core
-    (``RefusingGuard``, a test double) judges every pair as a leg instead."""
-    from physical_ai_server.workflow import fixture_guard as _fg
-    import numpy as np
-    if g_lo == g_hi:
-        return guard.judge_polyline([p[:n] for p in points], g_lo)
-    core = getattr(guard, '_travel_bound', None)
-    arm = getattr(guard, 'arm', None)
-    if not callable(core) or arm not in _fg.R_J_M:
-        for a, b in zip(points[:-1], points[1:]):
-            verdict = tower_leg_verdict(guard, a, b, n)
-            if verdict is not None:
-                return verdict
-        return None
+    is one polyline whose waypoints are its coarse samples), the blades judged
+    over the run's claw interval as for a leg (``judge_polyline``'s interval
+    form). A guard that fails cannot pass a run."""
+    waypoints = [p[:n] for p in points]
     try:
-        W = np.asarray([p[:n] for p in points], dtype=float)
-        if W.ndim != 2 or W.shape[1] != 5 or not np.all(np.isfinite(W)):
-            return _tower_unjudgeable()
-        samples = [W[:1]] + [_fg.coarse_samples(arm, a, b)[1:] for a, b in zip(W[:-1], W[1:])]
-        return core(np.concatenate(samples), g_lo, g_hi)
-    except _fg._TooMuchDroop:
-        return _fg.Verdict(True, 'droop', _fg.TOWER_DROOP_UNJUDGEABLE_DE)
-    except Exception:  # noqa: BLE001 — the core's unjudgeable and anything malformed: refused, never passed
+        if g_lo == g_hi:
+            return guard.judge_polyline(waypoints, g_lo)
+        return guard.judge_polyline(waypoints, g_lo, g_hi)
+    except Exception:  # noqa: BLE001 — an unjudged run is refused, never passed
         return _tower_unjudgeable()
 
 

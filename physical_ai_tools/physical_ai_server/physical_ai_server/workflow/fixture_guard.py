@@ -348,14 +348,16 @@ class TowerGuard:
         except _TooMuchDroop:
             return _DROOP
 
-    def judge_polyline(self, waypoints, gripper) -> Verdict:
+    def judge_polyline(self, waypoints, gripper, gripper_b=None) -> Verdict:
         """A replay as ONE polyline: its waypoints are the coarse samples (a pair farther apart than
-        ``TOWER_COARSE_M`` is split first), then the travel-bound rule."""
+        ``TOWER_COARSE_M`` is split first), then the travel-bound rule. The claw stays between ``gripper`` and
+        ``gripper_b`` along the whole polyline (without ``gripper_b``: held at ``gripper``); a moving claw's blades
+        are judged as for a leg, at the interval's middle angle grown by half of it."""
         try:
             W = np.atleast_2d(np.asarray(waypoints, float))
             if W.ndim != 2 or W.shape[1] != 5 or len(W) < 1 or not np.all(np.isfinite(W)):
                 raise _Unjudgeable
-            g_lo, g_hi = _claws(gripper, gripper)
+            g_lo, g_hi = _claws(gripper, gripper if gripper_b is None else gripper_b)
             pts = [W[:1]]
             for a, b in zip(W[:-1], W[1:]):
                 pts.append(coarse_samples(self.arm, a, b)[1:])

@@ -31,6 +31,8 @@ import json
 import math
 import os
 import struct
+import subprocess
+import sys
 import textwrap
 import threading
 import time
@@ -558,13 +560,20 @@ def test_the_guard_imports_only_numpy_arm_geometry_arm_cells_and_scene_fixture()
 # 9. the per-leg time on q20's leg set (D72's CI budget, R5-2)
 # ══════════════════════════════════════════════════════════════════════════
 
-def test_runtime_budget_here():
-    """q20's seeded leg set (both arms; zone grasp <-> hover, hover <-> HOME, OBS <-> hover direct, jog steps near
-    the tower, student program legs; 200 + 200 legs), each judged at BOTH residuals (calibrated: the server residual
-    with the design envelope standing in for the kit's; uncalibrated: the uncalibrated residual at the contract
-    place), process time per leg through the travel-bound rule: p99 <= 50 ms (D72; never loosened by a coder, R31).
-    The runner's own times are printed first."""
-    times, report = [], []
+# The legs are timed in a child interpreter with ONE BLAS thread, so the time is the rule's own. A multithreaded BLAS
+# keeps its worker threads spinning for a while after a call that woke them, and process time counts their CPU too:
+# measured in a fresh process (18 cores, numpy 1.26.4's OpenBLAS), the V1's calibrated legs read a p99 of about
+# 225 ms of process time for 13 ms of wall time, and about 11 ms either way once the pool had gone quiet — so the gate
+# depended on what ran before it in the process. The bound stays 50 ms (D72, R31).
+_ONE_BLAS_THREAD = {name: '1' for name in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS',
+                                           'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS')}
+_RUNTIME_CHILD = textwrap.dedent('''
+    import json
+    import time
+
+    import test_fixture_guard as H
+
+    out = {}
     for arm in ('v1', 'omx'):
         legs = H.q20_legs(arm)
         assert len(legs) == 200
@@ -577,13 +586,32 @@ def test_runtime_budget_here():
                 t0 = time.process_time()
                 g.judge_leg(a, b, s, s)
                 t.append(time.process_time() - t0)
-            t = np.array(t) * 1000.0
-            times.append(t)
-            report.append(f'{arm} {"calibrated" if calibrated else "uncalibrated"}: median {np.median(t):.1f} '
-                          f'p99 {np.percentile(t, 99):.1f} max {t.max():.1f} ms')
+            out[f'{arm} {"calibrated" if calibrated else "uncalibrated"}'] = t
+    print(json.dumps(out))
+''')
+
+
+def test_runtime_budget_here():
+    """q20's seeded leg set (both arms; zone grasp <-> hover, hover <-> HOME, OBS <-> hover direct, jog steps near
+    the tower, student program legs; 200 + 200 legs), each judged at BOTH residuals (calibrated: the server residual
+    with the design envelope standing in for the kit's; uncalibrated: the uncalibrated residual at the contract
+    place), process time per leg through the travel-bound rule, in a fresh interpreter with one BLAS thread: p99 <=
+    50 ms (D72; never loosened by a coder, R31). The runner's own times are printed first."""
+    env = dict(os.environ, **_ONE_BLAS_THREAD)
+    env['PYTHONPATH'] = os.pathsep.join([str(Path(__file__).resolve().parent), str(_PKG.parent)] + sys.path)
+    child = subprocess.run([sys.executable, '-c', _RUNTIME_CHILD], env=env, capture_output=True, text=True,
+                           timeout=600, cwd=str(_PKG.parent))
+    assert child.returncode == 0, child.stderr
+    measured = json.loads(child.stdout.strip().splitlines()[-1])
+    times, report = [], []
+    for label, t in measured.items():
+        t = np.array(t) * 1000.0
+        times.append(t)
+        report.append(f'{label}: median {np.median(t):.1f} p99 {np.percentile(t, 99):.1f} max {t.max():.1f} ms')
     allt = np.concatenate(times)
     print('tower guard per-leg time (q20, travel-bound rule): ' + '; '.join(report)
           + f'; all {len(allt)} legs p99 {np.percentile(allt, 99):.1f} ms')
+    assert list(measured) == ['v1 calibrated', 'v1 uncalibrated', 'omx calibrated', 'omx uncalibrated']
     assert len(allt) == 800
     assert np.percentile(allt, 99) <= 50.0, report
 
@@ -656,7 +684,7 @@ class _Scripted:
             return fg().Verdict(True, 'too_close', fg().TOWER_TOO_CLOSE_DE, -0.001, 'column')
         return fg().Verdict(False, 'clear')
 
-    def judge_polyline(self, _w, _g):
+    def judge_polyline(self, _w, _g, _g_b=None):
         return fg().Verdict(False, 'clear')
 
 
@@ -1197,10 +1225,10 @@ def test_wiring_a_slow_replay_check_says_so_once_before_its_first_chunk(monkeypa
             super().__init__()
             self.delay = delay
 
-        def judge_polyline(self, w, gr):
+        def judge_polyline(self, w, gr, gr_b=None):
             time.sleep(self.delay)
             events.append('judged')
-            return super().judge_polyline(w, gr)
+            return super().judge_polyline(w, gr, gr_b)
 
         def judge_leg(self, a, b, ga, gb):
             time.sleep(self.delay)
@@ -1270,6 +1298,67 @@ def test_wiring_a_replay_is_one_polyline_with_the_rules_own_verdict_within_the_b
     assert M.tower_leg_verdict(spy, q + [H.GR[arm]['open']], q + [H.GR[arm]['closed']], 5) is None
     assert len(seen) >= 2 and all(abs(b - a) <= 0.1 + 1e-12 for a, b in seen)
     assert seen[0][0] == H.GR[arm]['open'] and seen[-1][1] == H.GR[arm]['closed']
+
+
+# The wiring's path verdicts on 20 s takes of _take's two classes (seed 131 / 132, three per class and arm, in that
+# order), each with the claw held at 'holding', swept open <-> closed at 0.05 Hz and wobbling 0.04 rad about
+# 'holding' at 0.3 Hz: (arm, class, take, claw) -> (part, margin m) of every refusal; the other 31 of the 36 pass.
+# Computed at 61d93407, where motion still ran the guard's travel-bound core itself for a moving claw (verifier
+# finding X-WP12-1); the 48 takes of WP-12's own measurement (scratch/build-WP-12/probes/p08_replay_budget.py) gave
+# 144 identical verdicts before and after that change too (still, sweep and wobble each).
+_PATH_REFUSALS = {('v1', 'fast', 0, 'sweep'): ('pad', -0.0013501057218576543),
+                  ('v1', 'fast', 1, 'sweep'): ('pad', -0.0006868765388072014),
+                  ('omx', 'fast', 1, 'still'): ('pad', -0.04892226028209509),
+                  ('omx', 'fast', 1, 'sweep'): ('pad', -0.0039066936497408715),
+                  ('omx', 'fast', 1, 'wobble'): ('pad', -0.04892226028209509)}
+
+
+@pytest.mark.parametrize('arm', ['v1', 'omx'])
+def test_wiring_the_path_verdicts_of_held_and_moving_claws_are_todays(arm):
+    """X-WP12-1: the replay check's verdicts stay what they were before motion handed a moving claw's runs to the
+    guard's public interval form (judge_polyline(waypoints, lo, hi)): every refusal with its part and margin, every
+    pass a pass."""
+    ik = _arm_ik(arm)
+    g = _guard_on(arm, ik)
+    gr = H.GR[arm]
+    rng = np.random.default_rng(131 + (0 if arm == 'v1' else 1))
+    for label, amp_hi, fr_hi in (('p81-like', 0.35, 0.4), ('fast', 0.6, 0.8)):
+        for k in range(3):
+            W = _take(arm, rng, 20.0, amp_hi, fr_hi)
+            t = np.arange(len(W)) * 0.04
+            claws = {'still': np.full(len(W), gr['holding']),
+                     'sweep': gr['open'] + (gr['closed'] - gr['open']) * 0.5 * (1 - np.cos(2 * math.pi * 0.05 * t)),
+                     'wobble': gr['holding'] + 0.04 * np.sin(2 * math.pi * 0.3 * t)}
+            for claw, c in claws.items():
+                got = M.tower_path_verdict(g, np.concatenate([W, c[:, None]], axis=1), 5)
+                want = _PATH_REFUSALS.get((arm, label, k, claw))
+                if want is None:
+                    assert got is None, (label, k, claw, got)
+                else:
+                    assert (got.refused, got.reason, got.sentence_de, got.part) == (
+                        True, 'too_close', _TOO_CLOSE_DE, want[0]), (label, k, claw)
+                    assert got.margin_m == pytest.approx(want[1], abs=1e-9), (label, k, claw)
+
+
+def test_wiring_motion_keeps_no_copy_of_the_guards_rule():
+    """X-WP12-1: motion.py reaches the guard only through its public verdicts. It names no private member of
+    fixture_guard or of its TowerGuard (the travel-bound core, the margins, the droop exception) and none of the
+    guard's sampling (coarse or dense samples, the travel bound R_J_M, margins), neither as an attribute nor
+    through getattr."""
+    F = fg()
+    private = {name for name in vars(F.TowerGuard) if name.startswith('_') and not name.startswith('__')}
+    assert '_travel_bound' in private
+    banned = private | {'coarse_samples', 'dense_samples', 'dense_count', 'travel', 'R_J_M', 'margins',
+                        '_TooMuchDroop', '_Unjudgeable'}
+    tree = ast.parse((_PKG / 'workflow' / 'handlers' / 'motion.py').read_text(encoding='utf-8'))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            if isinstance(node.value, ast.Name) and node.value.id == '_fg':
+                assert not node.attr.startswith('_'), (node.attr, node.lineno)
+            assert node.attr not in banned, (node.attr, node.lineno)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'getattr'
+                and len(node.args) >= 2 and isinstance(node.args[1], ast.Constant)):
+            assert node.args[1].value not in banned, (node.args[1].value, node.lineno)
 
 
 def test_wiring_the_handlers_read_the_guard_with_getattr_only():

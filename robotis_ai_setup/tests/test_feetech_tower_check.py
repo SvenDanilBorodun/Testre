@@ -520,6 +520,23 @@ class RunHomeJudgesThePoseAfterThePullIn(BoundedTestCase):
                 pulled = arm._reading(self.HOME_TICKS[:5] + [2048])
                 self.assertEqual(node._traj_points, DRIVER.build_boot_home(pulled))
 
+    def test_a_pull_in_longer_than_the_slack_is_waited_out(self):
+        # verify R-4: the wait is the reading's distance at SEED_SPEED_STEPS PLUS the slack, so a joint further out
+        # than the slack alone covers (but inside the boot band) still glides from the pulled-in pose
+        slack_ticks = DRIVER.TOWER_PULL_IN_SLACK_S * DRIVER.SEED_SPEED_STEPS
+        for claw in (1948, 1748):
+            excess = 2048 - claw
+            self.assertGreater(excess, slack_ticks)
+            self.assertLess(excess, DRIVER._DEFAULT_BOOT_POSITION_TOLERANCE_TICKS)
+            with self.subTest(claw=claw):
+                node, result, arm, waited = self._run('tower_v1', self.HOME_TICKS[:5] + [claw])
+                self.assertEqual(result, (True, ''))
+                pulled = arm._reading(self.HOME_TICKS[:5] + [2048])
+                self.assertEqual(node._traj_points, DRIVER.build_boot_home(pulled))
+                self.assertGreater(waited, DRIVER.TOWER_PULL_IN_SLACK_S)
+                self.assertLessEqual(waited, excess / DRIVER.SEED_SPEED_STEPS + DRIVER.TOWER_PULL_IN_SLACK_S
+                                     + DRIVER.TOWER_PULL_IN_POLL_S + 1e-9)
+
     def test_joint_2_behind_its_back_stop_gets_the_lay_forward_sentence(self):
         ticks = [_tick(j, q) for j, q in enumerate(FALLEN_BACK)]
         self.assertEqual(ticks[1], 2048)

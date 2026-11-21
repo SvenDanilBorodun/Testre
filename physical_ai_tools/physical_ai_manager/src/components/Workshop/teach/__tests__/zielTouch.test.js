@@ -5,9 +5,8 @@
  * Licence Agreement; see LICENSE at the repository root.
  */
 
-import fs from 'fs';
-import path from 'path';
 import { describe, it, expect } from 'vitest';
+import fixture from '../../fixture/sceneFixture.json';
 import {
   ZIEL_TOUCH_TCP_Z_M,
   ZIEL_TOUCH_TOLERANCE_MM,
@@ -18,26 +17,36 @@ import {
 
 const OMX = { urdf_asset_id: 'omx_f', arm_joints: 5 };
 const V1 = { urdf_asset_id: 'v1', arm_joints: 5 };
+const C = fixture.constants;
+
+// The touch heights (spec 40 S5): the fingertips on the MAT, i.e. the mat's top
+// (MAT_THICKNESS_M) plus the solver's EE point above the table when the
+// fingertips touch it (FINGERTIP_BELOW_EE_M). OMX 0.00305 m (the provisional
+// fingertip offset, D86), V1 0.00045 m.
+const OMX_TOUCH_M = C.MAT_THICKNESS_M + C.FINGERTIP_BELOW_EE_M.omx;
+const V1_TOUCH_M = C.MAT_THICKNESS_M + C.FINGERTIP_BELOW_EE_M.v1;
 
 describe('zielTouch — per-profile plausibility', () => {
-  it('OMX: 0.070 m is exactly 30 mm (not too high); 0.071 m is too high', () => {
+  it('OMX: 30 mm above the touch height is not too high, 31 mm is', () => {
     expect(ZIEL_TOUCH_TOLERANCE_MM).toBe(30);
-    expect(zielTouchHeightAboveTableMm(0.07, OMX)).toBe(30);
-    expect(isZielTouchTooHigh(0.07, OMX)).toBe(false);
-    expect(isZielTouchTooHigh(0.071, OMX)).toBe(true);
-    // A touch on the table itself.
-    expect(isZielTouchTooHigh(0.04, OMX)).toBe(false);
+    expect(zielTouchHeightAboveTableMm(0.03305, OMX)).toBe(30);
+    expect(isZielTouchTooHigh(0.03305, OMX)).toBe(false);
+    expect(isZielTouchTooHigh(0.03405, OMX)).toBe(true);
+    // A touch on the mat itself.
+    expect(isZielTouchTooHigh(OMX_TOUCH_M, OMX)).toBe(false);
+    expect(zielTouchHeightAboveTableMm(OMX_TOUCH_M, OMX)).toBe(0);
   });
 
-  it('V1: the TCP is the fingertip — 0.030 m not, 0.031 m too high', () => {
-    expect(ZIEL_TOUCH_TCP_Z_M.v1).toBe(0);
-    expect(isZielTouchTooHigh(0.03, V1)).toBe(false);
-    expect(isZielTouchTooHigh(0.031, V1)).toBe(true);
+  it('V1: the closed claw on the mat — 0.03045 m not, 0.03145 m too high', () => {
+    expect(zielTouchHeightAboveTableMm(0.03045, V1)).toBe(30);
+    expect(isZielTouchTooHigh(0.03045, V1)).toBe(false);
+    expect(isZielTouchTooHigh(0.03145, V1)).toBe(true);
+    expect(isZielTouchTooHigh(V1_TOUCH_M, V1)).toBe(false);
   });
 
   it('no manifest falls back to the OMX (armGeometry\'s default asset)', () => {
-    expect(isZielTouchTooHigh(0.07, null)).toBe(false);
-    expect(isZielTouchTooHigh(0.071, null)).toBe(true);
+    expect(isZielTouchTooHigh(0.03305, null)).toBe(false);
+    expect(isZielTouchTooHigh(0.03405, null)).toBe(true);
   });
 
   it('a non-finite height is never „too high" (the store refuses it instead)', () => {
@@ -50,21 +59,16 @@ describe('zielTouch — per-profile plausibility', () => {
   });
 });
 
-describe('zielTouch — lockstep with the server solver', () => {
-  it('ZIEL_TOUCH_TCP_Z_M.omx_f equals ik_solver._TOOL_TIP_EXT_M', () => {
-    const file = path.resolve(process.cwd(), '../physical_ai_server/physical_ai_server/workflow/ik_solver.py');
-    // A missing file FAILS here (readFileSync throws) — never a silent pass.
-    const source = fs.readFileSync(file, 'utf8');
-    const match = source.match(/^_TOOL_TIP_EXT_M = ([0-9.]+)$/m);
-    expect(match).not.toBeNull();
-    expect(Number(match[1])).toBe(ZIEL_TOUCH_TCP_Z_M.omx_f);
+describe('zielTouch — lockstep with the fixture contract (sceneFixture.json)', () => {
+  it('keeps its two keys, omx_f and v1', () => {
+    expect(Object.keys(ZIEL_TOUCH_TCP_Z_M).sort()).toEqual(['omx_f', 'v1']);
   });
 
-  it('ZIEL_TOUCH_TCP_Z_M.v1 equals V1IKSolver.tool_tip_below_ee_m (the TCP IS the fingertip)', () => {
-    const file = path.resolve(process.cwd(), '../physical_ai_server/physical_ai_server/workflow/v1_ik.py');
-    const source = fs.readFileSync(file, 'utf8');
-    const match = source.match(/^ {4}tool_tip_below_ee_m = ([0-9.]+)$/m);
-    expect(match).not.toBeNull();
-    expect(Number(match[1])).toBe(ZIEL_TOUCH_TCP_Z_M.v1);
+  it('ZIEL_TOUCH_TCP_Z_M.omx_f equals the JSON\'s mat thickness + the OMX fingertip offset', () => {
+    expect(ZIEL_TOUCH_TCP_Z_M.omx_f).toBe(C.MAT_THICKNESS_M + C.FINGERTIP_BELOW_EE_M.omx);
+  });
+
+  it('ZIEL_TOUCH_TCP_Z_M.v1 equals the JSON\'s mat thickness + the V1 fingertip offset', () => {
+    expect(ZIEL_TOUCH_TCP_Z_M.v1).toBe(C.MAT_THICKNESS_M + C.FINGERTIP_BELOW_EE_M.v1);
   });
 });

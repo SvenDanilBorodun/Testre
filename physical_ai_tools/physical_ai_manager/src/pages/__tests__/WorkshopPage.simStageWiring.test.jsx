@@ -127,7 +127,7 @@ vi.mock('../../components/Workshop/RightDock', () => ({
     </div>
   ),
 }));
-vi.mock('../../components/Workshop/CalibrationWizard', () => ({ __esModule: true, default: () => <div data-testid="calib-wizard" /> }));
+vi.mock('../../components/Workshop/calibration/CalibrationPanel', () => ({ __esModule: true, default: () => <div data-testid="calib-panel" /> }));
 vi.mock('../../components/Workshop/LeaderToggle', () => ({ __esModule: true, default: () => <div data-testid="leader-toggle" /> }));
 vi.mock('../../components/Workshop/CameraFeedOverlay', () => ({ __esModule: true, default: () => <div data-testid="camera-feed" /> }));
 vi.mock('../../components/Workshop/TemplatePicker', () => ({ __esModule: true, default: () => <div data-testid="template-picker" /> }));
@@ -169,6 +169,7 @@ vi.mock('../../components/Workshop/blocks/perception', () => ({
 // ── Hooks + services. The catalog response feeds the REAL buildCatalogDims —
 //    the expected catalogDims below is its real output over these arrays. ──
 const mockRos = vi.hoisted(() => ({
+  startCalibration: vi.fn(() => Promise.resolve({ success: true, message: '' })),
   getObjectCatalog: vi.fn(() =>
     Promise.resolve({
       success: true,
@@ -222,11 +223,7 @@ vi.mock('react-hot-toast', () => ({
 function baseState() {
   return {
     workshop: {
-      hasIntrinsicScene: true,
-      hasHandeyeScene: true,
-      hasTableTouch: true,
-      recalibrating: false,
-      pendingVerify: false,
+      calibration: { state: 'ok' },
       selectedWorkflowId: null,
       unsavedBlocklyJson: null,
       restrictedBlocks: null,

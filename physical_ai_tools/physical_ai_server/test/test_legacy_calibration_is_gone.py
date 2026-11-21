@@ -21,8 +21,15 @@ their ten env knobs and their five ROS services:
 * no string literal and no comment of the server package sends a student to
   „Tisch vermessen"; such a sentence became S7's one sentence.
 
+The React half (WP-17): the wizard, its four steps and their two tests are
+deleted; ``blocks/messages_de.js`` carries no ``CALIB_`` key; no SPA source
+names one of the five services (``CameraFeedOverlay.jsx`` is never edited,
+A17, and one of its comments still names the preview service); the service
+caller hook offers no caller for them and the workshop slice no reducer of the
+wizard; no SPA source sends a student to „Tisch vermessen".
+
 ``physical_ai_server.py`` imports rclpy, so the node is read as source, the way
-the other node tests read it.
+the other node tests read it; the SPA is read as text.
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ from __future__ import annotations
 import ast
 import io
 from pathlib import Path
+import re
 import tokenize
 
 import pytest
@@ -165,3 +173,67 @@ def test_the_one_sentence_that_replaced_tisch_vermessen():
     has none, the student is sent to the calibration."""
     assert motion.CALIBRATION_FIRST_DE == (
         'Bitte zuerst die Kalibrierung abschließen (Roboter Studio → Kalibrierung).')
+
+
+# ── the React half (WP-17) ────────────────────────────────────────────────────
+_SRC = _REPO / 'physical_ai_tools' / 'physical_ai_manager' / 'src'
+_WORKSHOP = _SRC / 'components' / 'Workshop'
+_REMOVED_REACT_FILES = tuple(_WORKSHOP / rel for rel in (
+    'CalibrationWizard.jsx', 'IntrinsicCalibStep.jsx', 'HandEyeCalibStep.jsx',
+    'TableTouchStep.jsx', 'AccuracyVerifyStep.jsx',
+    '__tests__/TableTouchStep.claw.test.jsx', '__tests__/TableTouchStep.relock.test.jsx',
+))
+# A17: CameraFeedOverlay.jsx is not edited; one of its comments names the
+# preview service the wizard polled.
+_SERVICE_NAME_ALLOWED = {_WORKSHOP / 'CameraFeedOverlay.jsx': ('/calibration/preview',)}
+_REMOVED_CALLERS = ('calibrationCaptureFrame', 'calibrationSolve', 'calibrationPreview',
+                    'verifyCalibration', 'getCalibrationHistory')
+_REMOVED_REDUCERS = ('setCalibState', 'setCurrentStep', 'setCalibProgress', 'setMethodDisagreement',
+                     'setCalibError', 'markStepComplete', 'resetCalibProgress', 'requestRecalibration',
+                     'addCoverageCell', 'setCharucoPreview', 'setVerifyResult', 'setAccuracyResult',
+                     'finishVerify', 'setCalibHistory')
+
+
+def _spa_files(tests=True):
+    files = sorted(p for p in _SRC.rglob('*') if p.suffix in ('.js', '.jsx') and p.is_file()
+                   and (tests or '__tests__' not in p.parts))
+    assert len(files) > 200, f'the SPA was not found under {_SRC}'
+    return files
+
+
+def test_the_wizard_and_its_four_steps_are_deleted():
+    found = [str(p.relative_to(_REPO)) for p in _REMOVED_REACT_FILES if p.exists()]
+    assert found == [], found
+
+
+def test_no_calib_key_is_left_in_the_block_messages():
+    text = (_WORKSHOP / 'blocks' / 'messages_de.js').read_text(encoding='utf-8')
+    assert 'export const DE' in text
+    keys = re.findall(r'^\s*(CALIB_[A-Z0-9_]*)\s*:', text, re.M)
+    assert keys == [], keys
+    assert 'CALIB_' not in text
+
+
+@pytest.mark.parametrize('name', _REMOVED_SERVICES)
+def test_no_spa_source_names_a_removed_service(name):
+    found = [str(p.relative_to(_REPO)) for p in _spa_files()
+             if name in p.read_text(encoding='utf-8') and name not in _SERVICE_NAME_ALLOWED.get(p, ())]
+    assert found == [], f'{name} still occurs in {found}'
+
+
+def test_the_service_hook_and_the_workshop_slice_offer_nothing_of_the_wizard():
+    hook = (_SRC / 'hooks' / 'useRosServiceCaller.js').read_text(encoding='utf-8')
+    found = [name for name in _REMOVED_CALLERS if re.search(rf'\b{name}\b', hook)]
+    assert found == [], found
+    for kept in ('startCalibration', 'cancelCalibration', 'getCalibrationStatus', 'stopWorkflow'):
+        assert re.search(rf'const {kept} = useCallback', hook), kept
+    slice_ = (_SRC / 'features' / 'workshop' / 'workshopSlice.js').read_text(encoding='utf-8')
+    found = [name for name in _REMOVED_REDUCERS if re.search(rf'\b{name}\b', slice_)]
+    assert found == [], found
+    assert 'export const selectCalibrationHasUnsolvedCaptures' in slice_
+
+
+def test_no_spa_source_says_tisch_vermessen():
+    found = [str(p.relative_to(_REPO)) for p in _spa_files(tests=False)
+             if _PHRASE in p.read_text(encoding='utf-8')]
+    assert found == [], found

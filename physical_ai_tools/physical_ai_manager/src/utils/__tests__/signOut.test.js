@@ -303,16 +303,17 @@ describe('signOutStudent — no trace of the previous student', () => {
 
   it('keeps the rig calibration the workshop slice also holds', async () => {
     // The same slice is half student, half rig. A calibration describes the
-    // CAMERA and the TABLE and is persisted server-side; clearing it would send
-    // the next student through a 20-frame ChArUco capture for nothing.
+    // CAMERA, the MAT and the ARM and is persisted server-side; clearing it
+    // would lock the next student out of Roboter Studio for nothing.
     const { store, signOutStudent, workshop } = await freshStore();
-    store.dispatch(workshop.markStepComplete('scene_intrinsic'));
-    store.dispatch(workshop.markStepComplete('scene_handeye'));
+    store.dispatch(workshop.setCalibrationStatus({ has_scene_intrinsics: true, has_scene_handeye: true }));
+    store.dispatch(workshop.setCalibrationState({ v: 1, state: 'ok', code: 'ok', message_de: '', notes: [] }));
 
     await store.dispatch(signOutStudent({ reload: false }));
 
     expect(store.getState().workshop.hasIntrinsicScene).toBe(true);
     expect(store.getState().workshop.hasHandeyeScene).toBe(true);
+    expect(store.getState().workshop.calibration.state).toBe('ok');
   });
 
   it('keeps exactly the three rig/nonce fields the training slice names', async () => {

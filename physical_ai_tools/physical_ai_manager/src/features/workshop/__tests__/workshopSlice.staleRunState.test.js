@@ -30,9 +30,7 @@ describe('detections do not outlive the run that produced them', () => {
   // `active_detections` rides /workflow/status, which the server stops emitting
   // the moment the run is over. CameraFeedOverlay keeps painting the last set
   // over an MJPEG stream that comes from web_video_server, NOT from ROS — so the
-  // boxes stay on a moving picture and look live. The same component is mounted
-  // by IntrinsicCalibStep and HandEyeCalibStep, so they also leaked out of
-  // Roboter Studio entirely and into the calibration wizard.
+  // boxes stay on a moving picture and look live.
   test.each(['finished', 'stopped', 'error'])(
     'setRunState(%s) drops them',
     (terminal) => {

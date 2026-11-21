@@ -12,6 +12,9 @@ import { signedOut } from '../session/sessionActions';
 // the hook imports `store/store`, which imports THIS file, so a slice→hook
 // import would close a cycle around `configureStore`.
 import { isDisplayableVariableName } from '../../utils/variableName';
+// Pure (no React, no ROS): the panel's decision is the slice's too, so
+// `calibrated` can never mean two things.
+import { isCalibrated, isCapturing } from '../../components/Workshop/calibration/calibrationModel';
 
 // The "no sensor data" snapshot, spelled ONCE so initialState and every reset
 // path cannot drift. A FACTORY, not a shared frozen literal: `setSensorSnapshot`
@@ -63,57 +66,20 @@ function appendVariableHistory(state, name, value, ts) {
 }
 
 const initialState = {
-  // Calibration wizard state
-  // WS4 (2026-06-17): scene-cam-only calibration. The wizard starts on the
-  // scene intrinsic step (the gripper steps were removed). The gripper flags
-  // are kept (defaulted true = "not required") so any legacy gate that still
-  // ANDs them never blocks the editor.
-  calibState: 'idle',
-  currentStep: 'scene_intrinsic',
-  framesCaptured: 0,
-  // Pre-capture placeholder; the backend overwrites it with the live
-  // frames_required on every capture (20 since the rational-distortion /
-  // wide-lens intrinsic upgrade, 2026-06-24 W4).
-  framesRequired: 20,
-  lastViewRms: null,
-  methodDisagreement: null,
-  calibError: null,
-  hasIntrinsicGripper: true,
+  // Roboter Studio's calibration (spec 40 S4, S8). `calibration` is the robot's
+  // /edubotics/calibration_state, parsed (calibration/calibrationModel.js), or
+  // null while nothing has been heard; the editor unlocks on the real robot
+  // only while its state is `ok` (selectCalibrated). The three status flags
+  // are /calibration/status's („a valid arm check exists"), hydrated by the
+  // calibration panel; they no longer gate anything here.
+  calibration: null,
   hasIntrinsicScene: false,
-  hasHandeyeGripper: true,
   hasHandeyeScene: false,
-  // Touch-off table measurement (optional accuracy step, recommended).
   hasTableTouch: false,
-  hasColorProfile: false,
-  // W5 (2026-06-24): after the touch-off completes, route the student into the
-  // OPTIONAL „Genauigkeit prüfen" step before the editor opens. `pendingVerify`
-  // holds the editor closed only during that just-finished wizard session; the
-  // student clears it with „Fertig" or „Überspringen". It is NOT part of the
-  // `calibrated` gate — on a normal page reload it defaults false, so a
-  // calibrated rig opens straight to the editor and verify never blocks use.
-  pendingVerify: false,
-  // Last accuracy-verify solve result (residuals / yaw bias / mirror flag),
-  // shown as a quality readout. {residual_mm_mean, residual_mm_max,
-  // yaw_bias_deg, mirror_detected, point_count, message}.
-  accuracyResult: null,
-  // True between „Kalibrierung neu starten" and the moment the student finishes
-  // re-running the geometry steps. Forces the wizard to stay open even though
-  // valid YAMLs still exist on disk — without it the wizard's mount-time
-  // /calibration/status hydrate re-reads those YAMLs and flips `calibrated`
-  // straight back to true, bouncing the student back to the editor (2026-06-23).
-  recalibrating: false,
-  // Phase-2 calibration UX additions
-  // 16-cell coverage map: array of length 16, each cell is the count
-  // of captured frames whose board centroid landed in that cell.
-  coverageMosaic: Array(16).fill(0),
-  // Per-frame quality history: ['good' | 'ok' | 'poor'] in capture order.
-  qualityHistory: [],
-  // ChArUco corner preview (live overlay during capture)
-  charucoPreview: { detected: false, corners: [] },
-  // "Jetzt prüfen" reprojection result, set after /calibration/verify.
-  verifyResult: null,
-  // Calibration history — most recent N saved calibrations per camera.
-  calibHistory: [],
+  // The scene-camera profile the arm container STATES (D63):
+  // 'tower_v1' | 'legacy' | null (no statement yet — silence is never legacy).
+  // The simulator and the twin draw the tower only for 'tower_v1'.
+  sceneCameraProfile: null,
 
   // Workflow runtime state
   runState: 'idle',
@@ -158,153 +124,26 @@ const initialState = {
   restrictedBlocks: null,
 };
 
-function classifyQuality(score) {
-  // Backend sends 0 for "unknown" (RMS not yet estimable, < 4 frames) — treat
-  // it like null so the first captures aren't flagged as a red "schwach" dot.
-  if (score === undefined || score === null || score === 0) return 'ok';
-  if (score >= 3) return 'good';
-  if (score >= 2) return 'ok';
-  return 'poor';
-}
-
 const workshopSlice = createSlice({
   name: 'workshop',
   initialState,
   reducers: {
-    setCalibState: (state, action) => {
-      state.calibState = action.payload;
-    },
-    setCurrentStep: (state, action) => {
-      state.currentStep = action.payload;
-    },
-    setCalibProgress: (state, action) => {
-      const { framesCaptured, framesRequired, lastViewRms } = action.payload;
-      if (framesCaptured !== undefined) state.framesCaptured = framesCaptured;
-      if (framesRequired !== undefined) state.framesRequired = framesRequired;
-      if (lastViewRms !== undefined) state.lastViewRms = lastViewRms;
-    },
-    setMethodDisagreement: (state, action) => {
-      state.methodDisagreement = action.payload;
-    },
-    setCalibError: (state, action) => {
-      state.calibError = action.payload;
-    },
-    markStepComplete: (state, action) => {
-      const step = action.payload;
-      if (step === 'gripper_intrinsic') state.hasIntrinsicGripper = true;
-      else if (step === 'scene_intrinsic') state.hasIntrinsicScene = true;
-      else if (step === 'gripper_handeye') state.hasHandeyeGripper = true;
-      else if (step === 'scene_handeye') state.hasHandeyeScene = true;
-      else if (step === 'table_touch') state.hasTableTouch = true;
-      else if (step === 'color_profile') state.hasColorProfile = true;
-      // Once all three scene steps are done again, recalibration is complete —
-      // drop the override so the WorkshopPage gate returns to the editor.
-      if (state.hasIntrinsicScene && state.hasHandeyeScene && state.hasTableTouch) {
-        state.recalibrating = false;
-      }
-      // W5: completing the touch-off routes the student into the OPTIONAL
-      // accuracy-verify step before the editor opens (gated by pendingVerify,
-      // which is not part of `calibrated`). The student finishes or skips it.
-      if (step === 'table_touch') {
-        state.pendingVerify = true;
-        state.currentStep = 'accuracy_verify';
-        state.accuracyResult = null;
-      }
+    setCalibrationState: (state, action) => {
+      // The parsed /edubotics/calibration_state, or null (nothing heard).
+      state.calibration = action.payload || null;
     },
     setCalibrationStatus: (state, action) => {
-      // Hydrate per-step badges from /calibration/status so the wizard
-      // doesn't make the student redo intrinsic captures after every page
-      // reload. Payload mirrors the CalibrationStatus.srv response.
-      const {
-        has_gripper_intrinsics,
-        has_scene_intrinsics,
-        has_gripper_handeye,
-        has_scene_handeye,
-        has_table_plane,
-        has_color_profile,
-      } = action.payload || {};
-      if (has_gripper_intrinsics !== undefined) state.hasIntrinsicGripper = !!has_gripper_intrinsics;
+      // /calibration/status: under the tower camera all three fields mean „a
+      // valid arm check exists" (spec 40 S4). Payload mirrors the
+      // CalibrationStatus.srv response.
+      const { has_scene_intrinsics, has_scene_handeye, has_table_plane } = action.payload || {};
       if (has_scene_intrinsics !== undefined) state.hasIntrinsicScene = !!has_scene_intrinsics;
-      if (has_gripper_handeye !== undefined) state.hasHandeyeGripper = !!has_gripper_handeye;
       if (has_scene_handeye !== undefined) state.hasHandeyeScene = !!has_scene_handeye;
       if (has_table_plane !== undefined) state.hasTableTouch = !!has_table_plane;
-      if (has_color_profile !== undefined) state.hasColorProfile = !!has_color_profile;
     },
-    resetCalibProgress: (state) => {
-      state.framesCaptured = 0;
-      state.lastViewRms = null;
-      state.methodDisagreement = null;
-      state.calibError = null;
-      state.coverageMosaic = Array(16).fill(0);
-      state.qualityHistory = [];
-      state.verifyResult = null;
-    },
-    requestRecalibration: (state) => {
-      // Audit U3: drop every per-step "done" flag so the WorkshopPage's
-      // `calibrated` selector flips false and the wizard re-mounts.
-      // The on-host YAMLs under /root/.cache/edubotics/calibration/
-      // are untouched — re-running step 1 just overwrites them. To
-      // wipe them entirely the student would need `docker volume rm
-      // edubotics_calib` (separate operator path; intentional, since
-      // we never want to delete calibration without explicit intent).
-      // WS4: keep the (vestigial) gripper flags satisfied; only the scene
-      // artefacts gate the editor now.
-      // 2026-06-24 (W1, FULL scope): the force-recalibration release made
-      // intrinsics MANDATORY on every restart — the backend reports all three
-      // scene flags false until the student re-runs the whole flow this boot.
-      // So a manual „Kalibrierung neu starten" must also redo intrinsics:
-      // reset hasIntrinsicScene too and restart at `scene_intrinsic` (the
-      // first step). The earlier "intrinsics are always present, jump to the
-      // extrinsic" assumption is dead (factory-default seeding was removed).
-      // Force the wizard to stay open despite the on-disk YAMLs (see the
-      // `recalibrating` field doc) until the steps are actually re-run.
-      state.recalibrating = true;
-      state.hasIntrinsicGripper = true;
-      state.hasIntrinsicScene = false;
-      state.hasHandeyeGripper = true;
-      state.hasHandeyeScene = false;
-      state.hasTableTouch = false;
-      state.hasColorProfile = false;
-      state.currentStep = 'scene_intrinsic';
-      state.framesCaptured = 0;
-      state.methodDisagreement = null;
-      state.calibError = null;
-      state.coverageMosaic = Array(16).fill(0);
-      state.qualityHistory = [];
-      state.verifyResult = null;
-      state.pendingVerify = false;
-      state.accuracyResult = null;
-    },
-    addCoverageCell: (state, action) => {
-      const { cell, quality } = action.payload || {};
-      if (typeof cell === 'number' && cell >= 0 && cell < 16) {
-        state.coverageMosaic[cell] = (state.coverageMosaic[cell] || 0) + 1;
-      }
-      if (quality !== undefined && quality !== null) {
-        state.qualityHistory.push(classifyQuality(quality));
-      }
-    },
-    setCharucoPreview: (state, action) => {
-      const { detected, corners } = action.payload || {};
-      state.charucoPreview = {
-        detected: !!detected,
-        corners: Array.isArray(corners) ? corners : [],
-      };
-    },
-    setVerifyResult: (state, action) => {
-      state.verifyResult = action.payload || null;
-    },
-    // W5: store the accuracy-verify solve readout (residuals / yaw bias / mirror).
-    setAccuracyResult: (state, action) => {
-      state.accuracyResult = action.payload || null;
-    },
-    // W5: „Fertig" / „Überspringen" on the accuracy-verify step — drop the
-    // editor-hold so the WorkshopPage gate opens the editor.
-    finishVerify: (state) => {
-      state.pendingVerify = false;
-    },
-    setCalibHistory: (state, action) => {
-      state.calibHistory = Array.isArray(action.payload) ? action.payload : [];
+    setSceneCameraProfile: (state, action) => {
+      const p = action.payload;
+      state.sceneCameraProfile = p === 'tower_v1' || p === 'legacy' ? p : null;
     },
 
     setRunState: (state, action) => {
@@ -326,9 +165,7 @@ const workshopSlice = createSlice({
         // must stop painting boxes. A run that ENDS is the same event one step
         // later — and without this the last box set stayed on screen over a
         // camera feed that keeps streaming from web_video_server independently
-        // of ROS, so the boxes look live. CameraFeedOverlay is also mounted by
-        // BOTH calibration steps, so the stale boxes outlived Roboter Studio
-        // entirely and reappeared in the calibration wizard.
+        // of ROS, so the boxes look live.
         state.detections = [];
       } else if (next === 'running') {
         state.paused = false;
@@ -586,11 +423,10 @@ const workshopSlice = createSlice({
     // This slice is HALF rig and half student, so it is the one place the
     // sign-out reset has to be selective.
     //
-    // KEPT: everything calibration (`calibState`, the per-step has* flags, the
-    // coverage mosaic, the history). A calibration describes the CAMERA and the
-    // TABLE, it is persisted server-side in the edubotics_calib volume, and
-    // clearing it here would send the next student through a 20-frame ChArUco
-    // capture they do not need.
+    // KEPT: everything calibration (`calibration`, the three status flags, the
+    // stated `sceneCameraProfile`). A calibration describes the CAMERA, the MAT
+    // and the ARM, it is persisted server-side in the edubotics_calib volume,
+    // and the robot's state topic re-sends it anyway.
     //
     // CLEARED: the student's PROGRAM and everything derived from running it.
     // `unsavedBlocklyJson` is the one that made this necessary — WorkshopPage
@@ -644,21 +480,9 @@ const workshopSlice = createSlice({
 });
 
 export const {
-  setCalibState,
-  setCurrentStep,
-  setCalibProgress,
-  setMethodDisagreement,
-  setCalibError,
-  markStepComplete,
+  setCalibrationState,
   setCalibrationStatus,
-  resetCalibProgress,
-  requestRecalibration,
-  addCoverageCell,
-  setCharucoPreview,
-  setVerifyResult,
-  setAccuracyResult,
-  finishVerify,
-  setCalibHistory,
+  setSceneCameraProfile,
   setRunState,
   setPaused,
   setWorkflowStatus,
@@ -694,41 +518,24 @@ export const {
 /**
  * Is a Blockly program executing? `paused` counts: a debugger breakpoint still
  * holds the server's `on_workflow` claim, so the arm is mid-program with the
- * next segment already queued.
- *
- * Deliberately NOT read: `calibState`. `setCalibState` has no dispatcher
- * anywhere in `src/`, so that field never leaves `'idle'` and a guard keyed on
- * it would be inert.
+ * next segment already queued. The arm check is a program too (spec 40 S4).
  */
 export const selectWorkflowRunning = (state) =>
   state.workshop.runState === 'running' || state.workshop.paused === true;
 
 /**
- * Are there captured calibration frames that abandoning the wizard would throw
- * away? `framesCaptured` alone is not that question — it LATCHES. Nothing
- * resets it on leaving a step or the page; only the NEXT step's mount does
- * (`resetCalibProgress` / `setCalibProgress({framesCaptured: 0})`). So after the
- * touch-off it stays at 3 for the rest of the session.
- *
- * `!calibrated` is what makes it a live question: it is the same three-flag
- * conjunction `WorkshopPage` gates its editor on, and once it holds the required
- * steps are done and the latched count describes finished work. The OPTIONAL
- * „Genauigkeit prüfen" step therefore does not block — it runs after those
- * three, and losing it costs a re-run of one measurement.
- *
- * `recalibrating` is deliberately NOT a trigger. Nothing clears it but
- * completing all three steps, so a student who pressed „Kalibrierung neu
- * starten" and changed their mind would be unable to hand the PC over at all.
- *
- * The caller must ALSO establish that the wizard is on screen — the wizard is
- * the only thing that captures frames, and its unmount cancels the server-side
- * buffer, so off the Roboter-Studio page the latched count is stale for the same
- * reason.
+ * Is a calibration capture under way that leaving would throw away? True
+ * while the arm check (`arm_check_running`) or the handheld lens capture
+ * (`handheld_running`) runs — the robot's own state says so (spec 40 S8), so
+ * nothing here latches. The name is the old one: StudentApp's „Abmelden" gate
+ * reads it (ANDed with being on Roboter Studio and a live robot link).
  */
-export const selectCalibrationHasUnsolvedCaptures = (state) => {
-  const w = state.workshop;
-  const calibrated = w.hasIntrinsicScene && w.hasHandeyeScene && w.hasTableTouch;
-  return w.framesCaptured > 0 && !calibrated;
-};
+export const selectCalibrationHasUnsolvedCaptures = (state) => isCapturing(state.workshop.calibration);
+
+/** Roboter Studio on the real robot unlocks only while the calibration state is `ok`. */
+export const selectCalibrated = (state) => isCalibrated(state.workshop.calibration);
+
+/** The arm container states the tower camera: the simulator and the twin draw the tower. */
+export const selectTowerScene = (state) => state.workshop.sceneCameraProfile === 'tower_v1';
 
 export default workshopSlice.reducer;

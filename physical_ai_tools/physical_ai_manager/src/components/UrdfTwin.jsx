@@ -89,6 +89,13 @@
 //                    editor via ./Workshop/simConstants, not the solver's
 //                    wrist-centre span). Default false → the ring builds ZERO
 //                    primitives.
+//   * fixture      — the tower kit (spec 40 S8): Workshop/simConstants'
+//                    fixtureLayout(caps), given only while the arm container
+//                    states the tower camera. The arm stands on the kit's base
+//                    plate, `liftM` (7.2 mm) higher, and the plate and the
+//                    tower's oriented boxes are drawn; with showReach the
+//                    printed work zone with its cut replaces the ring. Default
+//                    null → the robot is never moved and nothing is built.
 
 import React, { useCallback, useMemo, useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
@@ -260,6 +267,8 @@ function buildGhostClone(robot, color, opacity = 0.35) {
   strays.forEach((obj) => { if (obj.parent) obj.parent.remove(obj); });
   ghost.rotation.x = robot.rotation.x;
   ghost.rotation.z = robot.rotation.z;
+  // A robot standing on the tower kit's plate: the ghost stands there too.
+  if (ghost.position && robot.position) ghost.position.y = robot.position.y;
   return { ghost, material };
 }
 
@@ -337,6 +346,11 @@ const FRAME_AXIS_SIZE_M = 0.07;
 // above the table (y=0.001) to avoid z-fighting; rendered only while showReach.
 const REACH_RING_COLOR = 0x22c55e;
 const REACH_RING_Y = 0.001;
+// ── The tower kit ("fixture") ───────────────────────────────────────────────
+// The base plate and the tower: a light printed-plastic grey, the tower a little
+// darker, both solid — they are obstacles the arm keeps clear of, not zones.
+const FIXTURE_PLATE_COLOR = 0xb8b2a8;
+const FIXTURE_TOWER_COLOR = 0x8d877d;
 // ── Sim-stage soft-shadow tuning ("showShadows") ─────────────────────────────
 // Modest shadow map so the sim stays smooth on integrated GPUs.
 const SHADOW_MAP_SIZE = 1024;
@@ -404,6 +418,8 @@ export default function UrdfTwin({
   // render loop (no React state), off under reduced motion. false (the default)
   // constructs nothing.
   chronoTrail = false,
+  // The tower kit (see the file-top note): `fixtureLayout(caps)` or null.
+  fixture = null,
 }) {
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
   // Read by the release handler, which must land a mesh on the SERVER's released
@@ -477,6 +493,10 @@ export default function UrdfTwin({
   const poseDriven = typeof poseSource === 'function';
   const poseSourceRef = useRef(poseSource);
   poseSourceRef.current = poseDriven ? poseSource : null;
+  // The tower kit: read by the URDF load, so a robot that arrives after the
+  // prop stands on the plate at once.
+  const fixtureRef = useRef(fixture);
+  fixtureRef.current = fixture;
   const sourceAppliedRef = useRef({ robot: null, version: undefined });
   const sourceGhostRef = useRef(null);
   const sourceGhostMaterialRef = useRef(null);
@@ -982,6 +1002,8 @@ export default function UrdfTwin({
         // world-frame geometry by construction — see emitEndEffector.
         robot.rotation.x = -Math.PI / 2;
         robot.rotation.z = asset.yaw || 0;
+        // On the tower kit the arm stands on its base plate (viewer +Y is up).
+        if (fixtureRef.current && robot.position) robot.position.y = fixtureRef.current.liftM;
         scene.add(robot);
         robotRef.current = robot;
         // NO framing and NO shadow traverse here: at this instant the robot has
@@ -1543,9 +1565,13 @@ export default function UrdfTwin({
     // angles run in its own XY plane from +x towards +y; laid flat by the
     // -π/2 X-rotation below, local (x, y) IS the base frame's (x, y), so the
     // bearing atan2(y, x) of the manifest is the geometry's theta unchanged.
+    // On the tower kit the printed work zone with its cut is drawn instead
+    // (its outline already in the base frame, the 2D table's shape).
+    const zone = fixture && Array.isArray(fixture.zone) && fixture.zone.length > 2 ? fixture.zone : null;
     const sector = annulus.sector || null;
-    const annulusKey = `${annulus.inner}:${annulus.outer}`
-      + (sector ? `:${sector.minDeg}:${sector.maxDeg}` : '');
+    const annulusKey = zone
+      ? `zone:${fixture.id}:${fixture.baseAxisX}:${zone.length}`
+      : `${annulus.inner}:${annulus.outer}` + (sector ? `:${sector.minDeg}:${sector.maxDeg}` : '');
     // Profile change (annulus radii or sector) → rebuild the ring geometry.
     if (ring && ring.userData && ring.userData.annulusKey !== annulusKey) {
       sceneRef.current.remove(ring);
@@ -1555,12 +1581,21 @@ export default function UrdfTwin({
       ring = null;
     }
     if (!ring) {
-      const geo = sector
-        ? new THREE.RingGeometry(
+      let geo;
+      if (zone) {
+        const shape = new THREE.Shape();
+        shape.moveTo(zone[0][0], zone[0][1]);
+        zone.slice(1).forEach(([x, y]) => shape.lineTo(x, y));
+        shape.closePath();
+        geo = new THREE.ShapeGeometry(shape);
+      } else if (sector) {
+        geo = new THREE.RingGeometry(
           annulus.inner, annulus.outer, 64, 1,
           (sector.minDeg * Math.PI) / 180, ((sector.maxDeg - sector.minDeg) * Math.PI) / 180,
-        )
-        : new THREE.RingGeometry(annulus.inner, annulus.outer, 64);
+        );
+      } else {
+        geo = new THREE.RingGeometry(annulus.inner, annulus.outer, 64);
+      }
       const mat = new THREE.MeshBasicMaterial({
         color: REACH_RING_COLOR,
         transparent: true,
@@ -1577,7 +1612,63 @@ export default function UrdfTwin({
     }
     ring.visible = showReach;
     requestRenderRef.current();
-  }, [showReach, annulus]);
+  }, [showReach, annulus, fixture]);
+
+  // ---- The tower kit ("fixture") ---------------------------------------------
+  // The lift: the arm (and every ghost of it) stands `liftM` higher on the
+  // plate. Without the prop the robot is never touched — a robot that was
+  // raised goes back to the table.
+  useEffect(() => {
+    const y = fixture ? fixture.liftM : 0;
+    const robot = robotRef.current;
+    if (!robot || !robot.position || robot.position.y === y) return;
+    robot.position.y = y;
+    const chrono = chronoRef.current;
+    [ghostRef.current, sourceGhostRef.current, ...(chrono ? chrono.ghosts.map((g) => g.ghost) : [])]
+      .forEach((g) => { if (g && g.position) g.position.y = y; });
+    requestRenderRef.current();
+  }, [fixture]);
+
+  // The plate and the tower's oriented boxes, in a group laid into the arm's
+  // base frame by the same -π/2 X-rotation as the robot (so a box's centre and
+  // its rows are written as the contract states them). Built per fixture and
+  // per scene (`asset` rebuilds the scene); without the prop this returns
+  // BEFORE constructing any primitive.
+  useEffect(() => {
+    const scene = sceneRef.current;
+    if (!scene || !fixture) return undefined;
+    const group = new THREE.Group();
+    group.userData.fixtureKit = true;
+    group.rotation.x = -Math.PI / 2;
+    const plateMaterial = new THREE.MeshStandardMaterial({ color: FIXTURE_PLATE_COLOR, metalness: 0.05, roughness: 0.85 });
+    const towerMaterial = new THREE.MeshStandardMaterial({ color: FIXTURE_TOWER_COLOR, metalness: 0.05, roughness: 0.8 });
+    const [[px0, py0], [px1, py1]] = fixture.plate;
+    const plate = new THREE.Mesh(new THREE.BoxGeometry(px1 - px0, py1 - py0, fixture.liftM), plateMaterial);
+    plate.position.set((px0 + px1) / 2, (py0 + py1) / 2, fixture.liftM / 2);
+    plate.userData.fixturePart = 'plate';
+    group.add(plate);
+    fixture.boxes.forEach(({ name, centre, rows, half }) => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(2 * half[0], 2 * half[1], 2 * half[2]), towerMaterial);
+      mesh.position.set(centre[0], centre[1], centre[2]);
+      mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().set(
+        rows[0][0], rows[0][1], rows[0][2], 0,
+        rows[1][0], rows[1][1], rows[1][2], 0,
+        rows[2][0], rows[2][1], rows[2][2], 0,
+        0, 0, 0, 1,
+      ));
+      mesh.userData.fixturePart = name;
+      group.add(mesh);
+    });
+    scene.add(group);
+    requestRenderRef.current();
+    return () => {
+      scene.remove(group);
+      group.traverse((obj) => { if (obj && obj.geometry) obj.geometry.dispose(); });
+      plateMaterial.dispose();
+      towerMaterial.dispose();
+      requestRenderRef.current();
+    };
+  }, [fixture, asset]);
 
   // ---- rosbridge joint-state subscription (ImageGridCell idiom) ----
   // `jointTopic` defaults to the bare global /joint_states (RecordPage); SimScene

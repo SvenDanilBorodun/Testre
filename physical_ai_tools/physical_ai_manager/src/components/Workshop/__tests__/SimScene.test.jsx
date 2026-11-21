@@ -15,6 +15,8 @@ import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import SimScene from '../SimScene';
 import { DE } from '../blocks/messages_de';
+import { fixtureLayout, towerView } from '../simConstants';
+import { inZone, zoneAzHi } from '../fixture/inZone';
 
 // The /sim/objects subscription, under test control. The hook itself has its own
 // wire contract; what matters here is WHEN SimScene is allowed to believe it.
@@ -898,5 +900,252 @@ describe('SimScene — the split stage (WI-1.8)', () => {
     } finally {
       window.localStorage.removeItem('edubotics_workshop_sim_split');
     }
+  });
+});
+
+// The tower kit and its cut zone (spec 40 S8, D66; revision 5, 58 m-8). Only
+// while the arm container STATES the tower camera (`tower_v1`) does the
+// simulator draw the base plate, the mat, the tower's footprint and the printed
+// work zone with the corner next to the tower base cut out — and snap a tap
+// into that zone. Under `legacy` and with no statement at all (`None`) the
+// table is exactly today's: the snapshots below were taken from the simulator
+// BEFORE the tower existed, on both arms' real capability manifests.
+describe('SimScene — the tower kit and the cut zone (only under tower_v1)', () => {
+  const OMX_CAPS = {
+    urdf_asset_id: 'omx_f', arm_joints: 5, reach_inner_m: 0.1, reach_outer_m: 0.25, reach_sector_deg: [-100, 100],
+  };
+  const V1_CAPS = {
+    urdf_asset_id: 'v1', arm_joints: 5, reach_inner_m: 0.1, reach_outer_m: 0.34, reach_sector_deg: [-90, 90],
+  };
+  const DEG = Math.PI / 180;
+  const workshop = (sceneCameraProfile) => ({ runState: 'idle', paused: false, sceneCameraProfile });
+  const svgOf = () => screen.getByRole('application', {
+    name: 'Simulator-Tisch — Objekte, Sperrzonen und Ziele platzieren',
+  });
+  const giveBox = () => {
+    const svg = svgOf();
+    const [, , w, h] = svg.getAttribute('viewBox').split(' ').map(Number);
+    svg.getBoundingClientRect = () => ({ left: 0, top: 0, width: w, height: h, right: w, bottom: h, x: 0, y: 0 });
+    return svg;
+  };
+
+  // Today's table: its markup with a reachable and an unreachable object, and
+  // where five taps place an object.
+  async function today(capabilities, profile) {
+    const placed = [];
+    const scene = {
+      objects: [
+        { type: 'wuerfel', tag_id: 0, x: 0.15, y: 0, yaw: 0 },
+        { type: 'wuerfel', tag_id: 1, x: -0.03, y: 0.15, yaw: 0 },
+      ],
+      zones: [],
+    };
+    const { unmount } = render(<SimScene scene={scene} catalog={CATALOG} onChange={() => {}} />,
+      { capabilities, workshop: workshop(profile) });
+    await screen.findByTestId('urdf-twin');
+    const markup = svgOf().outerHTML;
+    const twinFixture = twinProps.current.fixture === undefined ? 'none' : 'given';
+    unmount();
+    const onChange = vi.fn();
+    render(<SimScene scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={onChange} />,
+      { capabilities, workshop: workshop(profile) });
+    await screen.findByTestId('urdf-twin');
+    const svg = giveBox();
+    for (const [cx, cy] of [[150, 30], [75, 175], [290, 100], [10, 10], [150, 160]]) {
+      onChange.mockClear();
+      mockToast.mockClear();
+      fireEvent.pointerDown(svg, { clientX: cx, clientY: cy });
+      const obj = onChange.mock.calls[0][0].objects[0];
+      placed.push([cx, cy, obj.x, obj.y, mockToast.mock.calls.length]);
+    }
+    return { markup, placed, twinFixture };
+  }
+
+  test.each([['legacy'], [null]])('OMX, profile %s: today\'s table, byte for byte', async (profile) => {
+    expect(await today(OMX_CAPS, profile)).toMatchInlineSnapshot(`
+      {
+        "markup": "<svg viewBox="0 0 300 185" class="w-full h-auto rounded-md bg-[var(--bg-sunk)] touch-none cursor-crosshair" role="application" aria-label="Simulator-Tisch — Objekte, Sperrzonen und Ziele platzieren"><path data-testid="reach-sector" d="M 273.10096912652597 181.70602220836628 A 125 125 0 1 0 26.899030873473993 181.70602220836628 L 100.7596123493896 168.6824088833465 A 50 50 0 1 1 199.2403876506104 168.6824088833465 Z" fill="rgba(61,190,90,0.12)" stroke="#3DBE5A" stroke-width="1" stroke-dasharray="4 3"></path><circle cx="150" cy="160" r="4" fill="#4D4B47"></circle><text x="157" y="164" font-size="9" fill="#4D4B47">Roboter</text><g data-object-tag="0" data-unreachable="false" class="cursor-grab"><rect x="142.5" y="77.5" width="15" height="15" transform="rotate(0 150 85)" fill="#f59e0b" stroke="#92400e" stroke-width="1" rx="2"></rect><line x1="150" y1="85" x2="150" y2="71" stroke="#1f2937" stroke-width="1.5"></line><text x="159" y="76" font-size="9" fill="#475569">Würfel #0</text></g><g data-object-tag="1" data-unreachable="true" class="cursor-grab"><circle data-testid="unreachable-ring" cx="75" cy="175" r="12.5" fill="none" stroke="#FF3B30" stroke-width="1.5" stroke-dasharray="3 2"><title>Hier kann der Arm nicht greifen — verschiebe das Objekt in den grünen Greifbereich.</title></circle><rect x="67.5" y="167.5" width="15" height="15" transform="rotate(0 75 175)" fill="#f59e0b" stroke="#92400e" stroke-width="1" rx="2"></rect><line x1="75" y1="175" x2="75" y2="161" stroke="#1f2937" stroke-width="1.5"></line><text x="84" y="166" font-size="9" fill="#b91c1c">Würfel #1 (nicht erreichbar)</text></g></svg>",
+        "placed": [
+          [
+            150,
+            30,
+            0.25,
+            0,
+            1,
+          ],
+          [
+            75,
+            175,
+            -0.027,
+            0.151,
+            1,
+          ],
+          [
+            290,
+            100,
+            0.098,
+            -0.23,
+            1,
+          ],
+          [
+            10,
+            10,
+            0.183,
+            0.171,
+            1,
+          ],
+          [
+            150,
+            160,
+            0.1,
+            0,
+            1,
+          ],
+        ],
+        "twinFixture": "none",
+      }
+    `);
+  });
+
+  test.each([['legacy'], [null]])('V1, profile %s: today\'s table, byte for byte', async (profile) => {
+    expect(await today(V1_CAPS, profile)).toMatchInlineSnapshot(`
+      {
+        "markup": "<svg viewBox="0 0 300 185" class="w-full h-auto rounded-md bg-[var(--bg-sunk)] touch-none cursor-crosshair" role="application" aria-label="Simulator-Tisch — Objekte, Sperrzonen und Ziele platzieren"><path data-testid="reach-sector" d="M 320 160 A 170 170 0 0 0 -20.000000000000018 160 L 99.99999999999999 160 A 50 50 0 0 1 200 160 Z" fill="rgba(61,190,90,0.12)" stroke="#3DBE5A" stroke-width="1" stroke-dasharray="4 3"></path><circle cx="150" cy="160" r="4" fill="#4D4B47"></circle><text x="157" y="164" font-size="9" fill="#4D4B47">Roboter</text><g data-object-tag="0" data-unreachable="false" class="cursor-grab"><rect x="142.5" y="77.5" width="15" height="15" transform="rotate(0 150 85)" fill="#f59e0b" stroke="#92400e" stroke-width="1" rx="2"></rect><line x1="150" y1="85" x2="150" y2="71" stroke="#1f2937" stroke-width="1.5"></line><text x="159" y="76" font-size="9" fill="#475569">Würfel #0</text></g><g data-object-tag="1" data-unreachable="true" class="cursor-grab"><circle data-testid="unreachable-ring" cx="75" cy="175" r="12.5" fill="none" stroke="#FF3B30" stroke-width="1.5" stroke-dasharray="3 2"><title>Hier kann der Arm nicht greifen — verschiebe das Objekt in den grünen Greifbereich.</title></circle><rect x="67.5" y="167.5" width="15" height="15" transform="rotate(0 75 175)" fill="#f59e0b" stroke="#92400e" stroke-width="1" rx="2"></rect><line x1="75" y1="175" x2="75" y2="161" stroke="#1f2937" stroke-width="1.5"></line><text x="84" y="166" font-size="9" fill="#b91c1c">Würfel #1 (nicht erreichbar)</text></g></svg>",
+        "placed": [
+          [
+            150,
+            30,
+            0.26,
+            0,
+            0,
+          ],
+          [
+            75,
+            175,
+            0,
+            0.153,
+            1,
+          ],
+          [
+            290,
+            100,
+            0.12,
+            -0.28,
+            0,
+          ],
+          [
+            10,
+            10,
+            0.249,
+            0.232,
+            1,
+          ],
+          [
+            150,
+            160,
+            0.1,
+            0,
+            1,
+          ],
+        ],
+        "twinFixture": "none",
+      }
+    `);
+  });
+
+  test('tower_v1 draws the plate, the mat, the tower (pad, column, bridge, both head boxes) and the zone with its cut', async () => {
+    render(<SimScene scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} />,
+      { capabilities: OMX_CAPS, workshop: workshop('tower_v1') });
+    await screen.findByTestId('urdf-twin');
+    for (const id of ['fixture-plate', 'fixture-mat', 'fixture-box-pad', 'fixture-box-column',
+      'fixture-box-bridge', 'fixture-box-head', 'fixture-box-lens', 'reach-zone']) {
+      expect([id, !!screen.queryByTestId(id)]).toEqual([id, true]);
+    }
+    expect(screen.queryByTestId('reach-sector')).toBeNull();
+    // The zone's outline: every vertex lies on the printed zone (F = W − base axis).
+    const layout = fixtureLayout(OMX_CAPS);
+    const view = towerView(layout);
+    const d = screen.getByTestId('reach-zone').getAttribute('d');
+    const pts = [...d.matchAll(/(-?[0-9.]+) (-?[0-9.]+)/g)].map((m) => [Number(m[1]), Number(m[2])]);
+    expect(pts.length).toBeGreaterThan(20);
+    for (const [px, py] of pts) {
+      const x = view.maxX - py / 500 - layout.baseAxisX;
+      const y = view.maxY - px / 500;
+      const r = Math.hypot(x, y);
+      expect(r).toBeGreaterThan(layout.spec.zone_inner_m - 1e-3);
+      expect(r).toBeLessThan(layout.spec.zone_outer_m + 1e-3);
+      expect(Math.atan2(y, x) / DEG).toBeLessThan(zoneAzHi(layout.spec, r) + 0.05);
+    }
+    // The twin draws the same kit.
+    expect(twinProps.current.fixture).toBe(layout);
+  });
+
+  test('OMX tower_v1: a tap at r 0.15 m, az 84° lands on zone_az_hi(0.15) (accepted at 84° before the tower)', async () => {
+    const onChange = vi.fn();
+    render(<SimScene scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={onChange} />,
+      { capabilities: OMX_CAPS, workshop: workshop('tower_v1') });
+    await screen.findByTestId('urdf-twin');
+    const layout = fixtureLayout(OMX_CAPS);
+    const view = towerView(layout);
+    const svg = giveBox();
+    const xW = 0.15 * Math.cos(84 * DEG) + layout.baseAxisX;
+    const yW = 0.15 * Math.sin(84 * DEG);
+    fireEvent.pointerDown(svg, { clientX: 500 * (view.maxY - yW), clientY: 500 * (view.maxX - xW) });
+    const [placed] = onChange.mock.calls[0][0].objects;
+    const xF = placed.x - layout.baseAxisX;
+    const r = Math.hypot(xF, placed.y);
+    expect(Math.abs(r - 0.15)).toBeLessThan(0.0015);
+    expect(Math.abs(Math.atan2(placed.y, xF) / DEG - zoneAzHi(layout.spec, 0.15))).toBeLessThan(0.6);
+    expect(inZone(layout.spec, xF, placed.y)).toBe(true);
+    expect(mockToast).toHaveBeenCalledWith('Objekt in den Greifbereich verschoben.', expect.anything());
+  });
+
+  test('legacy (today): the same tap stays at 84° — the old sector accepts it', async () => {
+    const onChange = vi.fn();
+    render(<SimScene scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={onChange} />,
+      { capabilities: OMX_CAPS, workshop: workshop('legacy') });
+    await screen.findByTestId('urdf-twin');
+    const svg = giveBox();
+    // Today's table window: x 0.32 at the top, y 0.30 at the left (the module's VIEW_MAX_*).
+    const baseAxisX = -0.01125;
+    const xW = 0.15 * Math.cos(84 * DEG) + baseAxisX;
+    const yW = 0.15 * Math.sin(84 * DEG);
+    fireEvent.pointerDown(svg, { clientX: 500 * (0.3 - yW), clientY: 500 * (0.32 - xW) });
+    const [placed] = onChange.mock.calls[0][0].objects;
+    expect(Math.atan2(placed.y, placed.x - baseAxisX) / DEG).toBeGreaterThan(80);
+    expect(mockToast).not.toHaveBeenCalled();
+  });
+
+  test('tower_v1: a saved object outside the zone keeps its place and reads „(nicht erreichbar)"', async () => {
+    const layout = fixtureLayout(V1_CAPS);
+    const at = (r, az) => ({ x: r * Math.cos(az * DEG) + layout.baseAxisX, y: r * Math.sin(az * DEG) });
+    const scene = {
+      objects: [
+        { type: 'wuerfel', tag_id: 0, ...at(0.2, 0), yaw: 0 },
+        // Inside the old ±90° sector, inside the cut corner: not reachable on the tower kit.
+        { type: 'wuerfel', tag_id: 1, ...at(0.2, 80), yaw: 0 },
+      ],
+      zones: [],
+    };
+    const onChange = vi.fn();
+    const { container } = render(<SimScene scene={scene} catalog={CATALOG} onChange={onChange} />,
+      { capabilities: V1_CAPS, workshop: workshop('tower_v1') });
+    await screen.findByTestId('urdf-twin');
+    expect(onChange).not.toHaveBeenCalled();
+    // eslint-disable-next-line testing-library/no-container, testing-library/no-node-access
+    const groups = [...container.querySelectorAll('[data-object-tag]')];
+    const byTag = Object.fromEntries(groups.map((g) => [g.getAttribute('data-object-tag'), g]));
+    expect(byTag['0'].getAttribute('data-unreachable')).toBe('false');
+    expect(byTag['1'].getAttribute('data-unreachable')).toBe('true');
+    expect(byTag['1'].textContent).toContain('(nicht erreichbar)');
+  });
+
+  test('legacy: no kit is drawn and the twin gets no fixture', async () => {
+    render(<SimScene scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} />,
+      { capabilities: OMX_CAPS, workshop: workshop('legacy') });
+    await screen.findByTestId('urdf-twin');
+    expect(screen.queryByTestId('fixture-plate')).toBeNull();
+    expect(screen.queryByTestId('reach-zone')).toBeNull();
+    expect(twinProps.current.fixture).toBeUndefined();
   });
 });

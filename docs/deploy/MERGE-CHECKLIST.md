@@ -32,6 +32,58 @@ by hand after testing both on a real PC and Pi (GitHub → Actions →
 Every step below is an owner action (CLAUDE.md, „When to ask the user"). The
 details sit in `DEPLOY.md` §1 (053 … 059), §3c and §3d.
 
+## The 2.41.0 merge (`feat/scene-camera-tower-autocal-c`, the scene-camera tower): no owner step before the merge, a release precondition before the TAG
+
+**The merge.** Nothing has to happen before it: no migration (W1 has nothing
+to apply and is not run), no Railway variable, no secret, no Modal deploy, no
+Supabase setting; the branch changes nothing under
+`robotis_ai_setup/cloud_training_api/`, so W2 does not fire. What the merge
+itself deploys:
+
+- **W3 rebuilds the teacher web** (the branch changes
+  `physical_ai_tools/physical_ai_manager/`); no teacher-web screen is meant
+  to change (the changed pages are the student's Roboter Studio, Startseite
+  and the Pi's System tab). After W3, as after every merge: `/version.json`
+  names the merge commit (W3's own gate).
+- **W4 builds `:latest` images**; no robot pulls them. The robots get 2.41.0
+  only with the tag and W6, like every release.
+- `ci.yml::python-tests` now builds `pupil-apriltags==1.0.4` from its sdist
+  (`CMAKE_POLICY_VERSION_MINIMUM=3.5`) and runs the server suite's
+  real-detector tests with `EDUBOTICS_REQUIRE_PUPIL=1`; a red python-tests on
+  the merge is that build first.
+
+**The release precondition (owner decisions D25 as amended by D64, D86,
+D87; no code enforces it).** Push the `v2.41.0` tag only when ALL of these
+hold:
+
+1. **A tower kit is DELIVERED to every school that uses Roboter Studio on a
+   real robot** (D64: delivered, not installed — each kit is installed right
+   after its robot shows 2.41.0; until then the old scene camera stays and
+   records, and Roboter Studio on the real robot answers „Roboter Studio am
+   echten Roboter braucht die Turm-Kamera (Turm-Kit) …"). The update is forced:
+   a rig without its kit keeps Aufnahme, Training and Inferenz and loses
+   real-robot Roboter Studio until the kit is installed.
+2. **The R-C rig gates have passed** (`docs/KNOWN-ISSUES.md`, „Release
+   2.41.0", every gate there) — except RG-0 (the OMX fingertip measurement),
+   RG-11 (grasp accuracy) and RG-AB (the A/B study), which run AFTER the
+   release (D86, D87, D59; the release notes say the OMX grasp height is
+   provisional and the accuracy unproven).
+3. **RG-MAT is done**: the mats are printed from the cut that RG-T1R, RG-T1S
+   and RG-DROOP confirmed (the cut may only grow, D69).
+4. **For `tower_v1` on an Orange Pi: RG-GT** (the guard's per-leg budget on the
+   Pi, p99 ≤ 150 ms and max ≤ 600 ms, D72). Without it, do not release the tower
+   profile on the Pi.
+
+The teachers' material is `docs/TURM-KIT-AUFBAU.md` (the assembly, the
+rollout order, the leader's place, the USB ports) and the release notes; the
+owner hands both to the schools with the kits.
+
+**Rollback:** per rig, untick „Turm-Kamera (Turm-Kit)" (today's camera path);
+the release, back to 2.40.0 (the older `.exe` AND the pinned image tag; the
+previous Pi tarball), never below 2.40.0 once tower datasets exist. With the
+kit still mounted the tower camera keeps recording without a stamp: start new
+datasets or re-mount the old scene camera (`docs/KNOWN-ISSUES.md`).
+
 ## The 2.40.0 merge (`feat/scene-camera-tower-autocal-b`, the dataset's scene-camera stamp): no owner step before it
 
 Nothing has to happen before this merge: no migration (W1 has nothing to

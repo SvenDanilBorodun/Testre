@@ -29,14 +29,30 @@ Roboter-Studio-Modul vorzubereiten. Aufbauzeit: ~15 Minuten.
 
 ### 1. Turm-Kit aufbauen und kalibrieren
 
-- Roboter, Kameraturm und Szenen-Matte aufbauen: die Matte bis zum Anschlag an
-  die Grundplatte schieben, glatt auflegen und an den Ecken fixieren.
-- In der Einrichtung als Szenen-Kamera **„Turm-Kamera“** auswählen.
+Die ausführliche Anleitung mit Reihenfolge, USB-Anschlüssen und Fehlerbehebung
+steht in [`docs/TURM-KIT-AUFBAU.md`](../docs/TURM-KIT-AUFBAU.md). Kurz:
+
+- **Erst das Update, dann der Umbau:** Das Kit kommt vor dem Update. Bis der
+  Roboter Version 2.41.0 hat, bleibt die alte Szenen-Kamera montiert und nimmt
+  wie bisher auf.
+- Roboter, Kameraturm und Szenen-Matte aufbauen (die alte Szenen-Kamera samt Fuß
+  abbauen, der Turm-Fuß kommt an ihre Stelle an die Grundplatte): die Matte bis
+  zum Anschlag an die Grundplatte schieben, glatt auflegen und an den Ecken
+  fixieren. Die Turm-Kamera an einen eigenen USB-Anschluss, nie gemeinsam mit
+  der Greifer-Kamera an einen Hub.
+- In der Einrichtung die Turm-Kamera als Szenen-Kamera auswählen und
+  **„Turm-Kamera (Turm-Kit)“** ankreuzen (am Orange Pi im System-Fenster).
 - Roboter Studio öffnen: Die Kalibrierung wird von selbst geprüft. Beim ersten Mal
   **„Arm-Check starten“**: das Kalibrier-Ziel auf den Greifer klipsen, den Tisch
   frei räumen, 30 cm hinter dem Roboter frei lassen und Abstand halten — der Arm
   fährt seine Posen selbst an. Danach das Kalibrier-Ziel abnehmen und bestätigen.
 - Wurde die Kamera verdreht, verlangt diese Prüfung einen neuen Arm-Check.
+- Die Ecke der Greifzone neben dem Kameraturm ist auf der Matte ausgespart:
+  dort keine Objekte hinlegen.
+- **Nach dem Umbau neue Datensätze aufnehmen und neu trainieren:** Die
+  Turm-Kamera filmt aus einem anderen Blickwinkel, ein Datensatz der alten Kamera
+  lässt sich mit ihr nicht fortsetzen, und wie gut Modelle mit diesem Blickwinkel
+  lernen, ist noch nicht belegt.
 
 ### 2. AprilTags drucken und aufkleben
 

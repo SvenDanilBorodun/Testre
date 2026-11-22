@@ -250,6 +250,31 @@ describe('HomeGlidePrompt — the V1 under the camera tower', () => {
   });
 });
 
+describe('HomeGlidePrompt — the 2 Hz verdict re-renders no caller (S-1)', () => {
+  it('a re-sent verdict, a change the callers do not read and the countdown tick render no useHomeGlide() caller', async () => {
+    let runs = 0;
+    function Counted() {
+      const { offerHomeGlide } = useHomeGlide();
+      runs += 1;
+      return <button type="button" onClick={offerHomeGlide}>anbieten</button>;
+    }
+    await renderPage('v1_studio', <Counted />);
+    await deliver('clear');
+    const before = runs;
+    for (let i = 0; i < 30; i += 1) await deliver('clear'); // eslint-disable-line no-await-in-loop
+    // The provider's prompt changes, its callers' three values do not.
+    await deliver('unjudgeable');
+    await deliver('clear');
+    expect(runs).toBe(before);
+    offer();
+    expect(runs).toBeGreaterThan(before); // homeGlideActive turned true: that reaches them
+    const offered = runs;
+    await advance(2000);
+    expect(screen.getByText(`Start in ${HOME_GLIDE_COUNTDOWN_S - 2} Sekunden`)).toBeInTheDocument();
+    expect(runs).toBe(offered);
+  });
+});
+
 describe('HomeGlidePrompt — every other profile never subscribes (D1)', () => {
   it.each([['omx_full'], ['omx_follower'], [null], ['']])('%j', async (profile) => {
     await renderPage(profile, <><Offerer /><OfferOnMount /></>);

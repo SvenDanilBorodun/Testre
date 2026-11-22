@@ -209,6 +209,50 @@ describe('useTowerState / useHomeGlideState', () => {
     expect(result.current).toEqual({ glide: 'refused', gen: 1 });
   });
 
+  it('a verdict re-sent at 2 Hz (only gen moves) keeps its object and renders nothing (S-1)', async () => {
+    let runs = 0;
+    const { result } = renderHook(() => {
+      runs += 1;
+      return useTowerState({ enabled: true, rosbridgeUrl: URL });
+    });
+    await waitFor(() => expect(mockTopics).toHaveLength(1));
+    const send = (fields, gen) => act(() => mockTopics[0].cb(msg({ v: 1, ...fields, gen })));
+    const verdict = { glide: 'refused', fall: 'back', part: 'head' };
+    send(verdict, 1);
+    const first = result.current;
+    const before = runs;
+    for (let gen = 2; gen <= 31; gen += 1) send(verdict, gen);
+    expect(runs).toBe(before);
+    expect(result.current).toBe(first);
+    // Every field a caller reads still gets through on its own.
+    send({ ...verdict, part: 'lens' }, 32);
+    expect(result.current).toMatchObject({ glide: 'refused', fall: 'back', part: 'lens' });
+    send({ ...verdict, part: 'lens', fall: 'forward' }, 33);
+    expect(result.current.fall).toBe('forward');
+    send({ glide: 'clear', fall: 'forward', part: null }, 34);
+    expect(result.current).toMatchObject({ glide: 'clear', part: null });
+    expect(runs).toBe(before + 3);
+  });
+
+  it('a home-glide verdict re-sent at 2 Hz keeps its object too (S-1)', async () => {
+    let runs = 0;
+    const { result } = renderHook(() => {
+      runs += 1;
+      return useHomeGlideState({ enabled: true, rosbridgeUrl: URL });
+    });
+    await waitFor(() => expect(mockTopics).toHaveLength(1));
+    const send = (glide, gen) => act(() => mockTopics[0].cb(msg({ v: 1, glide, gen })));
+    send('clear', 1);
+    const first = result.current;
+    const before = runs;
+    for (let gen = 2; gen <= 31; gen += 1) send('clear', gen);
+    expect(runs).toBe(before);
+    expect(result.current).toBe(first);
+    send('refused', 32);
+    expect(result.current.glide).toBe('refused');
+    expect(runs).toBe(before + 1);
+  });
+
   it('disabled, or no URL: no subscription and no verdict', async () => {
     renderHook(() => useTowerState({ enabled: false, rosbridgeUrl: URL }));
     renderHook(() => useTowerState({ enabled: true, rosbridgeUrl: '' }));

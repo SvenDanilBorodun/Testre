@@ -434,16 +434,37 @@ class _Recorder:
 
 
 class _SyncThread:
-    """Runs the target at start(), recording where the worker begins and ends."""
+    """Runs the target at start(), recording where the worker begins and ends. With ``dies_quietly`` an
+    exception ends the worker as it ends a real ``threading.Thread`` (``threading.excepthook``): recorded,
+    never raised into the code that started it."""
 
-    def __init__(self, rec, target=None, daemon=None):
+    def __init__(self, rec, target=None, daemon=None, dies_quietly=False):
         self._rec = rec
         self._target = target
+        self._dies_quietly = dies_quietly
 
     def start(self):
         self._rec.calls.append("thread>")
-        self._target()
+        try:
+            self._target()
+        except Exception as exc:  # noqa: BLE001 — what threading.excepthook would print
+            if not self._dies_quietly:
+                raise
+            self._rec.calls.append(("thread died", type(exc).__name__))
+            return
         self._rec.calls.append("<thread")
+
+
+def _raises_once(exc, then):
+    """A stand-in whose first call raises ``exc`` and every later one returns ``then()``."""
+    calls = []
+
+    def call(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise exc
+        return then(*a, **k)
+    return call
 
 
 def _load(name, ns):
@@ -466,7 +487,9 @@ class TheStopAsksOnlyOnTheV1UnderTheTower(unittest.TestCase):
     STATUS = "Aktiv — Umgebung läuft"
 
     def _rig(self, *, robot_type=V1, scene_profile=TOWER, cloud_only=False, sentinel=None,
-             run_raises=None, answer=None, ask_raises=None):
+             run_raises=None, answer=None, ask_raises=None, read_raises_once=None, presses=1):
+        """``read_raises_once``: the first read raises it (the worker then dies as a real thread would);
+        ``presses``: how often „Stoppen" is pressed on the same window."""
         rec = _Recorder()
         note = rec.note
 
@@ -513,16 +536,20 @@ class TheStopAsksOnlyOnTheV1UnderTheTower(unittest.TestCase):
             _rs_scene_profile=scene_profile,
             _tower_check_running=False,
         )
+        read = docker_manager.read_tower_fall
+        if read_raises_once is not None:
+            read = _raises_once(read_raises_once, read)
         docker = types.SimpleNamespace(
-            read_tower_fall=docker_manager.read_tower_fall,
+            read_tower_fall=read,
             TOWER_FALL_UNKNOWN=docker_manager.TOWER_FALL_UNKNOWN,
             stop_containers=note("containers"),
             stop_cloud_only=note("containers"),
             stop_keepalive=note("keepalive"),
         )
+        quietly = read_raises_once is not None
         ns = {
             "threading": types.SimpleNamespace(
-                Thread=lambda target=None, daemon=None: _SyncThread(rec, target, daemon)),
+                Thread=lambda target=None, daemon=None: _SyncThread(rec, target, daemon, quietly)),
             "tk": types.SimpleNamespace(DISABLED="disabled", NORMAL="normal"),
             "webview_window": types.SimpleNamespace(destroy_all=note("webview")),
             "docker_manager": docker,
@@ -533,7 +560,8 @@ class TheStopAsksOnlyOnTheV1UnderTheTower(unittest.TestCase):
         handler = types.MethodType(_load("_stop_environment_after_tower_check", ns), owner)
         with mock.patch.object(docker_manager.wsl_bridge, "run", run), \
                 mock.patch.object(tower_stop_dialog, "ask", ask):
-            handler()
+            for _ in range(presses):
+                handler()
         return rec
 
     def _assert_stopped_as_today(self, rec):
@@ -605,6 +633,19 @@ class TheStopAsksOnlyOnTheV1UnderTheTower(unittest.TestCase):
                 rec = self._rig(run_raises=exc, answer=False)
                 self.assertEqual(rec.names().count("ask"), 1, rec.calls)
                 self._assert_stopped_nothing(rec)
+
+    def test_a_read_that_raises_asks_and_the_next_press_stops(self):
+        """FAILS FIRST (X-GUICHECK): a read that raises (read_tower_fall's own contract broken) killed the
+        worker before ``_decide``, so the check stayed marked running and every later „Stoppen" was ignored.
+        It is unknown now: the dialog asks, „Abbrechen" stops nothing, and the next press stops."""
+        rec = self._rig(sentinel="forward", answer=False, read_raises_once=ValueError("kaputt"), presses=2)
+        names = rec.names()
+        self.assertEqual(names.count("ask"), 1, rec.calls)
+        self.assertNotIn(("thread died", "ValueError"), rec.calls)
+        self.assertIn(("log", tower_stop_dialog.UNKNOWN_DE), rec.calls)
+        self.assertIn(("log", tower_stop_dialog.CANCELLED_DE), rec.calls)
+        self._assert_stopped_as_today(rec)
+        self.assertLess(names.index("ask"), names.index("containers"))
 
     def test_forward_and_none_stop_at_once(self):
         for sentinel in ("forward", "none"):
@@ -750,7 +791,9 @@ class _CloseScanRig:
 
     def __init__(self, *, robot_type=V1, scene_profile=TOWER, cloud_only=False, running=True, any_running=True,
                  sentinel=None, answer=None, ask_raises=None, generic_answer=True, scanning=False,
-                 blocked=None):
+                 blocked=None, probe_raises_once=None):
+        """``probe_raises_once``: the first stack probe raises it (the worker then dies as a real thread
+        would)."""
         self.rec = rec = _Recorder()
         self.sentinel = sentinel
         self.answer = answer
@@ -770,6 +813,10 @@ class _CloseScanRig:
         def any_container_running():
             rec.calls.append("ps")
             return any_running
+
+        probe = any_container_running
+        if probe_raises_once is not None:
+            probe = _raises_once(probe_raises_once, any_container_running)
 
         self.owner = owner = types.SimpleNamespace(
             root=types.SimpleNamespace(after=after, destroy=note("root.destroy")),
@@ -796,14 +843,15 @@ class _CloseScanRig:
             read_tower_fall=docker_manager.read_tower_fall,
             TOWER_FALL_UNKNOWN=docker_manager.TOWER_FALL_UNKNOWN,
             TOWER_FALL_NONE=docker_manager.TOWER_FALL_NONE,
-            any_container_running=any_container_running,
+            any_container_running=probe,
             stop_containers=note("containers"),
             stop_cloud_only=note("containers"),
             stop_keepalive=note("keepalive"),
         )
+        quietly = probe_raises_once is not None
         self.ns = {
             "threading": types.SimpleNamespace(
-                Thread=lambda target=None, daemon=None: _SyncThread(rec, target, daemon)),
+                Thread=lambda target=None, daemon=None: _SyncThread(rec, target, daemon, quietly)),
             "tk": types.SimpleNamespace(DISABLED="disabled", NORMAL="normal"),
             "webview_window": types.SimpleNamespace(destroy_all=note("webview")),
             "docker_manager": docker,
@@ -914,6 +962,22 @@ class ClosingTheWindowAsksOnlyOnTheV1UnderTheTower(unittest.TestCase):
         self.assertEqual(rec.names()[-1], "root.destroy")
         self.assertIn(("log", tower_stop_dialog.DIALOG_FAILED_DE), rec.calls)
 
+    def test_a_probe_that_raises_asks_and_the_next_close_closes(self):
+        """FAILS FIRST (X-GUICHECK): a stack probe that raises (docker_manager.any_container_running catches
+        only FileNotFoundError, TimeoutExpired and OSError; a ``text=True`` decode can raise
+        UnicodeDecodeError) killed the worker before ``_decide``: the check stayed marked running and the
+        window could no longer be closed. It is unknown now: the dialog asks, and the next click closes."""
+        rig = _CloseScanRig(running=False, sentinel="forward", answer=False,
+                            probe_raises_once=UnicodeDecodeError("cp1252", b"\x81", 0, 1, "undefined"))
+        rec = rig.press(self.handler)
+        self.assertEqual(rec.names().count("ask"), 1, rec.calls)
+        self.assertNotIn(("thread died", "UnicodeDecodeError"), rec.calls)
+        self.assertIn(("log", tower_stop_dialog.UNKNOWN_DE), rec.calls)
+        self.assertIn(("log", tower_stop_dialog.CLOSE_CANCELLED_DE), rec.calls)
+        self.assertNotIn("root.destroy", rec.names())
+        self.assertFalse(rig.owner._tower_check_running)
+        self.assertEqual(rig.press(self.handler).names()[-1], "root.destroy")
+
     def test_a_second_click_while_the_check_runs_is_ignored(self):
         rig = _CloseScanRig(sentinel="back", answer=False)
         rig.owner._tower_check_running = True
@@ -936,6 +1000,18 @@ class ScanningArmsAsksOnlyOnTheV1UnderTheTower(unittest.TestCase):
                 self.assertIn(("log", tower_stop_dialog.SCAN_CANCELLED_DE), rec.calls)
                 statuses = [c for c in rec.calls if isinstance(c, tuple) and c[0] == "status"]
                 self.assertEqual(statuses[-1], ("status", _CloseScanRig.STATUS))
+
+    def test_a_probe_that_raises_asks_and_the_next_scan_scans(self):
+        """FAILS FIRST (X-GUICHECK): the scan entry's probe, as the close button's."""
+        rig = _CloseScanRig(running=False, sentinel="forward", answer=False,
+                            probe_raises_once=ValueError("kaputt"))
+        rec = rig.press("_scan_arms_after_tower_check")
+        self.assertEqual(rec.names().count("ask"), 1, rec.calls)
+        self.assertNotIn(("thread died", "ValueError"), rec.calls)
+        self.assertNotIn("scan", rec.names())
+        self.assertIn(("log", tower_stop_dialog.SCAN_CANCELLED_DE), rec.calls)
+        self.assertFalse(rig.owner._tower_check_running)
+        self.assertEqual(rig.press("_scan_arms_after_tower_check").names().count("scan"), 1)
 
     def test_trotzdem_stoppen_scans(self):
         names = self._scan(sentinel="back", answer=True).names()

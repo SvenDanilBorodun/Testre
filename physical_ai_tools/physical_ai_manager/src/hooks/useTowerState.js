@@ -126,6 +126,18 @@ export function towerTierRunning({ towerState, statement, stored }) {
   return (statement ?? stored) === TOWER_SCENE_PROFILE;
 }
 
+// Whether `next` says nothing new against `prev`: every field but `gen`, which
+// the robot moves with each re-send and no caller reads. A 2 Hz re-send of the
+// same verdict then sets no state and renders nothing (the answer keeps the
+// object, and the `gen`, of the first message of the run).
+function sameVerdict(prev, next) {
+  if (prev === next) return true;
+  if (!prev || !next || typeof prev !== 'object' || typeof next !== 'object') return false;
+  const keys = Object.keys(next).filter((key) => key !== 'gen');
+  return keys.length === Object.keys(prev).filter((key) => key !== 'gen').length
+    && keys.every((key) => prev[key] === next[key]);
+}
+
 function useVerdictTopic(topicName, parse, enabled, rosbridgeUrl) {
   const [state, setState] = useState(null);
   const active = !!enabled && !!rosbridgeUrl;
@@ -137,6 +149,10 @@ function useVerdictTopic(topicName, parse, enabled, rosbridgeUrl) {
     }
     let cancelled = false;
     let topic = null;
+    // What this subscription last handed to setState; the state starts null.
+    // Compared here, not in an updater: React may still render once for an
+    // updater that returns the state it had.
+    let last = null;
 
     (async () => {
       let ros;
@@ -154,7 +170,11 @@ function useVerdictTopic(topicName, parse, enabled, rosbridgeUrl) {
         queue_length: 1,
       });
       topic.subscribe((msg) => {
-        if (!cancelled) setState(parse(msg?.data));
+        if (cancelled) return;
+        const next = parse(msg?.data);
+        if (sameVerdict(last, next)) return;
+        last = next;
+        setState(next);
       });
     })();
 

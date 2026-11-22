@@ -13,7 +13,7 @@
 // no answer from the robot is `unknown` and asks too (52 §6.3). The dialog
 // never blocks a stop. An OMX, or a V1 with the legacy camera, stops as today.
 
-import React from 'react';
+import React, { Profiler } from 'react';
 import { act, cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { configureStore } from '@reduxjs/toolkit';
@@ -207,6 +207,30 @@ describe('SystemPage — „Stoppen" on the V1 under the camera tower', () => {
     expect(screen.queryByRole('alertdialog')).toBeNull();
     await flush();
     expect(stopPosts()).toHaveLength(1);
+  });
+});
+
+describe('SystemPage — the 2 Hz verdict (S-1)', () => {
+  it('a tower_state re-sent at 2 Hz commits nothing; a new fall does', async () => {
+    mockPi.agentStatus = statusFixture();
+    let commits = 0;
+    render(
+      <Provider store={makeStore()}>
+        <Profiler id="system" onRender={() => { commits += 1; }}><SystemPage /></Profiler>
+      </Provider>,
+    );
+    await flush();
+    const live = towerTopics().filter((t) => !t.unsubscribed);
+    expect(live).toHaveLength(1);
+    const send = (fall, gen) => act(async () => {
+      live[0].cb({ data: JSON.stringify({ v: 1, glide: 'clear', fall, part: null, gen }) });
+    });
+    await send('forward', 0);
+    const before = commits;
+    for (let gen = 1; gen <= 30; gen += 1) await send('forward', gen); // eslint-disable-line no-await-in-loop
+    expect(commits).toBe(before);
+    await send('back', 31);
+    expect(commits).toBeGreaterThan(before);
   });
 });
 

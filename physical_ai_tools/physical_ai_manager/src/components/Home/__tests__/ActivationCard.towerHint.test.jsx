@@ -20,7 +20,7 @@
 // The strings are pinned as literals on purpose: D88 decided the activation
 // sentence word for word.
 
-import React from 'react';
+import React, { Profiler } from 'react';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 
 import ActivationCard from '../ActivationCard';
@@ -202,6 +202,19 @@ describe('ActivationCard — the tower hint holds the activation back', () => {
     await act(async () => { live.cb({ data: JSON.stringify({ v: 1, glide: 'gesperrt', fall: 'back', gen: 2 }) }); });
     expect(container.innerHTML).toBe(before);
     expect(activateButton()).not.toBeDisabled();
+  });
+
+  it.each(['clear', 'refused'])('glide %s re-sent at 2 Hz: the card commits nothing (S-1)', async (glide) => {
+    setUp({ status: { state: 'idle', hasLeader: false, required: true, message: '' } });
+    let commits = 0;
+    render(<Profiler id="card" onRender={() => { commits += 1; }}><ActivationCard /></Profiler>);
+    await flush();
+    await deliver(glide);
+    const before = commits;
+    for (let i = 0; i < 30; i += 1) await deliver(glide); // eslint-disable-line no-await-in-loop
+    expect(commits).toBe(before);
+    await deliver(glide === 'clear' ? 'refused' : 'clear');
+    expect(commits).toBeGreaterThan(before);
   });
 
   it.each([['omx_full'], ['omx_follower'], ['']])('profile %j: the card never subscribes to the tower (D1)', async (profile) => {

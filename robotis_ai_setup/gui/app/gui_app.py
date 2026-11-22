@@ -5078,9 +5078,10 @@ class EduBoticsApp:
         bounded ``docker ps``, which fails closed — a stack that is down has
         no energised arm, so "none" and WSL is never asked), then the
         driver's verdict ONCE (``docker_manager.read_tower_fall``, bounded at
-        TOWER_STATE_EXEC_TIMEOUT_S). On the Tk thread: "back" or "unknown"
-        shows ``tower_stop_dialog``; „Abbrechen" calls ``on_cancel``, gives
-        the status back and logs ``cancelled_de``, and nothing else runs;
+        TOWER_STATE_EXEC_TIMEOUT_S); a probe or a read that raises is
+        "unknown". On the Tk thread: "back" or "unknown" shows
+        ``tower_stop_dialog``; „Abbrechen" calls ``on_cancel``, gives the
+        status back and logs ``cancelled_de``, and nothing else runs;
         "forward", "none", „Trotzdem stoppen" and a dialog that cannot be
         shown give the status back and run ``proceed``. One check at a time:
         a press while one runs (its dialogs included) is ignored.
@@ -5115,10 +5116,16 @@ class EduBoticsApp:
                 self._tower_check_running = False
 
         def _check():
-            if probe_stack and not (self.running or docker_manager.any_container_running()):
-                fall = docker_manager.TOWER_FALL_NONE
-            else:
-                fall = docker_manager.read_tower_fall()
+            # A probe or a read that raises is no answer: unknown, which asks.
+            # The worker must reach `_decide`, or the check stays marked
+            # running and every later press is ignored.
+            try:
+                if probe_stack and not (self.running or docker_manager.any_container_running()):
+                    fall = docker_manager.TOWER_FALL_NONE
+                else:
+                    fall = docker_manager.read_tower_fall()
+            except Exception:  # noqa: BLE001 — a failed read asks; it never blocks
+                fall = docker_manager.TOWER_FALL_UNKNOWN
             self.root.after(0, lambda: _decide(fall))
 
         threading.Thread(target=_check, daemon=True).start()

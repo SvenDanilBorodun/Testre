@@ -6,7 +6,7 @@
  */
 
 import React, {
-  createContext, useCallback, useContext, useEffect, useRef, useState,
+  createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from 'react';
 import ReactDOM from 'react-dom';
 import toast from 'react-hot-toast';
@@ -303,11 +303,19 @@ export function useHomeGlidePrompt(robotProfile = null) {
 const HomeGlideContext = createContext(null);
 
 export function HomeGlideProvider({ children, robotProfile = null }) {
-  const glide = useHomeGlidePrompt(robotProfile);
+  const {
+    offerHomeGlide, homeGlideDialog, homeGlideActive, afterHomeGlide,
+  } = useHomeGlidePrompt(robotProfile);
+  // What useHomeGlide() reads, and only that: the prompt itself re-renders on
+  // every countdown second and every tower verdict, its callers need not.
+  const shared = useMemo(
+    () => ({ offerHomeGlide, homeGlideActive, afterHomeGlide }),
+    [offerHomeGlide, homeGlideActive, afterHomeGlide],
+  );
   return (
-    <HomeGlideContext.Provider value={glide}>
+    <HomeGlideContext.Provider value={shared}>
       {children}
-      {glide.homeGlideDialog}
+      {homeGlideDialog}
     </HomeGlideContext.Provider>
   );
 }

@@ -25,13 +25,12 @@ The server's own suite pins the block's sha256 and the rules
 """
 
 import ast
-import importlib.util
 import json
-import math
 import pathlib
 import re
 import subprocess
 import sys
+import textwrap
 import unittest
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -95,25 +94,38 @@ class SceneFixtureLockstep(unittest.TestCase):
     def test_the_check_compares_values_not_bytes(self):
         """The case table's last float digit differs between maths libraries (macOS against glibc:
         one unit in the last place, seen on the CI runner); the check must accept that and still
-        refuse every change that matters."""
-        spec = importlib.util.spec_from_file_location('export_scene_fixture_for_test', EXPORT)
-        export = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(export)
-        committed = json.loads((FIXTURE_DIR / 'sceneFixture.cases.json').read_text(encoding='utf-8'))
-        row = committed['in_zone']['omx'][1]
-        noisy = json.loads(json.dumps(committed))
-        noisy['in_zone']['omx'][1]['x_f'] = math.nextafter(row['x_f'], 1.0)   # one ulp: another libm
-        self.assertTrue(export.same_values(committed, noisy))
-        for change in (lambda d: d['in_zone']['omx'][1].__setitem__('x_f', row['x_f'] + 1e-9),
-                       lambda d: d['in_zone']['omx'][1].__setitem__('in_zone', not row['in_zone']),
-                       lambda d: d['in_zone']['omx'][1].__setitem__('what', row['what'] + ' '),
-                       lambda d: d['in_zone']['omx'].pop(),
-                       lambda d: d['in_zone']['omx'][1].pop('az_deg')):
-            changed = json.loads(json.dumps(committed))
-            change(changed)
-            self.assertFalse(export.same_values(committed, changed))
-        self.assertFalse(export.same_values({'a': True}, {'a': 1}))
-        self.assertFalse(export.same_values({'a': 1}, {'a': '1'}))
+        refuse every change that matters. Run in a fresh interpreter, like the check itself: inside
+        this suite another test may already hold a different ``physical_ai_server`` module."""
+        probe = textwrap.dedent(f"""
+            import importlib.util, json, math, sys
+            spec = importlib.util.spec_from_file_location('export_scene_fixture', {str(EXPORT)!r})
+            export = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(export)
+            committed = json.loads(open({str(FIXTURE_DIR / 'sceneFixture.cases.json')!r}, encoding='utf-8').read())
+            row = committed['in_zone']['omx'][1]
+            def copy():
+                return json.loads(json.dumps(committed))
+            noisy = copy()
+            noisy['in_zone']['omx'][1]['x_f'] = math.nextafter(row['x_f'], 1.0)   # one ulp: another libm
+            assert export.same_values(committed, noisy), 'one ulp must pass'
+            changes = [
+                lambda d: d['in_zone']['omx'][1].__setitem__('x_f', row['x_f'] + 1e-9),
+                lambda d: d['in_zone']['omx'][1].__setitem__('in_zone', not row['in_zone']),
+                lambda d: d['in_zone']['omx'][1].__setitem__('what', row['what'] + ' '),
+                lambda d: d['in_zone']['omx'].pop(),
+                lambda d: d['in_zone']['omx'][1].pop('az_deg'),
+            ]
+            for k, change in enumerate(changes):
+                changed = copy()
+                change(changed)
+                assert not export.same_values(committed, changed), f'change {{k}} must be refused'
+            assert not export.same_values({{'a': True}}, {{'a': 1}}), 'bool against int'
+            assert not export.same_values({{'a': 1}}, {{'a': '1'}}), 'int against str'
+            print('ok')
+        """)
+        run = subprocess.run([sys.executable, '-B', '-c', probe], capture_output=True, text=True, timeout=120)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout.strip(), 'ok')
 
     def test_the_reserved_range_is_the_calibrations_and_inside_tag36h11(self):
         c = _contract()

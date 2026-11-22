@@ -431,13 +431,17 @@ class TestTheLookupRunsBesideTheStart(_RouteCase):
         self.assertLess(elapsed, self.GPU_S + 0.75)
 
     def test_the_lookup_starts_before_the_reservation(self) -> None:
-        lookup = _Lookup()
+        # The lookup is held until the reservation is asked for. An instant lookup could finish, and so
+        # leave _SCENE_LOOKUPS, before create_reservation runs in its worker thread; the set would then
+        # read empty although the lookup had started first (seen on a CI runner, never locally).
+        lookup = _Lookup(delay_s=10.0)
         real_create = svc.create_reservation
 
         started_at_create = []
 
         def create(*a):
-            started_at_create.append(bool(route._SCENE_LOOKUPS))
+            started_at_create.append(bool(route._SCENE_LOOKUPS) and not lookup.finished.is_set())
+            lookup.release.set()
             return real_create(*a)
 
         self.server = _Server()

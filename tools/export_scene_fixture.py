@@ -14,11 +14,17 @@
       0.1 deg inside and outside each cut segment, the sector edges, the radii — the table the
       JS twin is held equal by.
 
-Both files are byte-fenced: ``test/test_scene_fixture.py`` compares them with a fresh render.
+Both files are fenced against a fresh render (``tests/test_scene_fixture_lockstep.py`` runs
+``--check``). The check compares VALUES, not bytes: the same structure and keys, every string,
+boolean and integer exactly, every float within ``FLOAT_REL_TOL`` / ``FLOAT_ABS_TOL``. The case
+table's coordinates come from ``math.cos`` / ``math.sin``, whose last digit differs between
+platforms' maths libraries (one unit in the last place, macOS against glibc, seen on the CI
+runner), so a byte comparison failed on Linux for a file rendered on a Mac; any change that
+matters (a knot, a radius, an ``in_zone`` verdict) is many orders above the tolerance.
 
 Usage: python3 tools/export_scene_fixture.py           write both files
-       python3 tools/export_scene_fixture.py --check   exit 1 when either file differs
-Deterministic: the same module gives the same bytes."""
+       python3 tools/export_scene_fixture.py --check   exit 1 when either file differs in value
+Deterministic: the same module on the same platform gives the same bytes."""
 
 import json
 import math
@@ -102,12 +108,31 @@ def render_cases() -> str:
     })
 
 
+FLOAT_REL_TOL = 1e-12
+FLOAT_ABS_TOL = 1e-15
+
+
+def same_values(a, b) -> bool:
+    """True when two JSON documents hold the same values (see the module docstring): equal
+    structure and keys, exact strings, booleans, integers and nulls, floats within the tolerance."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        return type(a) is type(b) and a == b
+    if isinstance(a, float) or isinstance(b, float):
+        return (isinstance(a, (int, float)) and isinstance(b, (int, float))
+                and math.isclose(a, b, rel_tol=FLOAT_REL_TOL, abs_tol=FLOAT_ABS_TOL))
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(same_values(a[k], b[k]) for k in a)
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(same_values(x, y) for x, y in zip(a, b))
+    return type(a) is type(b) and a == b
+
+
 def main(argv) -> int:
     check = '--check' in argv
     stale = []
     for path, text in ((FIXTURE_JSON, render_fixture()), (CASES_JSON, render_cases())):
         if check:
-            if not path.exists() or path.read_text(encoding='utf-8') != text:
+            if not path.exists() or not same_values(json.loads(path.read_text(encoding='utf-8')), json.loads(text)):
                 stale.append(path)
         else:
             path.parent.mkdir(parents=True, exist_ok=True)

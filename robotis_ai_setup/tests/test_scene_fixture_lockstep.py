@@ -25,7 +25,9 @@ The server's own suite pins the block's sha256 and the rules
 """
 
 import ast
+import importlib.util
 import json
+import math
 import pathlib
 import re
 import subprocess
@@ -89,6 +91,29 @@ class SceneFixtureLockstep(unittest.TestCase):
         self.assertEqual(set(data['constants']), set(contract))
         self.assertEqual(data['constants']['RESERVED_TAG_IDS'], list(contract['RESERVED_TAG_IDS']))
         self.assertEqual(data['constants']['FIXTURE_ID'], 'tower_v1')
+
+    def test_the_check_compares_values_not_bytes(self):
+        """The case table's last float digit differs between maths libraries (macOS against glibc:
+        one unit in the last place, seen on the CI runner); the check must accept that and still
+        refuse every change that matters."""
+        spec = importlib.util.spec_from_file_location('export_scene_fixture_for_test', EXPORT)
+        export = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(export)
+        committed = json.loads((FIXTURE_DIR / 'sceneFixture.cases.json').read_text(encoding='utf-8'))
+        row = committed['in_zone']['omx'][1]
+        noisy = json.loads(json.dumps(committed))
+        noisy['in_zone']['omx'][1]['x_f'] = math.nextafter(row['x_f'], 1.0)   # one ulp: another libm
+        self.assertTrue(export.same_values(committed, noisy))
+        for change in (lambda d: d['in_zone']['omx'][1].__setitem__('x_f', row['x_f'] + 1e-9),
+                       lambda d: d['in_zone']['omx'][1].__setitem__('in_zone', not row['in_zone']),
+                       lambda d: d['in_zone']['omx'][1].__setitem__('what', row['what'] + ' '),
+                       lambda d: d['in_zone']['omx'].pop(),
+                       lambda d: d['in_zone']['omx'][1].pop('az_deg')):
+            changed = json.loads(json.dumps(committed))
+            change(changed)
+            self.assertFalse(export.same_values(committed, changed))
+        self.assertFalse(export.same_values({'a': True}, {'a': 1}))
+        self.assertFalse(export.same_values({'a': 1}, {'a': '1'}))
 
     def test_the_reserved_range_is_the_calibrations_and_inside_tag36h11(self):
         c = _contract()

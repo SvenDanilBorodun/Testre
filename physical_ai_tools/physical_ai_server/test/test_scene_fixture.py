@@ -389,10 +389,13 @@ def test_in_zone_case_table_is_complete_and_holds():
 
 
 def test_the_json_files_equal_a_fresh_render():
-    """(7) both React files are byte-identical to what tools/export_scene_fixture.py renders now."""
+    """(7) both React files equal what tools/export_scene_fixture.py renders now: the constants file
+    byte for byte (literals and a hash), the case table by VALUE (``same_values``), because its
+    cos/sin coordinates differ in the last digit between macOS's and glibc's maths libraries."""
     tool = _export_tool()
     assert (_FIXTURE_DIR / 'sceneFixture.json').read_text(encoding='utf-8') == tool.render_fixture()
-    assert (_FIXTURE_DIR / 'sceneFixture.cases.json').read_text(encoding='utf-8') == tool.render_cases()
+    committed = json.loads((_FIXTURE_DIR / 'sceneFixture.cases.json').read_text(encoding='utf-8'))
+    assert tool.same_values(committed, json.loads(tool.render_cases()))
 
 
 def test_the_rendered_json_carries_every_constant_and_the_hash():

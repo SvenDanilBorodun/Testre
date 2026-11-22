@@ -7,8 +7,8 @@
 
 // The React copy of the fixture contract (spec 40 §3, WP-02). sceneFixture.json and
 // sceneFixture.cases.json are RENDERED from the server's scene_fixture.py by
-// tools/export_scene_fixture.py (the server suite byte-fences both against a fresh
-// render); this suite holds the shape the page will read, and proves the work-zone case
+// tools/export_scene_fixture.py (the server suite fences both against a fresh render:
+// the constants byte for byte, the case table by value); this suite holds the shape the page will read, and proves the work-zone case
 // table is reproducible in the browser's double arithmetic from the JSON's own knots —
 // the table WP-17's sceneFixture.inZone twin is held equal by.
 

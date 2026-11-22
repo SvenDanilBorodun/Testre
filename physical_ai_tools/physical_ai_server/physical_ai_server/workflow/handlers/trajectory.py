@@ -116,6 +116,14 @@ _JOINT1_WINDOW_TOL_RAD = 0.005
 # on a Pi): past this much the Protokoll says why the arm waits, once.
 TOWER_CHECK_SLOW_S = 1.0
 TOWER_CHECK_SLOW_DE = 'Die Bewegung wird auf Abstand zum Kameraturm geprüft – einen Moment …'
+# /workshop/replay answers once the take's tower check has ended, and on a Pi
+# that check of a fast 120 s take can outlast the page's 10 s service timeout
+# (useRosServiceCaller): a refusal answered later than this is said on
+# /task/status too (X-REPLAYCHECK).
+MANUAL_REPLAY_ANSWER_LATE_S = 8.0
+# A manual replay that „Beenden" (hand_guide false) ended before the arm moved.
+MANUAL_REPLAY_ENDED_DE = ('Wiedergabe abgebrochen — der Handbetrieb wurde beendet, '
+                          'bevor sich der Arm bewegt hat. Bitte erneut abspielen.')
 # Contract-B point layout: [j1..jn, grip, t_s] — (num_arm_joints + 2) floats.
 # 7 is the OMX width (n=5); extract_points/resegment_trajectory take the arm's
 # ``num_arm_joints`` and derive the width, asserting it EXACTLY (§16.4 rail #2).
@@ -318,19 +326,21 @@ def refuse_outside_joint1_window(points, joint_limits, num_arm_joints: int = 5) 
             raise WorkflowError(TOWER_JOINT1_WINDOW_DE)
 
 
-def judge_replay_tower(guard, path, num_arm_joints: int, notice=None) -> None:
+def judge_replay_tower(guard, path, num_arm_joints: int, notice=None, should_stop=None) -> None:
     """Judge a replay's path — the lead-in's start (when there is one) and the
     take's recorded points, full joint vectors — against the camera tower as
     ONE polyline (spec 40 S6.2, D70), before its first chunk; raise the German
     refusal. ``notice`` (optional) is told :data:`TOWER_CHECK_SLOW_DE` once when
-    the check runs longer than :data:`TOWER_CHECK_SLOW_S`, while it runs."""
+    the check runs longer than :data:`TOWER_CHECK_SLOW_S`, while it runs.
+    ``should_stop`` (optional) is asked between the check's pieces; when it
+    answers true the check ends with ``motion.TowerCheckStopped``."""
     timer = None
     if notice is not None:
         timer = threading.Timer(TOWER_CHECK_SLOW_S, notice, args=(TOWER_CHECK_SLOW_DE,))
         timer.daemon = True
         timer.start()
     try:
-        verdict = tower_path_verdict(guard, path, int(num_arm_joints))
+        verdict = tower_path_verdict(guard, path, int(num_arm_joints), should_stop=should_stop)
     finally:
         if timer is not None:
             timer.cancel()
@@ -677,7 +687,7 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
     guard = getattr(ctx, 'fixture_guard', None)
     if guard is not None:
         path = ([lead_in[:n + 1]] if lead_in is not None else []) + [p[:n + 1] for p in points]
-        judge_replay_tower(guard, path, n, notice=ctx.log)
+        judge_replay_tower(guard, path, n, notice=ctx.log, should_stop=ctx.should_stop)
 
     # Serialize against the main stack + hat handlers through the ONE acquire
     # helper (motion._hold_motion_lock), exactly like motion._publish_motion.

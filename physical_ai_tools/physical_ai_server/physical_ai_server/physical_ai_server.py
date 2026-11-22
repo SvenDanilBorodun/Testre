@@ -6483,14 +6483,33 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         re-segments through the velocity floor (handlers/trajectory) and holds
         _manual_lock for the whole publish. Points from ``points_json`` (inline,
         CONTRACT B) OR a server-persisted trajectory named ``name``."""
-        from physical_ai_server.workflow.handlers.motion import WorkflowError
+        from physical_ai_server.workflow.handlers.motion import TowerCheckStopped, WorkflowError
         from physical_ai_server.workflow.handlers.trajectory import (
-            REPLAY_PUBLISHES_VELOCITIES, clamp_speed, extract_points, judge_replay_tower,
-            refuse_outside_joint1_window, refuse_wrapped_joint_jumps, refuse_wrapped_lead_in,
-            resegment_trajectory,
+            MANUAL_REPLAY_ANSWER_LATE_S, MANUAL_REPLAY_ENDED_DE, REPLAY_PUBLISHES_VELOCITIES,
+            clamp_speed, extract_points, judge_replay_tower, refuse_outside_joint1_window,
+            refuse_wrapped_joint_jumps, refuse_wrapped_lead_in, resegment_trajectory,
         )
         response.success = False
         response.message = ''
+        # The take's tower check below can take a while (X-REPLAYCHECK). A
+        # „Beenden" (hand_guide false bumps the exit generation) from here on
+        # ends it at its next piece and refuses the claim; an answer later than
+        # MANUAL_REPLAY_ANSWER_LATE_S may find the page no longer waiting, so a
+        # refusal that late is said on /task/status too.
+        asked_at = time.monotonic()
+        with self._mode_lock:
+            session_gen = self._manual_exit_gen
+
+        def _notice(text):
+            # Resolved at call time: the ast-loaded node stubs of the manual
+            # tests carry no _publish_manual_notice.
+            (getattr(self, '_publish_manual_notice', None) or (lambda _t: None))(text)
+
+        def _answer(message):
+            response.message = message
+            if time.monotonic() - asked_at > MANUAL_REPLAY_ANSWER_LATE_S:
+                _notice(message)
+            return response
 
         # F6 — refuse a driven replay against a STALE follower readback (frozen
         # joint stream) so the lead-in never seeds from an old pose. Pre-claim.
@@ -6563,10 +6582,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 points, getattr(self._build_ik_solver(), 'joint_limits', None),
                 num_arm_joints=n)
             if guard is not None:
-                judge_replay_tower(guard, [p[:n + 1] for p in points], n)
+                judge_replay_tower(guard, [p[:n + 1] for p in points], n, notice=_notice,
+                                   should_stop=lambda: self._manual_exit_gen != session_gen)
+        except TowerCheckStopped:
+            return _answer(MANUAL_REPLAY_ENDED_DE)
         except WorkflowError as e:
-            response.message = str(e)
-            return response
+            return _answer(str(e))
         speed = clamp_speed(request.speed)
 
         current = None
@@ -6575,16 +6596,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         except Exception:  # noqa: BLE001
             current = None
         if not current or len(current) < n + 1:
-            response.message = ('Aktuelle Armstellung ist noch nicht bekannt — '
-                                'bitte kurz warten und erneut versuchen.')
-            return response
+            return _answer('Aktuelle Armstellung ist noch nicht bekannt — '
+                           'bitte kurz warten und erneut versuchen.')
         current = [float(v) for v in current[:n + 1]]
         # Non-finite guard: a NaN/Inf readback would publish NaN through the
         # lead-in (garbage arm command) or crash build_segment on an Inf delta.
         if not all(math.isfinite(v) for v in current):
-            response.message = ('Aktuelle Armstellung ist ungültig — bitte kurz '
-                                'warten und erneut versuchen.')
-            return response
+            return _answer('Aktuelle Armstellung ist ungültig — bitte kurz '
+                           'warten und erneut versuchen.')
         # Floor guard for the synthetic lead-in (the recorded points are reachable-
         # above-table by construction; the current-pose→start interpolation is
         # not). Returns None (no check) when the floor is unknown → lead-in behaves
@@ -6602,7 +6621,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         def _segment_from(pose):
             refuse_wrapped_lead_in(pose, points[0], joint_limits, num_arm_joints=n)
             if guard is not None:
-                judge_replay_tower(guard, [pose[:n + 1], points[0][:n + 1]], n)
+                # one leg: a „Beenden" meanwhile is refused at the claim (and,
+                # in the daemon's rebuild, by _run_replay's exit check)
+                judge_replay_tower(guard, [pose[:n + 1], points[0][:n + 1]], n, notice=_notice)
             return resegment_trajectory(
                 points, speed, lead_in_from=pose,
                 lead_in_floor_check=lead_floor,
@@ -6638,11 +6659,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # pose before driving.
             segmented = _segment_from(current)
         except WorkflowError as e:
-            response.message = str(e)
-            return response
+            return _answer(str(e))
         if not segmented:
-            response.message = 'Die Aufnahme enthält keine Bewegung.'
-            return response
+            return _answer('Die Aufnahme enthält keine Bewegung.')
 
         # Pre-create the trajectory publisher on the executor thread so the daemon
         # never races a cross-thread create_publisher (mirrors _ensure_sim_publisher).
@@ -6663,34 +6682,38 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # clear happen in _run_replay AFTER it acquires _manual_lock (never clear
         # the shared stop-event unlocked — it could defeat an in-flight jog's
         # abort). _mode_lock is RELEASED before the daemon starts (it acquires
-        # _manual_lock, not _mode_lock → no deadlock).
+        # _manual_lock, not _mode_lock → no deadlock). A refusal is answered after
+        # the lock is released (_answer may publish a notice).
         with self._mode_lock:
             ok, msg = self._assert_no_other_active('manual')
-            if not ok:
-                response.message = msg
-                return response
             existing = self._manual_replay_thread
-            if existing is not None and existing.is_alive():
-                response.message = 'Es läuft bereits eine Wiedergabe.'
-                return response
-            # FIX 1 — a replay is a TRANSIENT op: it claims a refcount slot for the
-            # duration of the drive (released in _run_replay's finally), instead of
-            # the old per-call `opened` boolean. FIX 4 — snapshot the exit
-            # generation so a „Beenden" that lands before the daemon drives aborts
-            # it (checked in _run_replay under _manual_lock).
-            self._manual_transient_ops += 1
-            self._recompute_on_manual_locked()
-            exit_gen = self._manual_exit_gen
-            thread = threading.Thread(
-                target=self._run_replay,
-                args=(segmented, exit_gen, _rebuild_from_live_pose),
-                name='workshop-replay',
-                daemon=True,
-            )
-            self._manual_replay_thread = thread
-            # Finding 2 — stamp activity INSIDE the claim lock (see the jog claim)
-            # so the idle watchdog never clobbers this fresh replay ref.
-            self._manual_last_activity_mono = time.monotonic()
+            if ok and existing is not None and existing.is_alive():
+                ok, msg = False, 'Es läuft bereits eine Wiedergabe.'
+            if ok and self._manual_exit_gen != session_gen:
+                # X-REPLAYCHECK — a „Beenden" after the take's last piece or
+                # while the lead-in was judged: never drive after it.
+                ok, msg = False, MANUAL_REPLAY_ENDED_DE
+            if ok:
+                # FIX 1 — a replay is a TRANSIENT op: it claims a refcount slot for the
+                # duration of the drive (released in _run_replay's finally), instead of
+                # the old per-call `opened` boolean. FIX 4 — snapshot the exit
+                # generation so a „Beenden" that lands before the daemon drives aborts
+                # it (checked in _run_replay under _manual_lock).
+                self._manual_transient_ops += 1
+                self._recompute_on_manual_locked()
+                exit_gen = self._manual_exit_gen
+                thread = threading.Thread(
+                    target=self._run_replay,
+                    args=(segmented, exit_gen, _rebuild_from_live_pose),
+                    name='workshop-replay',
+                    daemon=True,
+                )
+                self._manual_replay_thread = thread
+                # Finding 2 — stamp activity INSIDE the claim lock (see the jog claim)
+                # so the idle watchdog never clobbers this fresh replay ref.
+                self._manual_last_activity_mono = time.monotonic()
+        if not ok:
+            return _answer(msg)
         thread.start()
         response.success = True
         response.message = 'Wiedergabe gestartet.'
@@ -6764,6 +6787,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         (limp) arm between the claim and here also aborts the drive."""
         from types import SimpleNamespace
         from physical_ai_server.workflow.handlers.motion import WorkflowError
+        from physical_ai_server.workflow.handlers.trajectory import MANUAL_REPLAY_ENDED_DE
         from physical_ai_server.workflow.trajectory_builder import chunked_publish
         acquired = self._manual_lock.acquire(timeout=30.0)
         keep_session = False
@@ -6780,9 +6804,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self.get_logger().warning(
                     'replay aborted — Handbetrieb was ended before the drive '
                     'started.')
-                self._publish_manual_notice(
-                    'Wiedergabe abgebrochen — der Handbetrieb wurde beendet, '
-                    'bevor sich der Arm bewegt hat. Bitte erneut abspielen.')
+                self._publish_manual_notice(MANUAL_REPLAY_ENDED_DE)
                 return
             # FIX 2 — a record start seized the (limp) arm between the callback's
             # claim and here; driving now would fight the student's hand. Mirror
@@ -6812,9 +6834,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             if self._manual_exit_gen != exit_gen:
                 self.get_logger().warning(
                     'replay aborted — Handbetrieb was ended during the re-torque.')
-                self._publish_manual_notice(
-                    'Wiedergabe abgebrochen — der Handbetrieb wurde beendet, '
-                    'bevor sich der Arm bewegt hat. Bitte erneut abspielen.')
+                self._publish_manual_notice(MANUAL_REPLAY_ENDED_DE)
                 return
             # Lead-in from the arm's LIVE pose, now that we own the arm and it is
             # torqued (see _rebuild_from_live_pose). A refusal here is told to the

@@ -161,11 +161,27 @@ class SceneCameraNode(Node):
         try:
             while not self._halt.is_set() and self.step():
                 pass
+        except Exception as exc:
+            self._end_by_error(exc)
+            raise
         finally:
             self._release()
 
+    def _end_by_error(self, exc):
+        """The loop ended by an exception: the camera stays off until the node
+        starts again, and the state message left behind says so (never a stale
+        ``streaming``)."""
+        now = self._monotonic()
+        with self._lock:
+            self.verifier.close(now)
+        self.get_logger().warn(f'scene_camera: the capture loop ended ({type(exc).__name__}); '
+                               'the camera stays off until the environment is restarted')
+        self._note(now)
+
     def step(self):
-        """One turn: the self-test, an open when due, or one frame read.
+        """One turn: the self-test, an open when due, or one frame read (a read
+        that raises is a read that returned nothing: the verifier's silence
+        rule closes the device and it is opened again after the back-off).
         False once the self-test failed (the loop ends; the timer keeps the
         state message alive)."""
         if not self._selftested:
@@ -183,7 +199,10 @@ class SceneCameraNode(Node):
         if self._cap is None:
             self._cap = self._open_when_due()
             return True
-        ok, frame = self._cap.read()
+        try:
+            ok, frame = self._cap.read()
+        except Exception:  # noqa: BLE001 — a read that raises returned nothing (X-K1PI)
+            ok, frame = False, None
         now = self._monotonic()
         stamp_ns = time.time_ns()
         if not ok:

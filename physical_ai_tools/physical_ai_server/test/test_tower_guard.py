@@ -1397,12 +1397,15 @@ def test_wiring_a_replay_is_one_polyline_with_the_rules_own_verdict_within_the_b
 # 'holding' at 0.3 Hz: (arm, class, take, claw) -> (part, margin m) of every refusal; the other 31 of the 36 pass.
 # Computed at 61d93407, where motion still ran the guard's travel-bound core itself for a moving claw (verifier
 # finding X-WP12-1); the 48 takes of WP-12's own measurement (scratch/build-WP-12/probes/p08_replay_budget.py) gave
-# 144 identical verdicts before and after that change too (still, sweep and wobble each).
+# 144 identical verdicts before and after that change too (still, sweep and wobble each). Since X-REPLAYCHECK a run
+# is judged in pieces of TOWER_CHECK_CHUNK_PAIRS pairs and a refusal's margin is the smallest found in the first
+# refusing piece: the two OMX 'fast' 1 margins of 'still' and 'wobble' moved from -0.04892226028209509 (found by the
+# run judged in one call) to the values below; every refusal, reason, part and pass is unchanged.
 _PATH_REFUSALS = {('v1', 'fast', 0, 'sweep'): ('pad', -0.0013501057218576543),
                   ('v1', 'fast', 1, 'sweep'): ('pad', -0.0006868765388072014),
-                  ('omx', 'fast', 1, 'still'): ('pad', -0.04892226028209509),
+                  ('omx', 'fast', 1, 'still'): ('pad', -0.03782695257401979),
                   ('omx', 'fast', 1, 'sweep'): ('pad', -0.0039066936497408715),
-                  ('omx', 'fast', 1, 'wobble'): ('pad', -0.04892226028209509)}
+                  ('omx', 'fast', 1, 'wobble'): ('pad', -0.00021781222900443993)}
 
 
 @pytest.mark.parametrize('arm', ['v1', 'omx'])
@@ -1430,6 +1433,181 @@ def test_wiring_the_path_verdicts_of_held_and_moving_claws_are_todays(arm):
                     assert (got.refused, got.reason, got.sentence_de, got.part) == (
                         True, 'too_close', _TOO_CLOSE_DE, want[0]), (label, k, claw)
                     assert got.margin_m == pytest.approx(want[1], abs=1e-9), (label, k, claw)
+
+
+class _Counting:
+    """the guard ``inner``, every judge_polyline recorded (its waypoints' count, first and last row) and
+    ``on_call(k, waypoints)`` run inside the k-th call (a Stop that arrives while the check runs)."""
+
+    def __init__(self, inner, on_call=None):
+        self.inner = inner
+        self.on_call = on_call
+        self.judged = []
+
+    def judge_leg(self, a, b, ga, gb):
+        return self.inner.judge_leg(a, b, ga, gb)
+
+    def judge_polyline(self, w, gr, gr_b=None):
+        W = np.asarray(w, float)
+        self.judged.append((len(W), tuple(W[0]), tuple(W[-1])))
+        if self.on_call is not None:
+            self.on_call(len(self.judged), W)
+        return self.inner.judge_polyline(w, gr) if gr_b is None else self.inner.judge_polyline(w, gr, gr_b)
+
+
+def _take_rows(W, claw):
+    """Contract-B rows of the joint path ``W`` at 25 Hz with the claw ``claw`` (one value per row)."""
+    return [[float(v) for v in w] + [float(c), round(0.04 * i, 3)] for i, (w, c) in enumerate(zip(W, claw))]
+
+
+@pytest.mark.parametrize('arm', ['v1', 'omx'])
+@pytest.mark.parametrize('claw', ['still', 'sweep'])
+def test_wiring_a_stop_during_a_replays_tower_check_ends_it_at_the_next_chunk(arm, claw):
+    """X-REPLAYCHECK (R-5): a Stop that arrives while a program replay's tower check runs ends the check at its next
+    chunk (or claw band) with the stop sentence: nothing after the Stop is judged and nothing is published. Before,
+    the whole 120 s take was judged first (up to 1.2 s here for a very fast take, plausibly five times that on a
+    Pi, longer than WorkflowManager.stop()'s 5 s join)."""
+    ik = _arm_ik(arm)
+    stop = threading.Event()
+    spy = _Counting(_guard_on(arm, ik), on_call=lambda k, _w: stop.set())
+    gr = H.GR[arm]
+    W = _take(arm, np.random.default_rng(141 + (0 if arm == 'v1' else 1)), 120.0, 0.35, 0.4)
+    t = np.arange(len(W)) * 0.04
+    c = (np.full(len(W), gr['holding']) if claw == 'still'
+         else gr['open'] + (gr['closed'] - gr['open']) * 0.5 * (1 - np.cos(2 * math.pi * 0.05 * t)))
+    rows = _take_rows(W, c)
+    ctx = _Run(arm, rows[0][:6], guard=spy, ik=ik)
+    ctx.z_table = None                       # the floor check is not what this test is about
+    ctx.should_stop = stop.is_set
+    ctx.trajectories = {'Take': {'fps': 25, 'points': rows}}
+    with pytest.raises(M.WorkflowError) as excinfo:
+        TR.replay_trajectory(ctx, {'name': 'Take'})
+    assert str(excinfo.value) == 'Workflow wurde gestoppt.'
+    assert ctx.published == []
+    assert len(spy.judged) == 1, [n for n, _a, _b in spy.judged]      # nothing judged after the Stop
+    assert spy.judged[0][0] < len(rows) // 10, spy.judged[0][0]       # one chunk of the 3 000 waypoints
+
+
+@pytest.mark.parametrize('arm', ['v1', 'omx'])
+def test_wiring_the_chunked_replay_check_refuses_exactly_what_the_whole_polyline_refuses(arm):
+    """X-REPLAYCHECK (R-5): the replay check judges its polyline in chunks of TOWER_CHECK_CHUNK_PAIRS pairs that share
+    their boundary waypoint (a Stop is polled between them), and refuses exactly the takes the guard's travel-bound
+    rule refuses as ONE polyline — here each for the same reason with the same sentence: that rule is a conjunction
+    over the waypoints and their consecutive pairs, and every pair lies in exactly one chunk (the margin and the
+    part are the first refusing chunk's). WP-12's pinned 20 s takes (seed 131/132, calibrated) and 120 s takes with
+    the uncalibrated residual (seed 81/82), a held claw."""
+    ik = _arm_ik(arm)
+    grip = H.GR[arm]['holding']
+    refused, chunk_sizes = 0, []
+    for calibrated, seconds, seed in ((True, 20.0, 131), (False, 120.0, 81)):
+        g = _guard_on(arm, ik, calibrated=calibrated)
+        rng = np.random.default_rng(seed + (0 if arm == 'v1' else 1))
+        for amp_hi, fr_hi in ((0.35, 0.4), (0.6, 0.8)):
+            for _ in range(3):
+                W = _take(arm, rng, seconds, amp_hi, fr_hi)
+                spy = _Counting(g)
+                got = M.tower_path_verdict(spy, np.concatenate([W, np.full((len(W), 1), grip)], axis=1), 5)
+                whole = g.judge_polyline(W, grip)
+                assert (got is not None) == whole.refused, (calibrated, seconds)
+                if got is not None:
+                    refused += 1
+                    assert (got.reason, got.sentence_de) == (whole.reason, whole.sentence_de)
+                    continue
+                # a pass judged every pair: the chunks cover the path and each starts where the last ended
+                counts = [n for n, _a, _b in spy.judged]
+                assert sum(n - 1 for n in counts) == len(W) - 1, counts
+                assert all(spy.judged[i][2] == spy.judged[i + 1][1] for i in range(len(counts) - 1))
+                chunk_sizes.append(counts)
+    assert refused >= 1, refused
+    assert all(len(counts) > 1 for counts in chunk_sizes), [len(c) for c in chunk_sizes]
+    assert M.TOWER_CHECK_CHUNK_PAIRS == 100
+    assert max(max(counts) for counts in chunk_sizes) == M.TOWER_CHECK_CHUNK_PAIRS + 1
+
+
+_REPLAY_ENDED_DE = ('Wiedergabe abgebrochen — der Handbetrieb wurde beendet, bevor sich der Arm bewegt hat. Bitte '
+                    'erneut abspielen.')
+
+
+@pytest.mark.parametrize('when', ['take', 'lead_in'])
+def test_wiring_a_stop_during_a_manual_replays_tower_check_starts_nothing(when):
+    """X-REPLAYCHECK (R-5): „Stopp" (the universal manual abort, hand_guide(false), which bumps the exit generation)
+    while /workshop/replay judges the take ends the check at its next chunk, and one that lands after the take's
+    last chunk (here: while the lead-in is judged) refuses the claim: the answer is the stop sentence, no replay
+    thread starts and no claim is left behind. Before, the replay claimed with the generation of AFTER the Stop and
+    drove the whole take."""
+    arm = 'v1'
+    ik = _arm_ik(arm)
+    g = H.GR[arm]['open']
+    seconds = 120.0 if when == 'take' else 1.0          # a 1 s take is one chunk: call 1 the take, call 2 the lead-in
+    W = _take(arm, np.random.default_rng(151), seconds, 0.35, 0.4)
+    rows = _take_rows(W, np.full(len(W), g))
+
+    def beenden(k, _w):
+        if k == (1 if when == 'take' else 2):
+            with node._mode_lock:
+                node._manual_exit_gen += 1
+    spy = _Counting(_guard_on(arm, ik), on_call=beenden)
+    node = _replay_node(arm, guard_fn=lambda: spy, ik=ik)
+    node.joints = rows[0][:6]
+    resp = node.callback(_replay_request(rows), _response())
+    assert resp.success is False and resp.message == _REPLAY_ENDED_DE, resp.message
+    assert node.replay_runs == [] and node.published == []
+    assert node._manual_transient_ops == 0 and node.on_manual is False
+    if when == 'take':
+        assert len(spy.judged) == 1 and spy.judged[0][0] < len(rows) // 10, [n for n, _a, _b in spy.judged]
+    else:
+        assert len(spy.judged) == 2, [n for n, _a, _b in spy.judged]
+
+
+class _SlowGuard(_Scripted):
+    """clears (or refuses) every leg and polyline; a polyline of more than two waypoints (the take, not the lead-in)
+    takes ``delay`` seconds."""
+
+    def __init__(self, delay, refuse=False):
+        super().__init__()
+        self.delay = delay
+        self.refuse_all = refuse
+
+    def judge_polyline(self, w, _g, _g_b=None):
+        if len(w) > 2:
+            time.sleep(self.delay)
+        if self.refuse_all:
+            return fg().Verdict(True, 'too_close', fg().TOWER_TOO_CLOSE_DE, -0.001, 'column')
+        return fg().Verdict(False, 'clear')
+
+
+def test_wiring_a_manual_replay_says_a_slow_check_and_a_late_answer_on_task_status(monkeypatch):
+    """X-REPLAYCHECK (R-4): /workshop/replay says a tower check that takes longer than TOWER_CHECK_SLOW_S on
+    /task/status (TOWER_CHECK_SLOW_DE, once, through the manual notice), like the program replay says it in the
+    Protokoll. On a Pi the check of a fast 120 s take can outlast the page's 10 s service timeout, so a refusal
+    answered later than MANUAL_REPLAY_ANSWER_LATE_S is said there too; an answer in time is never said twice."""
+    arm, g = 'v1', H.GR['v1']['open']
+    home = list(H.HOME[arm])
+    rows = [home + [g, 0.0], [0.3, 0.7, 0.8, 0.0, 0.0, g, 1.0], [0.35, 0.7, 0.8, 0.0, 0.0, g, 2.0],
+            [0.4, 0.7, 0.8, 0.0, 0.0, g, 3.0]]
+
+    def ask(guard):
+        node = _replay_node(arm, guard_fn=lambda: guard)
+        node._publish_manual_notice = node.notices.append
+        node.joints = home + [g]
+        return node, node.callback(_replay_request(rows), _response())
+
+    node, resp = ask(_SlowGuard(0.0))                   # fast: nothing said
+    assert resp.success is True and node.notices == []
+    monkeypatch.setattr(TR, 'TOWER_CHECK_SLOW_S', 0.05)
+    node, resp = ask(_SlowGuard(0.3))                   # slow, then it starts: the wait is said once
+    assert resp.success is True, resp.message
+    assert node.notices == [_CHECK_SLOW_DE] and len(node.replay_runs) == 1
+    node, resp = ask(_SlowGuard(0.3, refuse=True))      # slow, refused in time: answered, said once (the wait)
+    assert resp.success is False and resp.message == _TOO_CLOSE_DE
+    assert node.notices == [_CHECK_SLOW_DE]
+    monkeypatch.setattr(TR, 'MANUAL_REPLAY_ANSWER_LATE_S', 0.2, raising=False)
+    node, resp = ask(_SlowGuard(0.3, refuse=True))      # refused after the page may have stopped waiting
+    assert resp.success is False and resp.message == _TOO_CLOSE_DE
+    assert node.notices == [_CHECK_SLOW_DE, _TOO_CLOSE_DE] and node.replay_runs == []
+    monkeypatch.undo()
+    assert TR.TOWER_CHECK_SLOW_S == 1.0
+    assert TR.MANUAL_REPLAY_ANSWER_LATE_S == 8.0        # the page's service timeout is 10 s
 
 
 def test_wiring_motion_keeps_no_copy_of_the_guards_rule():

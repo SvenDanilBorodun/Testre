@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import types
 import unittest
 from unittest import mock
@@ -357,6 +358,91 @@ class ATruncatedFrameIsDropped(_NodeCase):
         self.assertEqual(self.states()[-1]['dropped'], _SPLIT.BAD_FRAMES_LIMIT)
         self.assertTrue(self.capture.released)
         self.assertEqual(len(self.published(_SCENE_TOPIC)), 1)
+
+
+class _RaisingCapture(_FakeCapture):
+    """A fake capture whose read raises while ``raising`` is set, each such read
+    advancing the clock half a second (a pulled device under OpenCV)."""
+
+    def __init__(self, clock):
+        super().__init__(clock)
+        self.raising = False
+        self.reads = 0
+
+    def read(self):
+        self.reads += 1
+        if self.raising:
+            self.clock.t += 0.5
+            raise RuntimeError('the device went away')
+        return super().read()
+
+
+class ARaisingReadIsAFailedRead(_NodeCase):
+    """X-K1PI (K-1's Pi half): a ``cap.read()`` that raises ended the capture
+    thread silently; the timer then reported ``no_frames`` for ever and the
+    device was never opened again, so „sie wird erneut geöffnet“ was untrue.
+    A read that raises is a read that returned nothing (the Windows twin,
+    ``camera_bridge._SceneCaptureWorker``, since K-1)."""
+
+    def setUp(self):
+        super().setUp()
+        self.capture = _RaisingCapture(self.clock)
+
+    def test_a_read_that_raises_is_a_failed_read_and_the_camera_is_reopened(self):
+        self.stream()
+        self.capture.raising = True
+        for _ in range(6):                   # 3 s of reads that raise: past SILENCE_S
+            self.node.step()
+        self.assertEqual((self.states()[-1]['state'], self.states()[-1]['fault']), ('fault', 'no_frames'))
+        self.assertTrue(self.capture.released)
+        self.capture.raising = False
+        self.capture.released = False
+        self.clock.t += _SPLIT.RETRY_FIRST_S + 0.1
+        self.node.step()                     # the back-off is over: opened again
+        self.assertEqual(self.opened, ['/dev/video4', '/dev/video4'])
+        self.feed(*([_GOOD] * _SPLIT.VERIFY_FRAMES))
+        self.assertEqual(self.states()[-1]['state'], 'streaming')
+        self.assertFalse(self.capture.released)
+
+    def test_a_read_that_keeps_raising_is_no_frames_and_the_device_is_opened_again(self):
+        self.stream()
+        self.capture.raising = True
+        for attempt in range(3):
+            for _ in range(6):
+                self.node.step()
+            self.assertEqual(self.states()[-1]['fault'], 'no_frames', attempt)
+            self.assertTrue(self.capture.released, attempt)
+            self.assertIsNone(self.node._cap, attempt)
+            self.clock.t += _SPLIT.RETRY_MAX_S + 0.1     # past any back-off
+            self.node.step()
+        self.assertEqual(len(self.opened), 4)
+
+    def test_the_capture_thread_survives_a_read_that_raises(self):
+        self.capture.raising = True
+        self.node.start()
+        deadline = time.monotonic() + 5.0
+        while self.capture.reads < 4 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertGreaterEqual(self.capture.reads, 4)
+        self.assertTrue(self.node._thread.is_alive())
+        self.node.destroy_node()
+        self.assertFalse(self.node._thread.is_alive())
+        self.assertTrue(self.capture.released)
+
+    def test_an_unexpected_end_of_the_loop_leaves_no_streaming_state(self):
+        self.stream()
+
+        def broken():
+            raise RuntimeError('a defect in the loop')
+        self.node.step = broken
+        with self.assertRaises(RuntimeError):
+            self.node._run()
+        self.assertEqual(self.states()[-1]['state'], 'closed')
+        self.assertTrue(self.capture.released)
+        self.clock.t += 2.5                  # the timer keeps the state message alive, still closed
+        self.node._tick()
+        self.assertEqual(self.states()[-1]['state'], 'closed')
+        self.assertTrue(any('RuntimeError' in line for line in self.node.get_logger().lines('warn')))
 
 
 class TheDecodedFallback(_NodeCase):

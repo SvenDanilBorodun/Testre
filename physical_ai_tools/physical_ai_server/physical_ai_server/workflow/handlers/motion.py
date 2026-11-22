@@ -1036,8 +1036,20 @@ def _reacquire_after_release(ctx) -> None:
 # of the OMX's 1 056 grasps of the printed zone, pieces of 0.1 rad none
 # (scratch/build-WP-12/probes/p01_close_interval.py).
 TOWER_CLAW_BAND_RAD = 0.1
+# A replay's path is judged this many waypoint pairs at a time, and a Stop is
+# asked for before every piece (X-REPLAYCHECK): a 120 s take in one call held a
+# Stop for up to 1.2 s here (a very fast take), plausibly five times that on a
+# Pi. Measured over 72 takes of 120 s (both arms, both residuals, three speeds):
+# a piece costs at most 42 ms here, and the pieces cost a median 3 % (at most a
+# fifth) more than the take in one call; a refusal is often found sooner.
+TOWER_CHECK_CHUNK_PAIRS = 100
 # The legs a route has judged, for this thread's publishes of them.
 _tower_local = threading.local()
+
+
+class TowerCheckStopped(WorkflowError):
+    """A replay's tower check ended because its run or its manual session was
+    stopped: nothing has been published."""
 
 
 def _tower_unjudgeable():
@@ -1099,12 +1111,37 @@ def _polyline_verdict(guard, points, n, g_lo, g_hi):
         return _tower_unjudgeable()
 
 
-def tower_path_verdict(guard, points, n):
+def _run_verdict(guard, points, n, g_lo, g_hi, should_stop):
+    """One run judged in pieces of at most TOWER_CHECK_CHUNK_PAIRS pairs, each
+    starting at the waypoint where the last ended, with the run's claw interval:
+    the first refusal, else the last piece's verdict. ``should_stop`` (or None)
+    is asked before every piece."""
+    verdict = None
+    step = TOWER_CHECK_CHUNK_PAIRS
+    for start in range(0, max(len(points) - 1, 1), step):
+        if should_stop is not None and should_stop():
+            raise TowerCheckStopped('Workflow wurde gestoppt.')
+        verdict = _polyline_verdict(guard, points[start:start + step + 1], n, g_lo, g_hi)
+        if getattr(verdict, 'refused', False):
+            return verdict
+    return verdict
+
+
+def tower_path_verdict(guard, points, n, should_stop=None):
     """The guard's refusal of the polyline through ``points`` (full joint
     vectors: n arm joints, then the claw), or ``None`` when it passes. A pair
     whose claw moves more than TOWER_CLAW_BAND_RAD is cut like a leg, and the
     path is judged in runs whose claw spans at most that much (each run starts
-    where the last ended, so every pair belongs to one)."""
+    where the last ended, so every pair belongs to one).
+
+    A run is judged in pieces (:func:`_run_verdict`). The guard's travel-bound
+    rule is a conjunction over the waypoints and their consecutive pairs, and
+    every pair lies in exactly one piece, so the pieces refuse exactly what the
+    run in one call refuses. The refusal named is the first refusing piece's,
+    as between runs: its margin and part are the smallest found in that piece,
+    and a path both too close and too droopy names whichever comes first.
+    ``should_stop`` (or None) is asked before every piece; when it answers true
+    the check raises :class:`TowerCheckStopped`."""
     try:
         rows = [[float(v) for v in p[:n + 1]] for p in points]
     except (TypeError, ValueError):
@@ -1122,7 +1159,7 @@ def tower_path_verdict(guard, points, n):
             if max(hi, g) - min(lo, g) <= TOWER_CLAW_BAND_RAD + 1e-12:
                 lo, hi = min(lo, g), max(hi, g)
                 continue
-        verdict = _polyline_verdict(guard, fine[start:i], n, lo, hi)
+        verdict = _run_verdict(guard, fine[start:i], n, lo, hi, should_stop)
         if getattr(verdict, 'refused', False):
             return verdict
         if i < len(fine):

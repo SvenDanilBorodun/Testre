@@ -117,7 +117,7 @@ from physical_ai_server.workflow.autocal.camera_model import KB
 
 STATE_TOPIC = '/edubotics/calibration_state'
 STATE_VERSION = 1
-# /calibration/start's steps this service answers (the others stay the legacy wizard's).
+# /calibration/start's steps; the node refuses every other step (the legacy wizard is gone, decision D15).
 STEPS = ('mat_check', 'arm_check', 'target_removed', 'handheld', 'home')
 PROGRAM_PREFIX = 'armcheck-'
 HOME_PROGRAM_PREFIX = 'armcheck-home-'

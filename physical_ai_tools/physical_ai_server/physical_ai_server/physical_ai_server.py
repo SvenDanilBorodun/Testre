@@ -4414,8 +4414,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     def calibration_start_callback(self, request, response):
         # The tower calibration's steps (spec 40 S4): the mat check (three
         # frames, no motion), the arm check (a program: the workflow start's own
-        # arbitration applies, never on_calibration), the target's removal and
-        # the handheld lens step. Nothing else is a step any more (decision D15).
+        # arbitration applies, never on_calibration), the target's removal, the
+        # handheld lens step and the way home the arm check starts from (step
+        # 'home', X-TARGETSTART). Nothing else is a step any more (decision D15).
         service = getattr(self, 'scene_calibration', None)
         if service is not None and request.step in service.STEPS:
             response.success, response.message = service.start(request.step)

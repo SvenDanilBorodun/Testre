@@ -10,10 +10,13 @@
 // toolbar). It replaces the four-step wizard: the robot checks its mat on its
 // own (the page asks once on entering Roboter Studio), and the panel shows
 // what the robot's /edubotics/calibration_state says and offers the way out it
-// names — „Erneut prüfen" (the mat check), „Arm-Check starten" (ArmCheckView),
-// „Kalibrier-Ziel ist abgenommen", „Kamera von Hand vermessen" (HandheldView).
-// The view and the sentence are calibrationModel's; every string is
-// calibrationCopy's. A refusal of a press reads the robot's own answer.
+// names — „Erneut prüfen" (the mat check), „Arm-Check starten" with „Arm in die
+// Grundstellung fahren" beside it (ArmCheckView; the arm check starts only at
+// the Grundstellung, X-TARGETSTART), „Kalibrier-Ziel ist abgenommen", „Kamera
+// von Hand vermessen" (HandheldView). The view and the sentence are
+// calibrationModel's; every string is calibrationCopy's. A refusal of a press
+// reads the robot's own answer, and so does the way home when it moves or need
+// not (the calibration state does not change on that glide).
 //
 // The panel is an in-page panel, never a fixed overlay: the nav rail stays
 // clickable (utils/signOut.js names that escape).
@@ -67,13 +70,14 @@ function CalibrationPanel({ onClose = null }) {
 
   const [pending, setPending] = useState(null); // the step whose answer is awaited
   const [answer, setAnswer] = useState(null); // the robot's refusal of the last press
+  const [notice, setNotice] = useState(null); // the robot's answer to the way home when it moves or need not
   const [counting, setCounting] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
 
   // A refusal belongs to the state it was given in: a new state or code clears it
   // (the 1 Hz re-send of the same state does not).
   const stateKey = state ? `${state.state}/${state.code}` : '';
-  useEffect(() => { setAnswer(null); }, [stateKey]);
+  useEffect(() => { setAnswer(null); setNotice(null); }, [stateKey]);
 
   // The three status flags once per mount (/calibration/status: „a valid arm
   // check exists"). Read through a ref so a re-bound caller never re-asks.
@@ -90,16 +94,25 @@ function CalibrationPanel({ onClose = null }) {
     return () => { cancelled = true; };
   }, [dispatch]);
 
+  // „Der Arm fährt in die Grundstellung." is true only until that glide ends.
+  const wasRunningRef = useRef(programRunning);
+  useEffect(() => {
+    if (wasRunningRef.current && !programRunning) setNotice(null);
+    wasRunningRef.current = programRunning;
+  }, [programRunning]);
+
   const offline = heartbeatStatus !== 'connected';
   const moveBlocked = offline ? CALIBRATION_DE.OFFLINE
     : (programRunning && view.view !== VIEWS.ARM_CHECK_RUNNING ? CALIBRATION_DE.PROGRAM_RUNNING : null);
 
-  const call = useCallback(async (key, request) => {
+  const call = useCallback(async (key, request, { showSuccess = false } = {}) => {
     setPending(key);
     setAnswer(null);
+    setNotice(null);
     try {
       const r = await request();
       if (!r || r.success === false) setAnswer((r && r.message) || CALIBRATION_DE.NO_ANSWER);
+      else if (showSuccess && r.message) setNotice(r.message);
     } catch (_) {
       setAnswer(CALIBRATION_DE.NO_ANSWER);
     } finally {
@@ -114,6 +127,10 @@ function CalibrationPanel({ onClose = null }) {
     dispatch(clearWorkflowError());
     return runStep(CALIBRATION_STEPS.ARM_CHECK);
   }, [dispatch, runStep]);
+  const goHome = useCallback(
+    () => call(CALIBRATION_STEPS.HOME, () => startCalibration(CAMERA, CALIBRATION_STEPS.HOME), { showSuccess: true }),
+    [call, startCalibration],
+  );
   const stopArmCheck = useCallback(() => call('stop', () => stopWorkflow()), [call, stopWorkflow]);
   const cancelHandheld = useCallback(() => call('cancel', () => cancelCalibration('')), [call, cancelCalibration]);
 
@@ -159,6 +176,12 @@ function CalibrationPanel({ onClose = null }) {
           </p>
         )}
 
+        {notice && (
+          <p className="rounded-md border border-[var(--line)] bg-[var(--bg-sunk)] px-3 py-2 text-sm text-[var(--ink)]" role="status">
+            {notice}
+          </p>
+        )}
+
         {view.view === VIEWS.HANDHELD_RUNNING && (
           <HandheldView handheld={view.handheld} onCancel={cancelHandheld} disabled={pending !== null} />
         )}
@@ -169,6 +192,9 @@ function CalibrationPanel({ onClose = null }) {
           onStart={startArmCheck}
           onStop={stopArmCheck}
           onCountdownChange={setCounting}
+          onHome={goHome}
+          programRunning={programRunning}
+          onStopProgram={stopArmCheck}
         />
 
         {(view.canConfirmTargetRemoved || view.canStartHandheld || view.canRecheck

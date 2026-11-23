@@ -7,17 +7,18 @@
 
 The calibration service (``workflow/autocal/service.py``, spec 40 S4) publishes
 ``/edubotics/calibration_state`` — ``{"v": 1, "state", "code", "message_de",
-…}`` — and answers ``/calibration/start``'s four steps. Roboter Studio's
+…}`` — and answers ``/calibration/start``'s five steps. Roboter Studio's
 calibration panel (``components/Workshop/calibration/``) chooses its view from
 the state, its buttons from the code, and shows a sentence for every code even
 when a message is missing. If either side renamed a state, a code, a step or
 the topic alone, the panel would silently show the wrong view (or none), and a
 sentence edited on one side only would tell the student two different things.
 
-So, byte for byte: the topic and the version; the four steps; the seven
+So, byte for byte: the topic and the version; the five steps; the seven
 states; every code the robot can put into the state (``texts_de.BY_CODE`` and
 the service's own) with its German sentence, the format fields included; the
-target-removed button. The JavaScript is read as text (the precedent:
+target-removed button; the way-home button's label as the robot's refusal
+names it. The JavaScript is read as text (the precedent:
 ``test_record_r5_lockstep.py``); ``texts_de.py`` is stdlib-only and loaded by
 path, ``service.py`` (it imports NumPy) is read as source.
 """
@@ -122,9 +123,10 @@ class TheTopicTheVersionAndTheSteps(unittest.TestCase):
         match = re.findall(r"export const CALIBRATION_STATE_VERSION = (\d+);", _js_text(MODEL_JS))
         self.assertEqual(match, [str(_service_const(_service(), "STATE_VERSION"))])
 
-    def test_the_four_steps(self):
+    def test_the_five_steps(self):
+        # 'home' (X-TARGETSTART): the panel's way to the Grundstellung, where the arm check starts.
         steps = _service_const(_service(), "STEPS")
-        self.assertEqual(steps, ("mat_check", "arm_check", "target_removed", "handheld"))
+        self.assertEqual(steps, ("mat_check", "arm_check", "target_removed", "handheld", "home"))
         js = _js_frozen_object(MODEL_JS, "CALIBRATION_STEPS")
         self.assertEqual(sorted(js.values()), sorted(steps))
 
@@ -174,6 +176,12 @@ class TheCodesAndTheirSentences(unittest.TestCase):
         texts = _texts()
         self.assertEqual(_js_const_string(COPY_JS, "DROOP_WARNING_DE"), texts.DROOP_WARNING_DE)
         self.assertEqual(_js_const_string(COPY_JS, "TARGET_REMOVED_BUTTON_DE"), texts.TARGET_REMOVED_BUTTON_DE)
+
+    def test_the_way_home_button_is_the_one_the_refusal_names(self):
+        texts = _texts()
+        labels = re.findall(r"^\s*ARM_CHECK_HOME: '([^'\\]*)',$", _js_text(COPY_JS), re.M)
+        self.assertEqual(labels, ["Arm in die Grundstellung fahren"])
+        self.assertIn(f"„{labels[0]}“", texts.ARM_CHECK_NEEDS_HOME_DE)
 
     def test_the_sentences_keep_their_literal_umlauts(self):
         js = _js_frozen_object(COPY_JS, "CALIBRATION_SENTENCES_DE")

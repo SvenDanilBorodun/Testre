@@ -124,12 +124,17 @@ export const CALIBRATION_DE = Object.freeze({
   RECHECKING: 'Wird geprüft …',
   ARM_CHECK_START: 'Arm-Check starten',
   ARM_CHECK_PREP_TITLE: 'Vor dem Arm-Check:',
+  // The arm check starts only at the Grundstellung (X-TARGETSTART): the target
+  // is clipped on there, never before.
   ARM_CHECK_PREP: Object.freeze([
+    'Zuerst den Arm in die Grundstellung fahren (Knopf unten) – erst dann das Kalibrier-Ziel aufklipsen.',
     'Kalibrier-Ziel auf den Greifer aufklipsen.',
     'Tisch frei räumen.',
     '30 cm hinter dem Roboter frei lassen.',
     'Abstand halten – der Arm bewegt sich von selbst.',
   ]),
+  // The button the robot's own refusal names (texts_de.ARM_CHECK_NEEDS_HOME_DE).
+  ARM_CHECK_HOME: 'Arm in die Grundstellung fahren',
   COUNTDOWN: 'Der Arm bewegt sich in {s} s …',
   STOP: 'Stopp',
   ARM_CHECK_PROGRESS: 'Fortschritt des Arm-Checks',

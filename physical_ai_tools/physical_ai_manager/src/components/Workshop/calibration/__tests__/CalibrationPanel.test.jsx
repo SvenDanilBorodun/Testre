@@ -17,7 +17,9 @@ import React from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
-import workshopReducer, { setCalibrationState, setWorkflowStatus } from '../../../../features/workshop/workshopSlice';
+import workshopReducer, {
+  setCalibrationState, setRunState, setWorkflowStatus,
+} from '../../../../features/workshop/workshopSlice';
 import CalibrationPanel from '../CalibrationPanel';
 import { CALIBRATION_DE, CALIBRATION_NOTES_DE, TARGET_REMOVED_BUTTON_DE } from '../calibrationCopy';
 import { ARM_CHECK_COUNTDOWN_S } from '../ArmCheckView';
@@ -142,6 +144,88 @@ describe('CalibrationPanel — needs_arm_check', () => {
   it('no lens gate, no handheld offer', () => {
     renderPanel(calib('needs_arm_check', 'too_few_poses'));
     expect(screen.queryByRole('button', { name: 'Kamera von Hand vermessen' })).toBeNull();
+  });
+});
+
+describe('CalibrationPanel — the way to the Grundstellung (X-TARGETSTART)', () => {
+  const HOME = 'Arm in die Grundstellung fahren';
+
+  it('the preparation starts at the Grundstellung and clips the target on only there', () => {
+    renderPanel(calib('needs_arm_check', 'needs_arm_check/none'));
+    expect(CALIBRATION_DE.ARM_CHECK_PREP[0]).toBe(
+      'Zuerst den Arm in die Grundstellung fahren (Knopf unten) – erst dann das Kalibrier-Ziel aufklipsen.',
+    );
+    const items = within(screen.getByRole('list')).getAllByRole('listitem').map((li) => li.textContent);
+    expect(items[0]).toBe(CALIBRATION_DE.ARM_CHECK_PREP[0]);
+    expect(items).toContain('Kalibrier-Ziel auf den Greifer aufklipsen.');
+  });
+
+  it('„Arm in die Grundstellung fahren" sends step home at once, with no countdown', async () => {
+    renderPanel(calib('needs_arm_check', 'needs_arm_check/none'));
+    expect(CALIBRATION_DE.ARM_CHECK_HOME).toBe(HOME);
+    fireEvent.click(screen.getByRole('button', { name: HOME }));
+    await waitFor(() => expect(mockRos.startCalibration).toHaveBeenCalledTimes(1));
+    expect(mockRos.startCalibration).toHaveBeenCalledWith('scene', 'home');
+    expect(screen.queryByText(/Der Arm bewegt sich in/)).toBeNull();
+  });
+
+  it('the robot\'s answer is shown: that the arm moves, and a refusal as it comes', async () => {
+    const going = pyConstant('workflow/autocal/texts_de.py', 'ARM_GOING_HOME_DE');
+    expect(going).toBe('Der Arm fährt in die Grundstellung.');
+    mockRos.startCalibration.mockResolvedValueOnce({ success: true, message: going });
+    renderPanel(calib('needs_arm_check', 'needs_arm_check/none'));
+    fireEvent.click(screen.getByRole('button', { name: HOME }));
+    expect(await screen.findByText(going)).toBeInTheDocument();
+    expect(screen.getByText(going)).toHaveAttribute('role', 'status');
+    // an older robot does not know the step: its own refusal reads as it comes
+    const old = 'Diesen Kalibrier-Schritt gibt es für diesen Roboter nicht.';
+    mockRos.startCalibration.mockResolvedValueOnce({ success: false, message: old });
+    fireEvent.click(screen.getByRole('button', { name: HOME }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(old);
+    expect(screen.queryByText(going)).toBeNull();
+  });
+
+  it('a start away from the Grundstellung reads the robot\'s sentence, which names this button', async () => {
+    vi.useFakeTimers();
+    const needsHome = pyConstant('workflow/autocal/texts_de.py', 'ARM_CHECK_NEEDS_HOME_DE');
+    expect(needsHome).toContain(`„${HOME}“`);
+    mockRos.startCalibration.mockResolvedValue({ success: false, message: needsHome });
+    renderPanel(calib('needs_arm_check', 'needs_arm_check/none'));
+    fireEvent.click(screen.getByRole('button', { name: 'Arm-Check starten' }));
+    await act(async () => { vi.advanceTimersByTime(5000); });
+    vi.useRealTimers();
+    expect(await screen.findByRole('alert')).toHaveTextContent(needsHome);
+  });
+
+  it('disabled while a step runs, offline, and while a program runs — then „Stopp" stops it', async () => {
+    let answer;
+    mockRos.startCalibration.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    renderPanel(calib('needs_arm_check', 'needs_arm_check/none'));
+    fireEvent.click(screen.getByRole('button', { name: HOME }));
+    expect(screen.getByRole('button', { name: HOME })).toBeDisabled();
+    await act(async () => { answer({ success: true, message: '' }); });
+    expect(screen.getByRole('button', { name: HOME })).toBeEnabled();
+    renderPanel(calib('needs_arm_check', 'needs_arm_check/none'), { store: makeStore({ heartbeatStatus: 'disconnected' }) });
+    expect(screen.getAllByRole('button', { name: HOME })[1]).toBeDisabled();
+  });
+
+  it('while the glide home runs the panel offers „Stopp" (→ /workflow/stop) and clears the answer at its end', async () => {
+    const going = 'Der Arm fährt in die Grundstellung.';
+    mockRos.startCalibration.mockResolvedValueOnce({ success: true, message: going });
+    const { store } = renderPanel(calib('needs_arm_check', 'needs_arm_check/none'));
+    expect(screen.queryByRole('button', { name: 'Stopp' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: HOME }));
+    expect(await screen.findByText(going)).toBeInTheDocument();
+    act(() => { store.dispatch(setRunState('running')); });
+    expect(screen.getByRole('button', { name: HOME })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Arm-Check starten' })).toBeDisabled();
+    expect(screen.getByText(CALIBRATION_DE.PROGRAM_RUNNING)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Stopp' }));
+    await waitFor(() => expect(mockRos.stopWorkflow).toHaveBeenCalledTimes(1));
+    act(() => { store.dispatch(setRunState('finished')); });
+    expect(screen.queryByRole('button', { name: 'Stopp' })).toBeNull();
+    expect(screen.queryByText(going)).toBeNull();
+    expect(screen.getByRole('button', { name: HOME })).toBeEnabled();
   });
 });
 

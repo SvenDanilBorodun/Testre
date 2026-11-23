@@ -54,8 +54,9 @@ def _fake_time(monkeypatch):
 class _Arm:
     """The fake arm: every published point is where it is; its joints are the last one."""
 
-    def __init__(self, profile):
-        self.q = [float(v) for v in profile.home_joints_rad] + [float(profile.gripper_open_rad)]
+    def __init__(self, profile, start=None):
+        arm = profile.home_joints_rad if start is None else start
+        self.q = [float(v) for v in arm] + [float(profile.gripper_open_rad)]
         self.points = []
         self.chunks = 0
 
@@ -76,9 +77,9 @@ def _calibration(profile):
             'table_plane': None}
 
 
-def _run(pid, payload, workflow_id='armcheck-1790000000'):
+def _run(pid, payload, workflow_id='armcheck-1790000000', start=None):
     profile = RP.ROBOT_PROFILES[pid]
-    arm = _Arm(profile)
+    arm = _Arm(profile, start)
     ik = arm_model.for_robot(profile.build_ik(), pid, None)
     guards = []
 
@@ -182,7 +183,7 @@ def test_the_service_follows_the_program_s_own_blocks(pid, tmp_path):
     started = []
     ik = arm_model.for_robot(profile.build_ik(), pid, None)
     svc = SV.SceneCalibration(profile, camera, str(tmp_path), detect=lambda f, r=None: None,
-                              get_joints=lambda: None, fk=ik.fk, guard_parts=None,
+                              get_joints=lambda: list(profile.home_joints_rad), fk=ik.fk, guard_parts=None,
                               start_program=lambda j, w: (started.append(w) or (True, '')),
                               stop_program=lambda w: None, wall=lambda: 1_790_000_000,
                               start_thread=lambda target, name: None)
@@ -197,3 +198,41 @@ def test_the_service_follows_the_program_s_own_blocks(pid, tmp_path):
             dwells.append(pose)
     assert dwells == list(range(20))
     assert seen[-1] == (19, False)          # the Grundstellung's block is no dwell
+
+
+def _walks_the_lines(points, waypoints, tol=1e-6):
+    """True when the published arm joints walk the straight joint lines between consecutive ``waypoints`` in
+    order, reaching each one and ending on the last (a point may only stay on its line or step onto the next)."""
+    W = [np.asarray(w, float) for w in waypoints]
+    m = 0
+
+    def on(p, k):
+        a, d = W[k], W[k + 1] - W[k]
+        s = min(1.0, max(0.0, float(np.dot(p - a, d) / np.dot(d, d))))
+        return float(np.max(np.abs(a + s * d - p))) <= tol
+    for point in points:
+        p = np.asarray(point[:5], float)
+        if on(p, m):
+            continue
+        if m + 2 < len(W) and on(p, m + 1):
+            m += 1
+            continue
+        return False
+    return m == len(W) - 2 and np.allclose(points[-1][:5], W[-1], atol=tol)
+
+
+@pytest.mark.parametrize('pid', ['v1_studio', 'omx_full'])
+@pytest.mark.parametrize('corner', ['home', 'plus', 'minus'])
+def test_the_program_drives_straight_joint_lines_from_any_start_in_the_home_box(pid, corner):
+    """The route the target fence judges (``test_arm_check_target_fence.py``: straight joint lines start -> AC01
+    … AC20 -> HOME) is the route the program drives, from HOME and from two corners of the service's start box
+    (every arm joint ``ARM_CHECK_HOME_TOL_RAD`` off HOME): no via is inserted anywhere."""
+    profile = RP.ROBOT_PROFILES[pid]
+    kind = SF.arm_key(pid)
+    home = np.asarray(profile.home_joints_rad, float)
+    sign = {'home': 0.0, 'plus': 1.0, 'minus': -1.0}[corner]
+    start = home + sign * SV.ARM_CHECK_HOME_TOL_RAD * np.array([1.0, -1.0, 1.0, -1.0, 1.0])
+    phase, arm, status, _guards = _run(pid, _program(pid), start=list(start))
+    assert phase == 'finished', [s for s in status if s.get('phase') == 'error']
+    route = [start] + [np.asarray(p, float) for p in SF.ARMS[kind]['arm_check_poses_rad']] + [home]
+    assert _walks_the_lines(arm.points, route)

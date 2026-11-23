@@ -127,8 +127,9 @@ class _Env:
         self.foreign_target = False        # the OTHER arm's target is clipped on
         self.mat_visible = True
         self.jitter = 0.0                  # encoder jitter per read (a moving arm)
-        self.a = None                      # true shaft angles
-        self.enc = None                    # encoder readings
+        self.a = None                      # true shaft angles (None: no target drawn — at HOME it faces away, B4)
+        # encoder readings: the activated arm rests at HOME, where the arm check starts (X-TARGETSTART)
+        self.enc = np.asarray(self.profile.home_joints_rad, float)
         self.at = None                     # the pose index the arm stands at
         self.programs = []                 # (workflow_json dict, workflow_id) started
         self.stops = []
@@ -203,9 +204,20 @@ class _Env:
         self.at = i
 
     def home(self):
-        self.a = np.asarray(self.profile.home_joints_rad, float)
+        self.rest(self.profile.home_joints_rad)
+
+    def rest(self, q):
+        """The arm stands still at joints ``q`` (encoders exact), at no contract pose."""
+        self.a = np.asarray(q, float)
         self.enc = self.a.copy()
         self.at = None
+
+    def look_shows(self, ids):
+        """Every full-frame look shows exactly the tags ``ids`` (nothing else of the kit)."""
+        def detect(_frame, roi=None):
+            self.detects.append(roi)
+            return TG.Frame(S.WIDTH, S.HEIGHT, 120.0, {int(t): TG.TagObs(np.zeros((4, 2)), 80.0) for t in ids})
+        self.svc._detect = detect
 
     def status(self, block_id, workflow_id=None):
         self.svc.on_workflow_status({'workflow_id': workflow_id or self.wid, 'current_block_id': block_id,
@@ -327,6 +339,181 @@ def test_a_refused_program_start_releases_everything(kind, tmp_path):
     assert env.camera.holds == 0
     assert env.svc.state()['state'] != 'arm_check_running'
     assert env.svc.start('arm_check')[0] is False   # still refused, never "already running"
+
+
+def _nothing_started(env, before):
+    """No program, no hold, no capture thread, no look and the state as it was."""
+    assert env.programs == [] and env.threads == []
+    assert env.camera.holds == 0 and env.camera.frames == 0 and env.detects == []
+    assert env.svc.state()['state'] == before
+
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_the_arm_check_is_refused_away_from_home(kind, tmp_path):
+    """FAILS FIRST (X-TARGETSTART): from the observation pose, where every „Solange sichtbar" program leaves the
+    arm, the program's first leg OBS -> AC01 drives the clipped target through the tower column, and the tower
+    guard models the arm only. So the arm check starts only at HOME: anywhere else it is refused with its German
+    sentence before anything is held or started."""
+    env = _Env(kind, calib_dir=tmp_path)
+    before = env.svc.state()['state']
+    env.rest(SF.ARMS[kind]['observe_joints_rad'])
+    assert env.svc.start('arm_check') == (False, T.ARM_CHECK_NEEDS_HOME_DE)
+    _nothing_started(env, before)
+    env.put(0)                                           # at AC01 itself: not HOME either
+    assert env.svc.start('arm_check') == (False, T.ARM_CHECK_NEEDS_HOME_DE)
+    _nothing_started(env, before)
+
+
+@pytest.mark.parametrize('kind', KINDS)
+@pytest.mark.parametrize('joint', range(5))
+@pytest.mark.parametrize('sign', (-1.0, 1.0))
+def test_the_home_tolerance_is_per_joint(kind, joint, sign, tmp_path):
+    """FAILS FIRST: one arm joint just outside ``ARM_CHECK_HOME_TOL_RAD`` refuses; just inside starts."""
+    home = np.asarray(RP.ROBOT_PROFILES[PROFILE[kind]].home_joints_rad, float)
+    env = _Env(kind, calib_dir=tmp_path / 'out')
+    q = home.copy()
+    q[joint] += sign * (SV.ARM_CHECK_HOME_TOL_RAD + 0.002)
+    env.rest(q)
+    assert env.svc.start('arm_check') == (False, T.ARM_CHECK_NEEDS_HOME_DE)
+    assert env.programs == [] and env.camera.holds == 0
+    env = _Env(kind, calib_dir=tmp_path / 'in')
+    q = home.copy()
+    q[joint] += sign * (SV.ARM_CHECK_HOME_TOL_RAD - 0.002)
+    env.rest(q)
+    assert env.svc.start('arm_check')[0]
+    assert len(env.programs) == 1
+
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_the_arm_check_starts_from_a_corner_inside_the_home_tolerance(kind, tmp_path):
+    """Every arm joint off HOME by just under the tolerance at once (a corner of the box the fence judges)."""
+    home = np.asarray(RP.ROBOT_PROFILES[PROFILE[kind]].home_joints_rad, float)
+    env = _Env(kind, calib_dir=tmp_path)
+    env.rest(home + (SV.ARM_CHECK_HOME_TOL_RAD - 0.001) * np.array([1.0, -1.0, 1.0, -1.0, 1.0]))
+    ok, msg = env.svc.start('arm_check')
+    assert ok, msg
+
+
+@pytest.mark.parametrize('kind', KINDS)
+@pytest.mark.parametrize('joints', (None, [], [0.0, 0.0, 0.0, 0.0], 'nan', 'inf', 'text', 'raises'),
+                         ids=('none', 'empty', 'short', 'nan', 'inf', 'text', 'raises'))
+def test_unreadable_joints_refuse_the_arm_check(kind, joints, tmp_path):
+    """FAILS FIRST: joints that cannot be read (none, short, a NaN or infinity, not numbers, a raising reader)
+    refuse like a pose away from HOME (fail closed): nothing is held or started."""
+    env = _Env(kind, calib_dir=tmp_path)
+    before = env.svc.state()['state']
+    home = [float(v) for v in env.profile.home_joints_rad] + [float(env.profile.gripper_closed_rad)]
+
+    def reader():
+        if joints == 'raises':
+            raise RuntimeError('no joint states')
+        if joints in ('nan', 'inf'):
+            return home[:2] + [float(joints)] + home[3:]
+        if joints == 'text':
+            return ['a'] * 6
+        return joints
+    env.svc._get_joints = reader
+    assert env.svc.start('arm_check') == (False, T.ARM_CHECK_NEEDS_HOME_DE)
+    _nothing_started(env, before)
+
+
+def test_the_home_tolerance_covers_every_design_droop_and_is_s_bound():
+    """An arm resting at HOME is never refused: the tolerance exceeds every profile's design droop envelope with
+    room for servo settling, and stays the value the target fence proves (0.10 rad)."""
+    assert SV.ARM_CHECK_HOME_TOL_RAD == 0.10
+    worst = max(max(env) for env in SF.TOWER_DROOP_DESIGN_ENV_RAD.values())
+    assert worst == pytest.approx(0.061)
+    assert SV.ARM_CHECK_HOME_TOL_RAD >= worst + 0.03
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# step „home": the panel's way to the Grundstellung
+# ══════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_the_home_step_starts_the_grundstellung_program(kind, tmp_path):
+    """FAILS FIRST: away from HOME, with no target tag in the look, step ``home`` starts exactly ``home_program()``
+    through the internal start (its token passes the gate once) and answers in German; the look takes one frame."""
+    env = _Env(kind, calib_dir=tmp_path)
+    env.rest(SF.ARMS[kind]['observe_joints_rad'])
+    env.look_shows(SF.ARMS[kind]['mat_tags_f'])
+    before = env.svc.state()
+    assert env.svc.start('home') == (True, T.ARM_GOING_HOME_DE)
+    assert env.programs == [(SV.home_program(), 'armcheck-home-1790000000')]
+    assert env.detects == [None] and env.camera.holds == 0 and env.threads == []
+    assert env.svc.state() == before                      # a glide home changes no calibration state
+    assert env.svc._internal is None                     # the token was used once
+    env.svc.on_program_end('armcheck-home-1790000000', 'finished')
+    assert env.svc.state() == before
+
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_the_home_step_at_home_moves_nothing(kind, tmp_path):
+    """FAILS FIRST: already within the tolerance of HOME: success, its own sentence, no program."""
+    env = _Env(kind, calib_dir=tmp_path)
+    env.home()
+    env.look_shows(())
+    assert env.svc.start('home') == (True, T.ARM_AT_HOME_DE)
+    assert env.programs == []
+
+
+@pytest.mark.parametrize('kind', KINDS)
+@pytest.mark.parametrize('whose', ('own', 'other'))
+def test_the_home_step_refuses_while_a_target_is_seen(kind, whose, tmp_path):
+    """FAILS FIRST: one look showing any calibration-target tag of EITHER arm refuses with the
+    ``target_attached`` sentence and nothing moves (from the observation pose a clipped target would pass the
+    tower column on the way home)."""
+    other = 'omx' if kind == 'v1' else 'v1'
+    tag = SF.ARMS[kind if whose == 'own' else other]['target_tag_ids'][4]
+    env = _Env(kind, calib_dir=tmp_path)
+    env.rest(SF.ARMS[kind]['observe_joints_rad'])
+    env.look_shows([tag])
+    assert env.svc.start('home') == (False, T.TARGET_ATTACHED_DE)
+    assert env.programs == []
+    env.home()                                            # at HOME too: the target is to come off first
+    assert env.svc.start('home') == (False, T.TARGET_ATTACHED_DE)
+
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_the_home_step_refuses_without_a_look(kind, tmp_path):
+    """FAILS FIRST: a camera that does not stream, or a picture with no frame, refuses with the camera sentence
+    (the step must look first); an unknown or legacy statement refuses as the arm check does."""
+    env = _Env(kind, calib_dir=tmp_path, camera=_Camera(state=dict(CAMERA_STATE, state='fault')))
+    env.rest(SF.ARMS[kind]['observe_joints_rad'])
+    assert env.svc.start('home') == (False, T.CAMERA_MISSING_DE)
+    assert env.programs == [] and env.detects == []
+    env = _Env(kind, calib_dir=tmp_path)
+    env.rest(SF.ARMS[kind]['observe_joints_rad'])
+    env.camera.latest_frame = lambda *_a, **_k: None
+    assert env.svc.start('home') == (False, T.CAMERA_MISSING_DE)
+    assert env.programs == [] and env.detects == []
+    assert _Env(kind, calib_dir=tmp_path, camera=_Camera(profile=None)).svc.start('home') == (
+        False, T.PROFILE_UNKNOWN_DE)
+    assert _Env(kind, calib_dir=tmp_path, camera=_Camera(profile='legacy')).svc.start('home') == (
+        False, T.CAMERA_NOT_TOWER_DE)
+
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_the_home_step_refuses_while_busy_and_passes_a_refused_start_on(kind, tmp_path):
+    """FAILS FIRST: while the arm check or the handheld step runs, step ``home`` answers their busy sentence and
+    looks at nothing; a program start that refuses (mode arbitration, a live leader, torque) is the answer."""
+    env = _Env(kind, calib_dir=tmp_path / 'a')
+    env.home()
+    assert env.svc.start('arm_check')[0]
+    env.rest(SF.ARMS[kind]['observe_joints_rad'])
+    detects = len(env.detects)
+    assert env.svc.start('home') == (False, SV.ARM_CHECK_BUSY_DE)
+    assert len(env.programs) == 1 and len(env.detects) == detects
+    env = _Env(kind, calib_dir=tmp_path / 'b')
+    assert env.svc.start('handheld')[0]
+    assert env.svc.start('home') == (False, SV.HANDHELD_BUSY_DE)
+    assert env.programs == []
+    env = _Env(kind, calib_dir=tmp_path / 'c')
+    env.rest(SF.ARMS[kind]['observe_joints_rad'])
+    env.look_shows(())
+    env.svc._start_program = lambda _json, _wid: (False, 'Ein Workflow läuft gerade — bitte zuerst stoppen.')
+    assert env.svc.start('home') == (False, 'Ein Workflow läuft gerade — bitte zuerst stoppen.')
+    assert env.svc._internal is None
 
 
 # ══════════════════════════════════════════════════════════════════════════

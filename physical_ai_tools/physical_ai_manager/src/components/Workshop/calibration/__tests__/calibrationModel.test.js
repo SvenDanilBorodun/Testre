@@ -239,9 +239,10 @@ describe('calibrationModel — the wire', () => {
     expect(isCapturing(null)).toBe(false);
   });
 
-  it('names the four steps of /calibration/start', () => {
+  it('names the five steps of /calibration/start (home: the way to the Grundstellung, X-TARGETSTART)', () => {
     expect(CALIBRATION_STEPS).toEqual({
       MAT_CHECK: 'mat_check', ARM_CHECK: 'arm_check', TARGET_REMOVED: 'target_removed', HANDHELD: 'handheld',
+      HOME: 'home',
     });
   });
 });

@@ -26,12 +26,14 @@ export const CALIBRATION_STATE_VERSION = 1;
 export const CALIBRATION_STATES = Object.freeze(['ok', 'blocked', 'needs_arm_check', 'arm_check_running',
   'confirm_target_removed', 'handheld_running', 'unknown']);
 
-// /calibration/start's steps (StartCalibration.step).
+// /calibration/start's steps (StartCalibration.step). HOME is the way to the
+// Grundstellung, where the arm check starts (X-TARGETSTART).
 export const CALIBRATION_STEPS = Object.freeze({
   MAT_CHECK: 'mat_check',
   ARM_CHECK: 'arm_check',
   TARGET_REMOVED: 'target_removed',
   HANDHELD: 'handheld',
+  HOME: 'home',
 });
 
 export const VIEWS = Object.freeze({

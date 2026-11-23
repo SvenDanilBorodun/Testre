@@ -92,6 +92,14 @@ ARM_CHECK_BUSY_DE = 'Der Arm-Check läuft gerade – bitte warten, bis er fertig
 CHECK_FAILED_DE = 'Die Kalibrierung konnte gerade nicht geprüft werden. Bitte noch einmal versuchen.'
 HANDHELD_BUSY_DE = 'Die Kamera wird gerade von Hand vermessen – bitte zuerst fertig vermessen oder abbrechen.'
 HANDHELD_STOPPED_DE = 'Vermessen der Kamera abgebrochen. Es wurde nichts gespeichert.'
+# The arm check starts only at the Grundstellung (verification finding X-TARGETSTART: the tower guard models the
+# arm, never the clipped target, and from the observation pose the first leg drives the target through the tower
+# column), and step ``home`` is the panel's way there: its refusal, its two answers.
+ARM_CHECK_NEEDS_HOME_DE = ('Der Arm-Check startet nur aus der Grundstellung. Steckt das Kalibrier-Ziel schon am '
+                           'Greifer, bitte zuerst abnehmen. Dann „Arm in die Grundstellung fahren“ drücken und das '
+                           'Ziel erst dort aufklipsen.')
+ARM_AT_HOME_DE = 'Der Arm steht bereits in der Grundstellung.'
+ARM_GOING_HOME_DE = 'Der Arm fährt in die Grundstellung.'
 
 # Result code (mat check refusal, arm-check gate, note) -> its sentence.
 BY_CODE = {

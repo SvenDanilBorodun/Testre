@@ -73,7 +73,14 @@ er „Dieser Roboter ist noch nicht eingemessen. Bitte den Arm-Check starten."
 
 Vor dem Arm-Check:
 
-- **Kalibrier-Ziel auf den Greifer aufklipsen.**
+- **Zuerst den Arm in die Grundstellung fahren:** in der Kalibrierung
+  **„Arm in die Grundstellung fahren"** drücken (der Arm fährt sofort los).
+  Der Arm-Check startet nur aus der Grundstellung.
+- **Erst dann das Kalibrier-Ziel auf den Greifer aufklipsen** – nie vorher.
+  Ein Ziel, das schon in einer anderen Haltung am Greifer steckt, kann auf dem
+  Weg in die Grundstellung den Kameraturm streifen: Der Roboter fährt dann
+  nicht los, solange die Kamera das Ziel sieht („Am Greifer steckt noch das
+  Kalibrier-Ziel. Bitte abnehmen.").
 - **Tisch frei räumen.**
 - **30 cm hinter dem Roboter frei lassen.**
 - **Abstand halten – der Arm bewegt sich von selbst.**
@@ -184,7 +191,8 @@ zurückgesetzt wird.
 |---|---|
 | „Die Turm-Kamera liefert kein Bild. Bitte das USB-Kabel der Kamera prüfen." | Kabel und Anschluss prüfen (eigener Anschluss, kein Hub), dann „Erneut prüfen". |
 | „Das Kamerabild ist zu dunkel. Bitte das Licht einschalten." | Licht an, dann „Erneut prüfen". |
-| „Am Greifer steckt noch das Kalibrier-Ziel. Bitte abnehmen." | Ziel abnehmen, dann „Erneut prüfen". |
+| „Am Greifer steckt noch das Kalibrier-Ziel. Bitte abnehmen." | Ziel abnehmen, dann „Erneut prüfen" (vor dem Arm-Check: erneut „Arm in die Grundstellung fahren"). |
+| „Der Arm-Check startet nur aus der Grundstellung. …" | Ein schon aufgeklipstes Ziel abnehmen, „Arm in die Grundstellung fahren" drücken, dann das Ziel aufklipsen und „Arm-Check starten". |
 | „Die Kamera wurde verdreht. Bitte den Arm-Check starten." | Kamera und Turm in Ruhe lassen und den Arm-Check neu fahren. |
 | „Die Kamera sitzt nicht mehr an ihrem Platz am Turm oder ihr Objektiv wurde verdreht …" | Turm und Kopf prüfen und zurechtrücken; hilft das nicht, den Arm-Check fahren. |
 | „Die beiden Marker neben dem Kameraturm liegen nicht wie vorgesehen …" | Prüfen, ob die Marker 480 und 481 sauber in ihren Taschen im Turm-Fuß kleben. |

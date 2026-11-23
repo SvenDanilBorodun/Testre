@@ -159,6 +159,18 @@ def test_the_service_s_own_sentences_live_here_and_the_service_still_names_them(
         assert name in _constants()                                  # held to the lint rules below
 
 
+def test_the_way_home_sentences_verbatim():
+    """X-TARGETSTART: the arm check starts only at the Grundstellung; step ``home`` is the panel's way there. The
+    refusal names the panel's button as the panel spells it (calibrationCopy.js's ARM_CHECK_HOME)."""
+    assert t.ARM_CHECK_NEEDS_HOME_DE == (
+        'Der Arm-Check startet nur aus der Grundstellung. Steckt das Kalibrier-Ziel schon am Greifer, bitte zuerst '
+        'abnehmen. Dann „Arm in die Grundstellung fahren“ drücken und das Ziel erst dort aufklipsen.')
+    assert t.ARM_AT_HOME_DE == 'Der Arm steht bereits in der Grundstellung.'
+    assert t.ARM_GOING_HOME_DE == 'Der Arm fährt in die Grundstellung.'
+    for name in ('ARM_CHECK_NEEDS_HOME_DE', 'ARM_AT_HOME_DE', 'ARM_GOING_HOME_DE'):
+        assert name in _constants()                                  # held to the lint rules below
+
+
 def test_every_constant_follows_the_german_lint_rules():
     texts = _rendered()
     assert len(texts) >= 45

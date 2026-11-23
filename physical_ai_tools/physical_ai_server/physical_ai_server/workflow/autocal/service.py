@@ -33,8 +33,13 @@ tests hand it fakes.
   started through the node's ordinary program start, so mode arbitration, the
   leader gate, the torque assertion, the table floor and the tower guard all
   apply; the mat-check gate does not (a one-shot token lets exactly that
-  program through). No tag has to be visible to start (review B4).
-  A capture thread at 10 Hz (:meth:`capture_tick`) follows the program's own
+  program through). No tag has to be visible to start (review B4), but the
+  arm must stand at HOME: every measured arm joint within
+  ``ARM_CHECK_HOME_TOL_RAD`` of it, joints that cannot be read refused like a
+  pose elsewhere (X-TARGETSTART: the tower guard models the arm, never the
+  clipped target, and from the observation pose the first leg drives the
+  target through the tower column). A capture thread at 10 Hz
+  (:meth:`capture_tick`) follows the program's own
   blocks (``/workflow/status``): while pose ``i``'s dwell runs and the arm has
   moved less than 0.002 rad for 0.3 s, the pose is a RESTED record (its
   encoder readings: every ``PoseRecord.measured`` is the arm's encoders,
@@ -57,6 +62,11 @@ tests hand it fakes.
   pending handheld lens made under the camera state's ``profile_id`` the
   arm check started with (``handheld.read``) is held fixed in the solve
   (``lens_prior``, D89-1), and a written arm check uses it up.
+* THE WAY HOME (:meth:`go_home`, step ``home``): the panel's way to the
+  Grundstellung while Roboter Studio shows only the calibration panel. It
+  looks first and refuses while any target tag of either arm is seen; at HOME
+  already it moves nothing; otherwise :func:`home_program` through the same
+  internal start as the identity check's way home.
 * THE HANDHELD STEP (:meth:`start_handheld`, decision D9's fallback): the
   node's calibration mode claimed (``claim_mode``: nothing else moves the arm
   or starts while the student holds the target in front of the camera), the
@@ -108,7 +118,7 @@ from physical_ai_server.workflow.autocal.camera_model import KB
 STATE_TOPIC = '/edubotics/calibration_state'
 STATE_VERSION = 1
 # /calibration/start's steps this service answers (the others stay the legacy wizard's).
-STEPS = ('mat_check', 'arm_check', 'target_removed', 'handheld')
+STEPS = ('mat_check', 'arm_check', 'target_removed', 'handheld', 'home')
 PROGRAM_PREFIX = 'armcheck-'
 HOME_PROGRAM_PREFIX = 'armcheck-home-'
 CAPTURE_THREAD = 'calibration-capture'
@@ -133,6 +143,11 @@ CAPTURE_LOOKS = 3
 LOOK_STABLE_PX = 0.4
 REGION_MARGIN_PX = 120.0
 POSE1_CHECK_S = 3.0
+# The arm check starts only with every measured arm joint this close to HOME (X-TARGETSTART): above every
+# profile's design droop envelope (the OMX's 0.061 rad on joint 2) plus servo settling, so an arm resting at HOME
+# is never refused, and small enough that the program's first leg from any start inside it keeps the clipped
+# target clear of the tower (test_arm_check_target_fence.py proves it from every corner of the box).
+ARM_CHECK_HOME_TOL_RAD = 0.10
 MAT_CHECK_FRAMES = 3
 # a look older than this is no look of the arm's rest
 LOOK_MAX_AGE_S = 0.5
@@ -513,6 +528,8 @@ class SceneCalibration:
                 return self.confirm_target_removed()
             if step == 'handheld':
                 return self.start_handheld()
+            if step == 'home':
+                return self.go_home()
         except Exception as e:  # noqa: BLE001 — logged; the student gets the sentence
             self._log_internal(f'calibration step {step!r} failed: {type(e).__name__}: {e}')
             return False, CHECK_FAILED_DE
@@ -704,8 +721,27 @@ class SceneCalibration:
             with self._lock:
                 self._internal = None
 
+    def _home_deviation(self):
+        """The largest ``|measured − HOME|`` over the arm joints (radians), or
+        ``None`` when the joints cannot be read (none, short, non-finite)."""
+        home = np.asarray([float(v) for v in self.profile.home_joints_rad], dtype=np.float64)
+        q = self._measured()
+        if q is None or q.shape != home.shape:
+            return None
+        return float(np.max(np.abs(q - home)))
+
+    @staticmethod
+    def _at_home(deviation) -> bool:
+        """Every arm joint within ``ARM_CHECK_HOME_TOL_RAD`` of HOME; joints that
+        could not be read (``None``) are not at HOME (fail closed)."""
+        return deviation is not None and deviation <= ARM_CHECK_HOME_TOL_RAD
+
     def start_arm_check(self):
-        """``(ok, sentence)``: start the arm-check program (see the module docstring)."""
+        """``(ok, sentence)``: start the arm-check program (see the module
+        docstring). Only from HOME (X-TARGETSTART): the tower guard models the
+        arm, never the clipped target, and from the observation pose the first
+        leg would drive the target through the tower column; the route from
+        HOME keeps it clear (``test_arm_check_target_fence.py``)."""
         profile = self._camera.profile()
         if profile is None:
             return False, _t.PROFILE_UNKNOWN_DE
@@ -713,6 +749,14 @@ class SceneCalibration:
             return False, _t.CAMERA_NOT_TOWER_DE
         if not self._streaming():
             return False, _t.CAMERA_MISSING_DE
+        busy = self._busy_message()
+        if busy is not None:
+            return False, busy
+        deviation = self._home_deviation()
+        if not self._at_home(deviation):
+            self._log_internal(f'arm check refused: not at HOME (largest joint deviation {deviation} rad, '
+                               f'tolerance {ARM_CHECK_HOME_TOL_RAD} rad)')
+            return False, _t.ARM_CHECK_NEEDS_HOME_DE
         workflow_id = f'{PROGRAM_PREFIX}{int(self._wall())}'
         run = _Run(workflow_id, _sf.ARMS[self.kind]['arm_check_poses_rad'])
         try:
@@ -754,6 +798,34 @@ class SceneCalibration:
             return False, result.message_de
         result = self.run_mat_check()
         return result.ok, result.message_de
+
+    def go_home(self):
+        """Step ``home``: the panel's way to the Grundstellung, where the arm
+        check starts. It looks first: one full-frame look showing any target
+        tag of EITHER arm refuses with ``target_attached`` and nothing moves (a
+        target clipped on away from HOME may pass the tower on the way). At
+        HOME already: nothing to do. Otherwise :func:`home_program` through
+        the same internal start the identity check's way home takes."""
+        profile = self._camera.profile()
+        if profile is None:
+            return False, _t.PROFILE_UNKNOWN_DE
+        if profile != _sf.FIXTURE_ID or self.kind is None:
+            return False, _t.CAMERA_NOT_TOWER_DE
+        busy = self._busy_message()
+        if busy is not None:
+            return False, busy
+        if not self._streaming():
+            return False, _t.CAMERA_MISSING_DE
+        looks = self._frames(1)
+        if not looks:
+            return False, _t.CAMERA_MISSING_DE
+        groups = _tags.classify(looks[0].tags, self.kind)
+        if groups['target'] or groups['foreign_target']:
+            return False, _t.TARGET_ATTACHED_DE
+        if self._at_home(self._home_deviation()):
+            return True, _t.ARM_AT_HOME_DE
+        ok, message = self._start_internal(home_program(), f'{HOME_PROGRAM_PREFIX}{int(self._wall())}')
+        return (True, _t.ARM_GOING_HOME_DE) if ok else (False, message)
 
     def cancel(self):
         """``/calibration/cancel`` while an arm check is under way: stop its
@@ -886,9 +958,12 @@ class SceneCalibration:
             q = self._get_joints()
         except Exception:  # noqa: BLE001
             return None
-        if q is None or len(q) < 5:
+        try:
+            if q is None or len(q) < 5:
+                return None
+            q = np.asarray([float(v) for v in list(q)[:5]], dtype=np.float64)
+        except (TypeError, ValueError):
             return None
-        q = np.asarray([float(v) for v in list(q)[:5]], dtype=np.float64)
         return q if np.all(np.isfinite(q)) else None
 
     def _region(self, i):

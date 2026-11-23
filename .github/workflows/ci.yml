@@ -193,11 +193,12 @@ jobs:
         # tower-guard and route proofs made the serial run ~40 min on this runner
         # (19:51 on an Apple M5 Pro), which with the steps above ran past
         # timeout-minutes. loadfile keeps each file in one process, as the suite
-        # was built and verified. The tower guard's runtime budget (D72: p99 <= 50 ms
-        # of process time per leg, never loosened) is measured ALONE after the
+        # was built and verified. The tower guard's runtime budget (D72/D98: p99 <=
+        # 75 ms of process time per leg, owner-set) is measured ALONE after the
         # parallel run: with every core busy, process time inflates (+49 % measured
         # on 18 saturated cores) and the test failed at p99 61.5 ms on this runner
-        # (d212c6ff) while the guard itself was unchanged. Its own run fails if the
+        # (d212c6ff) while the guard itself was unchanged; alone it read 52.4 ms
+        # against the old 50 ms (58e1c484), so the owner set 75 ms (D98). Its own run fails if the
         # test is gone (pytest exits 4 on an unknown node id).
         run: |
           cd physical_ai_tools/physical_ai_server

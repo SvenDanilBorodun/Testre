@@ -317,7 +317,7 @@ class PythonTestsRunTheRealDetector(unittest.TestCase):
 
 
 class TheGuardBudgetIsMeasuredAlone(unittest.TestCase):
-    """D72's runtime budget (p99 <= 50 ms of process time per leg) is measured on
+    """D72's runtime budget (p99 <= 75 ms of process time per leg, D98) is measured on
     an otherwise idle runner: the parallel server run (D92) leaves it out and a
     serial run of exactly that test follows in the same step. Measured under
     ``-n auto`` it failed at p99 61.5 ms with the guard unchanged (d212c6ff)."""

@@ -564,7 +564,8 @@ def test_the_guard_imports_only_numpy_arm_geometry_arm_cells_and_scene_fixture()
 # keeps its worker threads spinning for a while after a call that woke them, and process time counts their CPU too:
 # measured in a fresh process (18 cores, numpy 1.26.4's OpenBLAS), the V1's calibrated legs read a p99 of about
 # 225 ms of process time for 13 ms of wall time, and about 11 ms either way once the pool had gone quiet — so the gate
-# depended on what ran before it in the process. The bound stays 50 ms (D72, R31).
+# depended on what ran before it in the process. The bound is 75 ms (D72, raised by the owner in D98: GitHub's
+# runner measured the V1's p99 at 48.9-52.4 ms alone, about 4 x this build machine's 12-13 ms).
 _ONE_BLAS_THREAD = {name: '1' for name in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS',
                                            'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS')}
 _RUNTIME_CHILD = textwrap.dedent('''
@@ -596,7 +597,8 @@ def test_runtime_budget_here():
     the tower, student program legs; 200 + 200 legs), each judged at BOTH residuals (calibrated: the server residual
     with the design envelope standing in for the kit's; uncalibrated: the uncalibrated residual at the contract
     place), process time per leg through the travel-bound rule, in a fresh interpreter with one BLAS thread: p99 <=
-    50 ms (D72; never loosened by a coder, R31). The runner's own times are printed first."""
+    75 ms (D72 as the owner raised it in D98 for GitHub's runner class; never loosened by a coder, R31). The
+    runner's own times are printed first."""
     env = dict(os.environ, **_ONE_BLAS_THREAD)
     env['PYTHONPATH'] = os.pathsep.join([str(Path(__file__).resolve().parent), str(_PKG.parent)] + sys.path)
     child = subprocess.run([sys.executable, '-c', _RUNTIME_CHILD], env=env, capture_output=True, text=True,
@@ -613,7 +615,7 @@ def test_runtime_budget_here():
           + f'; all {len(allt)} legs p99 {np.percentile(allt, 99):.1f} ms')
     assert list(measured) == ['v1 calibrated', 'v1 uncalibrated', 'omx calibrated', 'omx uncalibrated']
     assert len(allt) == 800
-    assert np.percentile(allt, 99) <= 50.0, report
+    assert np.percentile(allt, 99) <= 75.0, report
 
 
 # ══════════════════════════════════════════════════════════════════════════

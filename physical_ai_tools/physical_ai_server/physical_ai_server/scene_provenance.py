@@ -21,10 +21,10 @@ quality, which differs between Windows and the Pi for one tower view).
 The robot learns its live profile from ONE provider, a callable answering
 ``{"profile": "legacy" | "tower_v1" | None, "profile_id": <12 hex> | None,
 "platform": "windows" | "pi" | None}`` (``None`` = unknown: nothing is refused,
-nothing is stamped). The node wires the studio camera's provider, the arm
-container's stated profile (``workflow/studio_camera.py``, decision D63; no
-studio camera = no provider = unknown); :data:`LEGACY_PROVIDER` is the constant
-``legacy`` answer.
+nothing is stamped). The node wires its provider to the arm container's stated
+profile (decision D63; nothing stated = unknown); this module does not know
+where that answer comes from. :data:`LEGACY_PROVIDER` is the constant ``legacy``
+answer.
 
 Stdlib only and free of package imports: the recorder, the Daten engine, the
 edit worker and the sidecar load it, some of them by file path.

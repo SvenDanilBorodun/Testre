@@ -465,7 +465,7 @@ export function useRosServiceCaller() {
 
   // Roboter Studio — the tower calibration (spec 40 S4): /calibration/start
   // runs one of the calibration service's steps (`mat_check`, `arm_check`,
-  // `target_removed`, `handheld`; calibration/calibrationModel.js), the
+  // `target_removed`, `handheld`, `home`; calibration/calibrationModel.js), the
   // cancel stops the step under way, the status says whether a valid arm check
   // exists. The state itself arrives on /edubotics/calibration_state.
   const startCalibration = useCallback(

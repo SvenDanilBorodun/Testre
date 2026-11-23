@@ -316,6 +316,32 @@ class PythonTestsRunTheRealDetector(unittest.TestCase):
         self.assertEqual(str(env.get(name)), "1", "the gate fails only on exactly 1")
 
 
+class TheGuardBudgetIsMeasuredAlone(unittest.TestCase):
+    """D72's runtime budget (p99 <= 50 ms of process time per leg) is measured on
+    an otherwise idle runner: the parallel server run (D92) leaves it out and a
+    serial run of exactly that test follows in the same step. Measured under
+    ``-n auto`` it failed at p99 61.5 ms with the guard unchanged (d212c6ff)."""
+
+    BUDGET = "test/test_tower_guard.py::test_runtime_budget_here"
+
+    def _server_lines(self):
+        job = _load(WF / "ci.yml")["jobs"]["python-tests"]
+        steps = [s for s in job.get("steps") or [] if _SERVER_TESTS_RUN.search(s.get("run", ""))]
+        self.assertEqual(len(steps), 1, "one step runs the server tests")
+        return [line.strip() for line in steps[0]["run"].splitlines() if "pytest" in line]
+
+    def test_the_parallel_run_leaves_the_budget_out(self):
+        parallel = [line for line in self._server_lines() if " -n " in f" {line} "]
+        self.assertEqual(len(parallel), 1, "one parallel server run")
+        self.assertIn(f"--deselect {self.BUDGET}", parallel[0])
+
+    def test_the_budget_runs_alone_after_it(self):
+        lines = self._server_lines()
+        alone = [line for line in lines if line.split()[3:4] == [self.BUDGET]]
+        self.assertEqual(alone, [f"python -m pytest {self.BUDGET} -q"], "exactly the budget test, serially")
+        self.assertGreater(lines.index(alone[0]), next(i for i, l in enumerate(lines) if " -n " in f" {l} "))
+
+
 class ReleaseChannel(unittest.TestCase):
     def _uploads(self):
         found = []

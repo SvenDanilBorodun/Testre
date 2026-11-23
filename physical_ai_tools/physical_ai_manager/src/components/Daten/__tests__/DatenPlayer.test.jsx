@@ -195,7 +195,10 @@ describe('the player (§F)', () => {
     await openPlayerView();
     const grip = document.querySelector('[data-camera="gripper"] video');
     fireEvent.error(grip);
-    await waitFor(() => expect(document.querySelector('[data-camera="gripper"]').textContent).toContain(COPY.player.unplayable));
+    // The tile learns the status from a fetch (classifyMedia); under a loaded CI runner that once took 1.1 s,
+    // past waitFor's 1 s default (CI at d212c6ff, and #66). The assertion is unchanged.
+    await waitFor(() => expect(document.querySelector('[data-camera="gripper"]').textContent).toContain(COPY.player.unplayable),
+      { timeout: 5000 });
     expect(document.querySelector('[data-camera="scene"] video')).not.toBeNull();
   });
 
@@ -203,7 +206,8 @@ describe('the player (§F)', () => {
     world.clip = () => ({ status: 500, code: 'internal' });
     await openPlayerView();
     fireEvent.error(document.querySelector('[data-camera="scene"] video'));
-    await waitFor(() => expect(document.querySelector('[data-camera="scene"]').textContent).toContain(COPY.player.loadFailed));
+    await waitFor(() => expect(document.querySelector('[data-camera="scene"]').textContent).toContain(COPY.player.loadFailed),
+      { timeout: 5000 });
     fireEvent.click(within(document.querySelector('[data-camera="scene"]')).getByText(COPY.player.retry));
     expect(document.querySelector('[data-camera="scene"] video')).not.toBeNull();
   });

@@ -11,9 +11,11 @@
 
 | Teil | Hinweis |
 |---|---|
-| Kameraturm (Fuß, Aluminium-Profil, Kopf mit Turm-Kamera) | Der Fuß wird an die vorhandene Grundplatte des Roboters geschraubt. Im Fuß stecken zwei Marker (Nummer 480 und 481) – nicht abziehen, nicht überkleben. |
+| Kameraturm, fertig montiert (Fuß, Aluminium-Profil, Kopf mit Turm-Kamera) | Der Fuß wird an die vorhandene Grundplatte des Roboters geschraubt; am Turm selbst ist nichts zu schrauben. Im Fuß stecken zwei Marker (Nummer 480 und 481) – nicht abziehen, nicht überkleben. |
+| Zwei Schrauben M3 × 10 und ein Innensechskantschlüssel 2,5 mm | Für die beiden Laschen des Turm-Fußes. |
 | Turm-Kamera (Innomaker U20CAM-1080P-S1) mit USB-Verlängerung | Die Verlängerung gehört nur an die Turm-Kamera. |
 | Szenen-Matte (laminiert, passend zum Arm: V1 oder OMX) | Flach lagern, nicht rollen. |
+| Vier ablösbare Klebepunkte | Für die Ecken der Matte. |
 | Kalibrier-Ziel zum Aufklipsen (passend zum Arm) | Nur für den Arm-Check; danach wieder abnehmen. |
 
 ## Wann das Kit montiert wird — die Reihenfolge ist wichtig
@@ -37,15 +39,19 @@
 1. **Umgebung stoppen.**
 2. **Die alte Szenen-Kamera und ihren Fuß abbauen.** Der Fuß des Kameraturms
    sitzt an derselben Stelle.
-3. **Den Turm-Fuß an die Grundplatte schrauben** und den Turm aufstecken
-   (die Schrauben der Plattenlaschen fest anziehen). Den Turm danach nicht
-   mehr verschieben und **das Objektiv der Kamera nicht verdrehen** – es ist
-   scharf gestellt und mit einer Markierung gesichert.
+3. **Den Turm an die Grundplatte schrauben:** Der Turm kommt fertig montiert.
+   Seinen Fuß mit den beiden Laschen in die Zähne am Rand der Grundplatte
+   setzen und die beiden Schrauben M3 × 10 durch die Platte in die Laschen
+   **fest anziehen**. Der Fuß liegt flach auf dem Tisch und wackelt nicht. Den
+   Turm danach nicht mehr verschieben, an den Schrauben des Turms nichts lösen
+   und **das Objektiv der Kamera nicht verdrehen** – es ist scharf gestellt und
+   mit einer Markierung gesichert.
 4. **Die Turm-Kamera an einen eigenen USB-Anschluss stecken** (siehe
    „USB-Anschlüsse" unten), mit der mitgelieferten Verlängerung.
 5. **Die Szenen-Matte auflegen:** bis zum Anschlag an die Grundplatte
    schieben (der Ausschnitt der Matte umschließt die Platte), glatt auflegen
-   und an den Ecken fixieren. Die Matte darf keine Wellen werfen.
+   und die Ecken mit den vier Klebepunkten fixieren. Die Matte darf keine
+   Wellen werfen.
 6. **„Turm-Kamera" auswählen:**
    - **Windows:** in der Einrichtung der EduBotics-App die Szenen-Kamera
      auswählen und **„Turm-Kamera (Turm-Kit)"** ankreuzen. Die App prüft die
@@ -115,7 +121,9 @@ aufrichten.
 **Beim Stoppen** wird der Arm weich. Würde der V1 dabei nach hinten zum Turm
 fallen, fragt „Stoppen" vorher nach (am Windows-PC und im System-Fenster des
 Pi): den Arm zuerst in die Grundstellung fahren (Roboter Studio → Steuern →
-Grundstellung) oder ihn beim Stoppen festhalten, dann „Trotzdem stoppen".
+Grundstellung) oder ihn beim Stoppen festhalten, dann „Trotzdem stoppen". Am
+Windows-PC fragen ebenso das Schließen des EduBotics-Fensters und
+„Arme scannen" vorher nach, denn beide stoppen die Umgebung.
 
 ## Nur OMX mit Leader-Arm: wo der Leader steht
 

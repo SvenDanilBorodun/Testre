@@ -36,9 +36,10 @@ steht in [`docs/TURM-KIT-AUFBAU.md`](../docs/TURM-KIT-AUFBAU.md). Kurz:
   Roboter Version 2.41.0 hat, bleibt die alte Szenen-Kamera montiert und nimmt
   wie bisher auf.
 - Roboter, Kameraturm und Szenen-Matte aufbauen (die alte Szenen-Kamera samt Fuß
-  abbauen, der Turm-Fuß kommt an ihre Stelle an die Grundplatte): die Matte bis
-  zum Anschlag an die Grundplatte schieben, glatt auflegen und an den Ecken
-  fixieren. Die Turm-Kamera an einen eigenen USB-Anschluss, nie gemeinsam mit
+  abbauen, der fertig montierte Turm kommt mit seinem Fuß an ihre Stelle an die
+  Grundplatte, die beiden Laschen-Schrauben fest anziehen): die Matte bis
+  zum Anschlag an die Grundplatte schieben, glatt auflegen und die Ecken mit
+  den vier Klebepunkten fixieren. Die Turm-Kamera an einen eigenen USB-Anschluss, nie gemeinsam mit
   der Greifer-Kamera an einen Hub.
 - In der Einrichtung die Turm-Kamera als Szenen-Kamera auswählen und
   **„Turm-Kamera (Turm-Kit)“** ankreuzen (am Orange Pi im System-Fenster).

@@ -55,6 +55,11 @@ def _all_texts():
     out['resume_fps_de'] = t.resume_fps_de('Würfel', 25)
     out['resume_features_de'] = t.resume_features_de('Würfel')
     out['resume_robot_de'] = t.resume_robot_de('Würfel')
+    for then, now in (('legacy', 'tower_v1'), ('tower_v1', 'legacy')):
+        out[f'resume_scene_camera_de({then},{now})'] = t.resume_scene_camera_de('Würfel', then, now)
+    for profile, words in t.SCENE_CAMERA_NAMES_DE.items():
+        out[f'SCENE_CAMERA_NAMES_DE[{profile}]'] = words
+    out['scene_stamp_failed_de'] = t.scene_stamp_failed_de('Würfel')
     out['take_lost_slots_de'] = t.take_lost_slots_de(4, 3, 300, 0.1)
     out['take_excess_repeats_de'] = t.take_excess_repeats_de(4, 'scene', 12.4)
     out['take_arm_late_de'] = t.take_arm_late_de(4, 151.2)

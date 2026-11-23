@@ -720,3 +720,78 @@ describe('both tokens stay inside start()', () => {
     expect(snapshots.every((s) => Object.keys(s).every((k) => !/token/i.test(k)))).toBe(true);
   });
 });
+
+describe('the scene camera the reserved model was trained with (D58)', () => {
+  const RESERVED = { session_id: SID, summary: SUMMARY, session_s: 1800, remaining_today_s: 7000, reserve_s: 300 };
+
+  it('starts unknown', () => {
+    expect(controller.getSnapshot().sceneCameraProfile).toBeNull();
+  });
+
+  it('keeps the reserve answer\'s scene_camera_profile beside the summary', async () => {
+    for (const profile of ['tower_v1', 'legacy']) {
+      controller._resetForTests();
+      api.reserveInferenceSession.mockResolvedValue({ ...RESERVED, scene_camera_profile: profile });
+      // eslint-disable-next-line no-await-in-loop
+      await reserveVia(7);
+      expect(controller.getSnapshot()).toMatchObject({ phase: 'reserved', summary: SUMMARY, sceneCameraProfile: profile });
+    }
+  });
+
+  it('an answer without the key (an older API), null or an unknown value is unknown', async () => {
+    const answers = [RESERVED, { ...RESERVED, scene_camera_profile: null }, { ...RESERVED, scene_camera_profile: 'tower_v2' },
+      { ...RESERVED, scene_camera_profile: 'Legacy' }, { ...RESERVED, scene_camera_profile: 7 },
+      { ...RESERVED, scene_camera_profile: ['legacy'] }];
+    for (const answer of answers) {
+      controller._resetForTests();
+      api.reserveInferenceSession.mockResolvedValue(answer);
+      // eslint-disable-next-line no-await-in-loop
+      await reserveVia(7);
+      expect(controller.getSnapshot()).toMatchObject({ phase: 'reserved', sceneCameraProfile: null });
+    }
+  });
+
+  it('is cleared with the summary: by a release, by a new reserve, by a failed reserve, by the sign-out', async () => {
+    api.reserveInferenceSession.mockResolvedValue({ ...RESERVED, scene_camera_profile: 'tower_v1' });
+    await reserveVia(7);
+    controller.release();
+    expect(controller.getSnapshot()).toMatchObject({ summary: null, sceneCameraProfile: null });
+
+    await reserveVia(7);
+    let resolve;
+    api.reserveInferenceSession.mockReturnValue(new Promise((r) => { resolve = r; }));
+    controller.selectModel(token, 8, () => false);
+    await vi.advanceTimersByTimeAsync(controller.SELECT_DEBOUNCE_MS);
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'reserving', summary: null, sceneCameraProfile: null });
+    resolve({ ...RESERVED, session_id: SID2, scene_camera_profile: 'legacy' });
+    await flush();
+    expect(controller.getSnapshot()).toMatchObject({ trainingId: 8, sceneCameraProfile: 'legacy' });
+
+    api.reserveInferenceSession.mockRejectedValue(apiError(409, 'Die Modelldateien sind unvollständig oder beschädigt.'));
+    controller.selectModel(token, 9, () => false);
+    await vi.advanceTimersByTimeAsync(controller.SELECT_DEBOUNCE_MS);
+    await flush();
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'idle', summary: null, sceneCameraProfile: null });
+
+    api.reserveInferenceSession.mockResolvedValue({ ...RESERVED, scene_camera_profile: 'tower_v1' });
+    await reserveVia(7);
+    controller.endCloudInferenceOnLogout('jwt-at-logout');
+    expect(controller.getSnapshot()).toMatchObject({ summary: null, sceneCameraProfile: null });
+  });
+
+  it('stays with the summary through a run and when the heartbeat releases the reservation', async () => {
+    api.reserveInferenceSession.mockResolvedValue({ ...RESERVED, scene_camera_profile: 'tower_v1' });
+    await reserveVia(7);
+    await controller.start({ getAccessToken: token, getTaskInfo: () => FORM, trainingId: 7 });
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'running', sceneCameraProfile: 'tower_v1' });
+    await controller.stop();
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'ended', summary: SUMMARY, sceneCameraProfile: 'tower_v1' });
+
+    controller._resetForTests();
+    await reserveVia(7);
+    api.heartbeatInferenceSession.mockResolvedValue({ status: 'ended', end_reason: 'never_connected', end_reason_de: 'x', max_end_in_s: null });
+    await vi.advanceTimersByTimeAsync(controller.HEARTBEAT_MS);
+    await flush();
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'idle', summary: SUMMARY, sceneCameraProfile: 'tower_v1' });
+  });
+});

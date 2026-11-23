@@ -49,7 +49,11 @@ der Ticket-Warteschlange.
 | Kabelgebundenes Ethernet | Empfohlen — stabiler als WLAN, und `.local` funktioniert zuverlässiger. |
 
 **USB-Aufteilung** (Bandbreite): eine Kamera an den **USB3**-Port, eine an den
-**eigenständigen USB2**-Port, den/die Arm(e) an die **Hub-Ports**.
+**eigenständigen USB2**-Port, den/die Arm(e) an die **Hub-Ports**. Die beiden
+Kameras (mit Turm-Kit: Turm-Kamera und Greifer-Kamera) hängen **nie gemeinsam
+an einem Hub**; prüfen mit `lsusb -t` – die zwei Kameras müssen an
+**verschiedenen Bussen** stehen. Die USB-Verlängerung des Turm-Kits gehört nur
+an die Turm-Kamera.
 
 ## Schritt 1 — OS flashen
 
@@ -285,6 +289,48 @@ benutzen (Lehrkräfte und Admins sehen am Pi **nur** das System-Fenster):
 4. **Inferenz**: im Inferenz-Tab ein trainiertes Modell wählen und
    „In der Cloud starten". Arm und Kameras bleiben am Pi; der Leader-Arm muss
    dafür in den Follower-Modus geschaltet sein (die Seite sagt es).
+
+## Turm-Kit (ab Version 2.41.0)
+
+Roboter Studio am echten Roboter braucht ab Version 2.41.0 das **Turm-Kit**
+(Kameraturm mit Turm-Kamera, Szenen-Matte, Kalibrier-Ziel). Die ganze Anleitung
+steht in [`TURM-KIT-AUFBAU.md`](TURM-KIT-AUFBAU.md); für den Pi gilt zusätzlich:
+
+1. **Erst das Update, dann der Umbau.** Das Kit kommt vor dem Update. Bis der Pi
+   2.41.0 hat, bleibt die alte Szenen-Kamera montiert und nimmt wie bisher auf.
+   Woran man es erkennt: Das System-Fenster zeigt bei der Kamera das Kästchen
+   **„Turm-Kamera (Turm-Kit)"** (ältere Versionen haben es nicht).
+2. **Umbauen**: Umgebung stoppen, alte Szenen-Kamera samt Fuß abbauen, Turm-Fuß
+   an die Grundplatte schrauben, Turm-Kamera an einen eigenen USB-Anschluss
+   (siehe „USB-Aufteilung" oben, `lsusb -t`), Matte bis zum Anschlag an die
+   Grundplatte legen.
+3. Im System-Fenster in Schritt C die Turm-Kamera als **Szene** zuweisen und
+   **„Turm-Kamera (Turm-Kit)"** ankreuzen (nur mit Lehrkräfte- oder
+   Admin-Konto). Die Einstellung gilt ab dem nächsten „Umgebung starten". Kann
+   die angeschlossene Kamera das Turm-Format (MJPEG 1920 × 1080, 30 Bilder/s)
+   nicht liefern, lehnt „Umgebung starten" ab und nennt die Turm-Kamera.
+4. **Umgebung starten**, Roboter Studio öffnen, einmal den **Arm-Check** fahren
+   (Kalibrier-Ziel aufklipsen, Tisch frei, 30 cm hinter dem Roboter frei lassen,
+   Abstand halten).
+
+Die Belichtung der Kamera bleibt automatisch. Nach dem Umbau **neue Datensätze
+aufnehmen und neu trainieren**: Ein Datensatz der alten Kamera lässt sich mit
+der Turm-Kamera nicht fortsetzen, und wie gut Modelle mit dem Blickwinkel der
+Turm-Kamera lernen, ist noch nicht belegt (eine Vergleichsstudie folgt).
+
+**„OMX – Voll" mit Turm-Kit — wo der Leader-Arm steht:** Die Turm-Kamera sieht
+auch die rechte Tischseite. Der Fuß des Leader-Arms steht – vom Drehpunkt des
+Follower-Arms aus gemessen – **40 cm dahinter und 60 cm rechts daneben** oder
+**80 cm direkt rechts daneben** oder noch weiter weg; wer den Leader führt,
+steht hinter oder neben ihm.
+
+**V1 mit Turm-Kit:** Liegt der Arm beim Start nach hinten zum Turm, zeigt die
+Startseite eine Animation und den Weg, ihn nach vorne zu legen („Arm lockern" →
+„Ich halte ihn" → nach vorne legen → „Arm festsetzen"). „Stoppen" im
+System-Fenster fragt vorher nach, wenn der weiche Arm nach hinten zum Turm
+fallen würde.
+
+> Wird die Turm-Kamera abgeschaltet, während der Turm noch montiert ist, nimmt der Roboter weiter mit der Turm-Kamera auf – nur ohne Kennzeichnung. Dann einen NEUEN Datensatz beginnen und keinen Datensatz fortsetzen, der vor dem Turm aufgenommen wurde – oder die alte Szenen-Kamera wieder anbauen.
 
 ## Updates
 

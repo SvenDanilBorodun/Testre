@@ -62,6 +62,7 @@ through one lock. 50 Hz, not 100: the usbipd/WSL2 tunnel jitters 100 Hz
 from __future__ import annotations
 
 import atexit
+import json
 import math
 import os
 import signal
@@ -73,11 +74,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import feetech_bus as fb  # noqa: E402  (COPY'd next to this file in the image)
 import feetech_geometry as fg  # noqa: E402  (ditto — the whole-link box model)
+import scene_split  # noqa: E402  (ditto — the scene-camera profile's one value table)
 
 import rclpy  # noqa: E402
 from rclpy.node import Node  # noqa: E402
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy  # noqa: E402
 from sensor_msgs.msg import JointState  # noqa: E402
+from std_msgs.msg import String  # noqa: E402
 from std_srvs.srv import SetBool  # noqa: E402
 from std_srvs.srv import Trigger  # noqa: E402
 from trajectory_msgs.msg import JointTrajectory  # noqa: E402
@@ -97,7 +100,11 @@ from trajectory_msgs.msg import JointTrajectory  # noqa: E402
 # 1/4/5/6, STS3250 on the high-load shoulder + elbow 2/3.
 SERVO_IDS = (1, 2, 3, 4, 5, 6)
 JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'RL_joint')
-HOME_JOINTS_RAD = (0.0, 0.64, 1.48, 0.90, 0.0)
+# HOME is the OMX's shape (owner decisions D46, D49): the upper arm leans back,
+# the forearm and the claw point forward, level, 0.21 m above the table; every
+# glide to it (build_boot_home) opens the claw to GRIPPER_OPEN_RAD. Joint 3
+# holds the level forearm, a load the owner accepted without a bench test.
+HOME_JOINTS_RAD = (0.0, 0.64, 0.64, 0.0, 0.0)
 GRIPPER_OPEN_RAD = 0.90
 TICKS_PER_REV = 4096
 CENTER_TICK = 2048
@@ -780,8 +787,8 @@ PHYSICAL_TORQUE_REFUSALS = tuple(BOOT_PHYSICAL_REMEDY_DE)
 #
 # WHAT IT COSTS: the outer `margin` ticks of commanded travel at those two bounds
 # only — 11.25° at the default, i.e. joint2/joint3 command to at most +168.75°
-# instead of +180°. Nothing autonomous reaches them: HOME sits ≥1082 ticks from
-# the nearest register end (joint3 at 1.48 rad → tick 3013), and the closest any
+# instead of +180°. Nothing autonomous reaches them: HOME sits ≥1460 ticks from
+# the nearest register end (the claw at 0.90 rad → tick 2635), and the closest any
 # real V1IKSolver solution comes is 131 ticks — joint3 at its unconditional
 # analytic bound q3 ≤ _G_OFFSET = 2.938642 rad (tick 3964), reached at full
 # extension. That sits STRICTLY ABOVE the fenced maximum margin (130 — see
@@ -1179,6 +1186,185 @@ def boot_home_floor_decision(current, tol: float = None):
     return depth >= -tol, depth
 
 
+# ── the camera tower (WP-T1; spec 40, owner decisions D53, D65) ──────────────
+# With the scene-camera kit (EDUBOTICS_SCENE_CAMERA_PROFILE=tower_v1) a camera
+# tower stands behind the arm, and a V1 lying back toward it would sweep a
+# link into it on the activation glide. That glide is judged against the tower
+# first (fg.tower_glide_decision, the server guard's rule with the driver's
+# allowance): REFUSE-ONLY, no detour (D53 (2)), and a refusal leaves the arm
+# torqued where it stands, exactly like the floor check above. Under any other
+# profile the check does not exist and nothing changes (D53 (2): legacy
+# untouched). The same verdict for the live pose, with where a limp arm would
+# fall, is published on TOWER_STATE_TOPIC for the Startseite's placement hint.
+#
+# The robot profile this driver drives: entrypoint_omx.sh starts it for this
+# robot type and no other, so the tower check never needs to read the type.
+ARM_PROFILE = 'v1_studio'
+SCENE_PROFILE_ENV = 'EDUBOTICS_SCENE_CAMERA_PROFILE'
+TOWER_STATE_TOPIC = '/edubotics/tower_state'
+# The latched topic is re-sent at 2 Hz: rosbridge does not always ask for it.
+TOWER_STATE_PERIOD_S = 0.5
+# A held servo's reading dithers by a tick, and judging a glide is tens of
+# milliseconds of pure Python (more on an Orange Pi): the published state is
+# judged again once a joint (or the claw) has moved by more than two ticks
+# from the reading it was judged for, and never while a trajectory executes
+# (X-C2: every program motion moves more than that each period, and judging
+# then took the interpreter from the 50 Hz read and write loops). That is the
+# HINT's resolution only — run_home judges the exact pose at the press.
+TOWER_STATE_REJUDGE_RAD = 2 * RAD_PER_TICK
+TOWER_GLIDE_REFUSAL_DE = (
+    '[FEHLER] Grundstellungs-Fahrt entfällt: aus dieser Lage würde der Arm '
+    'dabei dem Kameraturm zu nahe kommen. Der Arm wird in seiner Stellung '
+    'gehalten (er ist NICHT weich). Bitte den Arm auf der Startseite lockern, '
+    'nach vorne legen und festsetzen – die Animation dort zeigt, wie.'
+)
+TOWER_GLIDE_UNJUDGEABLE_DE = (
+    '[FEHLER] Grundstellungs-Fahrt entfällt: die Lage des Arms kann gerade '
+    'nicht gegen den Kameraturm geprüft werden. Bitte die Umgebung neu '
+    'starten.'
+)
+
+
+def _eeprom_window_rad(limits, sign):
+    """The servo's EEPROM ``Min/Max_Position_Limit`` window of a joint (the
+    probe's fingerprint, fb.position_limit_window) in radians, lo <= hi."""
+    lo, hi = fb.position_limit_window(*limits, sign)
+    a, b = tick_to_rad(lo, sign), tick_to_rad(hi, sign)
+    return min(a, b), max(a, b)
+
+
+# A reading outside its window cannot be judged (a wrapped or unprovisioned
+# joint): the tower check refuses it.
+TOWER_WINDOW_RAD = tuple(_eeprom_window_rad(limits, sign)
+                         for limits, sign in zip(JOINT_LIMITS_RAD, JOINT_SIGNS))
+# A limp joint may rest a few ticks OUTSIDE its window against a hard stop (a
+# claw squeezed shut, joint 2 on its back stop): the torque-on's seed pulls it
+# to the window edge at SEED_SPEED_STEPS (_seed_goal_from_present_locked), but
+# a reading taken right after the torque-on still lies outside, and judging it
+# refused the press as unjudgeable („neu starten", which cannot help). So
+# run_home re-reads, every TOWER_PULL_IN_POLL_S, until every joint is inside
+# its window, for at most the pull-in that reading needs (its distance at
+# SEED_SPEED_STEPS plus TOWER_PULL_IN_SLACK_S), and judges that reading. The
+# rule is unchanged: a reading still outside then is refused as before, and
+# one further out than the boot band (_DEFAULT_BOOT_POSITION_TOLERANCE_TICKS)
+# or non-finite is no pull-in and is judged at once.
+TOWER_PULL_IN_SLACK_S = 0.25
+TOWER_PULL_IN_POLL_S = 0.02
+
+
+def tower_window_excess_ticks(reading):
+    """How many ticks the furthest joint of ``reading`` (arm joints + claw)
+    lies outside its EEPROM window: 0.0 when every joint is inside, ``None``
+    for a missing, short or non-finite reading."""
+    try:
+        values = [float(v) for v in list(reading)[:N_ARM_JOINTS + 1]]
+    except (TypeError, ValueError):
+        return None
+    if len(values) != len(TOWER_WINDOW_RAD) or not all(
+            math.isfinite(v) for v in values):
+        return None
+    worst = max(max(lo - v, v - hi)
+                for v, (lo, hi) in zip(values, TOWER_WINDOW_RAD))
+    return max(0.0, worst) / RAD_PER_TICK
+
+
+def scene_profile_from_env(env):
+    """The scene-camera profile ``env`` selects: ``scene_split``'s own
+    reading, the one value table every reader of the key runs
+    (tests/test_scene_profile_value_table.py)."""
+    return scene_split.normalise_profile(env.get(SCENE_PROFILE_ENV))
+
+
+def tower_check_on(env=None):
+    """Whether the tower exists for this driver. ``env`` defaults to the
+    container environment, read at CALL time like EDUBOTICS_REQUIRE_ACTIVATION,
+    so the deps-free suites' module-level exec of this file stays unaffected."""
+    env = os.environ if env is None else env
+    return scene_profile_from_env(env) == scene_split.PROFILE_TOWER
+
+
+def tower_glide_from(current, profile=ARM_PROFILE):
+    """The activation glide from ``current`` (arm joints + claw) to HOME with
+    the claw open, judged against the tower: ``(verdict, margin_m, part)``."""
+    return fg.tower_glide_decision(
+        list(current)[:N_ARM_JOINTS + 1],
+        list(HOME_JOINTS_RAD) + [GRIPPER_OPEN_RAD], profile, TOWER_WINDOW_RAD)
+
+
+def boot_home_tower_decision(current, env=None, profile=ARM_PROFILE):
+    """May the glide from ``current`` pass the camera tower? ``(ok, german,
+    judged)``, ``judged`` the decision's ``(verdict, margin_m, part)``.
+
+    Without the tower the check does not exist: ``(True, '', None)``. On the
+    tower a refused glide answers TOWER_GLIDE_REFUSAL_DE and one that cannot
+    be judged (a non-finite reading, a joint outside its EEPROM window, an
+    unknown profile) TOWER_GLIDE_UNJUDGEABLE_DE — refused alike, never
+    passed."""
+    if not tower_check_on(env):
+        return True, '', None
+    judged = tower_glide_from(current, profile)
+    if judged[0] == fg.TOWER_CLEAR:
+        return True, '', judged
+    if judged[0] == fg.TOWER_REFUSED:
+        return False, TOWER_GLIDE_REFUSAL_DE, judged
+    return False, TOWER_GLIDE_UNJUDGEABLE_DE, judged
+
+
+def boot_home_resend_refusal(cur, off, env=None):
+    """The German [WARNUNG] when the verifier's re-send from the stalled pose
+    ``cur`` must be skipped, else ``None``. On the tower that re-send is a
+    second activation glide and is judged like the first: the floor, then the
+    tower (spec 40 §2 correction 34). Without the tower it runs as it always
+    did."""
+    if not tower_check_on(env):
+        return None
+    ok, _depth = boot_home_floor_decision(cur)
+    reason = BOOT_HOME_FLOOR_REFUSAL_DE
+    if ok:
+        ok, reason, _judged = boot_home_tower_decision(cur, env)
+        if ok:
+            return None
+    return (f'[WARNUNG] Grundstellung nicht erreicht (Gelenke {off}) — kein '
+            'erneuter Anlauf. ' + reason.removeprefix('[FEHLER] '))
+
+
+def tower_glide_state(positions):
+    """``(glide, part)`` for the live pose ``positions`` (arm joints + claw;
+    ``None`` when there is no current reading): run_home's own verdict for the
+    glide from there and the tower part a refusal binds at. The expensive half
+    of the state."""
+    if positions is None:
+        return fg.TOWER_UNJUDGEABLE, None
+    verdict, _margin, part = tower_glide_from(positions)
+    return verdict, part if verdict == fg.TOWER_REFUSED else None
+
+
+def tower_fall(positions):
+    """Where a limp arm at ``positions`` would fall (``'unknown'`` without a
+    reading). The cheap half of the state, computed for every message."""
+    if positions is None:
+        return 'unknown'
+    return fg.limp_fall_direction(list(positions)[:N_ARM_JOINTS])
+
+
+def _tower_reading_moved(judged, positions):
+    """Whether ``positions`` moved from the reading ``judged`` (either may be
+    ``None``) by more than TOWER_STATE_REJUDGE_RAD on any joint."""
+    if judged is None or positions is None:
+        return judged is not positions
+    return len(judged) != len(positions) or any(
+        not abs(a - b) <= TOWER_STATE_REJUDGE_RAD
+        for a, b in zip(judged, positions))
+
+
+def tower_state_payload(glide, fall, part, gen):
+    """The ``/edubotics/tower_state`` message: ``v``, ``glide``, ``fall``,
+    ``part``, ``gen`` (counts the messages: strictly increasing, so a reader
+    can order them)."""
+    return json.dumps({'v': 1, 'glide': glide, 'fall': fall, 'part': part,
+                       'gen': int(gen)})
+
+
 def build_boot_home(current: list[float], duration_s: float = BOOT_HOME_DURATION_S,
                     hz: float = LOOP_HZ) -> list[tuple[list[float], float]]:
     """Quintic glide from the power-up pose to HOME + open gripper (the same
@@ -1276,6 +1462,26 @@ class FeetechArmNode(Node):
         # a home trajectory on /leader/joint_trajectory.
         self.create_service(Trigger, HOME_SERVICE, self._home_cb)
         self.create_service(Trigger, HOME_SERVICE_ALIAS, self._home_cb)
+
+        # The tower verdict for the live pose (WP-T1, 52 §5.1): latched, and
+        # re-sent at 2 Hz for rosbridge subscriptions that do not ask for
+        # TRANSIENT_LOCAL. Only on the tower; under any other profile the
+        # topic does not exist. Its own thread, never a timer of the
+        # executor: judging a glide must not hold back a trajectory or a
+        # service callback. `_tower_judged` is the reading the glide was last
+        # judged for, with that verdict.
+        self._tower_gen = 0
+        self._tower_judged = None
+        self._tower_thread = None
+        if tower_check_on():
+            self._tower_pub = self.create_publisher(
+                String, TOWER_STATE_TOPIC,
+                QoSProfile(depth=1,
+                           reliability=ReliabilityPolicy.RELIABLE,
+                           durability=DurabilityPolicy.TRANSIENT_LOCAL))
+            self._tower_thread = threading.Thread(
+                target=self._tower_state_loop, name='feetech-tower-state',
+                daemon=True)
 
         self._read_thread = threading.Thread(
             target=self._read_loop, name='feetech-read', daemon=True)
@@ -1990,6 +2196,10 @@ class FeetechArmNode(Node):
                        'werden — die Grundstellungs-Fahrt entfällt.')
             self.get_logger().error(message)
             return False, message
+        # On the tower the pose both checks judge, and the glide starts from,
+        # is the one after the torque-on's pull-in (TOWER_PULL_IN_SLACK_S).
+        if tower_check_on():
+            current = self._reading_after_pull_in(current)
         # TABLE-FLOOR PRE-CHECK (Rule §2, see BOOT_HOME_FLOOR_TOL_M). The glide
         # is a straight joint-space line and nothing else judges it; from the
         # pose a limp arm collapses into it can drive a link 16 cm into the
@@ -2004,6 +2214,17 @@ class FeetechArmNode(Node):
                 f'(Grundstellungs-Vorprüfung: tiefster Punkt {depth * 1000:.0f} '
                 f'mm, Grenze {-BOOT_HOME_FLOOR_TOL_M * 1000:.0f} mm.)')
             return False, BOOT_HOME_FLOOR_REFUSAL_DE
+        # CAMERA-TOWER PRE-CHECK (WP-T1, D53: refuse-only, no detour). On the
+        # tower only; the same contract as the floor check: a refusal skips the
+        # glide and the arm stays torqued where it stands.
+        ok, message, judged = boot_home_tower_decision(current)
+        if not ok:
+            self.get_logger().error(message)
+            if judged[1] is not None:
+                self.get_logger().info(
+                    f'(Kameraturm-Vorprüfung: {-judged[1] * 1000:.0f} mm '
+                    'näher als erlaubt.)')
+            return False, message
         gen = self._replace_trajectory(build_boot_home(current), time.monotonic())
         self.get_logger().info(
             'Grundstellungs-Fahrt gestartet (3 s sanfte Bewegung).')
@@ -2013,6 +2234,27 @@ class FeetechArmNode(Node):
         threading.Thread(target=self._boot_home_verify, args=(gen,),
                          name='feetech-boothome-verify', daemon=True).start()
         return True, ''
+
+    def _reading_after_pull_in(self, current: list) -> list:
+        """``current`` once the torque-on has pulled every joint into its
+        EEPROM window (see TOWER_PULL_IN_SLACK_S): re-read until it is, for at
+        most that reading's pull-in time, and return the last reading (a failed
+        re-read keeps the one before). A reading inside its windows, a
+        non-finite one or one beyond the boot band is returned at once."""
+        excess = tower_window_excess_ticks(current)
+        if not excess or excess > _DEFAULT_BOOT_POSITION_TOLERANCE_TICKS:
+            return current
+        deadline = (time.monotonic() + excess / SEED_SPEED_STEPS
+                    + TOWER_PULL_IN_SLACK_S)
+        while time.monotonic() < deadline:
+            time.sleep(TOWER_PULL_IN_POLL_S)
+            fresh = self._read_positions_once()
+            if fresh is None:
+                continue
+            current = fresh
+            if tower_window_excess_ticks(current) == 0.0:
+                break
+        return current
 
     def _home_cb(self, _request, response):
         """/v1/home + /edubotics/home_arm — Trigger, one callback for both.
@@ -2072,6 +2314,12 @@ class FeetechArmNode(Node):
                 return
             if (verdict == 'resend' and self._torque_on
                     and not self._bus_fault):
+                # On the tower the re-send is judged like the first glide
+                # (the floor, then the tower) and skipped when refused.
+                refusal = boot_home_resend_refusal(cur, off)
+                if refusal is not None:
+                    self.get_logger().warning(refusal)
+                    return
                 self.get_logger().warning(
                     f'[WARNUNG] Grundstellung noch nicht erreicht (Gelenke '
                     f'{off}) — erneuter Anlauf.')
@@ -2084,6 +2332,41 @@ class FeetechArmNode(Node):
                 'genau in der Grundstellung — bei Bedarf die Umgebung neu '
                 'starten.')
             return
+
+    def _tower_state_loop(self) -> None:
+        """Publishes /edubotics/tower_state every TOWER_STATE_PERIOD_S until
+        shutdown. Never dies: a failed tick is logged and the next one runs."""
+        while not self._stop.wait(TOWER_STATE_PERIOD_S):
+            try:
+                self._publish_tower_state()
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().warning(f'tower state not published: {e}')
+
+    def _trajectory_executing(self) -> bool:
+        """Torque on and the command rail holding a trajectory (the write loop
+        keeps a finished one for a second, holding its goal)."""
+        with self._traj_lock:
+            return self._torque_on and bool(self._traj_points)
+
+    def _publish_tower_state(self) -> None:
+        """One message of /edubotics/tower_state for the pose the read loop
+        last published (none while the bus is faulted): where a limp arm would
+        fall, every time, and the glide's verdict, judged again only when that
+        pose moved (TOWER_STATE_REJUDGE_RAD) and not while a trajectory
+        executes — the verdict judged at rest stands until the arm is at rest
+        again. A lost reading is unjudgeable at once (no judgement to run)."""
+        positions = None if self._bus_fault else self._last_positions
+        judged = self._tower_judged
+        if judged is None or (_tower_reading_moved(judged[0], positions)
+                              and (positions is None
+                                   or not self._trajectory_executing())):
+            judged = self._tower_judged = (positions, tower_glide_state(positions))
+        glide, part = judged[1]
+        self._tower_gen += 1
+        msg = String()
+        msg.data = tower_state_payload(glide, tower_fall(positions), part,
+                                       self._tower_gen)
+        self._tower_pub.publish(msg)
 
     # ── bus loops ────────────────────────────────────────────────────────────
     def _read_positions_once(self) -> list[float] | None:
@@ -2260,6 +2543,8 @@ class FeetechArmNode(Node):
     def start(self) -> None:
         self._read_thread.start()
         self._write_thread.start()
+        if self._tower_thread is not None:
+            self._tower_thread.start()
 
     def shutdown(self) -> None:
         """Torque OFF + stop loops. The STS3215 has no watchdog — it holds its

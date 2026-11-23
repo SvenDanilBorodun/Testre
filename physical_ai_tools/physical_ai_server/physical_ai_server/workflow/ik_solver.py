@@ -151,14 +151,15 @@ class IKSolver:
 
     Constructed once (optionally with the ``/robot_description`` URDF string,
     used only to *verify* the baked constants). ``solve()`` is called per
-    motion primitive; ``fk()`` provides exact forward kinematics for
-    calibration touch-off / pose readout.
+    motion primitive; ``fk()`` provides exact forward kinematics for the
+    pose readout.
     """
 
     # How far the fingertips reach BELOW the end-effector frame when the tool
-    # points straight down: the touch-off measures z_table as the EE height
-    # with the fingertips on the table, so the table surface sits this much
-    # lower. The simulator's table (Q13) and its grasp capture (N3) read it.
+    # points straight down: z_table is the EE height with the fingertips on
+    # the table, so the table surface sits this much lower. The simulator's
+    # table (Q13) and its grasp capture (N3) read it; on the real robot the arm
+    # model answers the fixture contract's FINGERTIP_BELOW_EE_M instead.
     tool_tip_below_ee_m = _TOOL_TIP_EXT_M
 
     def __init__(
@@ -428,10 +429,10 @@ class IKSolver:
 
         Declared per SOLVER because it is a frame convention, and the arms do
         not share one: this OMX FK returns a frame whose local **+x** is the
-        tool axis, ``V1IKSolver``'s is **+z**. A touch-off verticality gate that
+        tool axis, ``V1IKSolver``'s is **+z**. A verticality check that
         hardcodes column 0 is exactly this arm's answer and 90° wrong on the
-        Feetech arm — it would reject every correct vertical tap with „Greifer
-        steht schräg (90°)".
+        Feetech arm (the removed touch-off's tap gate once rejected every
+        correct vertical tap that way).
         One owner for the convention, like ``link_frames`` and
         ``roll_from_joints``."""
         return (1.0, 0.0, 0.0)

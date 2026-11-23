@@ -30,6 +30,11 @@ cross-checked against the imported ``gui.app.constants`` so the AST extraction
 itself can't silently drift from what the GUI actually runs. The Pi side is
 imported directly (``pi_agent.constants`` is deps-free stdlib, like the GUI's).
 
+The server registry's camera-tower literals equal the fixture contract
+(``workflow/scene_fixture.py``, standard library only, loaded by path): every
+profile's ``observe_pose_joints`` is its arm's ``observe_joints_rad`` and the
+OMX's ``reach_sector_deg`` its ``joint1_window_deg`` (spec 40 S6.4, §6.1 O4).
+
 Also locks the thin-descriptor invariant that leader-need is encoded ONCE:
 ``scan_requires_leader == not follower_only`` for every profile (the two keys
 have opposite defaults — a new profile setting only one of them would silently
@@ -37,6 +42,7 @@ disagree with itself).
 """
 
 import ast
+import importlib.util
 import sys
 import unittest
 from pathlib import Path
@@ -50,6 +56,15 @@ _SERVER_PROFILES = (
     _TESTS_DIR.parents[1] / "physical_ai_tools" / "physical_ai_server"
     / "physical_ai_server" / "robot_profiles.py"
 )
+_SCENE_FIXTURE = _SERVER_PROFILES.parent / "workflow" / "scene_fixture.py"
+
+
+def _load_scene_fixture():
+    """The fixture contract module, loaded by path (standard library only)."""
+    spec = importlib.util.spec_from_file_location("_scene_fixture_lockstep", _SCENE_FIXTURE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 # The pi_agent package is a sibling of gui/ under robotis_ai_setup/ and ships as
 # its own tarball; mirror the import convention its own tests use.
@@ -135,7 +150,8 @@ def _parse_server_registry():
             continue
         info = {}
         for kw in call.keywords:
-            if kw.arg in ("profile_id", "follower_only", "camera_roles"):
+            if kw.arg in ("profile_id", "follower_only", "camera_roles",
+                          "observe_pose_joints", "reach_sector_deg"):
                 info[kw.arg] = ast.literal_eval(kw.value)
             elif kw.arg == "capabilities" and isinstance(kw.value, ast.Call):
                 for cap_kw in kw.value.keywords:
@@ -282,6 +298,22 @@ class RegistryLockstepTest(unittest.TestCase):
                 label = reg[pid].get("display_de")
                 self.assertIsInstance(label, str, f"{name} {pid}")
                 self.assertTrue(label.strip(), f"{name} {pid}: display_de empty")
+
+    def test_the_camera_tower_literals_equal_the_fixture_contract(self):
+        # The observation pose is a literal on every profile and the OMX's
+        # sector is its joint-1 window — both the contract's (spec 40 S6.4,
+        # §6.1 O4); the V1 keeps its own ±90° capability sector.
+        contract = _load_scene_fixture()
+        for pid, info in self.server.items():
+            arm = contract.arm_key(pid)
+            self.assertIsNotNone(arm, f"{pid!r} has no fixture contract arm")
+            self.assertEqual(tuple(info.get("observe_pose_joints") or ()),
+                             tuple(contract.ARMS[arm]["observe_joints_rad"]), pid)
+            if arm == "omx":
+                self.assertEqual(tuple(info.get("reach_sector_deg") or ()),
+                                 tuple(contract.ARMS[arm]["joint1_window_deg"]), pid)
+            else:
+                self.assertEqual(tuple(info.get("reach_sector_deg") or ()), (-90, 90), pid)
 
     def test_default_profile_id_lockstep(self):
         # All three sides fall back to the same id on unknown/absent values —

@@ -17,6 +17,9 @@
 // entry chunk the white-screen CI greps watch — three/urdf-loader must stay
 // exclusive to the lazy UrdfTwin chunk. Keep the values plain numbers/strings.
 
+import sceneFixture from './fixture/sceneFixture.json';
+import { armSpecFor, baseAxisXFor, zoneOutline } from './fixture/inZone';
+
 // Strict-vertical reach annulus SHOWN TO THE STUDENT (the graspable ring on the
 // table). Deliberately NOT the IK solver's wrist-centre span (0.0415/0.2825) —
 // this is the practical projected table-top radius both panes draw. The SINGLE
@@ -199,4 +202,90 @@ export function resolveMaxInstances(catalogDims, type) {
   const dims = catalogDims && catalogDims[type];
   const max = dims && dims.max_instances;
   return Number.isFinite(max) ? max : DEFAULT_MAX_INSTANCES;
+}
+
+// ── The tower kit (spec 40 S8, D66) ─────────────────────────────────────────
+// What the simulator and the 3D twin draw of the tower kit, in Roboter Studio's
+// world W (the arm's base frame; x_W = x_F + base_axis_x, inZone.js): the base
+// plate the arm stands on (raised by LIFT_M), the mat with its notch around the
+// plate, the tower's nine oriented boxes at their contract place (the bridge
+// and both head boxes included) and the printed work zone with its cut. All of
+// it from sceneFixture.json, rendered from the server's contract; nothing here
+// is a measurement. Built once per arm, so the twin's effects see one identity.
+const C_FIX = sceneFixture.constants;
+const LAYOUTS = new Map();
+
+function buildLayout(spec, baseAxisX) {
+  const toW = ([x, y]) => [x + baseAxisX, y];
+  const [[px0, py0], [px1, py1]] = C_FIX.PLATE_OUTLINE_F;
+  const [[mx0, my0], [mx1, my1]] = spec.mat_sheet_f;
+  const { x_max: nx, y_abs: ny } = C_FIX.MAT_NOTCH_F;
+  // The mat's outline, its notch open to the rear edge around the plate.
+  const mat = [[mx0, my0], [mx1, my0], [mx1, my1], [mx0, my1], [mx0, ny], [nx, ny], [nx, -ny], [mx0, -ny]];
+  return Object.freeze({
+    id: C_FIX.FIXTURE_ID,
+    liftM: C_FIX.LIFT_M,
+    baseAxisX,
+    spec,
+    plate: Object.freeze([toW([px0, py0]), toW([px1, py1])]),
+    mat: Object.freeze(mat.map(toW)),
+    // centre in W; `rows` = R row by row (its COLUMNS are the box's axes); half extents.
+    boxes: Object.freeze(C_FIX.TOWER_OBB_F.map(([name, centre, rows, half]) => Object.freeze({
+      name, centre: [centre[0] + baseAxisX, centre[1], centre[2]], rows, half,
+    }))),
+    zone: Object.freeze(zoneOutline(spec).map(toW)),
+  });
+}
+
+/** The tower kit of the arm a capability manifest names, or null for an arm the contract does not know. */
+export function fixtureLayout(caps) {
+  const spec = armSpecFor(caps);
+  const baseAxisX = baseAxisXFor(caps);
+  if (!spec || baseAxisX === null) return null;
+  if (!LAYOUTS.has(spec)) LAYOUTS.set(spec, buildLayout(spec, baseAxisX));
+  return LAYOUTS.get(spec);
+}
+
+/** The table footprint (x, y) of an oriented box: the convex hull of its eight corners, counter-clockwise. */
+export function boxFootprint(box) {
+  const { centre, rows, half } = box;
+  const pts = [];
+  for (const sx of [-1, 1]) {
+    for (const sy of [-1, 1]) {
+      for (const sz of [-1, 1]) {
+        const l = [sx * half[0], sy * half[1], sz * half[2]];
+        pts.push([
+          centre[0] + rows[0][0] * l[0] + rows[0][1] * l[1] + rows[0][2] * l[2],
+          centre[1] + rows[1][0] * l[0] + rows[1][1] * l[1] + rows[1][2] * l[2],
+        ]);
+      }
+    }
+  }
+  // Andrew's monotone chain.
+  pts.sort((a, b) => (a[0] - b[0]) || (a[1] - b[1]));
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower = [];
+  for (const p of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 1e-15) lower.pop();
+    lower.push(p);
+  }
+  const upper = [];
+  for (let i = pts.length - 1; i >= 0; i -= 1) {
+    const p = pts[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 1e-15) upper.pop();
+    upper.push(p);
+  }
+  return lower.slice(0, -1).concat(upper.slice(0, -1));
+}
+
+/**
+ * The 2D simulator table's window (metres of W) for the tower kit: everything
+ * the kit draws — the mat, the plate, the tower's footprint, the zone — with a
+ * margin, symmetric left and right of the arm (+x forward is up on the table).
+ */
+export function towerView(layout, margin = 0.02) {
+  const pts = [...layout.mat, ...layout.plate, ...layout.zone, ...layout.boxes.flatMap(boxFootprint)];
+  const xs = pts.map((p) => p[0]);
+  const yAbs = Math.max(...pts.map((p) => Math.abs(p[1])));
+  return { minX: Math.min(...xs) - margin, maxX: Math.max(...xs) + margin, minY: -yAbs - margin, maxY: yAbs + margin };
 }

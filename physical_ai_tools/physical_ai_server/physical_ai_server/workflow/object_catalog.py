@@ -74,7 +74,8 @@ Physical tag-mounting convention (per object type, fleet-wide):
   validate the first copy on the rig (there is no runtime guard for this,
   same as the ``GRASP_ROLL_DEG`` jaw convention).
 
-Pure-Python + stdlib only (``os``/``re``/``dataclasses``) — unit testable
+Pure-Python + stdlib only (``os``/``re``/``dataclasses``, and the reserved tag
+ids of the stdlib-only fixture contract ``scene_fixture``) — unit testable
 without a container.
 """
 
@@ -85,6 +86,8 @@ import os
 import re
 from dataclasses import dataclass
 from typing import Optional
+
+from physical_ai_server.workflow.scene_fixture import RESERVED_TAG_IDS
 
 _logger = logging.getLogger(__name__)
 
@@ -242,7 +245,7 @@ _FIXED_CATALOG: dict = {
 # v1_studio variant: the SAME physical objects + tag ids (one printed tag sheet
 # fleet-wide), only the gripper close differs. The V1 channel is the claw servo
 # angle in RADIANS (0 = jaws closed … 0.90 = open command; see
-# robot_profiles._V1_HOME_JOINTS_RAD).
+# robot_profiles._V1_STUDIO.gripper_open_rad).
 #
 # Where 0.05 comes from: simulated against the claw meshes, a 30 mm cube held at
 # the 15 mm grasp depth blocks the blades at 0.195 rad (gear ratio 1) / 0.206 rad
@@ -373,6 +376,14 @@ def _parse_type(type_name: str, entry, seen_tags: dict[int, str],
         if raw < 0:
             raise ObjectCatalogError(
                 f'Objekt „{type_name}": Tag-ID {raw} darf nicht negativ sein.'
+            )
+        # The calibration's own tags (the mats, the tower's fixture tags, the
+        # clip-on targets) live in this range; an object using one would be
+        # taken for a mat or a target (spec 40 §3, decision D34).
+        if RESERVED_TAG_IDS[0] <= raw <= RESERVED_TAG_IDS[1]:
+            raise ObjectCatalogError(
+                f'Tag-ID {raw} ist für die Kalibrierung reserviert '
+                f'({RESERVED_TAG_IDS[0]} bis {RESERVED_TAG_IDS[1]}).'
             )
         if raw in local_seen:
             raise ObjectCatalogError(

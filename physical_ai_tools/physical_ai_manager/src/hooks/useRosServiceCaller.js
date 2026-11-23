@@ -463,32 +463,16 @@ export function useRosServiceCaller() {
     [callService]
   );
 
-  // Roboter Studio — calibration services
+  // Roboter Studio — the tower calibration (spec 40 S4): /calibration/start
+  // runs one of the calibration service's steps (`mat_check`, `arm_check`,
+  // `target_removed`, `handheld`, `home`; calibration/calibrationModel.js), the
+  // cancel stops the step under way, the status says whether a valid arm check
+  // exists. The state itself arrives on /edubotics/calibration_state.
   const startCalibration = useCallback(
     async (camera, step) =>
       callService(
         '/calibration/start',
         'physical_ai_interfaces/srv/StartCalibration',
-        { camera, step }
-      ),
-    [callService]
-  );
-
-  const calibrationCaptureFrame = useCallback(
-    async (camera) =>
-      callService(
-        '/calibration/capture_frame',
-        'physical_ai_interfaces/srv/CalibrationCaptureFrame',
-        { camera }
-      ),
-    [callService]
-  );
-
-  const calibrationSolve = useCallback(
-    async (camera, step) =>
-      callService(
-        '/calibration/solve',
-        'physical_ai_interfaces/srv/CalibrationSolve',
         { camera, step }
       ),
     [callService]
@@ -679,57 +663,6 @@ export function useRosServiceCaller() {
     [callService]
   );
 
-  // Phase-2: live ChArUco corner preview (1 Hz polled by the wizard).
-  const calibrationPreview = useCallback(
-    async (camera) =>
-      callService(
-        '/calibration/preview',
-        'physical_ai_interfaces/srv/CalibrationPreview',
-        { camera },
-        3000,
-      ),
-    [callService]
-  );
-
-  // W5 (2026-06-24): ground-truth accuracy + orientation verification.
-  // The student places an AprilTag at a KNOWN base (x, y) — optionally a
-  // known yaw — and the server projects it with the current calibration.
-  //   command "add_point": collect one (truth, detected) pair, returns the
-  //     live detected_x/y/yaw + running point_count.
-  //   command "solve": fit the 2D-similarity correction over >=4 points,
-  //     returns residual_mm_mean/max + yaw_bias_deg; mirror_detected on a
-  //     handedness flip (German message, persists nothing).
-  //   command "reset": clear the collected points.
-  // 25 s timeout: add_point grabs + detects a live scene frame server-side.
-  const verifyCalibration = useCallback(
-    async ({ command, truthX = 0, truthY = 0, truthYawDeg = 0, hasYaw = false }) =>
-      callService(
-        '/calibration/verify',
-        'physical_ai_interfaces/srv/VerifyCalibration',
-        {
-          command,
-          truth_x: Number(truthX) || 0,
-          truth_y: Number(truthY) || 0,
-          truth_yaw_deg: Number(truthYawDeg) || 0,
-          has_yaw: Boolean(hasYaw),
-        },
-        25000,
-      ),
-    [callService]
-  );
-
-  // Phase-2: calibration history listing (last 5 saved calibrations
-  // per camera).
-  const getCalibrationHistory = useCallback(
-    async (camera) =>
-      callService(
-        '/calibration/history',
-        'physical_ai_interfaces/srv/CalibrationHistory',
-        { camera },
-      ),
-    [callService]
-  );
-
   // Phase-2: workflow debugger services.
   const pauseWorkflow = useCallback(
     async () =>
@@ -788,8 +721,6 @@ export function useRosServiceCaller() {
     controlHfServer,
     getTrainingInfo,
     startCalibration,
-    calibrationCaptureFrame,
-    calibrationSolve,
     stopWorkflow,
     markDestination,
     getObjectCatalog,
@@ -801,9 +732,6 @@ export function useRosServiceCaller() {
     replayMotion,
     cancelCalibration,
     getCalibrationStatus,
-    calibrationPreview,
-    verifyCalibration,
-    getCalibrationHistory,
     pauseWorkflow,
     stepWorkflow,
     continueWorkflow,

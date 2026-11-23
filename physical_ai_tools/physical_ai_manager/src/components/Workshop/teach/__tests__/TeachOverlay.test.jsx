@@ -998,7 +998,8 @@ describe('TeachOverlay — review clean-up (trims with undo, cleaned rows kept a
 });
 
 describe('TeachOverlay — Ziel by touch: too high asks „Als Position speichern?"', () => {
-  const HIGH = { success: true, world_x: 0.18, world_y: -0.06, world_z: 0.16 }; // OMX: 120 mm above the table
+  // OMX: 157 mm above the mat's touch height (zielTouch: mat 0.45 mm + fingertip 2.6 mm).
+  const HIGH = { success: true, world_x: 0.18, world_y: -0.06, world_z: 0.16 };
 
   function storeEchoes() {
     mockStore.add.mockImplementation((input) => ({
@@ -1016,7 +1017,7 @@ describe('TeachOverlay — Ziel by touch: too high asks „Als Position speicher
     render(<TeachOverlay {...baseProps({ kind: 'ziel' })} />);
     captureHigh();
     const dialog = screen.getByRole('alertdialog');
-    expect(within(dialog).getByText(formatDe(DE.TEACH_ZIEL_TOO_HIGH, '12,0'))).toBeInTheDocument();
+    expect(within(dialog).getByText(formatDe(DE.TEACH_ZIEL_TOO_HIGH, '15,7'))).toBeInTheDocument();
     expect(within(dialog).getByRole('button', { name: new RegExp(DE.TEACH_ZIEL_AS_POSE) })).toHaveFocus();
     expect(mockStore.add).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_ZIEL) })).toBeDisabled();
@@ -1068,14 +1069,15 @@ describe('TeachOverlay — Ziel by touch: too high asks „Als Position speicher
     withSnapshot({ state: 'frei' });
     storeEchoes();
     const { unmount } = render(<TeachOverlay {...baseProps({ kind: 'ziel' })} />);
-    act(() => { mockHook.props.onCapture({ kind: 'ziel', name: 'Ziel 1', response: { ...HIGH, world_z: 0.07 } }); });
+    act(() => { mockHook.props.onCapture({ kind: 'ziel', name: 'Ziel 1', response: { ...HIGH, world_z: 0.0325 } }); });
     expect(screen.queryByRole('alertdialog')).toBeNull();
-    expect(mockStore.add.mock.calls[0][0]).toMatchObject({ kind: 'pin', z: 0.07 });
+    expect(mockStore.add.mock.calls[0][0]).toMatchObject({ kind: 'pin', z: 0.0325 });
     unmount();
-    // V1: the TCP is the fingertip, so the same 0.07 m is 70 mm up.
+    // V1: the TCP is the closed fingertip, 2.6 mm lower than the OMX's EE point
+    // at its touch, so the same 0.0325 m is 32 mm up.
     render(<TeachOverlay {...baseProps({ kind: 'ziel', caps: { urdf_asset_id: 'v1', arm_joints: 5 } })} />);
-    act(() => { mockHook.props.onCapture({ kind: 'ziel', name: 'Ziel 2', response: { ...HIGH, world_z: 0.07 } }); });
-    expect(within(screen.getByRole('alertdialog')).getByText(formatDe(DE.TEACH_ZIEL_TOO_HIGH, '7,0'))).toBeInTheDocument();
+    act(() => { mockHook.props.onCapture({ kind: 'ziel', name: 'Ziel 2', response: { ...HIGH, world_z: 0.0325 } }); });
+    expect(within(screen.getByRole('alertdialog')).getByText(formatDe(DE.TEACH_ZIEL_TOO_HIGH, '3,2'))).toBeInTheDocument();
   });
 
   test('P is never questioned; closing with a question open keeps the capture as a Position', () => {

@@ -73,10 +73,10 @@ DEFAULT_APPROACH_HEIGHT_M = 0.06
 GRIPPER_OPEN_RAD = 0.8
 GRIPPER_CLOSED_RAD = -0.5
 
-# Generic grasp (object-agnostic): the gripper descends to the measured table
-# plane (z_table from the touch-off) PLUS this conservative clearance, so the
-# fingertips straddle the lower part of a low-profile object instead of driving
-# into the table. Tuned on the rig (env-overridable).
+# Generic grasp (object-agnostic): the gripper descends to the run's table
+# height (z_table: the fixture contract's, spec 40 S5) PLUS this conservative
+# clearance, so the fingertips straddle the lower part of a low-profile object
+# instead of driving into the table. Tuned on the rig (env-overridable).
 GRASP_CLEARANCE_M = _safe_float('EDUBOTICS_GRASP_CLEARANCE_M', 0.012)
 # Release height ABOVE the destination surface for `drop_at`. Deliberately much
 # higher than the grasp clearance so the held object is dropped from a safe
@@ -1013,8 +1013,315 @@ def _reacquire_after_release(ctx) -> None:
     _hold_motion_lock(ctx, stop_raises=False)
 
 
+# ── The camera tower (spec 40 S6.2 'Where', S6.4; WP-12; decisions D34, D57, D65) ──
+# ``ctx.fixture_guard`` is the run's bound tower check (``fixture_guard.TowerGuard``
+# or ``RefusingGuard``), handed in by the node's provider; ``None`` is no guard —
+# ``legacy``, every context built without a provider (the existing tests, every
+# path outside Roboter Studio) — and then nothing here runs: each caller keeps
+# its old code path, byte for byte. It is read ONLY as
+# ``getattr(ctx, 'fixture_guard', None)``.
+#
+# Every program publish is judged at the one choke point, ``_publish_motion``
+# (``_publish_motion_t`` forwards to it). Every planner that returns several legs
+# — ``safe_move`` after ``plan_safe_route``, ``home``, ``go_to_observation_pose``
+# and ``_move_to_position`` — has ALL of them judged before the first publish
+# (``_guarded_route``), and those legs are not judged a second time. The guard
+# judges, it never reroutes: ``ctx.zones`` stays the student's own list and
+# ``path_guard`` plans around it alone.
+#
+# A leg whose claw moves is judged in pieces of at most TOWER_CLAW_BAND_RAD of
+# claw travel (each piece the leg's own section, claw and arm in step, so the
+# pieces cover the leg exactly). The guard grows a blade box by r_max · half its
+# claw interval; one interval for a full close refused 60 of the V1's 675 and 77
+# of the OMX's 1 056 grasps of the printed zone, pieces of 0.1 rad none
+# (scratch/build-WP-12/probes/p01_close_interval.py).
+TOWER_CLAW_BAND_RAD = 0.1
+# A replay's path is judged this many waypoint pairs at a time, and a Stop is
+# asked for before every piece (X-REPLAYCHECK): a 120 s take in one call held a
+# Stop for up to 1.2 s here (a very fast take), plausibly five times that on a
+# Pi. Measured over 72 takes of 120 s (both arms, both residuals, three speeds):
+# a piece costs at most 42 ms here, and the pieces cost a median 3 % (at most a
+# fifth) more than the take in one call; a refusal is often found sooner.
+TOWER_CHECK_CHUNK_PAIRS = 100
+# The legs a route has judged, for this thread's publishes of them.
+_tower_local = threading.local()
+
+
+class TowerCheckStopped(WorkflowError):
+    """A replay's tower check ended because its run or its manual session was
+    stopped: nothing has been published."""
+
+
+def _tower_unjudgeable():
+    from physical_ai_server.workflow import fixture_guard as _fg
+    return _fg.Verdict(True, 'unjudgeable', _fg.TOWER_UNJUDGEABLE_DE)
+
+
+def tower_refusal(verdict) -> WorkflowError:
+    """The German refusal of a guard's verdict (its own sentence)."""
+    from physical_ai_server.workflow import fixture_guard as _fg
+    return WorkflowError(getattr(verdict, 'sentence_de', None) or _fg.TOWER_UNJUDGEABLE_DE)
+
+
+def _claw_pieces(q_a, q_b, n):
+    """``[(arm_a, arm_b, claw_a, claw_b), …]``: the straight leg ``q_a → q_b``
+    (full vectors: n arm joints, then the claw) cut where its claw moves more
+    than TOWER_CLAW_BAND_RAD. A vector without its claw or with a non-finite
+    one stays one piece, which the guard refuses as unjudgeable."""
+    a = [float(v) for v in q_a]
+    b = [float(v) for v in q_b]
+    g_a = a[n] if len(a) > n else math.nan
+    g_b = b[n] if len(b) > n else math.nan
+    pieces = 1
+    if math.isfinite(g_a) and math.isfinite(g_b):
+        pieces = max(1, int(math.ceil(abs(g_b - g_a) / TOWER_CLAW_BAND_RAD - 1e-9)))
+    if pieces == 1:
+        return [(a[:n], b[:n], g_a, g_b)]
+    cut = ([a[:n + 1]]
+           + [[x + (y - x) * i / pieces for x, y in zip(a[:n + 1], b[:n + 1])] for i in range(1, pieces)]
+           + [b[:n + 1]])
+    return [(cut[i][:n], cut[i + 1][:n], cut[i][n], cut[i + 1][n]) for i in range(pieces)]
+
+
+def tower_leg_verdict(guard, q_a, q_b, n):
+    """The guard's refusal of the straight leg ``q_a → q_b`` (full joint
+    vectors), or ``None`` when it passes. A guard that fails cannot pass a leg."""
+    for arm_a, arm_b, g_a, g_b in _claw_pieces(q_a, q_b, n):
+        try:
+            verdict = guard.judge_leg(arm_a, arm_b, g_a, g_b)
+        except Exception:  # noqa: BLE001 — an unjudged leg is refused, never passed
+            return _tower_unjudgeable()
+        if getattr(verdict, 'refused', True):
+            return verdict
+    return None
+
+
+def _polyline_verdict(guard, points, n, g_lo, g_hi):
+    """One run of a path whose claw stays within ``[g_lo, g_hi]``: the guard's
+    travel-bound rule over its waypoints as ONE polyline (spec 40 S6.2: a replay
+    is one polyline whose waypoints are its coarse samples), the blades judged
+    over the run's claw interval as for a leg (``judge_polyline``'s interval
+    form). A guard that fails cannot pass a run."""
+    waypoints = [p[:n] for p in points]
+    try:
+        if g_lo == g_hi:
+            return guard.judge_polyline(waypoints, g_lo)
+        return guard.judge_polyline(waypoints, g_lo, g_hi)
+    except Exception:  # noqa: BLE001 — an unjudged run is refused, never passed
+        return _tower_unjudgeable()
+
+
+def _run_verdict(guard, points, n, g_lo, g_hi, should_stop):
+    """One run judged in pieces of at most TOWER_CHECK_CHUNK_PAIRS pairs, each
+    starting at the waypoint where the last ended, with the run's claw interval:
+    the first refusal, else the last piece's verdict. ``should_stop`` (or None)
+    is asked before every piece."""
+    verdict = None
+    step = TOWER_CHECK_CHUNK_PAIRS
+    for start in range(0, max(len(points) - 1, 1), step):
+        if should_stop is not None and should_stop():
+            raise TowerCheckStopped('Workflow wurde gestoppt.')
+        verdict = _polyline_verdict(guard, points[start:start + step + 1], n, g_lo, g_hi)
+        if getattr(verdict, 'refused', False):
+            return verdict
+    return verdict
+
+
+def tower_path_verdict(guard, points, n, should_stop=None):
+    """The guard's refusal of the polyline through ``points`` (full joint
+    vectors: n arm joints, then the claw), or ``None`` when it passes. A pair
+    whose claw moves more than TOWER_CLAW_BAND_RAD is cut like a leg, and the
+    path is judged in runs whose claw spans at most that much (each run starts
+    where the last ended, so every pair belongs to one).
+
+    A run is judged in pieces (:func:`_run_verdict`). The guard's travel-bound
+    rule is a conjunction over the waypoints and their consecutive pairs, and
+    every pair lies in exactly one piece, so the pieces refuse exactly what the
+    run in one call refuses. The refusal named is the first refusing piece's,
+    as between runs: its margin and part are the smallest found in that piece,
+    and a path both too close and too droopy names whichever comes first.
+    ``should_stop`` (or None) is asked before every piece; when it answers true
+    the check raises :class:`TowerCheckStopped`."""
+    try:
+        rows = [[float(v) for v in p[:n + 1]] for p in points]
+    except (TypeError, ValueError):
+        return _tower_unjudgeable()
+    if not rows or any(len(r) != n + 1 or not all(math.isfinite(v) for v in r) for r in rows):
+        return _tower_unjudgeable()
+    fine = [rows[0]]
+    for a, b in zip(rows[:-1], rows[1:]):
+        for _arm_a, arm_b, _g_a, g_b in _claw_pieces(a, b, n):
+            fine.append(list(arm_b) + [g_b])
+    start, lo, hi = 0, fine[0][n], fine[0][n]
+    for i in range(1, len(fine) + 1):
+        if i < len(fine):
+            g = fine[i][n]
+            if max(hi, g) - min(lo, g) <= TOWER_CLAW_BAND_RAD + 1e-12:
+                lo, hi = min(lo, g), max(hi, g)
+                continue
+        verdict = _run_verdict(guard, fine[start:i], n, lo, hi, should_stop)
+        if getattr(verdict, 'refused', False):
+            return verdict
+        if i < len(fine):
+            start = i - 1
+            lo, hi = min(fine[i - 1][n], fine[i][n]), max(fine[i - 1][n], fine[i][n])
+    return None
+
+
+def _leg_key(q_a, q_b):
+    return tuple(float(v) for v in q_a), tuple(float(v) for v in q_b)
+
+
+def _tower_check_publish(ctx, q_start, q_end) -> None:
+    """The publish choke point's check: refuse a leg the run's guard refuses,
+    unless its route already judged it on this thread."""
+    guard = getattr(ctx, 'fixture_guard', None)
+    if guard is None:
+        return
+    if _leg_key(q_start, q_end) in (getattr(_tower_local, 'judged', None) or ()):
+        return
+    verdict = tower_leg_verdict(guard, q_start, q_end, _n(ctx))
+    if verdict is not None:
+        raise tower_refusal(verdict)
+
+
+def _transit_plan(ctx, q_start, q_end, duration_s, roll=None):
+    """``(legs, rerouted)``: exactly what ``safe_move`` publishes for this
+    transit — the one direct leg, or ``plan_safe_route``'s detour around the
+    student's Sperrzonen (its German refusal raises here, before anything moves)."""
+    zones = getattr(ctx, 'zones', None)
+    ik = getattr(ctx, 'ik', None)
+    if zones:
+        _warn_unreadable_zones(ctx, zones)
+    if (not zones or ik is None or not hasattr(ik, 'link_points')
+            or not segment_blocked(ik, q_start, q_end, zones, ZONE_MARGIN_M)):
+        return [(q_start, q_end, duration_s)], False
+    return list(plan_safe_route(ctx, q_start, q_end, zones, duration_s, roll=roll)), True
+
+
+def _route_plan(ctx, legs, roll=None):
+    """Every planned leg's transit plan, in order (see :func:`_transit_plan`)."""
+    return [_transit_plan(ctx, a, b, d, roll=roll) for a, b, d in legs]
+
+
+def _route_refusal(ctx, plan):
+    """The run's guard's refusal of the first published leg of ``plan`` it
+    refuses, or ``None``."""
+    guard = getattr(ctx, 'fixture_guard', None)
+    if guard is None:
+        return None
+    n = _n(ctx)
+    for sub, _rerouted in plan:
+        for a, b, _d in sub:
+            verdict = tower_leg_verdict(guard, a, b, n)
+            if verdict is not None:
+                return verdict
+    return None
+
+
+def _publish_route(ctx, plan, tempo=None, on_leg=None) -> None:
+    """Publish a judged ``plan`` like ``safe_move`` publishes each leg (the
+    Sperrzone note for a detour, then its legs), its legs exempt from a second
+    judgement. ``on_leg(planned_index)`` follows each planned leg."""
+    judged = frozenset(_leg_key(a, b) for sub, _r in plan for a, b, _d in sub)
+    previous = getattr(_tower_local, 'judged', None)
+    _tower_local.judged = judged | (previous or frozenset())
+    try:
+        for index, (sub, rerouted) in enumerate(plan):
+            if rerouted:
+                log = getattr(ctx, 'log', None)
+                if callable(log):
+                    log('[WARNUNG] Sperrzone auf dem Weg — Ausweichroute wird gefahren.')
+            for a, b, d in sub:
+                _publish_motion_t(ctx, a, b, d, tempo)
+            if on_leg is not None:
+                on_leg(index)
+    finally:
+        _tower_local.judged = previous
+
+
+def _same_pose(a, b) -> bool:
+    return len(a) == len(b) and all(abs(float(x) - float(y)) <= 1e-9 for x, y in zip(a, b))
+
+
+def _leave_observation_rung(ctx, legs):
+    """The ladder's second rung for a move that LEAVES the observation pose
+    (spec 40 S6.4, decisions C2, D57 Q2: the way back goes via HOME when the
+    direct line is refused): ``[OBS → HOME, HOME → target]``, the claw carried
+    to HOME. ``None`` when the move does not start at OBS, OBS is HOME, or the
+    move ends at HOME."""
+    if len(legs) != 1:
+        return None
+    q_start, q_end, duration_s = legs[0]
+    n = _n(ctx)
+    observe, home = _observe_joints(ctx), _home_joints(ctx)
+    if (len(q_start) <= n or not _same_pose(q_start[:n], observe) or _same_pose(observe, home)
+            or _same_pose(q_end[:n], home)):
+        return None
+    via = home + [float(q_start[n])]
+    return [(list(q_start), via, DEFAULT_MOVE_DURATION_S), (via, list(q_end), duration_s)]
+
+
+def _guarded_route(ctx, legs, roll=None, tempo=None, second_rung=None) -> None:
+    """Publish ``legs`` (each a transit, as ``safe_move`` publishes it) with
+    every published leg judged by the run's guard BEFORE the first publish.
+    ``second_rung()`` (optional) is the ladder's other route, tried when the
+    guard refuses the first; it never shows the refusal sentence itself — only
+    a route with no rung left does."""
+    plan = _route_plan(ctx, legs, roll=roll)
+    refusal = _route_refusal(ctx, plan)
+    if refusal is not None and second_rung is not None:
+        try:
+            other = second_rung()
+        except WorkflowError:
+            other = None
+        if other:
+            other_plan = _route_plan(ctx, other, roll=roll)
+            if _route_refusal(ctx, other_plan) is None:
+                plan, refusal = other_plan, None
+    if refusal is not None:
+        raise tower_refusal(refusal)
+    _publish_route(ctx, plan, tempo=tempo)
+
+
+def _warn_refinement(ctx, target_xyz, label: str) -> None:
+    """D42: the arm model's pose for ``target_xyz`` misses it by more than its
+    acceptance (the sector edge) — the move still goes; the student hears it
+    ONCE per target per run (``ctx.refine_warned``, declared on the
+    WorkflowContext). Call right after the commanded solve, on its thread: the
+    miss is the calling thread's."""
+    ik = getattr(ctx, 'ik', None)
+    if ik is None:
+        return
+    from physical_ai_server.workflow import arm_model as _arm_model
+    text = _arm_model.refinement_warning(ik, label)
+    if text is None:
+        return
+    try:
+        key = (str(label), tuple(round(float(v), 4) for v in target_xyz))
+    except (TypeError, ValueError):
+        key = (str(label), None)
+    warned = getattr(ctx, 'refine_warned', None)
+    if not isinstance(warned, set):
+        warned = set()
+        try:
+            ctx.refine_warned = warned
+        except Exception:  # noqa: BLE001 — a diagnostic never breaks a move
+            pass
+    if key in warned:
+        return
+    warned.add(key)
+    try:
+        ctx.log(text)
+    except Exception:  # noqa: BLE001 — a diagnostic never breaks a move
+        pass
+
+
 def _publish_motion(ctx, q_start: list[float], q_end: list[float],
                     duration_s: float, tempo: float | None = None) -> None:
+    # The camera tower: a leg the run's guard refuses is refused here, before
+    # anything is published (a route's legs were judged together before it).
+    _tower_check_publish(ctx, q_start, q_end)
     # Phase-2 Tempo: scale the REQUESTED duration by the per-move override
     # (`tempo`) or, when None, the workflow-global ctx.tempo — BEFORE
     # build_segment, so the velocity floor protects a fast tempo and the
@@ -1079,7 +1386,17 @@ def safe_move(
     the descend/grasp corridor + gripper-only moves call raw ``_publish_motion``
     (zones are user obstacles, never the table/target — there is deliberately NO
     hard zone backstop inside ``_publish_motion``).
+
+    With the run's tower guard (``ctx.fixture_guard``) the same legs are planned
+    first and judged together before the first publish; a move that starts at
+    the observation pose takes the ladder's second rung, via HOME, when the
+    direct route is refused (spec 40 S6.4).
     """
+    if getattr(ctx, 'fixture_guard', None) is not None:
+        legs = [(q_start, q_end, duration_s)]
+        _guarded_route(ctx, legs, roll=roll, tempo=tempo,
+                       second_rung=lambda: _leave_observation_rung(ctx, legs))
+        return
     zones = getattr(ctx, 'zones', None)
     ik = getattr(ctx, 'ik', None)
     if zones:
@@ -1161,11 +1478,13 @@ def _floor_z_at(ctx, x: float, y: float) -> float | None:
     """Return the table-surface z at base-frame (x, y) for the workspace-floor
     refusal, or ``None`` when no table height is known.
 
-    L1 fix: when the touch-off measured a tilted ``table_plane = (a, b, c)``
-    (``z = a·x + b·y + c``) the legitimate grasp z VARIES across the table, so
-    comparing every target against the SCALAR ``z_table`` would falsely refuse
-    a low corner ("Tischebene"). With the plane present we evaluate the plane z
-    at the target's own (x, y); otherwise we fall back to the flat ``z_table``.
+    L1 fix: when a run carries a tilted ``table_plane = (a, b, c)``
+    (``z = a·x + b·y + c``; the removed touch-off measured one, no real run
+    carries one now: the mat is flat and the arm model carries its tilt) the
+    legitimate grasp z VARIES across the table, so comparing every target
+    against the SCALAR ``z_table`` would falsely refuse a low corner
+    ("Tischebene"). With the plane present we evaluate the plane z at the
+    target's own (x, y); otherwise we fall back to the flat ``z_table``.
     """
     plane = getattr(ctx, 'table_plane', None)
     if plane is not None:
@@ -1183,7 +1502,7 @@ def _floor_z_at(ctx, x: float, y: float) -> float | None:
 # Rule §2 — WHERE THE GRIPPER DESCENDS on a tilted table. ONE knob, ONE helper,
 # for EVERY site that needs "how high is the table at this (x, y)".
 #
-# ``ctx.z_table`` is a SCALAR: ``calibration_manager.solve_table_plane`` sets it
+# ``ctx.z_table`` is a SCALAR: the touch-off (removed, decision D15) set it
 # to ``a·cx + b·cy + c`` evaluated at the TAP CENTROID. The workspace floor
 # (``_floor_z_at``) already evaluates the measured plane at the TARGET's own
 # (x, y) — but the GRASP height did not, so on a tilted table the two disagreed
@@ -1201,7 +1520,7 @@ def _floor_z_at(ctx, x: float, y: float) -> float | None:
 # refuses, because the floor refusal only fires at
 # ``plane(x, y) − z_table > WORKSPACE_FLOOR_MARGIN_M``. Over the SAME 12 cm
 # lever the table has already eaten the whole 15 mm grasp depth at 7.13°, and
-# nothing bounds the plane slope (``TABLE_TOUCH_MAX_TILT_DEG`` gates per-tap
+# nothing bounded the plane slope (the touch-off's tilt gate judged per-tap
 # GRIPPER verticality, not slope). An earlier revision of this line said „3.4°
 # over a 25 cm lever is already 15 mm" — arithmetically true (0.25·tan 3.4° =
 # 14.85 mm) but a DIFFERENT lever from the table three lines above, which reads
@@ -1212,10 +1531,9 @@ def _floor_z_at(ctx, x: float, y: float) -> float | None:
 # rather than a second copy of the plane evaluation:
 #   * ``handlers/perception_blocks._attach_named_world`` — the named-object grasp
 #     height (this repo half);
-#   * ``physical_ai_server.py::mark_destination_callback`` — a PINNED
-#     destination's persisted z, which ``pickup`` then descends to plus
-#     ``GRASP_CLEARANCE_M``, so a pin at the far corner of a tilted table
-#     inherits the identical error.
+#   * ``resolve_destination_z`` — a PINNED destination's z, which ``pickup``
+#     then descends to plus ``GRASP_CLEARANCE_M``, so a pin at the far corner of
+#     a tilted table inherits the identical error.
 # ``capture_pose_callback`` is deliberately NOT a caller: it persists a MEASURED
 # FK height at that very point, which is already the right answer.
 #
@@ -1261,12 +1579,11 @@ def table_z_at(ctx, x: float, y: float) -> float | None:
 # THIS run", and the difference is provenance.
 #
 # A destination pinned by clicking the scene camera is a point ON THE TABLE. Its
-# height was never independently measured — it was READ OFF the table plane the
-# touch-off had drawn at the moment of the click. `entry['z']` is therefore a
-# CACHED answer to a question the plane already answers, and
-# `EDUBOTICS_FORCE_RECALIBRATION` ships 1, so "Tisch vermessen" re-runs and
-# re-draws that plane at the start of every lesson while NOTHING invalidates the
-# cache: a pin baked in September is descended to under October's plane. Both
+# height was never independently measured — it was READ OFF the table plane in
+# force at the moment of the click. `entry['z']` is therefore a CACHED answer to
+# a question the plane already answers, and when the calibration changes
+# NOTHING invalidates the cache: a pin baked in September would be descended to
+# under October's plane. Both
 # carriers stale independently — the saved workflow's Z field and
 # `WorkflowManager._persisted_destinations`, which only `set_destination` writes
 # and nothing ever clears.
@@ -1276,8 +1593,8 @@ def table_z_at(ctx, x: float, y: float) -> float | None:
 # pin carries several times the re-calibration variance of a persisted scalar at
 # that lever, growing linearly with it. The scalar half is 1.51 mm SD at the
 # shipped 4-tap gate and reproduces on every layout tried. For the PLANE half,
-# quote the shipped number `calibration_manager.py` already carries for the same
-# quantity under the same method — **5.10 mm SD at 4 taps** — and do not restate
+# quote the number the touch-off's module carried for the same quantity under
+# the same method — **5.10 mm SD at 4 taps** — and do not restate
 # it here; an independent re-run got 5.4-9.6 mm across plausible random layouts,
 # i.e. that file's figure, not the 3.48 mm an earlier revision of this comment
 # claimed (3.48 reproduces only under a FIXED diamond layout, which is not the
@@ -1322,6 +1639,7 @@ def _solve_or_raise(
     free_yaw: bool = True,
     roll: float | None = None,
     unreachable_de: str | None = None,
+    label: str | None = None,
 ) -> list[float]:
     """Solve ``target_xyz`` or refuse in German.
 
@@ -1330,7 +1648,12 @@ def _solve_or_raise(
     :func:`_unreachable_target_de`); ``None`` keeps the object sentence of the
     composite „Greife" path. Every sentence goes through
     :func:`sim_greifbereich_de`, so the simulator never reads the rig's
-    „markierten Greifbereich"."""
+    „markierten Greifbereich".
+
+    ``label`` marks a COMMANDED solve: the pose is driven to, so the arm
+    model's refinement warning (D42) names it once per target per run
+    (:func:`_warn_refinement`). ``None`` — a caller that warns itself (the
+    node's jog)."""
     if ctx.ik is None:
         raise WorkflowError(
             'Roboter-Beschreibung nicht verfügbar — der Bewegungsrechner (IK) '
@@ -1347,6 +1670,8 @@ def _solve_or_raise(
     if solution is None:
         raise WorkflowError(sim_greifbereich_de(
             ctx, unreachable_de if unreachable_de is not None else _UNREACHABLE_OBJECT_DE))
+    if label is not None:
+        _warn_refinement(ctx, target_xyz, label)
     return list(solution)
 
 
@@ -1526,6 +1851,7 @@ def _solve_grasp_and_approach(
     refuse_without_clearance: bool = True,
     purpose: str = 'grasp',
     unreachable_de: str | None = None,
+    label: str = 'Ziel',
 ) -> tuple[list[float], list[float]]:
     """Solve the GRASP first, then the APPROACH derived from the reachable
     envelope. Returns ``(grasp_arm_q, approach_arm_q)``.
@@ -1581,10 +1907,11 @@ def _solve_grasp_and_approach(
 
     ``unreachable_de`` is handed to :func:`_solve_or_raise` (B8): the caller's
     sentence for an unreachable grasp/drop point, ``None`` for the object one.
+    ``label`` names the grasp/drop point in the refinement warning (D42).
     """
     gx, gy, gz = (float(v) for v in grasp_xyz)
     grasp_arm_q = _solve_or_raise(ctx, (gx, gy, gz), roll=roll,
-                                  unreachable_de=unreachable_de)
+                                  unreachable_de=unreachable_de, label=label)
 
     requested = max(0.0, float(approach_height_m))
     best_lift, best_q = _max_reachable_rise(
@@ -1853,6 +2180,21 @@ def sim_greifbereich_de(ctx, text: Any) -> Any:
     return text.replace(_MARKED_GREIFBEREICH_DE, _SIM_GREIFBEREICH_DE)
 
 
+# Spec 40 S7: the ONE sentence where a block or the jog needs the grasp height
+# and the run has none (it replaced every sentence that sent a student to the
+# removed touch-off step).
+CALIBRATION_FIRST_DE = 'Bitte zuerst die Kalibrierung abschließen (Roboter Studio → Kalibrierung).'
+# The two camera sentences of _resolve_target, worded for the tower calibration
+# (the Kalibrierung panel's „Erneut prüfen" is the mat check, „Arm-Check
+# starten" the arm check): a run without the camera calibration, and a complete
+# calibration whose projection of this object failed.
+CAMERA_NOT_CALIBRATED_DE = ('Die Szenen-Kamera ist noch nicht kalibriert — bitte zuerst den Arm-Check '
+                            'starten (Roboter Studio → Kalibrierung).')
+PROJECTION_FAILED_DE = ('Die Position dieses Objekts lässt sich mit der aktuellen Kamera-Kalibrierung nicht '
+                        'auf den Tisch umrechnen — bitte die Kalibrierung erneut prüfen und, wenn das nicht '
+                        'hilft, den Arm-Check starten (Roboter Studio → Kalibrierung).')
+
+
 def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
     """Turn an evaluated input value into a base-frame (x, y, z) point.
 
@@ -1885,7 +2227,7 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
     # see/count blocks keep working) when the calibration is incomplete:
     # ctx.z_table / scene_intrinsics / scene_extrinsics is missing. Name the
     # exact missing step instead of the generic "could not evaluate" message,
-    # so the student knows to finish the touch-off rather than re-running the
+    # so the student knows to finish the calibration rather than re-running the
     # detect block. (Both the dict shape with a None world_xyz_m and the
     # Detection object shape land here.)
     has_world_key = (
@@ -1896,7 +2238,7 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
         # Distinguish the two reasons world_xyz_m is unset so the student fixes
         # the RIGHT step. The camera→table projection needs intrinsics +
         # extrinsics + the board surface height; the grasp DESCEND additionally
-        # needs the measured touch-off z_table. With per-rig intrinsics now
+        # needs the grasp height z_table. With per-rig intrinsics now
         # mandatory (#1), "camera not calibrated" is the common early case and
         # must not be mislabelled as a missing table measurement.
         cam_uncalibrated = (
@@ -1905,10 +2247,7 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
             or getattr(ctx, 'board_table_z', None) is None
         )
         if cam_uncalibrated:
-            raise WorkflowError(
-                'Die Szenen-Kamera ist noch nicht kalibriert — bitte zuerst die '
-                'Kamera-Kalibrierung (intrinsisch + Ausrichtung) abschließen.'
-            )
+            raise WorkflowError(CAMERA_NOT_CALIBRATED_DE)
         # FOURTH cause, and it used to be misattributed to the third: the
         # calibration is COMPLETE and the camera→table projection itself failed
         # (a ray parallel to the table plane, a degenerate extrinsic, a corner
@@ -1916,10 +2255,10 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
         # project_pixel_to_table, leaving world_xyz_m unset — indistinguishable
         # here from "never projected". Measured 2026-09-07 with intrinsics,
         # extrinsics AND board_table_z all present: „sehe ich" → True, „Anzahl"
-        # → 1, and „finde"/„Greife" → „bitte zuerst „Tisch vermessen"
-        # abschließen." — a touch-off the student had already done. The
-        # perception side now stamps the reason on the detection so this branch
-        # can tell the two apart.
+        # → 1, and „finde"/„Greife" asked for the missing grasp height — a
+        # calibration step the student had already done. The perception side
+        # now stamps the reason on the detection so this branch can tell the
+        # two apart.
         reason = None
         if isinstance(value, dict):
             extras = value.get('extras')
@@ -1928,16 +2267,8 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
         if isinstance(extras, dict):
             reason = extras.get('world_error')
         if reason == 'projection':
-            raise WorkflowError(
-                'Die Position dieses Objekts lässt sich mit der aktuellen '
-                'Kamera-Ausrichtung nicht auf den Tisch umrechnen — bitte die '
-                'Kamera-Ausrichtung („Kamera einmessen") neu machen und darauf '
-                'achten, dass die Kamera schräg von oben auf den Tisch schaut.'
-            )
-        raise WorkflowError(
-            'Für diesen Block muss die Tischhöhe kalibriert sein — bitte '
-            'zuerst „Tisch vermessen" abschließen.'
-        )
+            raise WorkflowError(PROJECTION_FAILED_DE)
+        raise WorkflowError(CALIBRATION_FIRST_DE)
     raise WorkflowError('Ziel-Wert konnte nicht ausgewertet werden.')
 
 
@@ -2017,8 +2348,12 @@ def home(ctx, args: dict[str, Any]) -> None:
     from physical_ai_server.workflow import home_planner
     legs = home_planner.plan_floor_checked_home_route(ctx, q_start, q_end,
                                                       DEFAULT_HOME_DURATION_S)
-    for leg_start, leg_end, leg_dur in legs:
-        safe_move(ctx, leg_start, leg_end, leg_dur)
+    if getattr(ctx, 'fixture_guard', None) is not None:
+        # The camera tower: every leg of the route judged before the first.
+        _guarded_route(ctx, legs)
+    else:
+        for leg_start, leg_end, leg_dur in legs:
+            safe_move(ctx, leg_start, leg_end, leg_dur)
     ctx.last_arm_joints = _home_joints(ctx)
     ctx.last_full_joints = q_end
     _warn_if_home_not_reached(ctx)
@@ -2047,11 +2382,29 @@ def go_to_observation_pose(ctx) -> None:
     # where a WorkflowError propagates as a normal German error — NEITHER is a
     # `finally`/un-catchable teardown — so a refusal here is safe (it ends the
     # run/loop cleanly, the intended "trapped arm" behavior).
+    #
+    # With the run's tower guard the route is the LADDER of spec 40 S6.4
+    # (decisions C2, D57 Q2): this route when the guard passes every leg of it,
+    # else via HOME (its floor-checked way there, then HOME → OBS). Leaving OBS
+    # again is the next block's ordinary move, whose ``safe_move`` carries the
+    # same second rung.
     from physical_ai_server.workflow import home_planner
     legs = home_planner.plan_home_route(ctx, q_start, q_end,
                                         DEFAULT_MOVE_DURATION_S)
-    for leg_start, leg_end, leg_dur in legs:
-        safe_move(ctx, leg_start, leg_end, leg_dur)
+    if getattr(ctx, 'fixture_guard', None) is not None:
+        home = _home_joints(ctx) + [q_start[_n(ctx)]]
+
+        def via_home():
+            if _same_pose(arm, home[:_n(ctx)]):
+                return None
+            return (list(home_planner.plan_floor_checked_home_route(
+                        ctx, q_start, home, DEFAULT_HOME_DURATION_S, log=lambda _text: None))
+                    + list(home_planner.plan_home_route(
+                        ctx, home, q_end, DEFAULT_MOVE_DURATION_S, log=lambda _text: None)))
+        _guarded_route(ctx, legs, second_rung=via_home)
+    else:
+        for leg_start, leg_end, leg_dur in legs:
+            safe_move(ctx, leg_start, leg_end, leg_dur)
     ctx.last_arm_joints = arm
     ctx.last_full_joints = q_end
 
@@ -2276,8 +2629,8 @@ def _refuse_position_below_table(ctx, q_end, name) -> None:
 
     Judged by ``home_planner.pose_floor_clearance``: the point model on every
     joint-route arm — the arm's joint points and its fingertip at the CARRIED
-    claw opening ``q_end[n]`` — against the touch-off plane minus the solver's
-    ``tool_tip_below_ee_m``, else the base plane z = 0. A judged point more
+    claw opening ``q_end[n]`` — against the run's table height minus the
+    solver's ``tool_tip_below_ee_m``, else the base plane z = 0. A judged point more
     than ``WORKSPACE_FLOOR_MARGIN_M`` (1 cm, exactly a Ziel's margin) below the
     surface refuses, so a pose taught with the fingertips on the table passes.
     Geometry the model cannot judge is refused too — never an approval.
@@ -2307,6 +2660,22 @@ def _move_to_position(ctx, name: str, pose: list[float], tempo) -> None:
         q_end = list(pose) + [q_start[n]]
         _refuse_position_below_table(ctx, q_end, name)
         legs, rung = _pose_route(ctx, q_start, q_end, name)
+        if getattr(ctx, 'fixture_guard', None) is not None:
+            # The camera tower: every leg judged before the first moves.
+            plan = _route_plan(ctx, legs)
+            refusal = _route_refusal(ctx, plan)
+            if refusal is not None:
+                raise tower_refusal(refusal)
+            if rung == 'via':
+                ctx.log(_POSITION_VIA_DE.format(name=name))
+            elif rung == 'home':
+                ctx.log(_POSITION_VIA_HOME_DE.format(name=name))
+
+            def arrived(index):
+                ctx.last_full_joints = list(legs[index][1])
+                ctx.last_arm_joints = list(legs[index][1][:n])
+            _publish_route(ctx, plan, tempo=tempo, on_leg=arrived)
+            return
         if rung == 'via':
             ctx.log(_POSITION_VIA_DE.format(name=name))
         elif rung == 'home':
@@ -2406,6 +2775,12 @@ def _is_table_ziel(ctx, value: Any) -> bool:
     return isinstance(entry, dict) and bool(entry.get('plane_tracked'))
 
 
+def _target_label(dest: Any) -> str:
+    """How the refinement warning (D42) names a destination: a Ziel by its
+    name, anything else (a point) as „Ziel"."""
+    return dest if isinstance(dest, str) and dest.strip() else 'Ziel'
+
+
 def move_to(ctx, args: dict[str, Any]) -> None:
     _require_seeded_start_pose(ctx)
     _refuse_greifziel(args.get('destination'), 'bewege zu')
@@ -2415,6 +2790,7 @@ def move_to(ctx, args: dict[str, Any]) -> None:
         return
     dest = args.get('destination')
     target = _resolve_target(dest, ctx)
+    label = _target_label(dest)
     roll = _carry_roll(ctx)
     if _is_table_ziel(ctx, dest):
         # The roll is decided FIRST (the drop_at rule: the carry roll when it
@@ -2424,10 +2800,12 @@ def move_to(ctx, args: dict[str, Any]) -> None:
             roll = GRASP_ROLL_RAD
         target = table_ziel_hover(ctx, target, roll, dest)
     arm_q = _solve_with_carry_roll(ctx, target, roll)
-    if arm_q is None:
+    if arm_q is not None:
+        _warn_refinement(ctx, target, label)
+    else:
         roll = GRASP_ROLL_RAD
         arm_q = _solve_or_raise(ctx, target, roll=GRASP_ROLL_RAD,
-                                unreachable_de=_unreachable_target_de(ctx, dest))
+                                unreachable_de=_unreachable_target_de(ctx, dest), label=label)
     q_end = arm_q + [ctx.last_full_joints[_n(ctx)]]
     # TRANSIT — route around any no-go zone (raw _publish_motion when none).
     # Optional per-move „mit Tempo" override; None → workflow-global tempo.
@@ -2540,6 +2918,183 @@ def compute_grasp_roll(ctx, x: float, y: float, tag_yaw: float) -> float:
     return grasp_joint5(base, float(tag_yaw), GRASP_ROLL_RAD)
 
 
+# ── The arrival trim (spec 40 S6.6; decisions C8, D33, D34, D42; WP-14) ──────
+# Before the gripper closes in ``_execute_pickup`` the MEASURED joints 2..4 are
+# compared with the model pose the arm was commanded to, and what the arm still
+# lacks is commanded once more, at most ARM_TRIM_ROUNDS times: a sagging arm
+# closes where the calibrated model put the object, not a few millimetres low.
+# Each round waits ARM_TRIM_SETTLE_S (stop-polled; Stop raises), reads the
+# source ``check_grasp_held`` reads, and ends the trim when every error is within
+# ARM_TRIM_DONE_RAD (two encoder ticks). A round is skipped — and the trim ends
+# with one German [WARNUNG] — when
+#   (a) an error exceeds ``arm_trim_bounds``: larger than anything the arm check
+#       saw in free space, so something holds the arm; or
+#   (b) the calibrated model says the correction would LOWER the fingertip by
+#       more than ARM_TRIM_LOWER_MAX_M (raise-only, C8: a finger resting on an
+#       object is never pushed down).
+# The total correction per joint is clamped to the same bound, and never past
+# the arm model's joint limits. ``ctx.last_full_joints`` keeps the MODEL pose;
+# the close and the lift start from what was really commanded (a leg from the
+# model pose would let the arm sag back before the jaws close).
+#
+# Decision D33/D42: ``autocal.arm_check.DROOP_ENVELOPE_MAX_RAD`` × 1.4 stays at
+# or below ARM_TRIM_CAP_RAD, so bound (a) never stands in a free arm's way for
+# an arm without the droop warning; an arm with it may skip at a far-edge grasp
+# (``test_arrival_trim.py``).
+#
+# Never in the simulator, only with a valid arm check (``ctx.arm_trim_envelope_rad``,
+# the stored envelope the node hands a run the calibration gate approved), and
+# ``EDUBOTICS_ARM_TRIM=0`` is the one-variable rollback. It runs inside
+# ``_execute_pickup``'s motion-lock hold and takes none of its own.
+ARM_TRIM_ENV = 'EDUBOTICS_ARM_TRIM'
+ARM_TRIM_ROUNDS = 2
+ARM_TRIM_SETTLE_S = 0.25
+ARM_TRIM_DONE_RAD = 0.0031          # two ticks of 2π/4096 (0.00307 rad)
+ARM_TRIM_ENVELOPE_FACTOR = 2.0
+ARM_TRIM_ENVELOPE_MARGIN_RAD = 0.010
+ARM_TRIM_CAP_RAD = 0.15
+ARM_TRIM_LOWER_MAX_M = 0.0005
+# Requested duration of one correction leg (the velocity floor may extend it).
+ARM_TRIM_MOVE_S = 0.5
+# Joints 2..4 (indices into the arm vector); joints 1 and 5 are never trimmed.
+_ARM_TRIM_JOINTS = (1, 2, 3)
+_ARM_TRIM_SKIPPED_DE = ('[WARNUNG] Der Arm ist nicht genau angekommen – '
+                        'die Feinkorrektur wurde ausgelassen.')
+
+
+def arm_trim_enabled() -> bool:
+    """``EDUBOTICS_ARM_TRIM`` read when the pickup runs: unset or blank is on,
+    ``0`` is the rollback (a malformed value warns and stays on)."""
+    return _safe_float(ARM_TRIM_ENV, 1.0) != 0.0
+
+
+def arm_trim_bounds(envelope) -> tuple[float, float, float] | None:
+    """Bound (a) per trimmed joint (2..4): ``min(2 × envelope[j] + 0.010,
+    ARM_TRIM_CAP_RAD)`` from the arm check's stored droop envelope (one value per
+    arm joint). ``None`` — no trim — for anything that is not a finite,
+    non-negative envelope covering joints 2..4."""
+    if isinstance(envelope, (str, bytes, dict)):
+        return None
+    try:
+        values = [float(envelope[j]) for j in _ARM_TRIM_JOINTS]
+    except (TypeError, ValueError, IndexError):
+        return None
+    if not all(math.isfinite(v) and v >= 0.0 for v in values):
+        return None
+    return tuple(min(ARM_TRIM_ENVELOPE_FACTOR * v + ARM_TRIM_ENVELOPE_MARGIN_RAD, ARM_TRIM_CAP_RAD)
+                 for v in values)
+
+
+def _trim_settle(ctx) -> None:
+    """Wait ARM_TRIM_SETTLE_S in ``_MOTION_LOCK_POLL_S`` slices; Stop raises."""
+    should_stop = getattr(ctx, 'should_stop', None)
+    deadline = time.monotonic() + ARM_TRIM_SETTLE_S
+    while True:
+        if callable(should_stop) and should_stop():
+            raise WorkflowError('Workflow wurde gestoppt.')
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            return
+        time.sleep(min(_MOTION_LOCK_POLL_S, remaining))
+
+
+def _trim_readback(ctx, n: int) -> list[float] | None:
+    """The measured arm joints (``n`` finite values), or ``None``."""
+    try:
+        joints = ctx.get_follower_joints()
+        if not joints or len(joints) < n:
+            return None
+        values = [float(v) for v in joints[:n]]
+    except Exception:  # noqa: BLE001 — no readback is no trim
+        return None
+    return values if all(math.isfinite(v) for v in values) else None
+
+
+def _model_fingertip_z(ik, arm_q) -> float | None:
+    """The calibrated model's fingertip height at the arm joints ``arm_q``:
+    ``fk`` plus ``tool_tip_below_ee_m`` along the tool's world approach axis
+    (``home_planner.pose_floor_clearance``'s closed fingertip). ``None`` when the
+    model cannot answer."""
+    try:
+        got = ik.fk([float(v) for v in arm_q])
+        if got is None:
+            return None
+        rot, tcp = got
+        local = [float(v) for v in ik.approach_axis_local]
+        norm = math.sqrt(sum(v * v for v in local))
+        down = sum(float(rot[2][k]) * local[k] for k in range(3)) / norm
+        z = float(tcp[2]) + float(getattr(ik, 'tool_tip_below_ee_m', 0.0) or 0.0) * down
+    except Exception:  # noqa: BLE001 — an unjudgeable correction is never published
+        return None
+    return z if math.isfinite(z) else None
+
+
+def _trim_arrival(ctx, model_q: list[float], tempo: float | None = None) -> list[float]:
+    """The arrival trim (see the block comment above) at the model pose
+    ``model_q`` (arm joints + gripper). Returns the full joint vector the arm is
+    commanded to now: ``model_q`` itself when nothing was published."""
+    if getattr(ctx, 'simulated', False) or not arm_trim_enabled():
+        return model_q
+    bounds = arm_trim_bounds(getattr(ctx, 'arm_trim_envelope_rad', None))
+    n = _n(ctx)
+    if (bounds is None or n <= max(_ARM_TRIM_JOINTS)
+            or not callable(getattr(ctx, 'get_follower_joints', None))):
+        return model_q
+    ik = getattr(ctx, 'ik', None)
+    try:
+        limits = [(float(lo), float(hi)) for lo, hi in ik.joint_limits]
+    except Exception:  # noqa: BLE001 — no stated limits: the bound alone clamps
+        limits = []
+    model = [float(v) for v in model_q]
+    command = model_q
+    errors_log: list[list[float]] = []
+    applied, skipped, rounds = False, None, 0
+    while rounds < ARM_TRIM_ROUNDS:
+        rounds += 1
+        _trim_settle(ctx)
+        measured = _trim_readback(ctx, n)
+        if measured is None:
+            skipped = 'no_readback'
+            break
+        errors = [model[j] - measured[j] for j in _ARM_TRIM_JOINTS]
+        errors_log.append([round(e, 5) for e in errors])
+        if all(abs(e) <= ARM_TRIM_DONE_RAD for e in errors):
+            break
+        if any(abs(e) > b for e, b in zip(errors, bounds)):
+            skipped = 'bound'
+            break
+        new = [float(v) for v in command]
+        for j, e, b in zip(_ARM_TRIM_JOINTS, errors, bounds):
+            total = max(-b, min(b, float(command[j]) + e - model[j]))
+            value = model[j] + total
+            if j < len(limits):
+                value = max(limits[j][0], min(limits[j][1], value))
+            new[j] = value
+        if all(new[j] == float(command[j]) for j in _ARM_TRIM_JOINTS):
+            break                                   # nothing left to command (bound or limit)
+        after = list(measured)
+        for j in _ARM_TRIM_JOINTS:
+            after[j] += new[j] - float(command[j])
+        z_now, z_after = _model_fingertip_z(ik, measured), _model_fingertip_z(ik, after)
+        if z_now is None or z_after is None:
+            skipped = 'unjudgeable'
+            break
+        if z_after < z_now - ARM_TRIM_LOWER_MAX_M:
+            skipped = 'lowers'
+            break
+        _publish_motion_t(ctx, command, new, ARM_TRIM_MOVE_S, tempo)
+        command = new
+        applied = True
+    _logger.info('arrival trim: errors_rad=%s rounds=%d applied=%s%s', errors_log, rounds, applied,
+                 f' skipped={skipped}' if skipped else '')
+    if skipped in ('bound', 'lowers', 'unjudgeable'):
+        try:
+            ctx.log(_ARM_TRIM_SKIPPED_DE)
+        except Exception:  # noqa: BLE001 — diagnostics never gate motion
+            pass
+    return command
+
+
 def _execute_pickup(
     ctx,
     grasp_xyz: tuple[float, float, float],
@@ -2548,6 +3103,7 @@ def _execute_pickup(
     close_rad: float,
     tempo: float | None = None,
     unreachable_de: str | None = None,
+    label: str = 'Ziel',
 ) -> None:
     """Open → hover above → descend straight down → close → lift, at the FINAL
     ``grasp_xyz`` (NO extra clearance added here — the caller supplies the exact
@@ -2562,10 +3118,15 @@ def _execute_pickup(
     graspable object because its +approach pose fell outside the annulus.
 
     ``unreachable_de``: the ``pickup`` block names its Ziel or point (B8); the
-    composite „Greife" passes nothing and keeps the object sentence.
+    composite „Greife" passes nothing and keeps the object sentence. ``label``:
+    how the refinement warning (D42) names the grasp point.
+
+    Between the descend and the close runs the arrival trim
+    (:func:`_trim_arrival`, spec 40 S6.6).
     """
     grasp_arm_q, above_arm_q = _solve_grasp_and_approach(
-        ctx, grasp_xyz, approach_height_m, roll=roll, unreachable_de=unreachable_de)
+        ctx, grasp_xyz, approach_height_m, roll=roll, unreachable_de=unreachable_de,
+        label=label)
     lift_arm_q = above_arm_q
 
     open_q = ctx.last_full_joints[:_n(ctx)] + [_gripper_open(ctx)]
@@ -2599,14 +3160,21 @@ def _execute_pickup(
         _publish_motion_t(ctx, above_q, grasp_q, DEFAULT_GRASP_DURATION_S, tempo)
         ctx.last_full_joints = grasp_q
         ctx.last_arm_joints = grasp_arm_q
+        # ARRIVAL TRIM (spec 40 S6.6): raise-only, at most two rounds, inside
+        # this hold. ctx.last_full_joints stays the MODEL pose; the close and
+        # the lift start from what was really commanded (the model pose itself
+        # whenever nothing was trimmed).
+        commanded_arm_q = _trim_arrival(ctx, grasp_q, tempo)[:_n(ctx)]
         # Gripper-only close — EXEMPT (raw).
-        _publish_motion_t(ctx, grasp_q, closed_q, DEFAULT_GRIPPER_DURATION_S, tempo)
+        _publish_motion_t(ctx, commanded_arm_q + [_gripper_open(ctx)],
+                          commanded_arm_q + [close_rad], DEFAULT_GRIPPER_DURATION_S, tempo)
         ctx.last_full_joints = closed_q
         # Record the COMMANDED close (the recipe's gripper_close_rad on the
         # named-object path) for the per-object grasp-held threshold.
         ctx.last_commanded_close_rad = close_rad
         # LIFT-OUT (carry up to the hover) — TRANSIT, zone-avoided.
-        safe_move(ctx, closed_q, lift_q, DEFAULT_APPROACH_DURATION_S, roll=roll, tempo=tempo)
+        safe_move(ctx, commanded_arm_q + [close_rad], lift_q, DEFAULT_APPROACH_DURATION_S,
+                  roll=roll, tempo=tempo)
         ctx.last_arm_joints = lift_arm_q
         ctx.last_full_joints = lift_q
     finally:
@@ -2885,7 +3453,8 @@ def pickup(ctx, args: dict[str, Any]) -> None:
     # that arm is byte-identical.
     _execute_pickup(ctx, grasp_xyz, DEFAULT_APPROACH_HEIGHT_M,
                     GRASP_ROLL_RAD, _pickup_close(ctx), tempo=_move_tempo(args),
-                    unreachable_de=_unreachable_target_de(ctx, args.get('target')))
+                    unreachable_de=_unreachable_target_de(ctx, args.get('target')),
+                    label=_target_label(args.get('target')))
 
 
 def drop_at(ctx, args: dict[str, Any]) -> None:
@@ -2928,7 +3497,8 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
     drop_arm_q, above_arm_q = _solve_grasp_and_approach(
         ctx, drop_xyz, DEFAULT_APPROACH_HEIGHT_M, roll=roll,
         refuse_without_clearance=False, purpose='place',
-        unreachable_de=_unreachable_target_de(ctx, args.get('destination')))
+        unreachable_de=_unreachable_target_de(ctx, args.get('destination')),
+        label=_target_label(args.get('destination')))
 
     # Carry at the close the GRASP actually commanded, not at the profile's
     # full-closed value. The two are the same number on the OMX
@@ -3213,7 +3783,7 @@ def descend_to(ctx, args: dict[str, Any]) -> None:
     _require_seeded_start_pose(ctx)
     ziel = args.get('ziel')
     x, y, z, roll = _greifziel_xyz_roll(ctx, ziel, 'senke auf')
-    arm_q = _solve_or_raise(ctx, (x, y, z), roll=roll)
+    arm_q = _solve_or_raise(ctx, (x, y, z), roll=roll, label='Ziel')
     # F21 (owner decision Q3): from anywhere but straight above, the block
     # first runs „fahre über" for the same Greifziel and only then descends — a
     # descend that started elsewhere used to swing in LOW, sideways at grasp

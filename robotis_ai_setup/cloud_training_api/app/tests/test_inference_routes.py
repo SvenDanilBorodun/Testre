@@ -314,7 +314,9 @@ class TestStudentsOnly(_Case):
 class TestReserve(_Case):
     def test_the_happy_path(self) -> None:
         body = self.assertAnswer(self.reserve(), 200)
-        self.assertEqual(set(body), {"session_id", "summary", "session_s", "remaining_today_s", "reserve_s"})
+        self.assertEqual(set(body), {"session_id", "summary", "session_s", "remaining_today_s", "reserve_s",
+                                     "scene_camera_profile"})
+        self.assertIsNone(body["scene_camera_profile"])  # TRAINING names no dataset (D58)
         self.assertEqual(body["summary"]["expected_cameras"], ["gripper", "scene"])
         self.assertEqual(body["reserve_s"], svc.RESERVE_S)
         row = self.store.rows[body["session_id"]]

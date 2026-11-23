@@ -24,7 +24,9 @@ student-facing text (role labels are assigned downstream).
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
+from dataclasses import dataclass
 from typing import Optional
 
 # CameraDevice is defined in config_generator (the Pi has no device_manager) and
@@ -203,3 +205,116 @@ def scan_cameras() -> list[CameraDevice]:
         CameraDevice(path=d["path"], name=d["name"])
         for d in list_video_devices()
     ]
+
+
+# ── What a camera can deliver: the start pre-flight (spec 40 S1, decision C6) ──
+
+# One ``v4l2-ctl --list-formats-ext`` is a few ioctls; this bounds a camera or a
+# driver that hangs.
+LIST_FORMATS_TIMEOUT_S = 5
+# A listed rate this little below the one asked for counts as that rate: a
+# camera may list 29.970 fps for its 30.
+FPS_SLACK = 0.5
+
+_FORMAT_RE = re.compile(r"(?:\[\d+\]:|Pixel Format:)\s*'([^']*)'")
+_SIZE_DISCRETE_RE = re.compile(r"Size:\s*Discrete\s+(\d+)x(\d+)")
+_SIZE_RANGE_RE = re.compile(
+    r"Size:\s*(?:Stepwise|Continuous)\s+(\d+)x(\d+)\s*-\s*(\d+)x(\d+)"
+    r"(?:\s+with step\s+(\d+)/(\d+))?")
+_FPS_RE = re.compile(r"\(([\d.]+)(?:\s*-\s*([\d.]+))?\s*fps\)")
+_SECONDS_RE = re.compile(r"([\d.]+)s\b")
+
+
+@dataclass
+class VideoMode:
+    """One frame size a camera lists for one pixel format (a discrete size has
+    ``*_min == *_max``) and the highest rate it lists for it; ``max_fps`` is
+    ``None`` when no interval was listed (not proof of any rate)."""
+
+    fourcc: str
+    width_min: int
+    width_max: int
+    width_step: int
+    height_min: int
+    height_max: int
+    height_step: int
+    max_fps: Optional[float] = None
+
+
+def _interval_fps(line: str) -> Optional[float]:
+    """The highest rate an ``Interval:`` line names: its ``(… fps)`` part, else
+    one over its shortest interval in seconds."""
+    match = _FPS_RE.search(line)
+    if match:
+        rates = [float(v) for v in match.groups() if v]
+        return max(rates) if rates else None
+    seconds = [float(v) for v in _SECONDS_RE.findall(line) if float(v) > 0]
+    return 1.0 / min(seconds) if seconds else None
+
+
+def parse_formats(text: str) -> list[VideoMode]:
+    """The ``VideoMode``s in a ``v4l2-ctl --list-formats-ext`` answer, both of
+    its layouts (``[0]: 'MJPG' (…)`` and the older ``Pixel Format: 'MJPG'``);
+    ``[]`` for a text that lists none."""
+    modes: list[VideoMode] = []
+    fourcc = None
+    for line in text.splitlines():
+        match = _FORMAT_RE.search(line)
+        if match:
+            fourcc = match.group(1).strip()
+            continue
+        if fourcc is None:
+            continue
+        match = _SIZE_DISCRETE_RE.search(line)
+        if match:
+            width, height = int(match.group(1)), int(match.group(2))
+            modes.append(VideoMode(fourcc, width, width, 1, height, height, 1))
+            continue
+        match = _SIZE_RANGE_RE.search(line)
+        if match:
+            w0, h0, w1, h1 = (int(match.group(i)) for i in range(1, 5))
+            step_w = int(match.group(5) or 1) or 1
+            step_h = int(match.group(6) or 1) or 1
+            modes.append(VideoMode(fourcc, w0, w1, step_w, h0, h1, step_h))
+            continue
+        if "Interval:" in line and modes and modes[-1].fourcc == fourcc:
+            fps = _interval_fps(line)
+            if fps is not None and (modes[-1].max_fps is None or fps > modes[-1].max_fps):
+                modes[-1].max_fps = fps
+    return modes
+
+
+def offers(modes: list[VideoMode], fourcc: str, width: int, height: int, min_fps: float) -> bool:
+    """True when ``modes`` list ``fourcc`` at ``width`` x ``height`` with a rate
+    of at least ``min_fps`` (less ``FPS_SLACK``), or with no rate listed."""
+    for mode in modes:
+        if mode.fourcc != fourcc:
+            continue
+        if not (mode.width_min <= width <= mode.width_max
+                and (width - mode.width_min) % mode.width_step == 0):
+            continue
+        if not (mode.height_min <= height <= mode.height_max
+                and (height - mode.height_min) % mode.height_step == 0):
+            continue
+        if mode.max_fps is None or mode.max_fps >= min_fps - FPS_SLACK:
+            return True
+    return False
+
+
+def list_formats(device: str) -> Optional[list[VideoMode]]:
+    """The ``VideoMode``s ``device`` lists (one bounded ``v4l2-ctl
+    --device=<device> --list-formats-ext``, no shell), or ``None`` when the
+    list cannot be read: no tool, a timeout, a failed call or a text without a
+    format. ``None`` is never proof of anything (refuse on proof only)."""
+    try:
+        result = subprocess.run(
+            ["v4l2-ctl", f"--device={device}", "--list-formats-ext"],
+            capture_output=True, timeout=LIST_FORMATS_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("cannot list the formats of %s: %s", device, type(exc).__name__)
+        return None
+    if result.returncode != 0:
+        logger.warning("v4l2-ctl --list-formats-ext %s exited %s", device, result.returncode)
+        return None
+    modes = parse_formats((result.stdout or b"").decode("utf-8", errors="replace"))
+    return modes or None

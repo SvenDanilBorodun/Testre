@@ -21,6 +21,8 @@
 import React from 'react';
 import { render, screen, waitFor, act, cleanup } from '@testing-library/react';
 import UrdfTwin from '../UrdfTwin';
+import { fixtureLayout } from '../Workshop/simConstants';
+import sceneFixture from '../Workshop/fixture/sceneFixture.json';
 import { SUCHER_HEMI_GROUND, SUCHER_LINK_COLOR, SUCHER_LINK_METALNESS } from '../sucher/twinPalette';
 
 // --- react-redux: selector-aware stub over a mutable module-level state. ---
@@ -71,6 +73,8 @@ let mockTcpUrdf = null;
 function newMockRobot() {
   const robot = {
     rotation: { x: 0, z: 0 },
+    // The tower kit's lift writes position.y (the fixture prop); nothing else does.
+    position: { x: 0, y: 0, z: 0 },
     applied: [],
     setJointValue: (name, value) => {
       robot.applied.push([name, value]);
@@ -151,6 +155,7 @@ const mockAxesCtor = vi.fn();
 // per-type object material colour. All stay uncalled for the default-prop call.
 const mockBoxGeometryCtor = vi.fn();
 const mockRingGeometryCtor = vi.fn();
+const mockShapeGeometryCtor = vi.fn();
 const mockStandardMaterialCtor = vi.fn(); // captures the opts (incl. color)
 // Every MeshStandardMaterial instance (each with a dispose spy) and every
 // scene.add / scene.remove, so the ghost-arm tests can prove exactly which
@@ -419,6 +424,8 @@ vi.mock('three', () => {
           x: 0, y: 0, z: 0,
         },
         rotation: { set: () => {}, x: 0 },
+        // The tower kit's oriented boxes take their rotation from a Matrix4.
+        quaternion: { setFromRotationMatrix: vi.fn() },
         castShadow: false,
         receiveShadow: false,
         visible: true,
@@ -469,6 +476,7 @@ vi.mock('three', () => {
         position: { set: vi.fn() },
         scale: { set: vi.fn() },
         rotation: { x: 0 },
+        userData: {},
         dispose: () => {},
         addEventListener: () => {},
       };
@@ -541,6 +549,21 @@ vi.mock('three', () => {
     },
     Box3,
     Vector3,
+    // The tower kit (fixture prop): an oriented box's rotation, the zone's outline.
+    Matrix4: function Matrix4() {
+      this.elements = null;
+      this.set = (...e) => { this.elements = e; return this; };
+    },
+    Shape: function Shape() {
+      this.points = [];
+      this.moveTo = (x, y) => { this.points.push([x, y]); return this; };
+      this.lineTo = (x, y) => { this.points.push([x, y]); return this; };
+      this.closePath = () => this;
+    },
+    ShapeGeometry: function ShapeGeometry(shape) {
+      mockShapeGeometryCtor(shape);
+      return { dispose: () => {} };
+    },
   };
 });
 // viewPreset (Aufnahme 2.0): what the preset effect writes into the controls.
@@ -607,6 +630,7 @@ beforeEach(() => {
   mockAxesCtor.mockClear();
   mockBoxGeometryCtor.mockClear();
   mockRingGeometryCtor.mockClear();
+  mockShapeGeometryCtor.mockClear();
   mockStandardMaterialCtor.mockClear();
   mockStandardMaterials.length = 0;
   mockBasicMaterials.length = 0;
@@ -931,6 +955,76 @@ describe('UrdfTwin — sim-stage catalog objects / reach ring / shadows', () => 
     await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
     expect(mockRingGeometryCtor).toHaveBeenCalledWith(0.1, 0.28, 64);
     expect(mockRenderer.shadowMap.enabled).toBe(true);
+  });
+});
+
+// The tower kit (spec 40 S8): the optional `fixture` prop (simConstants'
+// fixtureLayout) stands the arm on its base plate — raised by the plate's
+// lift, 7.2 mm — and draws the plate and the tower's nine oriented boxes (the
+// bridge and both head boxes included); with showReach the printed zone with
+// its cut replaces the ring. Absent, the twin is exactly what it was.
+describe('UrdfTwin — the tower kit (fixture)', () => {
+  const OMX = fixtureLayout({ urdf_asset_id: 'omx_f', arm_joints: 5 });
+  const boxArgs = () => mockBoxGeometryCtor.mock.calls.map((c) => c.map((v) => Math.round(v * 1e6) / 1e6));
+
+  test('without the fixture prop: the robot stays at the table, no plate, no tower, the ring as before', async () => {
+    render(<UrdfTwin showReach />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    expect(mockRobot.position.y).toBe(0);
+    expect(mockBoxGeometryCtor).not.toHaveBeenCalled();
+    expect(mockShapeGeometryCtor).not.toHaveBeenCalled();
+    expect(mockRingGeometryCtor).toHaveBeenCalledWith(0.1, 0.28, 64);
+  });
+
+  test('with it: the robot is raised by 7.2 mm and the plate and the nine tower boxes are drawn', async () => {
+    expect(OMX.liftM).toBe(0.0072);
+    render(<UrdfTwin fixture={OMX} />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    expect(mockRobot.position.y).toBe(0.0072);
+    const args = boxArgs();
+    // The plate: its outline, as thick as the lift.
+    expect(args).toContainEqual([0.114, 0.1772, 0.0072]);
+    // Every tower box at its full size (half extents doubled), the bridge and both head boxes included.
+    for (const [name, , , half] of sceneFixture.constants.TOWER_OBB_F) {
+      expect([name, args.some((a) => a.join() === half.map((h) => Math.round(2 * h * 1e6) / 1e6).join())])
+        .toEqual([name, true]);
+    }
+    expect(OMX.boxes.map((b) => b.name)).toEqual(
+      ['pad', 'socket', 'rib_a', 'rib_b', 'column', 'block', 'head', 'lens', 'bridge'],
+    );
+    expect(mockBoxGeometryCtor).toHaveBeenCalledTimes(10);
+  });
+
+  test('an oriented box takes its rows as its rotation and sits at its centre in the arm\'s frame', async () => {
+    render(<UrdfTwin fixture={OMX} />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    const head = OMX.boxes.find((b) => b.name === 'head');
+    const mesh = mockMeshInstances.find((m) => m.userData && m.userData.fixturePart === 'head');
+    expect(mesh).toBeTruthy();
+    expect([mesh.position.x, mesh.position.y, mesh.position.z]).toEqual(head.centre);
+    const m4 = mesh.quaternion.setFromRotationMatrix.mock.calls[0][0];
+    expect(m4.elements).toEqual([...head.rows[0], 0, ...head.rows[1], 0, ...head.rows[2], 0, 0, 0, 0, 1]);
+    // The OMX's joint-1 axis sits 11.25 mm behind its base origin: the kit too.
+    expect(head.centre[0]).toBeCloseTo(sceneFixture.constants.TOWER_OBB_F[6][1][0] - 0.01125, 12);
+  });
+
+  test('with showReach the zone with its cut is drawn instead of the ring', async () => {
+    render(<UrdfTwin fixture={OMX} showReach />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    expect(mockRingGeometryCtor).not.toHaveBeenCalled();
+    expect(mockShapeGeometryCtor).toHaveBeenCalledTimes(1);
+    const shape = mockShapeGeometryCtor.mock.calls[0][0];
+    expect(shape.points).toEqual(OMX.zone);
+  });
+
+  test('taking the fixture away puts the robot back on the table and removes the kit', async () => {
+    const { rerender } = render(<UrdfTwin fixture={OMX} />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    expect(mockRobot.position.y).toBe(0.0072);
+    rerender(<UrdfTwin />);
+    expect(mockRobot.position.y).toBe(0);
+    const kit = mockGroupInstances.find((g) => g.userData && g.userData.fixtureKit);
+    expect(mockSceneOps).toContainEqual(['remove', kit]);
   });
 });
 

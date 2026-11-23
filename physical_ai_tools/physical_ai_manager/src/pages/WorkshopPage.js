@@ -11,7 +11,10 @@ import React, {
 import { useDispatch, useSelector } from 'react-redux';
 import toast, { useToasterStore } from 'react-hot-toast';
 import * as Blockly from 'blockly/core';
-import CalibrationWizard from '../components/Workshop/CalibrationWizard';
+import CalibrationPanel from '../components/Workshop/calibration/CalibrationPanel';
+import useCalibrationState from '../components/Workshop/calibration/useCalibrationState';
+import { CALIBRATION_DE } from '../components/Workshop/calibration/calibrationCopy';
+import { CALIBRATION_STEPS } from '../components/Workshop/calibration/calibrationModel';
 import { HomeGlideProvider } from '../components/Workshop/HomeGlidePrompt';
 import LeaderToggle from '../components/Workshop/LeaderToggle';
 import BlocklyWorkspace from '../components/Workshop/BlocklyWorkspace';
@@ -31,7 +34,7 @@ import {
   DOCK_WIDTH, SIM_WIDTH, readDockWidth, readSimWidth, writeDockWidth, writeSimWidth,
 } from '../components/Workshop/layout/layoutPrefs';
 import { LAYOUT_DE, fillLayout } from '../components/Workshop/layout/layoutCopy';
-import { buildCatalogDims } from '../components/Workshop/simConstants';
+import { buildCatalogDims, fixtureLayout } from '../components/Workshop/simConstants';
 import { DE, formatDe } from '../components/Workshop/blocks/messages_de';
 import {
   applyPinnedCoordinates,
@@ -79,7 +82,8 @@ import {
   setUnsavedBlocklyJson,
   setSelectedWorkflowId,
   markWorkflowSaved,
-  requestRecalibration,
+  selectCalibrated,
+  selectTowerScene,
   setDebuggerVisible,
 } from '../features/workshop/workshopSlice';
 import {
@@ -210,21 +214,16 @@ const LOADING_SAVE_STATUS = Object.freeze({ savedAt: null, dirty: false, loading
 
 function WorkshopPage({ isActive }) {
   const dispatch = useDispatch();
-  // WS4 (2026-06-17): scene-cam-only calibration. The gripper camera is no
-  // longer calibrated (not modelled in the omx_f URDF; unused at runtime), so
-  // the editor-unlock gate reads only scene flags. The gripper flags are
-  // intentionally NOT read here.
-  // 2026-06-22: the colour-profile step was dropped — the editor unlocks after
-  // the 3 geometry steps (intrinsic + extrinsic + table touch-off). The grasp
-  // path needs only those three; the colour profile gated nothing else.
-  const hasIntrinsicScene = useSelector((s) => s.workshop.hasIntrinsicScene);
-  const hasHandeyeScene = useSelector((s) => s.workshop.hasHandeyeScene);
-  const hasTableTouch = useSelector((s) => s.workshop.hasTableTouch);
-  const recalibrating = useSelector((s) => s.workshop.recalibrating);
-  // W5: holds the editor closed only while the student is on the optional
-  // „Genauigkeit prüfen" step right after the touch-off (defaults false on a
-  // page reload, so a calibrated rig opens straight to the editor).
-  const pendingVerify = useSelector((s) => s.workshop.pendingVerify);
+  // The tower calibration (spec 40 S8): the robot's /edubotics/calibration_state
+  // (kept in the workshop slice by useCalibrationState) unlocks the editor on
+  // the real robot only while its state is `ok`; the scene-camera profile the
+  // arm container states decides whether the 3D twin draws the tower kit.
+  const calibrated = useSelector(selectCalibrated);
+  const towerScene = useSelector(selectTowerScene);
+  useCalibrationState({ enabled: isActive });
+  // „Kalibrierung" in the toolbar: the panel shown on purpose over an `ok`
+  // state (to re-check the mat or re-run the arm check).
+  const [calibPanelOpen, setCalibPanelOpen] = useState(false);
   const selectedWorkflowId = useSelector((s) => s.workshop.selectedWorkflowId);
   const unsavedBlocklyJson = useSelector((s) => s.workshop.unsavedBlocklyJson);
   const accessToken = useSelector((s) => s.auth?.session?.access_token);
@@ -614,7 +613,7 @@ function WorkshopPage({ isActive }) {
     previewActive,
   });
   const subscriptions = useRosTopicSubscription();
-  const { getObjectCatalog, jogArm } = useRosServiceCaller();
+  const { getObjectCatalog, jogArm, startCalibration } = useRosServiceCaller();
   // Blockly 12 ties getSelected() to the FocusManager, and clicking the
   // camera overlay (a non-focusable div) blurs the block in Chromium →
   // selection is null by the time the camera onClick runs. So we remember
@@ -801,23 +800,41 @@ function WorkshopPage({ isActive }) {
     return true;
   }, []);
 
-  const calibrated =
-    hasIntrinsicScene &&
-    hasHandeyeScene &&
-    hasTableTouch;
+  // Entering Roboter Studio on the real robot asks the robot for a mat check
+  // ONCE (spec 40 S8; no motion, three frames): its result arrives as the
+  // calibration state. It waits for a live robot link, and never runs over a
+  // program (whose own start gate checks the mat); leaving the page re-arms it.
+  const entryMatCheckDoneRef = useRef(false);
+  useEffect(() => {
+    if (!isActive) {
+      entryMatCheckDoneRef.current = false;
+      return;
+    }
+    if (entryMatCheckDoneRef.current || simMode || heartbeatStatus !== 'connected' || workflowRunning) return;
+    entryMatCheckDoneRef.current = true;
+    startCalibration('scene', CALIBRATION_STEPS.MAT_CHECK).catch(() => {
+      // Unanswered: the panel offers „Erneut prüfen" and says why.
+    });
+  }, [isActive, simMode, heartbeatStatus, workflowRunning, startCalibration]);
 
-  // The editor unlocks only when calibrated AND not mid-recalibration AND not
-  // holding for the optional accuracy-verify step. The `recalibrating` override
-  // (set by „Kalibrierung neu starten") keeps the wizard open even though the
-  // on-disk YAMLs still satisfy `calibrated` — it clears once the student
-  // finishes re-running the steps. `pendingVerify` (set right after the
-  // touch-off, cleared by „Fertig"/„Überspringen") routes the student through
-  // the optional „Genauigkeit prüfen" step before the editor opens; it is NOT
-  // part of `calibrated`, so a calibrated rig still opens straight to the
-  // editor on a fresh page load (workshopSlice).
+  // A real program that started under `ok` keeps its editor — and RunControls
+  // with its Stopp — until it ends, even when a mat check meanwhile leaves
+  // `ok` (the program-start gate's own check may read `tags_hidden` with the
+  // arm over the mat and fall back to the last good one). Only an editor that
+  // was open under `ok` is held; nothing is ever opened by a run.
+  const [editorHeldForRun, setEditorHeldForRun] = useState(false);
+  useEffect(() => {
+    if (!realRunActive) setEditorHeldForRun(false);
+    else if (calibrated && !calibPanelOpen) setEditorHeldForRun(true);
+  }, [realRunActive, calibrated, calibPanelOpen]);
+
+  // The editor on the real robot: only while the calibration state is `ok`
+  // (or held for a run that started under it), and not while the student opened
+  // the calibration panel. RunControls lives in the editor, so a real program
+  // can never be STARTED on a robot that is not calibrated.
   // Phase-3: the simulator needs no calibration (real interpreter + real IK on a
   // VIRTUAL arm — plan §WS-D), so simMode opens the editor regardless.
-  const showEditor = simMode || (calibrated && !recalibrating && !pendingVerify);
+  const showEditor = simMode || (!calibPanelOpen && (calibrated || editorHeldForRun));
 
   // Re-subscribe to /workflow/status whenever this page is active OR
   // the rosbridge connection state flips back to connected. The v1
@@ -1278,6 +1295,11 @@ function WorkshopPage({ isActive }) {
     const entry = storeEntries.find((e) => e && e.id === highlight.id);
     return ghostJointsFromEntry(entry, caps, robotType);
   }, [storeEntries, highlight, caps, robotType]);
+  // The tower kit in the dock's 3D twin (spec 40 S8): only while the arm
+  // container states the tower camera; the robot then stands on the plate
+  // (raised by its lift). Undefined = the twin renders exactly as before.
+  const towerFixture = useMemo(() => (towerScene ? fixtureLayout(caps) || undefined : undefined),
+    [towerScene, caps]);
 
   // A tap in SimScene's „Ziel setzen" mode: a pin ON the virtual table (z 0).
   // On a calibrated real rig the same entry later re-asks the measured plane
@@ -1861,22 +1883,19 @@ function WorkshopPage({ isActive }) {
     </div>
   );
 
-  // „Kalibrierung neu starten" — a calibrated student can re-enter the wizard
-  // (e.g. the cameras moved between sessions). Resets per-step badges; the on-disk
-  // YAMLs survive and are overwritten as each step is re-run.
+  // „Kalibrierung" — the calibration panel over a calibrated robot, to check
+  // the mat again or re-run the arm check (after a bump: decision D8). Nothing
+  // is reset by opening it. Not while a real program runs: the panel replaces
+  // the editor, and with it the program's Stopp.
   const recalibrateButton = (
     <button
       type="button"
-      onClick={() => {
-        if (typeof window !== 'undefined'
-            && window.confirm('Kalibrierung neu starten? Die bisherigen Werte werden beim nächsten Schritt überschrieben.')) {
-          dispatch(requestRecalibration());
-        }
-      }}
-      className="st-tbtn text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)]"
-      title="Kalibrierung erneut durchlaufen — Schritt-Marker werden zurückgesetzt"
+      onClick={() => setCalibPanelOpen(true)}
+      disabled={realRunActive}
+      className="st-tbtn text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] disabled:opacity-50 disabled:cursor-not-allowed"
+      title={realRunActive ? DE.STOP_PROGRAM_FIRST : CALIBRATION_DE.TOOLBAR_TITLE}
     >
-      Kalibrierung neu starten
+      {CALIBRATION_DE.TOOLBAR}
     </button>
   );
 
@@ -1976,6 +1995,7 @@ function WorkshopPage({ isActive }) {
                 showFrames={showFrames}
                 markers={markers}
                 ghostJoints={ghostJoints}
+                fixture={towerFixture}
               />
             </Suspense>
             {showFrames && (
@@ -2007,9 +2027,9 @@ function WorkshopPage({ isActive }) {
   ];
 
   return (
-    // ONE warned glide-to-Grundstellung prompt for the whole page: its three
-    // callers (TableTouchStep, JogPanel, Vormachen) can each unmount while a
-    // countdown is still running — see HomeGlidePrompt.
+    // ONE warned glide-to-Grundstellung prompt for the whole page: its two
+    // callers (JogPanel, Vormachen) can each unmount while a countdown is
+    // still running — see HomeGlidePrompt.
     <HomeGlideProvider robotProfile={robotProfile}>
     {/* The mode FRAME: orange on the real robot, blue in the simulator — a
         border and `data-mode` on this EXISTING root, never a wrapper (a wrapper
@@ -2433,7 +2453,7 @@ function WorkshopPage({ isActive }) {
             )}
           </>
         ) : (
-          <CalibrationWizard />
+          <CalibrationPanel onClose={calibPanelOpen ? () => setCalibPanelOpen(false) : undefined} />
         )}
       </main>
     </div>

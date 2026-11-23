@@ -13,6 +13,13 @@ unlabelled duplicate of a fleet-object tag in circulation breaks the
 detector's id->type mapping); pass ``--allow-reserved`` to print the
 colliding cells labelled with their owning type instead.
 
+The calibration's own ids, ``scene_fixture.RESERVED_TAG_IDS`` (the scene mats,
+the tower's fixture tags, the clip-on targets), are refused in every mode,
+``--allow-reserved`` included: an object carrying one would be taken for a mat
+or a target. Their sheets come from ``tools/generate_scene_mat.py`` and
+``tools/generate_calibration_target.py``. The refusal needs neither OpenCV nor
+Pillow.
+
 Usage:
     python tools/generate_apriltags.py                       # catalog sheet (A4 PDF)
     python tools/generate_apriltags.py --start-id 40 --count 10 --size-mm 24
@@ -26,18 +33,23 @@ along the 30x30 mm lines KEEPING the white quiet zone around each black square
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import math
 import sys
 from pathlib import Path
 
-import cv2
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+try:  # the renderer's stack; main() refuses reserved ids before it needs any of it
+    import cv2
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError as _exc:
+    _RENDER_IMPORT_ERROR = _exc
+else:
+    _RENDER_IMPORT_ERROR = None
 
 
 QUIET_ZONE_MM = 8.0
 TAGS_PER_ROW = 4
-TAG_FAMILY = cv2.aruco.DICT_APRILTAG_36H11
 DPI = 300
 _PX_PER_MM = DPI / 25.4
 
@@ -253,8 +265,40 @@ def _catalog_entries() -> tuple[list[tuple[int, str]], float]:
     return entries, float(catalog.tag_size_m)
 
 
+def _calibration_range() -> tuple[int, int]:
+    """``RESERVED_TAG_IDS`` of the fixture contract: the calibration's own tags. The
+    contract is loaded from its file (standard library only), never through the package."""
+    path = _SERVER_PKG_ROOT / 'physical_ai_server' / 'workflow' / 'scene_fixture.py'
+    spec = importlib.util.spec_from_file_location('edubotics_scene_fixture', path)
+    contract = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(contract)
+    return contract.RESERVED_TAG_IDS
+
+
+def reserved_ids(ids) -> list[int]:
+    """The ids of ``ids`` the calibration reserves, in their order."""
+    lo, hi = _calibration_range()
+    return [i for i in ids if lo <= i <= hi]
+
+
+def _refuse_calibration_ids(ids) -> None:
+    """Exit with a German sentence when ``ids`` holds an id of the calibration's range."""
+    hit = reserved_ids(ids)
+    if not hit:
+        return
+    lo, hi = _calibration_range()
+    if len(hit) == 1:
+        sentence = f'Tag-ID {hit[0]} ist für die Kalibrierung reserviert ({lo} bis {hi}).'
+    elif hit == list(range(hit[0], hit[-1] + 1)):
+        sentence = f'Tag-IDs {hit[0]} bis {hit[-1]} sind für die Kalibrierung reserviert ({lo} bis {hi}).'
+    else:
+        sentence = f'Tag-IDs {", ".join(map(str, hit))} sind für die Kalibrierung reserviert ({lo} bis {hi}).'
+    sys.exit(sentence + ' Die Druckvorlagen der Kalibrier-Marker kommen aus '
+             'tools/generate_scene_mat.py und tools/generate_calibration_target.py.')
+
+
 def _render_tag_marker(tag_id: int, tag_px: int) -> np.ndarray:
-    aruco_dict = cv2.aruco.getPredefinedDictionary(TAG_FAMILY)
+    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36H11)
     return aruco_dict.generateImageMarker(tag_id, tag_px)
 
 
@@ -561,7 +605,8 @@ def main() -> None:
         '--allow-reserved', action='store_true',
         help='Manual mode: allow ids reserved by the fixed object catalog; '
              'colliding cells are labelled with the owning type instead of '
-             'the range being refused.')
+             'the range being refused. Never the calibration\'s ids '
+             '(scene_fixture.RESERVED_TAG_IDS).')
     parser.add_argument(
         '--dpi', type=int, default=DPI,
         help=f'Resolution in DPI (default: {DPI})')
@@ -573,9 +618,10 @@ def main() -> None:
     if args.start_id is not None:
         if args.count <= 0:
             parser.error('--count must be positive.')
+        requested = list(range(args.start_id, args.start_id + args.count))
+        _refuse_calibration_ids(requested)
         catalog_entries, catalog_tag_size_m = _catalog_entries()
         reserved = {tid: label for tid, label in catalog_entries}
-        requested = list(range(args.start_id, args.start_id + args.count))
         collisions = [i for i in requested if i in reserved]
         if collisions and not args.allow_reserved:
             listing = ', '.join(f'#{i} ({reserved[i]})' for i in collisions)
@@ -591,10 +637,13 @@ def main() -> None:
             tag_size_mm = catalog_tag_size_m * 1000.0
     else:
         entries, tag_size_m = _catalog_entries()
+        _refuse_calibration_ids([tid for tid, _label in entries])
         tag_size_mm = args.size_mm if args.size_mm is not None else tag_size_m * 1000.0
 
     if tag_size_mm <= 0:
         parser.error('--size-mm must be positive.')
+    if _RENDER_IMPORT_ERROR is not None:
+        raise _RENDER_IMPORT_ERROR
     _render_sheet(entries, tag_size_mm, args.out, dpi=args.dpi)
 
 

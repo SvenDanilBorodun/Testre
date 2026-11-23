@@ -76,6 +76,7 @@ MERGE_CHECK_LABELS_DE = {
     'joints': 'Gelenke',
     'video': 'Videoformat',
     'stats': 'Statistiken',
+    'scene_camera': 'Szenen-Kamera',
 }
 
 # ── disk (§D3, §E3, §E10) ─────────────────────────────────────────────────────

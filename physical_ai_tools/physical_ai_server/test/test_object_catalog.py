@@ -195,6 +195,25 @@ def test_bool_tag_id_rejected():
         parse_catalog(data)
 
 
+@pytest.mark.parametrize('tag_id', [400, 450, 480, 586])
+def test_a_tag_id_reserved_for_the_calibration_is_refused(tag_id):
+    """(WP-02 (8), D34) ids 400..586 belong to the mats, the fixture and the clip-on targets
+    (scene_fixture.RESERVED_TAG_IDS); an object may never use one, in the fixed set or in a student's
+    registration (code_rpc merges through parse_catalog)."""
+    data = _valid_dict()
+    data['types']['banane']['tag_ids'] = [20, tag_id]
+    with pytest.raises(ObjectCatalogError) as err:
+        parse_catalog(data)
+    assert str(err.value) == f'Tag-ID {tag_id} ist für die Kalibrierung reserviert (400 bis 586).'
+
+
+@pytest.mark.parametrize('tag_id', [0, 399, 587])
+def test_a_tag_id_outside_the_reserved_range_is_accepted(tag_id):
+    data = _valid_dict()
+    data['types']['banane']['tag_ids'] = [tag_id]
+    assert parse_catalog(data).recipe_for_tag(tag_id).type_name == 'banane'
+
+
 def test_negative_object_height_fails():
     data = _valid_dict()
     data['types']['banane']['object_height_m'] = -0.01

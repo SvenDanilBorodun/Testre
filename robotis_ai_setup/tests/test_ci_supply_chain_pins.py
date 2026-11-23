@@ -23,10 +23,15 @@ Pinned here, across every workflow:
   name (which would block security updates too). ci.yml installs the same
   versions by hand, and must install exactly what requirements.txt ships, so a
   Dependabot patch PR is red until ci.yml's pins move with it.
+* **The real AprilTag detector (WP-18, 2026-11-20).** ``python-tests`` installs
+  the server image's ``pupil-apriltags`` and runs the server tests with
+  ``EDUBOTICS_REQUIRE_PUPIL=1``, so a lost detector fails its tests instead of
+  skipping them.
 """
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import shlex
@@ -264,6 +269,77 @@ class PythonTestsPinsEveryPackage(unittest.TestCase):
         for name in (*SERVER_LOCKSTEP, "pyarrow", "av"):
             with self.subTest(dependency=name):
                 self.assertIn(name, bare)
+
+
+PUPIL_REQUIRED = REPO / "physical_ai_tools" / "physical_ai_server" / "test" / "pupil_required.py"
+# The step that runs the server suite (pytest over physical_ai_server/test/).
+_SERVER_TESTS_RUN = re.compile(r"cd physical_ai_tools/physical_ai_server\s*\n\s*python -m pytest test/")
+
+
+def _require_env_name() -> str:
+    """``pupil_required.REQUIRE_ENV``, read from the gate's own source."""
+    for node in ast.parse(PUPIL_REQUIRED.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.Assign) and [getattr(t, "id", None) for t in node.targets] == ["REQUIRE_ENV"]:
+            return ast.literal_eval(node.value)
+    raise AssertionError("pupil_required.py assigns no REQUIRE_ENV")
+
+
+class PythonTestsRunTheRealDetector(unittest.TestCase):
+    """WP-18: the server suite's real-detector tests (``pupil_required.require_pupil``)
+    run in CI. Without the module they skip; ``EDUBOTICS_REQUIRE_PUPIL=1`` turns
+    that skip into a failure (the ``EDUBOTICS_REQUIRE_JAVAC`` rule)."""
+
+    def test_the_job_installs_the_server_images_detector(self):
+        dockerfile = SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        image = {v for n, v in _PIN.findall(dockerfile) if _norm(n) == "pupil-apriltags"}
+        self.assertEqual(len(image), 1, "the image pins pupil-apriltags once")
+        self.assertEqual(_ci_pins("python-tests").get("pupil-apriltags"), image)
+        # 1.0.4 has no wheel for Python 3.12: pip builds the sdist, whose CMakeLists asks
+        # for CMake 3.1, which the CMake 4 of the isolated build refuses without the
+        # image's policy floor.
+        policy = re.findall(r"^ENV CMAKE_POLICY_VERSION_MINIMUM=(\S+)$", dockerfile, re.M)
+        self.assertEqual(len(policy), 1, "the image sets the CMake policy floor once")
+        job = _load(WF / "ci.yml")["jobs"]["python-tests"]
+        runs = "\n".join(step.get("run", "") for step in job.get("steps") or [])
+        lines = [line.split("#", 1)[0].strip() for line in runs.replace("\\\n", " ").splitlines()]
+        installs = [line for line in lines if re.search(r"\bpip install\b", line) and "pupil-apriltags==" in line]
+        self.assertEqual(len(installs), 1, "one install of the detector")
+        self.assertRegex(installs[0], rf"^CMAKE_POLICY_VERSION_MINIMUM={re.escape(policy[0])} python -m pip install ")
+
+    def test_the_server_tests_fail_on_a_lost_detector(self):
+        name = _require_env_name()
+        self.assertEqual(name, "EDUBOTICS_REQUIRE_PUPIL")
+        job = _load(WF / "ci.yml")["jobs"]["python-tests"]
+        steps = [s for s in job.get("steps") or [] if _SERVER_TESTS_RUN.search(s.get("run", ""))]
+        self.assertEqual(len(steps), 1, "one step runs the server tests")
+        env = {**(job.get("env") or {}), **(steps[0].get("env") or {})}
+        self.assertEqual(str(env.get(name)), "1", "the gate fails only on exactly 1")
+
+
+class TheGuardBudgetIsMeasuredAlone(unittest.TestCase):
+    """D72's runtime budget (p99 <= 75 ms of process time per leg, D98) is measured on
+    an otherwise idle runner: the parallel server run (D92) leaves it out and a
+    serial run of exactly that test follows in the same step. Measured under
+    ``-n auto`` it failed at p99 61.5 ms with the guard unchanged (d212c6ff)."""
+
+    BUDGET = "test/test_tower_guard.py::test_runtime_budget_here"
+
+    def _server_lines(self):
+        job = _load(WF / "ci.yml")["jobs"]["python-tests"]
+        steps = [s for s in job.get("steps") or [] if _SERVER_TESTS_RUN.search(s.get("run", ""))]
+        self.assertEqual(len(steps), 1, "one step runs the server tests")
+        return [line.strip() for line in steps[0]["run"].splitlines() if "pytest" in line]
+
+    def test_the_parallel_run_leaves_the_budget_out(self):
+        parallel = [line for line in self._server_lines() if " -n " in f" {line} "]
+        self.assertEqual(len(parallel), 1, "one parallel server run")
+        self.assertIn(f"--deselect {self.BUDGET}", parallel[0])
+
+    def test_the_budget_runs_alone_after_it(self):
+        lines = self._server_lines()
+        alone = [line for line in lines if line.split()[3:4] == [self.BUDGET]]
+        self.assertEqual(alone, [f"python -m pytest {self.BUDGET} -q"], "exactly the budget test, serially")
+        self.assertGreater(lines.index(alone[0]), next(i for i, l in enumerate(lines) if " -n " in f" {l} "))
 
 
 class ReleaseChannel(unittest.TestCase):

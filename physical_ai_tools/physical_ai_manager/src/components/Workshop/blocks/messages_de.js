@@ -276,32 +276,6 @@ export const DE = {
   DEBUG_GRIPPER_OPENING: 'Greifer geöffnet (rad)',
   DEBUG_VISIBLE_MARKERS: 'Sichtbare Marker',
 
-  // Calibration wizard rebuild
-  CALIB_DIVERSITY_HINT:
-    'Mindestens 12 Bilder für die Kamerakalibrierung und 14 für die '
-    + 'Hand-Auge-Kalibrierung aus verschiedenen Winkeln aufnehmen — '
-    + 'wenige diverse Bilder sind besser als viele ähnliche. '
-    + 'Mindestens die Hälfte sollte den Würfel schräg zeigen.',
-  CALIB_COVERAGE_GAP:
-    'Noch Aufnahmen in den schraffierten Bereichen aufnehmen.',
-  CALIB_QUALITY_GOOD: 'gut',
-  CALIB_QUALITY_OK: 'okay',
-  CALIB_QUALITY_POOR: 'schlecht',
-  CALIB_QUALITY_BADGE: 'Qualität: %1',
-  CALIB_AGREEMENT_EXCELLENT: 'hervorragend',
-  CALIB_AGREEMENT_GOOD: 'gut',
-  CALIB_AGREEMENT_FAIR: 'mäßig',
-  CALIB_AGREEMENT_POOR: 'schlecht',
-  CALIB_AGREEMENT_LABEL: 'Übereinstimmung PARK ↔ TSAI: %1',
-  CALIB_VERIFY_TITLE: 'Jetzt prüfen',
-  CALIB_VERIFY_INSTRUCTION:
-    'Lege einen Marker auf die markierte Stelle und klicke auf '
-    + '"Position prüfen". Der Roboter zeigt dir, wie gut die Kalibrierung ist.',
-  CALIB_VERIFY_RESULT: 'Abweichung: %1 mm',
-  CALIB_HISTORY_TITLE: 'Kalibrierungs-Verlauf',
-  CALIB_HISTORY_EMPTY: 'Noch keine früheren Kalibrierungen vorhanden.',
-  CALIB_HISTORY_LOAD: 'Diese Version laden',
-
   // Workflow versions
   VERSION_HISTORY: 'Verlauf',
   VERSION_LOAD: 'laden',

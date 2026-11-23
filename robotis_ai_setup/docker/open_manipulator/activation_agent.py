@@ -46,6 +46,11 @@ THE CONTRACT (deliberately interfaces-free)
 ``/edubotics/home_arm``        std_srvs/Trigger  — served by the Feetech
                                driver, called by this node. Family-neutral
                                alias for /v1/home.
+``/edubotics/scene_camera_profile`` std_msgs/String — ``{"v":1,"profile":…}``,
+                               latched + 1 Hz: the configured scene-camera
+                               profile, stated (decision D63). Not part of
+                               the activation gate; it rides this node
+                               because this node runs on every profile.
 
 Both use stock message types on purpose: ``physical_ai_interfaces`` is built
 only in the SERVER image, and a new .srv there would mean an interfaces
@@ -178,6 +183,22 @@ FEETECH_HOME_WAIT_S = 20.0
 #: Feetech families. Same `case` split entrypoint_omx.sh makes — one place per
 #: layer, never a chain of `!=` tests that can drift apart.
 FEETECH_ROBOT_TYPES = ('v1_studio',)
+
+#: The scene-camera profile STATEMENT (decision D63). This container is where
+#: the configured profile lives, so it says it at every start, on every robot
+#: type: the server and the page take the profile from this topic and from
+#: nothing else, and silence on it means „unknown" (the tower guard stays ON),
+#: never `legacy`. MUST stay equal to physical_ai_server/scene_provenance.py's
+#: PROFILE_TOPIC (tests/test_scene_provenance_lockstep.py).
+PROFILE_TOPIC = '/edubotics/scene_camera_profile'
+#: (reliability, durability, depth): latched like the activation state. Plain
+#: member NAMES of rclpy's QoS enums, so the deps-free suite reads them.
+PROFILE_QOS = ('RELIABLE', 'TRANSIENT_LOCAL', 1)
+SCENE_PROFILE_ENV = 'EDUBOTICS_SCENE_CAMERA_PROFILE'
+#: What a raw value loses at both ends before the comparison: blanks and the
+#: quotes config_generator.upsert_env_var writes around every value. The same
+#: set as scene_split's (tests/test_scene_profile_value_table.py).
+_PROFILE_STRIP = ' \t\r\n\v\f"\''
 
 STATE_IDLE = 'idle'
 STATE_ACTIVATING = 'activating'
@@ -333,6 +354,28 @@ def state_payload(state, step, message, robot_type, leader, required, seq):
     }
 
 
+def scene_profile_from_env(env):
+    """The scene-camera profile the container environment ``env`` selects.
+
+    The one value table every reader of the key runs
+    (tests/test_scene_profile_value_table.py): blanks and quotes stripped at
+    both ends, lower-cased, ``tower_v1`` is the tower and anything else,
+    absence included, is ``legacy``. The agent's own stdlib copy of
+    ``scene_split.normalise_profile``, never an import of it: scene_split's
+    pixel functions import numpy and cv2, and this node's failure is silent
+    and total."""
+    raw = env.get(SCENE_PROFILE_ENV)
+    if isinstance(raw, str) and raw.strip(_PROFILE_STRIP).lower() == 'tower_v1':
+        return 'tower_v1'
+    return 'legacy'
+
+
+def profile_payload(env):
+    """The statement's bytes: compact UTF-8 JSON, ``v`` then ``profile``."""
+    return json.dumps({'v': 1, 'profile': scene_profile_from_env(env)},
+                      separators=(',', ':')).encode('utf-8')
+
+
 def fresh_pose(sample, now, max_age_s=JOINT_MAX_AGE_S):
     """A cached ``(pose, stamp)`` if it is recent enough, else None.
 
@@ -380,6 +423,8 @@ class ActivationAgent(Node):
             os.environ.get('EDUBOTICS_REQUIRE_ACTIVATION'), default=True)
         self._feetech = is_feetech(self._robot_type)
         self._leader = has_leader(self._robot_type, self._follower_only)
+        # Read once: the container's environment does not change while it runs.
+        self._profile_data = profile_payload(os.environ).decode('utf-8')
 
         self._group = ReentrantCallbackGroup()
         self._lock = threading.Lock()
@@ -415,6 +460,13 @@ class ActivationAgent(Node):
             QoSProfile(depth=1,
                        reliability=ReliabilityPolicy.RELIABLE,
                        durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        # The profile statement: latched for the same reason, and created
+        # unconditionally, because a rig without it reads as „unknown".
+        self._profile_pub = self.create_publisher(
+            String, PROFILE_TOPIC,
+            QoSProfile(depth=PROFILE_QOS[2],
+                       reliability=getattr(ReliabilityPolicy, PROFILE_QOS[0]),
+                       durability=getattr(DurabilityPolicy, PROFILE_QOS[1])))
         # Same QoS the entrypoint's Phase-3 publishers used. The follower's
         # arm_controller subscribes VOLATILE, which a TRANSIENT_LOCAL offer
         # satisfies.
@@ -431,12 +483,15 @@ class ActivationAgent(Node):
 
         self.create_service(Trigger, ACTIVATE_SERVICE, self._activate_cb,
                             callback_group=self._group)
-        self.create_timer(1.0, self._publish_state, callback_group=self._group)
+        self.create_timer(1.0, self._on_timer, callback_group=self._group)
         self._publish_state()
+        self._publish_profile()
         self.get_logger().info(
             f'Aktivierung bereit ({self._robot_type}, '
             f'Leader={"ja" if self._leader else "nein"}, '
             f'erforderlich={"ja" if self._required else "nein"}).')
+        self.get_logger().info(
+            f'Scene camera profile statement: {self._profile_data}')
 
     # ── subscriptions ────────────────────────────────────────────────────────
 
@@ -486,6 +541,18 @@ class ActivationAgent(Node):
             msg = String()
             msg.data = json.dumps(payload, ensure_ascii=False)
             self._state_pub.publish(msg)
+
+    def _publish_profile(self):
+        """The same bytes every time, so no lock and no sequence number."""
+        msg = String()
+        msg.data = self._profile_data
+        self._profile_pub.publish(msg)
+
+    def _on_timer(self):
+        """The 1 Hz re-send of both latched topics: rosbridge subscriptions do
+        not always ask for TRANSIENT_LOCAL."""
+        self._publish_state()
+        self._publish_profile()
 
     # ── the service ──────────────────────────────────────────────────────────
 

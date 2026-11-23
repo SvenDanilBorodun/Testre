@@ -71,7 +71,7 @@ vi.mock('../../components/Workshop/SimStage', () => ({
 
 // ── Remaining children: import-safe no-op stubs (inlined — a vi.mock factory is
 //    hoisted above imports, so it can't reference a top-level helper). ──
-vi.mock('../../components/Workshop/CalibrationWizard', () => ({ __esModule: true, default: () => <div data-testid="calib-wizard" /> }));
+vi.mock('../../components/Workshop/calibration/CalibrationPanel', () => ({ __esModule: true, default: () => <div data-testid="calib-panel" /> }));
 // LeaderToggle exposes the lock reason the page hands it.
 vi.mock('../../components/Workshop/LeaderToggle', () => ({
   __esModule: true,
@@ -89,7 +89,7 @@ vi.mock('../../components/Workshop/RunControls', () => ({
 }));
 vi.mock('../../components/Workshop/CameraFeedOverlay', () => ({ __esModule: true, default: () => <div data-testid="camera-feed" /> }));
 vi.mock('../../components/Workshop/TemplatePicker', () => ({ __esModule: true, default: () => <div data-testid="template-picker" /> }));
-// ToolbarButtons renders its `extra` slot (Verlauf, Kalibrierung neu starten);
+// ToolbarButtons renders its `extra` slot (Verlauf, Kalibrierung);
 // the Vormachen chooser lives in the page header.
 vi.mock('../../components/Workshop/ToolbarButtons', () => ({
   __esModule: true,
@@ -150,6 +150,7 @@ vi.mock('../../components/Workshop/blocks/perception', () => ({
 
 // ── Hooks + services. ──
 const mockRos = vi.hoisted(() => ({
+  startCalibration: vi.fn(() => Promise.resolve({ success: true, message: '' })),
   getObjectCatalog: vi.fn(() =>
     Promise.resolve({
       success: true,
@@ -203,12 +204,8 @@ vi.mock('react-hot-toast', () => ({
 function baseState(over = {}) {
   return {
     workshop: {
-      // calibrated so the editor (not the wizard) renders; sim needs no calib.
-      hasIntrinsicScene: true,
-      hasHandeyeScene: true,
-      hasTableTouch: true,
-      recalibrating: false,
-      pendingVerify: false,
+      // calibrated so the editor (not the calibration panel) renders; sim needs no calib.
+      calibration: { state: 'ok' },
       selectedWorkflowId: null,
       unsavedBlocklyJson: null,
       restrictedBlocks: null,
@@ -387,20 +384,19 @@ describe('WorkshopPage — Lernpfade are real-rig only (N1, owner decision Q5)',
 });
 
 describe('WorkshopPage — an uncalibrated rig cannot START outside the simulator (§3.49)', () => {
-  // A simulator „Ziel setzen" pin is stored at z = 0 (the virtual table). On a
-  // real rig with no touch-off the server keeps that stored 0 and has no floor
-  // (measured: OMX fingertips 40 mm into the table, no refusal). The ONE thing
-  // keeping that run from being started is that showEditor hides RunControls
-  // outside the simulator until the rig is calibrated. Keep this gate.
-  test('no touch-off, simulator off → the CalibrationWizard, no RunControls; in the simulator → RunControls', async () => {
-    mockState = baseState({ hasTableTouch: false });
+  // A simulator „Ziel setzen" pin is stored at z = 0 (the virtual table). The
+  // ONE thing keeping a real run of it from being started on an uncalibrated
+  // robot is that showEditor hides RunControls outside the simulator until the
+  // calibration state is `ok`. Keep this gate.
+  test('not calibrated, simulator off → the calibration panel, no RunControls; in the simulator → RunControls', async () => {
+    mockState = baseState({ calibration: { state: 'needs_arm_check', code: 'needs_arm_check/none' } });
     render(<WorkshopPage isActive />);
-    expect(await screen.findByTestId('calib-wizard')).toBeInTheDocument();
+    expect(await screen.findByTestId('calib-panel')).toBeInTheDocument();
     expect(screen.queryByTestId('run-controls')).toBeNull();
     expect(screen.queryByTestId('blockly-workspace')).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
     expect(await screen.findByTestId('run-controls')).toBeInTheDocument();
-    expect(screen.queryByTestId('calib-wizard')).toBeNull();
+    expect(screen.queryByTestId('calib-panel')).toBeNull();
   });
 });
 
@@ -706,13 +702,13 @@ describe('WorkshopPage — the header (WI-1.4)', () => {
     expect(screen.getByRole('button', { name: DE.TOOLBAR_TEACH }).getAttribute('aria-describedby')).toBe(reason.id);
   });
 
-  test('„Kalibrierung neu starten" is offered on the real robot, never in the simulator (R0-8)', async () => {
+  test('„Kalibrierung" is offered on the real robot, never in the simulator (R0-8)', async () => {
     render(<WorkshopPage isActive />);
     await screen.findByTestId('blockly-workspace');
-    expect(screen.getByRole('button', { name: 'Kalibrierung neu starten' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Kalibrierung' })).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
     await screen.findByTestId('sim-stage');
-    expect(screen.queryByRole('button', { name: 'Kalibrierung neu starten' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Kalibrierung' })).toBeNull();
   });
 });
 

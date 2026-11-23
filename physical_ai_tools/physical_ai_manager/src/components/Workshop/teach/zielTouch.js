@@ -5,17 +5,25 @@
  * Licence Agreement; see LICENSE at the repository root.
  */
 
-// Ziel by touch: is the captured TCP plausibly ON the table? A Ziel is a point
-// on the table whose height the run re-reads from the table plane, so a Z
-// pressed with the gripper held in the air would silently drop that height.
-// Pure; no Blockly, no React. Rig gate S-R4 owns the per-arm numbers.
+// Ziel by touch: is the captured TCP plausibly ON the mat? A Ziel is a point
+// on the table whose height the run takes from the fixture, so a Z pressed
+// with the gripper held in the air would silently drop that height.
+// Pure; no Blockly, no React.
 
 import { armGeometry } from '../../../utils/armProfile';
+import fixture from '../fixture/sceneFixture.json';
 
-// The expected FK TCP height when the fingertips touch the table (z = 0 is the table surface
-// on every shipped arm: CLAUDE.md „z = 0 IS the table"). OMX: the FK TCP is end_effector_link and the
-// fingers reach ik_solver._TOOL_TIP_EXT_M = 0.04 m further. V1: the TCP IS the (closed) fingertip.
-export const ZIEL_TOUCH_TCP_Z_M = Object.freeze({ omx_f: 0.04, v1: 0.0 });
+// The expected FK TCP height when the fingertips touch the mat (spec 40 S5):
+// z = 0 is the table, the mat's top lies MAT_THICKNESS_M above it, and the
+// solver's EE point sits FINGERTIP_BELOW_EE_M above the mat when the fingertips
+// touch it (the OMX with the gripper at the cube-holding opening — a
+// provisional value until the owner's measurement, D86; the V1's TCP IS the
+// closed fingertip, 0). Read from the fixture contract, never a literal here.
+const C = fixture.constants;
+export const ZIEL_TOUCH_TCP_Z_M = Object.freeze({
+  omx_f: C.MAT_THICKNESS_M + C.FINGERTIP_BELOW_EE_M.omx,
+  v1: C.MAT_THICKNESS_M + C.FINGERTIP_BELOW_EE_M.v1,
+});
 export const ZIEL_TOUCH_TOLERANCE_MM = 30;
 
 const EXPECTED = new Map(Object.entries(ZIEL_TOUCH_TCP_Z_M));

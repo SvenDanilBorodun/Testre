@@ -81,6 +81,61 @@ class FloorRefusal(_WorkflowError):
     the floor sentence by a broader ``except`` (spec D1, r4-M2)."""
 
 
+class TowerRefusal(_WorkflowError):
+    """The camera tower's refusal of the manual home glide (spec 40 S6.2, WP-12):
+    every rung the floor and the Sperrzonen allowed was refused by the tower
+    guard, which ``plan_home_route`` / ``plan_floor_checked_home_route`` take as a
+    rung condition when given one (``tower=``). ``reason`` is the guard's:
+    ``'too_close'`` (:data:`TOWER_HOME_REFUSED_DE`), ``'unjudgeable'`` or
+    ``'droop'`` (the guard's own sentence)."""
+
+    def __init__(self, text, reason):
+        super().__init__(text)
+        self.reason = reason
+
+
+# The glide's own sentence (52 §5.3 (b): the home-glide prompt's hint says the same).
+TOWER_HOME_REFUSED_DE = ('Von hier würde die Fahrt in die Grundstellung dem Kameraturm zu nahe kommen. Bring '
+                         'den Arm erst mit „Steuern" nach vorne – dann geht die Grundstellung.')
+
+
+class _TowerRung:
+    """The tower guard as a rung condition: ``ok(legs)`` judges every leg of a
+    rung, and the first refusal it meets is what the planner says when no rung
+    is left. Without a guard every rung passes."""
+
+    def __init__(self, guard, n):
+        self.guard = guard
+        self.n = n
+        self.verdict = None
+
+    def ok(self, legs) -> bool:
+        if self.guard is None:
+            return True
+        from physical_ai_server.workflow.handlers import motion as _m
+        for leg in legs:
+            verdict = _m.tower_leg_verdict(self.guard, leg[0], leg[1], self.n)
+            if verdict is not None:
+                if self.verdict is None:
+                    self.verdict = verdict
+                return False
+        return True
+
+    def stuck(self, q_start) -> bool:
+        """True when the guard refuses the start itself (a leg of no length:
+        its one coarse sample, the start, is below the allowance). Every rung
+        then starts with that sample at the same claw value (the claw is
+        carried), so none can pass and the search is skipped."""
+        return self.guard is not None and not self.ok([(list(q_start), list(q_start))])
+
+    def refusal(self) -> TowerRefusal:
+        reason = getattr(self.verdict, 'reason', 'unjudgeable')
+        if reason == 'too_close':
+            return TowerRefusal(TOWER_HOME_REFUSED_DE, reason)
+        from physical_ai_server.workflow.handlers import motion as _m
+        return TowerRefusal(str(_m.tower_refusal(self.verdict)), reason)
+
+
 _logger = logging.getLogger(__name__)
 
 
@@ -197,13 +252,13 @@ _FLOOR_REFUSAL_DE = (
 
 
 def _floor_fn(ctx):
-    """``(x, y) -> table height``, from the touch-off when there is one.
+    """``(x, y) -> table height``, from the run's table when it has one.
 
     Falls back to ``0.0`` rather than to "unknown", and that is deliberate: on
     this arm z = 0 is not a guess, it is where ``base_link`` is bolted (its mesh
     spans z ∈ [0.0000, 0.0625] m). So the floor guard works on an UNCALIBRATED
     rig too — unlike the Cartesian floor, which has nothing to compare against
-    until „Tisch vermessen" has run.
+    until the run has a table height.
     """
     from physical_ai_server.workflow.handlers import motion as _m
 
@@ -311,7 +366,7 @@ def _warn_self_collision(ctx, geom, legs, log=None) -> None:
             'trotzdem ausgeführt — bitte den Arm dabei beobachten.')
 
 
-def plan_home_route(ctx, q_start, q_home_full, duration_s: float, log=None) -> list:
+def plan_home_route(ctx, q_start, q_home_full, duration_s: float, log=None, tower=None) -> list:
     """Legs ``[(q_from, q_to, duration), …]`` that reach the Grundstellung
     without driving a link through the table, or raise ``WorkflowError``
     (:class:`FloorRefusal` for the floor refusal).
@@ -325,13 +380,23 @@ def plan_home_route(ctx, q_start, q_home_full, duration_s: float, log=None) -> l
     profile-less ctx, every test double) gets exactly ``[(q_start, q_home_full,
     duration_s)]`` — one leg, byte-identical to today. So does any rig with
     ``EDUBOTICS_HOME_FLOOR_TOL_M=0``.
+
+    ``tower`` (the manual glide's tower guard, spec 40 WP-12) is a rung
+    condition: a rung is taken only when the guard passes every leg of it too,
+    and when it refused every rung the floor and the Sperrzonen allowed the
+    planner raises :class:`TowerRefusal`. ``None``: no condition, today's ladder.
     """
     from physical_ai_server.workflow import arm_geometry as _ag
     from physical_ai_server.workflow.handlers import motion as _m
 
     direct = [(list(q_start), list(q_home_full), duration_s)]
+    rung = _TowerRung(tower, _m._n(ctx))
+    if rung.stuck(q_start):
+        raise rung.refusal()
     geom = _ag.resolve_geometry(ctx)
     if geom is None or FLOOR_TOL_M <= 0.0:
+        if not rung.ok(direct):
+            raise rung.refusal()
         return direct
 
     floor_fn = _floor_fn(ctx)
@@ -340,7 +405,7 @@ def plan_home_route(ctx, q_start, q_home_full, duration_s: float, log=None) -> l
     # L0 — direct. The 98 % case, and the one the measurements say to keep.
     floor_direct = _floor_ok(geom, q_start, q_home_full, floor_fn, allowance)
     zone_direct = _zone_ok(ctx, q_start, q_home_full)
-    if floor_direct and zone_direct:
+    if floor_direct and zone_direct and rung.ok(direct):
         _warn_self_collision(ctx, geom, direct, log=log)
         return direct
 
@@ -381,7 +446,7 @@ def plan_home_route(ctx, q_start, q_home_full, duration_s: float, log=None) -> l
             # inflated size). Re-raise it rather than the floor message: the
             # table is provably not the obstacle here.
             raise zone_refusal
-        if all(_floor_ok(geom, a, b, floor_fn, allowance) for a, b, _d in legs):
+        if all(_floor_ok(geom, a, b, floor_fn, allowance) for a, b, _d in legs) and rung.ok(legs):
             _warn_self_collision(ctx, geom, legs, log=log)
             sink = log if log is not None else getattr(ctx, 'log', None)
             if callable(sink):
@@ -414,6 +479,8 @@ def plan_home_route(ctx, q_start, q_home_full, duration_s: float, log=None) -> l
             continue
         legs = [(list(q_start), via, _ESCAPE_DURATION_S),
                 (via, list(q_home_full), duration_s)]
+        if not rung.ok(legs):
+            continue
         _warn_self_collision(ctx, geom, legs, log=log)
         sink = log if log is not None else getattr(ctx, 'log', None)
         if callable(sink):
@@ -425,6 +492,9 @@ def plan_home_route(ctx, q_start, q_home_full, duration_s: float, log=None) -> l
     # was fine over the table and only a Sperrzone blocked it, the floor remedy
     # (hand-guide the arm up) is the wrong advice — say what is actually in the
     # way. path_guard owns that wording, including the inflated-size sentence.
+    # A rung the floor and the zones allowed but the tower refused: the tower.
+    if rung.verdict is not None:
+        raise rung.refusal()
     if floor_direct and not zone_direct:
         from physical_ai_server.workflow import path_guard as _pg
         raise _m.WorkflowError(_pg._refusal_message(
@@ -523,14 +593,14 @@ def _table_surface_fn(ctx):
     """``(x, y) -> the table SURFACE height under that point``, for judging
     where the arm's OWN parts are (``pose_floor_clearance``).
 
-    The touch-off plane where one exists (``motion._floor_z_at``, the
-    plane-aware refusal helper — never the ``GRASP_Z_FROM_PLANE`` knob) minus
-    the solver's ``tool_tip_below_ee_m``: on the OMX the touch-off's
-    ``z_table`` is the END-EFFECTOR frame's height with the fingertips on the
-    table (0.04 m above the surface), on the Feetech arm the EE frame IS the
-    fingertip (0). With no table measurement, the base plane z = 0. So a kit
-    whose arm stands on a riser is judged by its own measurement, and on a
-    Feetech arm this is exactly :func:`_floor_fn`."""
+    The run's table height (``motion._floor_z_at``, the plane-aware refusal
+    helper — never the ``GRASP_Z_FROM_PLANE`` knob) minus the solver's
+    ``tool_tip_below_ee_m``: ``z_table`` is the END-EFFECTOR frame's height
+    with the fingertips on the table (a real run carries the fixture
+    contract's ``MAT_THICKNESS_M + FINGERTIP_BELOW_EE_M``, the simulator its
+    solver's own fingertip offset), so this answers the mat's surface. With no
+    table height, the base plane z = 0. On a Feetech arm, whose EE frame IS
+    the fingertip (0), this is exactly :func:`_floor_fn`."""
     from physical_ai_server.workflow.handlers import motion as _m
 
     tip = float(getattr(getattr(ctx, 'ik', None), 'tool_tip_below_ee_m', 0.0) or 0.0)
@@ -595,37 +665,44 @@ def pose_floor_clearance(ctx, q_full) -> Optional[float]:
 
 
 def plan_floor_checked_home_route(ctx, q_start, q_home_full, duration_s: float,
-                                  log=None) -> list:
+                                  log=None, tower=None) -> list:
     """Legs to HOME for the manual glide and the `home` block, or raise
     ``WorkflowError`` (German).
 
     Box-table arms (V1), a disabled floor rung, or a solver without
     ``link_points`` → exactly :func:`plan_home_route`. Otherwise (the OMX) the
-    point-model ladder described above."""
+    point-model ladder described above. ``tower``: the rung condition of
+    :func:`plan_home_route`, on this ladder too."""
     from physical_ai_server.workflow import arm_geometry as _ag
 
     ik = getattr(ctx, 'ik', None)
     if (_ag.resolve_geometry(ctx) is not None or FLOOR_TOL_M <= 0.0 or ik is None
             or not callable(getattr(ik, 'link_points', None))):
-        # ``log`` is forwarded ONLY when given: a test stubs plan_home_route
-        # with a four-positional lambda (r5-m2), and every existing caller
-        # passes none.
-        if log is None:
-            return plan_home_route(ctx, q_start, q_home_full, duration_s)
-        return plan_home_route(ctx, q_start, q_home_full, duration_s, log=log)
+        # ``log`` and ``tower`` are forwarded ONLY when given: a test stubs
+        # plan_home_route with a four-positional lambda (r5-m2), and every
+        # existing caller passes neither.
+        extra = {}
+        if log is not None:
+            extra['log'] = log
+        if tower is not None:
+            extra['tower'] = tower
+        return plan_home_route(ctx, q_start, q_home_full, duration_s, **extra)
 
     start_idx = _moving_point_start(ik)
     if start_idx is None:
         raise FloorRefusal(_FLOOR_REFUSAL_DE)
     n = int(ik.num_joints())
+    rung = _TowerRung(tower, n)
+    if rung.stuck(q_start):
+        raise rung.refusal()
     # The point model is judged against z = 0 — the surface the base is bolted to —
-    # NOT the touch-off. On these solvers the touch-off's z_table/plane is the
-    # END-EFFECTOR FRAME's height when the FINGERS touch the table (the grasp
-    # descends that frame, see CLAUDE.md "DUAL Z-KEY CONVENTION"), i.e. ~the
-    # finger length ABOVE the real surface, while link_points already samples the
-    # fingers themselves. Judging the fingers and the elbow against that plane
-    # made a calibrated rig lift or refuse for a table that was ~40 mm lower.
-    # (The box model keeps the touch-off: there the TCP IS the fingertip.)
+    # NOT the run's z_table. On these solvers z_table is the END-EFFECTOR FRAME's
+    # height when the FINGERS touch the table (the grasp descends that frame, see
+    # CLAUDE.md "DUAL Z-KEY CONVENTION"), i.e. ~the finger length ABOVE the real
+    # surface, while link_points already samples the fingers themselves. Judging
+    # the fingers and the elbow against that height made a calibrated rig lift or
+    # refuse for a table that was ~40 mm lower (the touch-off's measurement then).
+    # (The box model keeps z_table: there the TCP IS the fingertip.)
     floor_fn = _base_plane_floor
     q_start = [float(v) for v in q_start]
     q_home_full = [float(v) for v in q_home_full]
@@ -638,7 +715,8 @@ def plan_floor_checked_home_route(ctx, q_start, q_home_full, duration_s: float,
     # Never below the table, and never deeper than the arm already is.
     allowance = min(0.0, start_clear) - 1e-9
 
-    if _point_line_ok(ik, start_arm, home_arm, floor_fn, start_idx, allowance):
+    if (_point_line_ok(ik, start_arm, home_arm, floor_fn, start_idx, allowance)
+            and rung.ok([(list(q_start), list(q_home_full), duration_s)])):
         return [(list(q_start), list(q_home_full), duration_s)]
 
     # LIFT rung — a small JOINT-SPACE via, never a Cartesian re-solve. The first
@@ -681,10 +759,15 @@ def plan_floor_checked_home_route(ctx, q_start, q_home_full, duration_s: float,
                               min(0.0, via_clear) - 1e-9):
             continue
         via = via_arm + [gripper]
+        legs = [(list(q_start), via, _POINT_LIFT_DURATION_S),
+                (via, list(q_home_full), duration_s)]
+        if not rung.ok(legs):
+            continue
         sink = log if log is not None else getattr(ctx, 'log', None)
         if callable(sink):
             sink('[WARNUNG] Der direkte Weg in die Grundstellung würde durch die '
                  'Tischebene führen — der Arm wird zuerst angehoben.')
-        return [(list(q_start), via, _POINT_LIFT_DURATION_S),
-                (via, list(q_home_full), duration_s)]
+        return legs
+    if rung.verdict is not None:
+        raise rung.refusal()
     raise FloorRefusal(_FLOOR_REFUSAL_DE)

@@ -180,6 +180,12 @@ services:
       - EDUBOTICS_CAMERA_SOURCE=${EDUBOTICS_CAMERA_SOURCE:-}
       - EDUBOTICS_CAMERA_INGEST_PORT=${EDUBOTICS_CAMERA_INGEST_PORT:-5557}
       - EDUBOTICS_CAMERA_NAMES=${EDUBOTICS_CAMERA_NAMES:-gripper,scene}
+      # Scene-camera profile: `tower_v1` = the tower camera kit (one camera on
+      # the tower is the scene camera for everything), anything else and the
+      # default = `legacy`, today's camera path. Read only by the arm
+      # container's scene-camera code, through one value table
+      # (scene_split.normalise_profile); no other service gets it.
+      - EDUBOTICS_SCENE_CAMERA_PROFILE=${EDUBOTICS_SCENE_CAMERA_PROFILE:-legacy}
     volumes:
       - /dev:/dev
       - /dev/shm:/dev/shm
@@ -286,10 +292,9 @@ services:
       # used to go dead — every service call timed out — until the encode finished).
       # Read by communicator.py; '0' reverts to the in-process edit (debug only).
       - EDUBOTICS_DATASET_EDIT_SUBPROCESS=${EDUBOTICS_DATASET_EDIT_SUBPROCESS:-1}
-      # Roboter Studio calibration dir (ChArUco intrinsics + hand-eye
-      # transforms). Default lands inside the edubotics_calib named volume
-      # mounted below. Readers: workflow/calibration_manager.py,
-      # physical_ai_server.py.
+      # Roboter Studio calibration dir (the arm check's and the mat check's
+      # files, workflow/autocal/). Default lands inside the edubotics_calib
+      # named volume mounted below. Reader: physical_ai_server.py.
       - EDUBOTICS_CALIB_DIR=${EDUBOTICS_CALIB_DIR:-/root/.cache/edubotics}
       # Roboter Studio named-object grasping: the object set is a FIXED constant
       # baked into the physical-ai-server image (identical on every machine/user;
@@ -359,45 +364,6 @@ services:
       # behavior); omx_follower = Roboter-Studio-only kit. Absent/unknown
       # values fall back to omx_full (one-variable rollback).
       - EDUBOTICS_ROBOT_TYPE=${EDUBOTICS_ROBOT_TYPE:-omx_full}
-      # WS4 (2026-06-17) scene-cam single-shot extrinsic: the known
-      # board-on-table placement (base frame, metres). The student lays the
-      # ChArUco flat at this reference; the scene extrinsic + z_table derive
-      # from it. Read by workflow/calibration_manager.py at import time, so
-      # these MUST stay forwarded (ci.yml::env-forwarding-guard). Defaults
-      # (18 cm in front of base, centred, table = base plane) fit the typical
-      # OMX-F classroom station — see tools/classroom_kit_README.md.
-      - EDUBOTICS_BOARD_ORIGIN_X_M=${EDUBOTICS_BOARD_ORIGIN_X_M:-0.18}
-      - EDUBOTICS_BOARD_ORIGIN_Y_M=${EDUBOTICS_BOARD_ORIGIN_Y_M:-0.075}
-      - EDUBOTICS_BOARD_TABLE_Z_M=${EDUBOTICS_BOARD_TABLE_Z_M:-0.0}
-      # Yaw of the ChArUco board frame about base +Z (0 when the L-jig holds it
-      # square to the base — the default). For a jig that holds the board rotated.
-      - EDUBOTICS_BOARD_YAW_DEG=${EDUBOTICS_BOARD_YAW_DEG:-0.0}
-      # Scene-extrinsic orientation sanity gate: the workspace band the camera's
-      # optical axis must hit (forward of the robot, roughly centred), so a
-      # grossly misplaced board is rejected. Generous defaults; relax per-rig for
-      # an unusual camera mount.
-      - EDUBOTICS_EXTRINSIC_REGION_X_MIN=${EDUBOTICS_EXTRINSIC_REGION_X_MIN:-0.08}
-      - EDUBOTICS_EXTRINSIC_REGION_X_MAX=${EDUBOTICS_EXTRINSIC_REGION_X_MAX:-0.46}
-      - EDUBOTICS_EXTRINSIC_REGION_Y_ABS=${EDUBOTICS_EXTRINSIC_REGION_Y_ABS:-0.18}
-      # P3a: one extrinsic "Bild erfassen" click internally bursts this many
-      # camera reads of the fixed board and averages the solvePnP poses (sensor-
-      # jitter reduction, ~sqrt(N)). =1 reverts to the exact single-shot path.
-      # INTERVAL spaces the reads past the ~25 fps frame period. Read by
-      # workflow/calibration_manager.py.
-      - EDUBOTICS_EXTRINSIC_BURST_FRAMES=${EDUBOTICS_EXTRINSIC_BURST_FRAMES:-8}
-      - EDUBOTICS_EXTRINSIC_BURST_INTERVAL_S=${EDUBOTICS_EXTRINSIC_BURST_INTERVAL_S:-0.06}
-      # DEV (2026-06-24): force a full recalibration (intrinsics + extrinsic +
-      # touch-off) on EVERY EduBotics restart, because the bench setup changes
-      # constantly during development. The server reads this ONCE at startup; the
-      # /calibration/status gate reports not-calibrated until the student re-runs
-      # the full wizard this boot (then it latches for the session, re-asserts next
-      # restart). Set to 0/false/no/off for the classroom (calibration persists).
-      # Read by physical_ai_server.py — MUST stay forwarded (env-forwarding-guard).
-      - EDUBOTICS_FORCE_RECALIBRATION=${EDUBOTICS_FORCE_RECALIBRATION:-1}
-      # #1 (2026-06-19): per-rig intrinsic calibration is MANDATORY — the
-      # factory-default-intrinsics seeding (the old EDUBOTICS_FACTORY_* knobs)
-      # was REMOVED. A guessed focal length scales every projected XY, so no
-      # guessed K ships; the student runs the 12-frame ChArUco intrinsic step.
       # Generic grasp: conservative descend clearance above the measured table
       # plane, and a fixed tool-roll (j5) for the gripper. Rig-tunable.
       - EDUBOTICS_GRASP_CLEARANCE_M=${EDUBOTICS_GRASP_CLEARANCE_M:-0.012}
@@ -474,6 +440,12 @@ services:
       - EDUBOTICS_OUTPUT_MAX_PER_S=${EDUBOTICS_OUTPUT_MAX_PER_S:-5}
       - EDUBOTICS_GRASP_RETRY=${EDUBOTICS_GRASP_RETRY:-1}
       - EDUBOTICS_GRASP_SETTLE_S=${EDUBOTICS_GRASP_SETTLE_S:-0.3}
+      # Arrival trim (spec 40 S6.6): before the gripper closes in „aufnehmen" /
+      # „Greife", joints 2-4 are commanded once more by what the arm still lacks
+      # (raise-only, at most two rounds; only with a valid arm check, never in
+      # the simulator). `0` is the one-variable rollback. Read by
+      # workflow/handlers/motion.py.
+      - EDUBOTICS_ARM_TRIM=${EDUBOTICS_ARM_TRIM:-1}
       # Teleop force/collision e-stop (Rule §2 software guard, teleop-only). Read by the
       # collision monitor in safety/collision_monitor.py + collision_detector.py. The follower
       # is MIXED-MODEL: dxl11-13 (XL430-W250) expose 'Present Load', dxl14-15 (XL330-M288)

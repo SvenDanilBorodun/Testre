@@ -7,7 +7,10 @@
 // player's frame math, the chart data, the German formatting, the hint
 // sentences, the sync badge and the merge checks.
 
-import { describe, expect, it } from 'vitest';
+import React from 'react';
+import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it } from 'vitest';
+import MergePanel from '../../../components/Daten/MergePanel';
 import COPY from '../datenCopy';
 import * as CONTRACT from '../datenContract';
 import { everyFifth, parseEpisodeNumbers, toRangeText } from '../model/episodeNumbers';
@@ -452,6 +455,66 @@ describe('mergeChecks (§D5, each check failing alone)', () => {
     const failing = r.checks.filter((c) => !c.ok);
     expect(failing.map((c) => c.id)).toEqual([id]);
     expect(failing[0].text).toBe(text);
+  });
+
+  // D58: the eighth check, shown only when it fails or a dataset is a tower
+  // dataset (the version row's pattern), so a legacy rig's panel is today's.
+  describe('scene_camera (D58)', () => {
+    const ids = (r) => r.checks.map((c) => c.id);
+    const go = (entries) => {
+      render(React.createElement(MergePanel, {
+        entries, own: 'lena', robotType: 'omx_f', onGo: () => {}, onCancel: () => {},
+      }));
+      return screen.getByRole('button', { name: /zusammenführen/ });
+    };
+    afterEach(cleanup);
+
+    it('the contract carries it as the eighth id', () => {
+      expect(CONTRACT.MERGE_CHECKS).toEqual(['version', 'robot', 'fps', 'cameras', 'joints', 'video', 'stats', 'scene_camera']);
+    });
+
+    it.each([
+      ['two stampless entries', { scene_camera_profile: 'legacy' }, { scene_camera_profile: 'legacy' }],
+      ['two entries of an older robot image (no field)', {}, {}],
+      ['a stampless entry and one without the field', { scene_camera_profile: 'legacy' }, {}],
+    ])('no row for %s', (_name, a, b) => {
+      const r = mergeChecks([entry(a), entry({ id: 'max/omx_f_a', ...b })]);
+      expect(r.ok).toBe(true);
+      expect(ids(r)).not.toContain('scene_camera');
+      expect(r.checks).toHaveLength(6);
+    });
+
+    it('two tower entries: a passing row', () => {
+      const r = mergeChecks([entry({ scene_camera_profile: 'tower_v1' }), entry({ id: 'max/omx_f_a', scene_camera_profile: 'tower_v1' })]);
+      expect(r.ok).toBe(true);
+      expect(r.checks.at(-1)).toEqual({ id: 'scene_camera', ok: true, text: COPY.merge.check.sceneOk });
+      expect(r.checks.at(-1).text).toBe('Gleiche Szenen-Kamera: Turm-Kamera');
+      expect(go([entry({ scene_camera_profile: 'tower_v1' }), entry({ id: 'max/omx_f_a', scene_camera_profile: 'tower_v1' })]).disabled).toBe(false);
+    });
+
+    it.each([
+      ['a tower and a stampless entry', { scene_camera_profile: 'tower_v1' }, { scene_camera_profile: 'legacy' }],
+      ['a tower entry and one of an older robot image', { scene_camera_profile: 'tower_v1' }, {}],
+    ])('%s fail it alone, the button disabled', (_name, a, b) => {
+      const entries = [entry(a), entry({ id: 'max/omx_f_a', ...b })];
+      const r = mergeChecks(entries);
+      expect(r.ok).toBe(false);
+      expect(r.checks.filter((c) => !c.ok)).toEqual([{ id: 'scene_camera', ok: false, text: COPY.merge.check.sceneBad }]);
+      expect(COPY.merge.check.sceneBad).toBe('Mit verschiedenen Szenen-Kameras aufgenommen (Turm-Kamera und bisherige Szenen-Kamera) – lässt sich nicht zusammenführen');
+      expect(go(entries).disabled).toBe(true);
+    });
+
+    it.each([
+      ['a tower entry', { scene_camera_profile: 'tower_v1' }],
+      ['a stampless entry', { scene_camera_profile: 'legacy' }],
+    ])('%s and one whose stamp is unreadable (null): the unreadable text', (_name, a) => {
+      const entries = [entry(a), entry({ id: 'max/omx_f_a', scene_camera_profile: null })];
+      const r = mergeChecks(entries);
+      expect(r.ok).toBe(false);
+      expect(r.checks.filter((c) => !c.ok)).toEqual([{ id: 'scene_camera', ok: false, text: COPY.merge.check.sceneUnknown }]);
+      expect(COPY.merge.check.sceneUnknown).toBe('Bei einem Datensatz ist nicht lesbar, mit welcher Szenen-Kamera er aufgenommen wurde – lässt sich nicht zusammenführen');
+      expect(go(entries).disabled).toBe(true);
+    });
   });
 });
 

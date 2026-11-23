@@ -50,6 +50,13 @@ export const cloudCopy = {
   leader: {
     hint: 'Der Leader-Arm ist aktiv. Schalte mit dem Leader-Schalter in den Follower-Modus, bevor du in der Cloud startest.',
   },
+  // D58: the reserved model and the robot name different scene cameras. A
+  // warning only; Start stays possible. {then}/{now} come from sceneCameraNames
+  // (the robot's own words, record_texts_de.SCENE_CAMERA_NAMES_DE).
+  sceneMismatch:
+    'Dieses Modell wurde mit Aufnahmen {then} trainiert, dein Roboter filmt jetzt mit {now}. Es kann deshalb '
+    + 'schlechter greifen. Am besten nimmst du neue Episoden auf und trainierst neu.',
+  sceneCameraNames: { legacy: 'der bisherigen Szenen-Kamera', tower_v1: 'der Turm-Kamera' },
   models: {
     title: 'Deine Modelle',
     loading: 'Modelle werden geladen …',

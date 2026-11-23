@@ -35,6 +35,8 @@ equal to ``lerobot.datasets.utils``'s (the thin Dockerfile's Daten gate).
 from __future__ import annotations
 
 import hashlib
+import importlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -59,7 +61,7 @@ EPISODES_DIR = 'meta/episodes'
 # Columns a copy renumbers; every OTHER data column is payload and copied verbatim.
 INDEX_COLUMNS = ('index', 'episode_index', 'task_index')
 # contract.MERGE_CHECKS, in that order.
-MERGE_CHECKS = ('version', 'robot', 'fps', 'cameras', 'joints', 'video', 'stats')
+MERGE_CHECKS = ('version', 'robot', 'fps', 'cameras', 'joints', 'video', 'stats', 'scene_camera')
 _VIDEO_INFO_KEYS = ('video.codec', 'video.pix_fmt', 'video.height', 'video.width', 'video.fps')
 # LeRobot's own defaults for a source info.json that omits a size setting.
 _DEFAULT_CHUNKS_SIZE = 1000
@@ -68,6 +70,22 @@ _DEFAULT_VIDEO_FILES_MB = 200
 # verify() decodes the first and the last frame of every output episode at this
 # tolerance: the train-time FrameTimestampError condition (P1).
 DECODE_TOLERANCE_S = 1e-4
+
+
+def _scene_provenance():
+    """``scene_provenance`` (D58, stdlib only): by package name, by file path when
+    this module was loaded without its package."""
+    try:
+        return importlib.import_module('physical_ai_server.scene_provenance')
+    except ImportError:
+        spec = importlib.util.spec_from_file_location(
+            '_edubotics_v3_scene_provenance', str(Path(__file__).resolve().parent.parent / 'scene_provenance.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+
+scene_provenance = _scene_provenance()
 
 
 class SurgeryError(RuntimeError):
@@ -272,7 +290,10 @@ def check_compatible(sources) -> list:
     """``[(ok, check_id)]`` with exactly ``MERGE_CHECKS``' ids, in that order.
     ``stats``: the per-episode statistics carry the same names per feature — a
     LeRobot that writes no quantiles ``q01…q99`` cannot be merged with one that
-    does (LeRobot's own metadata writer would crash, P21)."""
+    does (LeRobot's own metadata writer would crash, P21). ``scene_camera``
+    (D58): two or more sources must all have a readable scene-camera profile,
+    the same one; ONE source (a delete, a split) is never refused for its stamp,
+    whatever it says."""
     a = sources[0]
     fa = _comparable_features(a.info)
 
@@ -283,6 +304,7 @@ def check_compatible(sources) -> list:
         return {k: v for k, v in f.items() if 'video' not in v}
 
     fs = [_comparable_features(s.info) for s in sources]
+    scenes = [scene_provenance.dataset_profile(s.root) for s in sources] if len(sources) > 1 else []
     return [
         (all(str(s.info.get('codebase_version', '')).startswith('v3') for s in sources), 'version'),
         (all(s.info.get('robot_type') == a.info.get('robot_type') for s in sources), 'robot'),
@@ -291,6 +313,7 @@ def check_compatible(sources) -> list:
         (all(joints(f) == joints(fa) for f in fs), 'joints'),
         (all(vids(f) == vids(fa) for f in fs), 'video'),
         (all(stat_names(s) == stat_names(a) for s in sources), 'stats'),
+        (None not in scenes and len(set(scenes)) <= 1, 'scene_camera'),
     ]
 
 

@@ -20,6 +20,7 @@ one). Stdlib only.
 from __future__ import annotations
 
 import base64
+import http.client
 import http.server
 import os
 import pathlib
@@ -137,12 +138,21 @@ class _NginxHarness(unittest.TestCase):
         os.makedirs(os.path.join(self.tmp, "html"))
         pathlib.Path(self.tmp, "html", "index.html").write_text("spa", encoding="utf-8")
         _Upstream.seen = []
-        self.ports = {k: _free_port() for k in ("nginx", "agent", "rosbridge", "video", "daten")}
+        # Every Python server binds port 0 and KEEPS the port the kernel gave
+        # it; only nginx's port is picked ahead (it is written into the
+        # config) and re-picked if nginx cannot bind it. A port probed with
+        # _free_port() and released was taken by something else before the
+        # server bound it (CI, 2026-11-23: EADDRINUSE in setUp).
+        self.ports = {}
         for name in ("rosbridge", "video", "daten"):
             handler = type(f"_{name}", (_Upstream,), {"name": name})
-            self._serve(http.server.ThreadingHTTPServer(("127.0.0.1", self.ports[name]), handler))
+            srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            self.ports[name] = srv.server_address[1]
+            self._serve(srv)
         if self.old_agent:
-            self._serve(http.server.ThreadingHTTPServer(("127.0.0.1", self.ports["agent"]), _OldAgent))
+            srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _OldAgent)
+            self.ports["agent"] = srv.server_address[1]
+            self._serve(srv)
         else:
             self.app = agent.AgentApp(env_file=os.path.join(self.tmp, ".env"),
                                       auth_file=os.path.join(self.tmp, "pi_auth.json"))
@@ -156,28 +166,48 @@ class _NginxHarness(unittest.TestCase):
             self.app._auth.try_claim(self.app._auth.mint_code(), "teacher")
             sid = self.app._auth.create_session("student", 600)
             self.cookie = f"{pi_auth.COOKIE_NAME}={sid}"
-            self.agent_srv = agent.ThreadingHTTPServer(("127.0.0.1", self.ports["agent"]),
-                                                       self.app._make_handler())
+            self.agent_srv = agent.ThreadingHTTPServer(("127.0.0.1", 0), self.app._make_handler())
+            self.ports["agent"] = self.agent_srv.server_address[1]
             self._serve(self.agent_srv)
         conf = os.path.join(self.tmp, "nginx.conf")
-        pathlib.Path(conf).write_text(
-            render(_OPI_NGINX.read_text(encoding="utf-8"), self.ports, self.tmp,
-                   strip_auth=self.strip_auth), encoding="utf-8")
-        test = subprocess.run([_NGINX, "-t", "-p", self.tmp, "-c", conf],
-                              capture_output=True, text=True, timeout=30)
-        self.assertEqual(test.returncode, 0, test.stderr)
-        self.nginx = subprocess.Popen([_NGINX, "-p", self.tmp, "-c", conf,
-                                       "-g", "daemon off;"],
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.nginx = None
         self.addCleanup(self._stop_nginx)
+        for _attempt in range(3):
+            self.ports["nginx"] = _free_port()
+            pathlib.Path(conf).write_text(
+                render(_OPI_NGINX.read_text(encoding="utf-8"), self.ports, self.tmp,
+                       strip_auth=self.strip_auth), encoding="utf-8")
+            test = subprocess.run([_NGINX, "-t", "-p", self.tmp, "-c", conf],
+                                  capture_output=True, text=True, timeout=30)
+            self.assertEqual(test.returncode, 0, test.stderr)
+            self.nginx = subprocess.Popen([_NGINX, "-p", self.tmp, "-c", conf,
+                                           "-g", "daemon off;"],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            if self._wait_for_nginx():
+                break
+            self._stop_nginx()      # its port was taken meanwhile: pick another
+        else:
+            self.fail("nginx did not come up on three free ports")
+        self.base = f"http://127.0.0.1:{self.ports['nginx']}"
+
+    def _wait_for_nginx(self) -> bool:
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
+            if self.nginx.poll() is not None:
+                return False        # exited: it could not bind its port
             try:
-                socket.create_connection(("127.0.0.1", self.ports["nginx"]), 0.2).close()
-                break
-            except OSError:
+                # The answer must come from nginx: a port taken by another
+                # listener would otherwise pass for a started nginx.
+                conn = http.client.HTTPConnection("127.0.0.1", self.ports["nginx"], timeout=1)
+                try:
+                    conn.request("GET", "/")
+                    server = conn.getresponse().getheader("Server", "")
+                finally:
+                    conn.close()
+                return server.startswith("nginx")
+            except (OSError, http.client.HTTPException):
                 time.sleep(0.05)
-        self.base = f"http://127.0.0.1:{self.ports['nginx']}"
+        return False
 
     def _serve(self, srv):
         srv.daemon_threads = True
@@ -186,6 +216,10 @@ class _NginxHarness(unittest.TestCase):
         self.addCleanup(srv.shutdown)
 
     def _stop_nginx(self):
+        if self.nginx is None or self.nginx.returncode is not None:
+            if self.nginx is not None and self.nginx.stderr:
+                self.nginx.stderr.close()
+            return
         self.nginx.terminate()
         try:
             self.nginx.wait(10)

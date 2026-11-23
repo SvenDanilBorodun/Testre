@@ -33,6 +33,36 @@ from typing import Any
 import cv2
 import numpy as np
 
+# pupil_apriltags reports its corners and centre about +0.4 px off OpenCV's
+# pixel convention (pixel centres on the integers): about +0.3 ... +0.5 px per
+# axis, with the blur and the tag size. cornerSubPix-refined corners are
+# unbiased on average (mean -0.003, +0.004 px); raw corners the refinement
+# cannot polish are moved by this instead (A13).
+UNREFINED_CORNER_SHIFT_PX = -0.4
+
+
+def _corner_centre(corners) -> tuple[float, float] | None:
+    """Where the diagonals of a tag quad cross (corner 0 to 2, corner 1 to 3):
+    the image of the tag's centre under any perspective, which the mean of the
+    corners is not. ``None`` unless both diagonals cross inside the quad."""
+    try:
+        c = np.asarray(corners, dtype=np.float64).reshape(4, 2)
+    except (ValueError, TypeError):
+        return None
+    if not np.all(np.isfinite(c)):
+        return None
+    d1 = c[2] - c[0]
+    d2 = c[3] - c[1]
+    w = c[1] - c[0]
+    det = d1[1] * d2[0] - d1[0] * d2[1]
+    if abs(det) <= 1e-9 * float(np.dot(d1, d1) + np.dot(d2, d2)):
+        return None
+    s = (w[1] * d2[0] - w[0] * d2[1]) / det
+    t = (w[1] * d1[0] - w[0] * d1[1]) / det
+    if not (0.0 <= s <= 1.0 and 0.0 <= t <= 1.0):
+        return None
+    return float(c[0, 0] + s * d1[0]), float(c[0, 1] + s * d1[1])
+
 
 @dataclass
 class Detection:
@@ -51,6 +81,8 @@ class Detection:
     # The two ROS-wire consumers in physical_ai_server.py already coerce at their
     # own call site (det.cx = int(cx) for the int32 Detection.msg field, float(cx)
     # for the verify-point projection), so they are unaffected by construction.
+    # In OpenCV's pixel convention (A13): the intersection of the diagonals of
+    # the refined corners, not pupil's raw centre (see _corner_centre).
     centroid_px: tuple[float, float]
     bbox_px: tuple[int, int, int, int]   # x, y, w, h
     confidence: float
@@ -58,8 +90,9 @@ class Detection:
     aruco_id: int | None = None
     world_xyz_m: tuple[float, float, float] | None = None
     # AprilTag only: the 4 tag corners in image pixels as a float (4, 2) ndarray,
-    # in pupil_apriltags' native counter-clockwise order. Kept as float (the
-    # detector also computes an int-cast copy for the bbox) because the
+    # in pupil_apriltags' native counter-clockwise order and in OpenCV's pixel
+    # convention (refined, or shifted by UNREFINED_CORNER_SHIFT_PX). Kept as
+    # float (the detector also computes an int-cast copy for the bbox) because the
     # downstream tag-pose solvePnP (workflow/tag_pose.py) needs sub-pixel
     # corners — an int cast measurably degrades the recovered yaw of a ~24 mm tag.
     corners_px: Any | None = None
@@ -135,11 +168,13 @@ class Perception:
         """Polish the float tag corners with ``cv2.cornerSubPix`` on the gray
         image. Returns the refined (4, 2) float64 corners in the SAME order;
         falls back to the raw corners on any failure or when the search window
-        can't fit (tiny / image-edge tags)."""
+        can't fit (tiny / image-edge tags), moved by
+        ``UNREFINED_CORNER_SHIFT_PX`` onto OpenCV's convention (A13)."""
         try:
             pts = np.asarray(corners_f, dtype=np.float64).reshape(-1, 2)
+            unrefined = pts + UNREFINED_CORNER_SHIFT_PX
             if pts.shape[0] < 1 or not np.all(np.isfinite(pts)):
-                return np.asarray(corners_f, dtype=np.float64)
+                return unrefined
             h, w = gray.shape[:2]
             win_x, win_y = Perception._SUBPIX_WIN
             # cornerSubPix reads a (2*win+1) neighbourhood around each point; if
@@ -148,7 +183,7 @@ class Perception:
             margin_x, margin_y = win_x + 1, win_y + 1
             if (pts[:, 0].min() < margin_x or pts[:, 0].max() > w - 1 - margin_x
                     or pts[:, 1].min() < margin_y or pts[:, 1].max() > h - 1 - margin_y):
-                return pts
+                return unrefined
             corners32 = pts.astype(np.float32).reshape(-1, 1, 2)
             refined = cv2.cornerSubPix(
                 gray, corners32, Perception._SUBPIX_WIN,
@@ -156,10 +191,10 @@ class Perception:
             )
             out = np.asarray(refined, dtype=np.float64).reshape(-1, 2)
             if out.shape != pts.shape or not np.all(np.isfinite(out)):
-                return pts
+                return unrefined
             return out
         except Exception:
-            return np.asarray(corners_f, dtype=np.float64)
+            return np.asarray(corners_f, dtype=np.float64) + UNREFINED_CORNER_SHIFT_PX
 
     def _detect_apriltag(self, bgr: np.ndarray, aruco_id: int | None) -> list[Detection]:
         if self._apriltag_detector is None:
@@ -174,10 +209,6 @@ class Perception:
         for r in results:
             if aruco_id is not None and r.tag_id != aruco_id:
                 continue
-            # Sub-pixel float centre — NOT int(). See Detection.centroid_px for the
-            # measurement: the int cast truncated (never rounded), biasing every
-            # grasp point by ~1.4 mm mean / 2.7 mm max in the same direction.
-            cx, cy = float(r.center[0]), float(r.center[1])
             # Sub-pixel float corners (pupil's native CCW order) for the
             # downstream tag-pose math; a separate int-cast copy drives the
             # bbox so the existing overlay/bbox path is byte-unchanged.
@@ -190,8 +221,18 @@ class Perception:
             # PRESERVES the input point order (it refines each point in place), so
             # pupil's CCW winding is kept. Guard tags too small / against the image
             # edge where the (5,5) search window can't fit — fall back to the raw
-            # detector corners on any failure.
+            # detector corners, moved onto OpenCV's convention, on any failure.
             corners_f = self._refine_corners_subpix(gray, corners_f)
+            # Sub-pixel float centre — NOT int(). See Detection.centroid_px for the
+            # measurement: the int cast truncated (never rounded), biasing every
+            # grasp point by ~1.4 mm mean / 2.7 mm max in the same direction.
+            # The centre is where the corners' diagonals cross (A13); pupil's own
+            # centre, moved like raw corners, only when they give none.
+            centre = _corner_centre(corners_f)
+            if centre is None:
+                centre = (float(r.center[0]) + UNREFINED_CORNER_SHIFT_PX,
+                          float(r.center[1]) + UNREFINED_CORNER_SHIFT_PX)
+            cx, cy = centre
             corners_i = corners_f.astype(int)
             xs, ys = corners_i[:, 0], corners_i[:, 1]
             x, y = int(xs.min()), int(ys.min())

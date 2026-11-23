@@ -35,6 +35,9 @@ jobs:
       # test_code_insert_cases.py compiles the insertion fixture with javac
       # ($JAVA_HOME_21_X64 on this runner): a lost JDK fails, never skips.
       EDUBOTICS_REQUIRE_JAVAC: "1"
+      # The server suite's real-detector tests (test/pupil_required.py) need
+      # pupil_apriltags, installed below: a lost detector fails, never skips.
+      EDUBOTICS_REQUIRE_PUPIL: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -75,10 +78,20 @@ jobs:
           # pinned equal to cloud_training_api/requirements.txt.
           # PyJWT: the cloud API verifies access tokens locally (2026-11-10,
           # services/jwt_auth.py); its tests sign real ES256 tokens.
+          # pytest-xdist (+ its execnet): the server suite runs on every core (2.41.0,
+          # owner decision D92): its tower-guard proofs made the serial step ~40 min.
           python -m pip install pyyaml==6.0.3 pytest==9.2.0 numpy==1.26.4 opencv-contrib-python-headless==4.10.0.84 cryptography==49.0.0 \
             pyarrow==25.0.0 av==15.1.0 huggingface_hub==1.23.0 \
             fastapi==0.115.12 httpx==0.28.1 aiohttp==3.14.1 "uvicorn[standard]==0.34.2" \
-            boto3==1.43.107 botocore==1.43.107 "PyJWT[crypto]==2.15.1"
+            boto3==1.43.107 botocore==1.43.107 "PyJWT[crypto]==2.15.1" \
+            pytest-xdist==3.8.0 execnet==2.1.2
+          # pupil-apriltags: the real AprilTag detector of the server image (its
+          # version), for the server suite's detector tests (EDUBOTICS_REQUIRE_PUPIL
+          # above). 1.0.4 has no wheel for Python 3.12, so pip builds its sdist; the
+          # sdist's CMakeLists asks for CMake 3.1, which the CMake 4 of the isolated
+          # build refuses unless told to behave as 3.5 (the image's workaround,
+          # docker/physical_ai_server/Dockerfile).
+          CMAKE_POLICY_VERSION_MINIMUM=3.5 python -m pip install pupil-apriltags==1.0.4
       - name: Syntax-check Python modules
         # ZERO-FILE FLOOR, the repo's standing rule for scan-based guards (the
         # four ps_* guards and the three lockstep tests all carry one).
@@ -167,7 +180,8 @@ jobs:
           python -m unittest discover -s tests -v
 
       - name: Roboter Studio workflow + IK unit tests (pure-Python, no ROS)
-        # numpy + opencv only (workflow modules import ROS/onnx/pupil lazily).
+        # numpy + opencv + pupil_apriltags (workflow modules import ROS/onnx/pupil
+        # lazily; the real-detector tests fail without pupil, EDUBOTICS_REQUIRE_PUPIL).
         # Covers the closed-form IK round-trip + base_yaw, the AprilTag
         # tag-pose/yaw math (the SOLE automated guard for the orientation chain —
         # the IK self-check is position-only), the object catalog schema, the
@@ -175,9 +189,21 @@ jobs:
         # interpreter, and the trajectory builder. These are pytest-style
         # (monkeypatch/tmp_path/pytest.approx fixtures), so this is a pytest run,
         # NOT unittest discover. Previously this dir was compileall-checked only.
+        # On every core, one worker per file (owner decision D92, 2.41.0): the
+        # tower-guard and route proofs made the serial run ~40 min on this runner
+        # (19:51 on an Apple M5 Pro), which with the steps above ran past
+        # timeout-minutes. loadfile keeps each file in one process, as the suite
+        # was built and verified. The tower guard's runtime budget (D72/D98: p99 <=
+        # 75 ms of process time per leg, owner-set) is measured ALONE after the
+        # parallel run: with every core busy, process time inflates (+49 % measured
+        # on 18 saturated cores) and the test failed at p99 61.5 ms on this runner
+        # (d212c6ff) while the guard itself was unchanged; alone it read 52.4 ms
+        # against the old 50 ms (58e1c484), so the owner set 75 ms (D98). Its own run fails if the
+        # test is gone (pytest exits 4 on an unknown node id).
         run: |
           cd physical_ai_tools/physical_ai_server
-          python -m pytest test/ -q
+          python -m pytest test/ -q -n auto --dist loadfile --deselect test/test_tower_guard.py::test_runtime_budget_here
+          python -m pytest test/test_tower_guard.py::test_runtime_budget_here -q
 
       - name: The Pi firewall in a real kernel (as root, SA-05)
         # VB-05 (2026-11-15): tests/test_pi_firewall_netns.py builds three

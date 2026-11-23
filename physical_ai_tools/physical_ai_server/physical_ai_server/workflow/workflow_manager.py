@@ -141,16 +141,17 @@ class WorkflowContext:
     # workflow with no replay block never touches it).
     trajectories: dict[str, Any] = field(default_factory=dict)
     # DUAL Z-KEY (don't conflate):
-    #   z_table        — MEASURED end-effector grasp height (touch-off). Used by
-    #                    motion.pickup as the descend target. NOT a projection plane.
-    #   board_table_z  — table SURFACE height (extrinsic solve). The plane the
+    #   z_table        — end-effector height with the fingertips on the table (spec
+    #                    40 S5). Used by motion.pickup as the descend target. NOT a
+    #                    projection plane.
+    #   board_table_z  — table SURFACE height (the mat's top). The plane the
     #                    camera ray intersects to recover an object's (x, y); the
     #                    object sits on the surface, not at the gripper grasp height.
     z_table: float | None = None
     board_table_z: float | None = None
     scene_intrinsics: dict | None = None
     scene_extrinsics: Any | None = None
-    # Touch-off MEASURED EE-frame table tilt (a, b, c) for z = a·x + b·y + c. Used
+    # EE-frame table tilt (a, b, c) for z = a·x + b·y + c (None: level). Used
     # by motion's descend; NOT used for object projection (it is offset above the
     # surface by the finger length, so projecting onto it reintroduces lateral
     # error on a tilted camera — perception projects onto board_table_z instead).
@@ -256,15 +257,6 @@ class WorkflowContext:
     # blocks runs fine without a catalog; a named block fails loud at the block.
     object_catalog: Any | None = None
     object_catalog_error: str | None = None
-    # W5 — ground-truth accuracy correction (from the "Genauigkeit prüfen" step).
-    # xy_correction is a 2x3 affine (numpy) mapping detected base XY -> corrected
-    # base XY (None → no correction / identity); yaw_bias_rad is added to the
-    # measured tag yaw before commanding the wrist roll (0.0 → no change). Both
-    # are consumed via getattr by perception_blocks (_apply_xy_correction /
-    # _apply_yaw_bias), so they are safe to read before/after this attribute
-    # exists. Threaded from the calib dict in start(), mirroring z_table.
-    xy_correction: Any | None = None
-    yaw_bias_rad: float = 0.0
     # Per-run claimed/skipped tag-id sets for the „Solange <Typ> sichtbar" loop:
     # a tag id is CLAIMED after a successful grasp (so a placed object re-entering
     # view is never re-grabbed and the loop terminates) and SKIPPED after a
@@ -388,6 +380,27 @@ class WorkflowContext:
     # Position names already warned THIS RUN that they were taught on another
     # robot (motion._stored_pose_joints): the [WARNUNG] is said once per name.
     position_warned: set = field(default_factory=set)
+    # The camera tower's check for THIS run (spec 40 S6.2 'Where'; WP-12): the
+    # guard the node's provider handed to start() — a fixture_guard.TowerGuard,
+    # or a RefusingGuard when it cannot be built — or None (``legacy``, a
+    # manager without a provider): then no motion is judged and every handler
+    # publishes what it always did. The handlers read it only through
+    # getattr(ctx, 'fixture_guard', None). Set once in start(), never mutated.
+    fixture_guard: Any | None = None
+    # (label, target) pairs whose refinement warning (D42: the arm model's pose
+    # misses the target by more than IK_REFINE_ACCEPT_M — the sector edge) was
+    # already said THIS RUN (motion._warn_refinement): once per target per run.
+    refine_warned: set = field(default_factory=set)
+    # The (width, height) of the scene frames the run's calibration was made
+    # for — the tower calibration's ``image_size`` (spec 40 S1 guard G4) — or
+    # None (the legacy calibration, the simulator): then a frame of any size
+    # is looked at. perception_blocks refuses a frame of another size in German.
+    scene_image_size: tuple | None = None
+    # The droop envelope of this rig's valid arm check (one value per arm joint,
+    # rad), handed in only with a run's tower calibration, or None (no arm
+    # check, legacy, the simulator): motion._trim_arrival (spec 40 S6.6) runs
+    # only with it. Set once in start(), never mutated.
+    arm_trim_envelope_rad: list | None = None
 
 
 MAX_WORKFLOW_JSON_BYTES = 256 * 1024  # 256 KiB; see plan §2.5
@@ -515,8 +528,26 @@ class WorkflowManager:
         arm_profile: Any | None = None,
         code_rpc: Any | None = None,
         simulated: bool = False,
+        fixture_guard_provider: Callable[[], Any] | None = None,
+        start_gate: Callable[[str, str], str | None] | None = None,
+        on_run_end: Callable[[str, str | None], None] | None = None,
     ) -> None:
         self._publisher = publisher
+        # The tower calibration (spec 40 S4, WP-13): asked at every start(),
+        # with the refusal guards, before anything of the run exists:
+        # ``start_gate(workflow_json, workflow_id)`` answers None (start) or the
+        # German refusal. The node passes the calibration service's gate for the
+        # REAL manager only (the mat check at the start of every real program).
+        self._start_gate = start_gate
+        # Fired after ``on_finished`` with ``(workflow_id, terminal phase)`` when
+        # a run ends, and with ``(workflow_id, None)`` when a start that passed
+        # the gate never became a run (the node: the calibration service's hook).
+        self._on_run_end = on_run_end
+        # The camera tower (spec 40 S6.2 'Where'; WP-12): asked at every start()
+        # for the run's guard (None: nothing judged). The node passes one for the
+        # real and the simulator manager, scoped by the stated scene-camera
+        # profile (D63); a manager without a provider judges nothing.
+        self._fixture_guard_provider = fixture_guard_provider
         # True ONLY for the simulator's manager (the node's
         # _get_or_create_sim_workflow_manager passes it). Stamped onto every
         # run's ctx.simulated: the one source of the mode-aware behaviour (no
@@ -633,6 +664,11 @@ class WorkflowManager:
             return False
         return self._thread is not None and self._thread.is_alive()
 
+    @property
+    def workflow_id(self) -> str | None:
+        """The id of the run this manager started last (it stays after the run ends)."""
+        return self._workflow_id
+
     def _prev_run_threads_alive(self) -> bool:
         """True while ANY thread of the PREVIOUS run is still running.
 
@@ -692,7 +728,7 @@ class WorkflowManager:
         ``plane_tracked`` says the z is a CACHED reading off the table plane (a
         camera click) rather than a MEASURED height (a „Position merken" FK
         snapshot), so ``motion.resolve_destination_z`` re-asks the plane in force
-        at run time instead of descending to a value the next touch-off
+        at run time instead of descending to a value a later calibration
         invalidates. It defaults False — the conservative direction, and what
         every pre-existing caller and every hand-built test dict keeps.
 
@@ -959,6 +995,15 @@ class WorkflowManager:
                 return False, (
                     'Zu viele Ereignis-Blöcke (Maximum 16).'
                 ), []
+            # The calibration gate is the last refusal guard (the mat check at
+            # the start of a real program, spec 40 S4). From here on every way
+            # out reports the run's end (the ``finally`` and ``_run``).
+            gated = False
+            if self._start_gate is not None:
+                refusal = self._start_gate(workflow_json, workflow_id)
+                if refusal is not None:
+                    return False, str(refusal), []
+                gated = True
 
             # EVERY path out of here restores the flag unless a run actually
             # took ownership of it — see the ``finally`` below.
@@ -1032,6 +1077,16 @@ class WorkflowManager:
                     except Exception as e:
                         return False, f'IK-Solver konnte nicht initialisiert werden: {e}', []
 
+                # The run's tower guard. A provider that fails cannot pass a
+                # motion: the run is refused in German, never started unjudged.
+                fixture_guard = None
+                if self._fixture_guard_provider is not None:
+                    try:
+                        fixture_guard = self._fixture_guard_provider()
+                    except Exception:  # noqa: BLE001 — refused below, never passed
+                        from physical_ai_server.workflow import fixture_guard as _fg
+                        return False, _fg.TOWER_UNJUDGEABLE_DE, []
+
                 perception_instance = None
                 if self._perception_factory is not None:
                     try:
@@ -1068,7 +1123,8 @@ class WorkflowManager:
                 else:
                     unreachable = self._ik_precheck(interpreter, ik_instance, zones,
                                                     destinations=destinations,
-                                                    calib=calib)
+                                                    calib=calib,
+                                                    fixture_guard=fixture_guard)
 
                 # Audit fix #6: seed ctx.last_full_joints synchronously HERE,
                 # before hat threads (or the main daemon) ever spawn. The
@@ -1110,10 +1166,11 @@ class WorkflowManager:
                     board_table_z=calib.get('board_table_z'),
                     scene_intrinsics=calib.get('scene_intrinsics'),
                     scene_extrinsics=calib.get('scene_extrinsics'),
+                    scene_image_size=(tuple(int(v) for v in calib['image_size'])
+                                      if calib.get('image_size') is not None else None),
                     table_plane=calib.get('table_plane'),
-                    # W5 — ground-truth accuracy correction (None/0.0 when never run).
-                    xy_correction=calib.get('xy_correction'),
-                    yaw_bias_rad=float(calib.get('yaw_bias_rad', 0.0) or 0.0),
+                    # The arm check's droop envelope (the arrival trim; None → no trim).
+                    arm_trim_envelope_rad=calib.get('droop_envelope_rad'),
                     should_stop=self._stop_event.is_set,
                     log=lambda msg: self._emit_status({'log_message': msg}),
                     emit_detections=lambda dets: self._emit_status({'detections': dets}),
@@ -1162,6 +1219,8 @@ class WorkflowManager:
                     hat_reclaim_at={},
                     # Phase-4 no-go zones (None/empty → motion behaves as today).
                     zones=zones,
+                    # The camera tower's check (None → nothing judged).
+                    fixture_guard=fixture_guard,
                     # Phase-2 Tempo (global speed multiplier; 1.0 → unchanged speed).
                     tempo=tempo,
                     # ArmProfile geometry stamps (motion._n & friends read these;
@@ -1275,6 +1334,8 @@ class WorkflowManager:
                     # silently un-stopped and any handler this call already
                     # started exits at once.
                     self._stop_event.set()
+                    if gated:
+                        self._report_run_end(workflow_id, None)
 
     def _start_joint_seed_watchdog(self, ctx: WorkflowContext) -> None:
         """Keep seeding ``ctx.last_full_joints`` until a real readback arrives.
@@ -1760,7 +1821,12 @@ class WorkflowManager:
         zones: list | None = None,
         destinations: dict[str, dict[str, Any]] | None = None,
         calib: dict[str, Any] | None = None,
+        fixture_guard: Any | None = None,
     ) -> list[dict[str, Any]]:
+        # ``fixture_guard`` (the run's tower guard): a target whose solved pose
+        # it refuses is flagged too — advisory like the rest; the runtime judges
+        # every leg. Judged with the claw open (the HOME seed's).
+        #
         # A Position that takes the JOINT route is not a point the arm has to
         # reach by a Cartesian solve (its HOME-like poses are often outside the
         # strict-vertical image), so it is left out of the point pre-check; the
@@ -1816,7 +1882,24 @@ class WorkflowManager:
                     'block_id': target['block_id'],
                     'message': 'Diese Position liegt in einer Sperrzone.',
                 })
+            elif fixture_guard is not None:
+                refusal = self._tower_refuses_pose(fixture_guard, solution)
+                if refusal is not None:
+                    unreachable.append({'block_id': target['block_id'], 'message': refusal})
         return unreachable
+
+    def _tower_refuses_pose(self, guard, solution) -> str | None:
+        """The guard's German refusal of the pose ``solution`` (arm joints) with
+        the claw open, or None (also when it cannot be asked: advisory)."""
+        try:
+            n = self._num_arm_joints
+            verdict = guard.judge_pose([float(v) for v in list(solution)[:n]],
+                                       float(self._home_full_joints[n]))
+        except Exception:  # noqa: BLE001 — advisory; the runtime judges every leg
+            return None
+        if getattr(verdict, 'refused', False):
+            return getattr(verdict, 'sentence_de', None)
+        return None
 
     def _zone_precheck_only(
         self,
@@ -2274,7 +2357,7 @@ class WorkflowManager:
                 # flood from this poll), which does not belong in a trigger check.
                 # The reclaim DOES belong here — see the all-claimed branch below.
                 from physical_ai_server.workflow.handlers.perception_blocks import (
-                    _excluded_ids, reclaim_from_detections, reclaim_only,
+                    _excluded_ids, frame_size_error, reclaim_from_detections, reclaim_only,
                 )
                 tag_ids = {int(i) for i in recipe.tag_ids}
                 wanted = tag_ids - {int(i) for i in _excluded_ids(ctx)}
@@ -2310,6 +2393,10 @@ class WorkflowManager:
                     time.sleep(0.2)
                     return False
                 frame = ctx.get_scene_frame()
+                if frame is not None and frame_size_error(ctx, frame) is not None:
+                    # G4: a frame the run's calibration was not made for is no
+                    # observation (the main stack's looking blocks say why).
+                    frame = None
                 if frame is None:
                     # NOT a dropped frame — that returns the cached previous
                     # image (see the docstring). This is "no frame has arrived
@@ -2363,6 +2450,8 @@ class WorkflowManager:
 
     def _run(self, interpreter: Interpreter, ctx: WorkflowContext) -> None:
         terminal_phase = 'error'
+        # Read once: a start after this run released on_workflow may set the next id.
+        workflow_id = self._workflow_id
         # Audit fix #6: ctx.last_full_joints is seeded synchronously in
         # start() before any handler thread spawns, so this block no
         # longer needs to redo the work here.
@@ -2466,6 +2555,15 @@ class WorkflowManager:
                 self._on_finished(terminal_phase)
             except Exception:
                 pass
+            self._report_run_end(workflow_id, terminal_phase)
+
+    def _report_run_end(self, workflow_id, phase) -> None:
+        if self._on_run_end is None:
+            return
+        try:
+            self._on_run_end(workflow_id, phase)
+        except Exception:  # noqa: BLE001 — the run is over either way
+            pass
 
     def _await_hat_handlers(self, ctx: WorkflowContext) -> None:
         """Keep the run alive for its hat handlers after the main stack ends.

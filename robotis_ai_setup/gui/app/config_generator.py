@@ -18,6 +18,7 @@ from .constants import (
     ROS_DOMAIN_ID,
 )
 from .device_manager import HardwareConfig
+from .scene_split import PROFILE_LEGACY, normalise_profile
 
 
 # Keys this generator owns. Anything in the existing .env that is NOT
@@ -58,6 +59,12 @@ MANAGED_KEYS = frozenset({
     # EDUBOTICS_FOLLOWER_ONLY is derived from it. The server reads it at boot to
     # resolve its ArmProfile (capabilities + kinematics seam).
     "EDUBOTICS_ROBOT_TYPE",
+    # EDUBOTICS_SCENE_CAMERA_PROFILE is the scene camera's profile (tower_v1 |
+    # legacy; spec 40 S1, decision D32), set by the setup's „Turm-Kamera" box.
+    # MANAGED like the robot type: fixed at "Umgebung starten", read back at
+    # the next launch, a stale hand-pinned value superseded. The arm container
+    # reads it (the ingest node's size check, the profile statement).
+    "EDUBOTICS_SCENE_CAMERA_PROFILE",
     # CAMERA_DEVICE_N / CAMERA_NAME_N are handled by prefix-match below
     # because the count varies with how many cameras are connected.
 })
@@ -508,7 +515,8 @@ def _phone_camera_names_line() -> str:
 def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
                       phone_camera: bool = False,
                       robot_type: str = DEFAULT_ROBOT_PROFILE,
-                      follower_only: bool | None = None) -> str:
+                      follower_only: bool | None = None,
+                      scene_camera_profile: str = PROFILE_LEGACY) -> str:
     """Write .env file with hardware paths.
 
     Args:
@@ -540,6 +548,9 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
             follower-only profile is CONTRADICTORY (the profile has no leader
             to re-arm) and raises a German ValueError instead of silently
             emitting a both-arms .env.
+        scene_camera_profile: The session's scene-camera profile, emitted as the
+            managed ``EDUBOTICS_SCENE_CAMERA_PROFILE`` line through
+            ``scene_split.normalise_profile`` (``tower_v1`` or ``legacy``).
 
     Returns:
         The content written to the file.
@@ -644,6 +655,7 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
     # GUI-hardset robot type — the server resolves its ArmProfile from this at
     # boot. MANAGED so the selector is authoritative; a full restart changes it.
     lines.append(f"EDUBOTICS_ROBOT_TYPE={robot_type}")
+    lines.append(f"EDUBOTICS_SCENE_CAMERA_PROFILE={normalise_profile(scene_camera_profile)}")
     # Default camera source. Yields to an operator override already present in
     # the preserved (unmanaged) lines, so EDUBOTICS_CAMERA_SOURCE=usb_cam in a
     # hand-edited .env survives regeneration (one-variable rollback).
@@ -668,7 +680,8 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
 
 def generate_cloud_only_env(output_path: str = ENV_FILE,
                             phone_camera: bool = False,
-                            robot_type: str = DEFAULT_ROBOT_PROFILE) -> str:
+                            robot_type: str = DEFAULT_ROBOT_PROFILE,
+                            scene_camera_profile: str = PROFILE_LEGACY) -> str:
     """Write a minimal .env for cloud-only mode (no robot hardware).
 
     Docker Compose still reads .env when starting any service, so we provide
@@ -683,7 +696,8 @@ def generate_cloud_only_env(output_path: str = ENV_FILE,
 
     ``robot_type`` is emitted for MANAGED-key symmetry (so a stale hand-pinned
     EDUBOTICS_ROBOT_TYPE is superseded here too, R3) even though cloud-only
-    never starts physical_ai_server.
+    never starts physical_ai_server. ``scene_camera_profile`` likewise, so the
+    „Turm-Kamera" box reads back what it was at the next launch.
     """
     domain_id = _resolve_ros_domain_id()
     preserved = _read_unmanaged_lines(output_path)
@@ -700,6 +714,7 @@ def generate_cloud_only_env(output_path: str = ENV_FILE,
         f"REGISTRY_FALLBACK={REGISTRY_FALLBACK}",
         f"IMAGE_TAG={IMAGE_TAG}",
         f"EDUBOTICS_ROBOT_TYPE={robot_type}",
+        f"EDUBOTICS_SCENE_CAMERA_PROFILE={normalise_profile(scene_camera_profile)}",
     ]
     from .constants import cameras_use_native_bridge
     if cameras_use_native_bridge() and not _has_camera_source(preserved):

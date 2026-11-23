@@ -56,9 +56,8 @@ from physical_ai_server.workflow.handlers.motion import GraspSkip, WorkflowError
 # Tightening the tolerance is NOT the fix: corner noise alone moves the recovered
 # edge by percent, so a threshold small enough to see 20 mm of plane error would
 # reject legitimate detections. Detecting a wrong plane height needs a second,
-# independent measurement of it (the touch-off's z_table vs the extrinsic's
-# board_table_z already are two such measurements, cross-checked at calibration
-# time by TABLE_TOUCH's 0.12 m camera cross-check) — not a stricter edge gate.
+# independent measurement of it (the mat check fits the camera to the mat's own
+# printed tags at every program start) — not a stricter edge gate.
 _TAG_EDGE_TOL_FRAC = max(0.0, _motion._safe_float('EDUBOTICS_TAG_EDGE_TOL_FRAC', 0.5))
 
 # Multi-frame yaw averaging for the grasped instance. Yaw error scales as
@@ -209,16 +208,39 @@ def _ensure_perception(ctx):
         )
 
 
+def frame_size_error(ctx, frame) -> Optional[str]:
+    """Guard G4 (spec 40 S1): the German refusal when ``frame`` is not the
+    size the run's calibration was made for (``ctx.scene_image_size``, the
+    tower calibration's ``image_size``), else ``None``. A run without one (the
+    legacy calibration, the simulator) looks at a frame of any size."""
+    want = getattr(ctx, 'scene_image_size', None)
+    if want is None:
+        return None
+    shape = getattr(frame, 'shape', None)
+    try:
+        size = (int(shape[1]), int(shape[0]))
+    except (TypeError, ValueError, IndexError):
+        size = None
+    if size == tuple(int(v) for v in want):
+        return None
+    from physical_ai_server.workflow.autocal import texts_de
+    return texts_de.IMAGE_SIZE_DE
+
+
 def _scene_frame(ctx):
     """Fetch a FRESH scene-camera frame, or raise a German error. Rejects a
     frozen/stale frame (camera down mid-workflow) — not just a never-arrived
-    one — via the optional ctx.get_scene_frame_age getter."""
+    one — via the optional ctx.get_scene_frame_age getter, and a frame of
+    another size than the run's calibration (G4)."""
     getter = getattr(ctx, 'get_scene_frame', None)
     bgr = getter() if getter else None
     if bgr is None:
         raise WorkflowError(
             'Kein aktuelles Szenenbild verfügbar — bitte die Szenen-Kamera prüfen.'
         )
+    size_error = frame_size_error(ctx, bgr)
+    if size_error is not None:
+        raise WorkflowError(size_error)
     age_getter = getattr(ctx, 'get_scene_frame_age', None)
     if callable(age_getter):
         try:
@@ -862,59 +884,11 @@ def in_no_grasp_wait() -> bool:
     return getattr(_NO_GRASP_WAIT, 'depth', 0) > 0
 
 
-def _apply_xy_correction(ctx, x: float, y: float) -> tuple[float, float]:
-    """Apply the optional ground-truth XY correction stored on ctx.
-
-    Another agent (W5 calibration verify) populates ``ctx.xy_correction`` with a
-    2x3 affine (numpy array) mapping detected base XY → corrected base XY, fit
-    from known-position tags. Consumed SAFELY with getattr so this code works
-    before/after that attribute exists (absent → identity, no correction)."""
-    M = getattr(ctx, 'xy_correction', None)
-    if M is None:
-        return (float(x), float(y))
-    try:
-        Marr = np.asarray(M, dtype=np.float64).reshape(2, 3)
-        v = Marr @ np.array([float(x), float(y), 1.0], dtype=np.float64)
-        cx, cy = float(v[0]), float(v[1])
-        if not (math.isfinite(cx) and math.isfinite(cy)):
-            return (float(x), float(y))
-        return (cx, cy)
-    except Exception:
-        # A malformed correction must never break grasping — fall back to raw.
-        return (float(x), float(y))
-
-
-def _apply_yaw_bias(ctx, yaw: Optional[float]) -> Optional[float]:
-    """Add the optional ground-truth yaw bias (radians) stored on ctx and
-    re-wrap. ``ctx.yaw_bias_rad`` is populated by the W5 calibration verify;
-    consumed SAFELY (absent / None → 0.0, no change)."""
-    if yaw is None:
-        return None
-    try:
-        yb = float(getattr(ctx, 'yaw_bias_rad', 0.0) or 0.0)
-    except (TypeError, ValueError):
-        yb = 0.0
-    # isfinite guard, the one its sibling _apply_xy_correction already has. A
-    # NaN yaw_bias_rad (a corrupt scene_handeye.yaml, which survives reboots)
-    # propagates: compute_grasp_roll → solve(roll=nan) → None → „Position
-    # außerhalb des Arbeitsbereichs" for EVERY grasp, permanently, with no hint
-    # at the cause. Measured 2026-09-07: yaw_bias_rad=nan → _apply_yaw_bias(0.5)
-    # returned nan. Treated as "no bias", the same way a malformed correction
-    # matrix falls back to the raw position.
-    if not math.isfinite(yb):
-        yb = 0.0
-    if yb == 0.0:
-        return float(yaw)
-    from physical_ai_server.workflow.tag_pose import _wrap
-    return _wrap(float(yaw) + yb)
-
-
 def _tag_table_xy(ctx, d, recipe):
     """The detection's base-frame table position ``(x, y)`` in metres, or ``None``.
 
-    THE one projection of a tag centre onto that object's own tag-top plane:
-    ``project_pixel_to_table`` followed by the ground-truth
-    ``_apply_xy_correction``, in that order. ``None`` when the rig has nothing to
+    THE one projection of a tag centre onto that object's own tag-top plane
+    (``project_pixel_to_table``). ``None`` when the rig has nothing to
     project with (no scene intrinsics / extrinsics / ``board_table_z`` — the
     simulator's normal state) or when the projection itself fails.
 
@@ -940,7 +914,7 @@ def _tag_table_xy(ctx, d, recipe):
         return None
     if point is None:
         return None
-    return _apply_xy_correction(ctx, float(point[0]), float(point[1]))
+    return (float(point[0]), float(point[1]))
 
 
 def _attach_named_world(ctx, detections: list, recipe) -> list:
@@ -972,15 +946,15 @@ def _attach_named_world(ctx, detections: list, recipe) -> list:
     cat = getattr(ctx, 'object_catalog', None)
     expected_edge = float(getattr(cat, 'tag_size_m', 0.0) or 0.0)
     for d in detections:
-        # THE one projection + ground-truth XY correction, shared verbatim with
-        # the recycled-object reclaim (_tag_table_xy) so the two can never
-        # disagree about where an object is. The calibration preconditions were
-        # already checked above, so a None here means the projection failed.
+        # THE one projection, shared verbatim with the recycled-object reclaim
+        # (_tag_table_xy) so the two can never disagree about where an object
+        # is. The calibration preconditions were already checked above, so a
+        # None here means the projection failed.
         xy = _tag_table_xy(ctx, d, recipe)
         if xy is None:
             # Record WHY the world position is unset so motion._resolve_target
-            # can name the projection failure instead of blaming the touch-off
-            # (which this rig has already completed) — see its fourth branch.
+            # can name the projection failure instead of asking for a
+            # calibration this rig already has — see its fourth branch.
             try:
                 d.extras['world_error'] = 'projection'
             except Exception:  # noqa: BLE001 — diagnosis never breaks detection
@@ -1015,10 +989,10 @@ def _attach_named_world(ctx, detections: list, recipe) -> list:
                         'zu stark ab — Ausrichtung verworfen.'
                     )
                     yaw = None
-        # W5-apply: ground-truth yaw bias (no-op when unset). Single-frame here
-        # for see/count display; grasp_object re-samples the GRASPED instance
-        # over N frames (circular mean) before committing the wrist roll.
-        d.extras['tag_yaw'] = _apply_yaw_bias(ctx, yaw)
+        # Single-frame here for see/count display; grasp_object re-samples the
+        # GRASPED instance over N frames (circular mean) before committing the
+        # wrist roll.
+        d.extras['tag_yaw'] = None if yaw is None else float(yaw)
         d.extras['gripper_close_rad'] = float(recipe.gripper_close_rad)
         d.extras['object_type'] = recipe.type_name
     ctx.emit_detections(detections)
@@ -1314,7 +1288,7 @@ def _multiframe_tag_yaw(ctx, recipe, tag_id, fallback_yaw):
     frame (same back-projection + edge gate as ``_attach_named_world``),
     circular-mean them, and gate on the mean resultant length R.
 
-    Returns the circular-mean yaw (rad, with ``yaw_bias_rad`` applied) when
+    Returns the circular-mean yaw (rad) when
     R ≥ ``_TAG_YAW_MIN_RESULTANT`` and ≥2 valid frames were read; otherwise
     returns ``None`` so ``grasp_object`` SKIPS the instance (never blind-grasps).
     Yaw error scales as pixel_noise / tag_edge_pixels, so averaging tightens the
@@ -1405,7 +1379,7 @@ def _multiframe_tag_yaw(ctx, recipe, tag_id, fallback_yaw):
         _safe_log(ctx, '[WARNUNG] Die Szenen-Kamera hat während der Messung '
                        'keine neuen Bilder geliefert — die Ausrichtung wurde '
                        'nur aus einem Bild bestimmt.')
-        return _apply_yaw_bias(ctx, yaws[0])
+        return yaws[0]
     if len(yaws) < 2:
         return None
     res = circular_mean_resultant(yaws)
@@ -1418,7 +1392,7 @@ def _multiframe_tag_yaw(ctx, recipe, tag_id, fallback_yaw):
             f'unstabil (R={R:.2f}) — Ausrichtung verworfen.'
         )
         return None
-    return _apply_yaw_bias(ctx, mean)
+    return float(mean)
 
 
 def _corner_fingerprint(corners):
@@ -1605,6 +1579,9 @@ def _wait_frame_usable(ctx, state: dict):
             _scene_frame(ctx)            # raises the missing-picture sentence
         return None
     state.pop('none_since', None)
+    size_error = frame_size_error(ctx, frame)
+    if size_error is not None:
+        raise WorkflowError(size_error)
     age_getter = getattr(ctx, 'get_scene_frame_age', None)
     age = None
     if callable(age_getter):

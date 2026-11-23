@@ -4,13 +4,15 @@ rig, and reach is never widened from IK alone).
 
 The manifest carries the shape per profile: OMX ``reach_inner_m`` 0.10 /
 ``reach_outer_m`` 0.25 (the minimum over bearings at the rig's grasp height,
-rounded down — the drawn 0.28 overstated the forward reach), the V1 its
-``reach_sector_deg`` (−90°, 90°) beside 0.10 / 0.34 (it cannot turn behind
-itself). Every point of the advertised shape must be graspable in the simulator
-(whose table now equals the rig's, Q13), and the shape must not understate it:
-on the OMX a point 2 cm outside the rim at bearing 0 is not graspable; on the
-V1 a point outside the sector (bearing ±120°) is not. Radii are measured in
-the BASE frame, from its origin — where the editor centres the ring.
+rounded down — the drawn 0.28 overstated the forward reach) and its
+``reach_sector_deg`` (−100°, 100°), the joint-1 window of the camera tower
+(spec 40 S6.3, §6.1 O4); the V1 its ``reach_sector_deg`` (−90°, 90°) beside
+0.10 / 0.34 (it cannot turn behind itself). Every point of the advertised shape
+must be graspable in the simulator (whose table now equals the rig's, Q13), and
+the shape must not understate it: a point outside the sector (bearing ±130° on
+the OMX, ±120° on the V1) is not. Radii are measured in the BASE frame, from
+its origin — where the editor centres the ring. The simulator's arm is the
+node's (``arm_model.for_simulator``: the plate's lift and the joint-1 window).
 
 The V1 ring is deliberately conservative on both edges (its profile comment:
 the grasp plane reaches 0.3665 but the 60 mm hover only 0.3415, so the
@@ -27,6 +29,7 @@ import math
 import pytest
 
 from physical_ai_server import robot_profiles as rp
+from physical_ai_server.workflow import arm_model
 
 from daten_timeout import per_test_time_limit  # noqa: F401
 from rig_emulation import Rig, grasp, program
@@ -50,6 +53,9 @@ def _graspable(monkeypatch, pid, r, bearing_deg):
     a = math.radians(bearing_deg)
     obj = {'type': 'wuerfel', 'x': r * math.cos(a), 'y': r * math.sin(a), 'yaw': 0.2}
     rig = Rig(monkeypatch, pid, objects=[obj], simulated=True)
+    sim_ik = arm_model.for_simulator(rig.profile.build_ik())
+    rig.ik = rig.arm._ik = sim_ik
+    rig.mgr._ik_factory = lambda: sim_ik
     phase = rig.run(program(grasp()))
     return phase == 'finished' and rig.world.held_key() == 0
 

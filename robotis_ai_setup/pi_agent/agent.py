@@ -226,6 +226,31 @@ _ARM_FAMILY_MISMATCH_DE = (
     "Bitte die Arme für den gewählten Robotertyp neu scannen."
 )
 
+# The scene camera's profile (spec 40 S1, decisions C6, D32): what the System
+# tab's „Turm-Kamera (Turm-Kit)" box may store, and the start pre-flight. The
+# tower camera is MJPG 1920x1080 at 30 fps; only that profile is ever refused,
+# and only on proof read from the camera's own format list.
+_SCENE_CAMERA_PROFILES = (config_generator.SCENE_PROFILE_TOWER,
+                          config_generator.SCENE_PROFILE_LEGACY)
+_SCENE_CAMERA_PROFILE_INVALID_DE = (
+    "Unbekanntes Kameraprofil. Erlaubt sind „tower_v1“ (Turm-Kamera) und "
+    "„legacy“ (bisherige Szenen-Kamera)."
+)
+_TOWER_CAPTURE = ("MJPG", 1920, 1080, 30.0)
+_SCENE_CAMERA_FORMAT_REFUSED_DE = (
+    "Die Szenen-Kamera liefert kein MJPEG-Bild mit 1920 × 1080 Bildpunkten. "
+    "Bitte die Turm-Kamera anschließen oder in der Einrichtung „Turm-Kamera“ abwählen."
+)
+_SCENE_CAMERA_HINT_DE = (
+    "Die Szenen-Kamera meldet das Aufnahmeformat ({width} × {height} mit {fps} Bildern "
+    "pro Sekunde) nicht. Ist es die Turm-Kamera, bitte in der Einrichtung „Turm-Kamera“ "
+    "auswählen."
+)
+# The format usb_cam is handed in the legacy profile: EDUBOTICS_CAMERA_PIXEL_FORMAT
+# (the compose's default yuyv) as the V4L2 fourcc it asks the camera for.
+# usb_cam's other formats are not judged (no hint).
+_USB_CAM_FOURCC = {"yuyv": "YUYV", "mjpeg2rgb": "MJPG"}
+
 
 # ── Robot login (pi_auth) ─────────────────────────────────────────────────────
 #
@@ -251,9 +276,10 @@ _PUBLIC_GET_PATHS = frozenset({"/", "/health", "/auth/state", "/auth/check",
 # (scan, cameras, environment start/stop, the update a stale Pi needs, the
 # leader toggle) but not maintain the Pi. Only a teacher's or an admin's session
 # — or a process on the Pi itself (loopback) — may reset it or change its robot
-# type. The setup code is minted for loopback peers only (/auth/setup-code).
+# type or its scene camera's profile. The setup code is minted for loopback
+# peers only (/auth/setup-code).
 # The full route table is in docs/CLAUDE-CHANGELOG.md (2026-11-13).
-_MAINTENANCE_POST_PATHS = frozenset({"/factory-reset", "/robot-type"})
+_MAINTENANCE_POST_PATHS = frozenset({"/factory-reset", "/robot-type", "/scene-camera-profile"})
 _MAINTENANCE_ROLES = frozenset({"teacher", "admin"})
 _MAINTENANCE_ROLE_DE = (
     "Das darf nur eine Lehrkraft oder ein Admin: bitte mit einem solchen Konto "
@@ -596,6 +622,10 @@ class AgentApp:
         # Guards hardware mutation + the robot-tier lifecycle ops so two POSTs
         # (scan + start) can't race the Dynamixel bus / the .env write.
         self._lifecycle_lock = threading.Lock()
+        # The last start's scene-camera hint (German, or None): the legacy
+        # profile's camera did not list the format usb_cam is handed. Set by the
+        # start pre-flight, cleared by the next start and by a profile change.
+        self._scene_camera_hint: Optional[str] = None
 
         # Roboter-Studio leader-toggle busy state (mirrors the RS control server).
         self._rs_busy_lock = threading.Lock()
@@ -1437,6 +1467,10 @@ class AgentApp:
             "cameras": cameras,
             "follower_only": str(follower_only_raw).strip() == "1",
             "images": docker_manager.get_last_pull_status(),
+            # The „Turm-Kamera" box (additive, like the keys above): the stored
+            # profile as it reads, and the last start's hint or None.
+            "scene_camera_profile": self._scene_camera_profile(),
+            "scene_camera_hint": self._scene_camera_hint,
         }
 
     # ── update-in-flight fast-fail (mutating lifecycle endpoints) ────────────
@@ -1893,6 +1927,50 @@ class AgentApp:
                      "hardware_ready": self._hardware_ready(requested),
                      "message": f"Robotertyp gesetzt: {row['display_de']}."}
 
+    # ── POST: /scene-camera-profile ──────────────────────────────────────────
+
+    def _scene_camera_profile(self) -> str:
+        """The stored scene-camera profile, read as every reader of the key
+        reads it (``config_generator.scene_camera_profile_of``)."""
+        return config_generator.scene_camera_profile_of(config_generator.read_env_var(
+            config_generator.SCENE_CAMERA_PROFILE_KEY, self.env_file))
+
+    def handle_set_scene_camera_profile(self, body: dict) -> "tuple[int, dict]":
+        """The System tab's „Turm-Kamera (Turm-Kit)" box. Body: ``{"profile":
+        "tower_v1"|"legacy"}``, exactly; anything else is a German 400 (the box
+        sends only these two).
+
+        A maintenance route (``_MAINTENANCE_POST_PATHS``: a teacher's or an
+        admin's session, or a loopback peer). It takes ``_lifecycle_lock`` with
+        the bounded wait like every mutating route, because „Umgebung starten"
+        reads the key under that lock. The value counts from the next start: the
+        pre-flight then judges it against the camera, and the arm container
+        reads it when it starts; a running tier keeps the profile it started
+        with, as on Windows."""
+        if self._update_in_flight():
+            return self._busy_updating()
+        requested = body.get("profile")
+        if not isinstance(requested, str) or requested not in _SCENE_CAMERA_PROFILES:
+            return 400, {"ok": False, "message": _SCENE_CAMERA_PROFILE_INVALID_DE}
+        if not self._acquire_lifecycle():
+            return self._busy_lifecycle()
+        try:
+            try:
+                config_generator.upsert_env_var(
+                    config_generator.SCENE_CAMERA_PROFILE_KEY, requested, self.env_file)
+            except Exception as e:  # noqa: BLE001 — surfaced in German
+                return 500, {"ok": False,
+                             "message": "Die Turm-Kamera-Einstellung konnte nicht "
+                                        f"gespeichert werden: {e}"}
+            # The hint described the other profile's start.
+            self._scene_camera_hint = None
+        finally:
+            self._lifecycle_lock.release()
+        message = ("Turm-Kamera ausgewählt." if requested == config_generator.SCENE_PROFILE_TOWER
+                   else "Turm-Kamera abgewählt.") + " Gilt ab dem nächsten „Umgebung starten“."
+        self._log(message)
+        return 200, {"ok": True, "scene_camera_profile": requested, "message": message}
+
     # ── POST: /environment/start + /environment/stop ─────────────────────────
 
     def handle_environment_start(self, body: dict) -> "tuple[int, dict]":
@@ -1943,6 +2021,9 @@ class AgentApp:
                 return 503, {"ok": False, "code": "manager_login_unknown",
                              "message": _MANAGER_LOGIN_UNKNOWN_DE}
             self.stop_active_previews()  # free /dev/video* before usb_cam claims it
+            refusal = self._scene_camera_preflight()
+            if refusal is not None:
+                return refusal
             try:
                 config_generator.generate_env_file(
                     self._hardware, self.env_file, follower_only=None,
@@ -1959,6 +2040,62 @@ class AgentApp:
                          "message": "Die Roboter-Umgebung konnte nicht gestartet werden — "
                                     "bitte das Protokoll prüfen."}
         return 200, {"ok": True, "message": "Roboter-Umgebung gestartet."}
+
+    def _scene_camera_preflight(self) -> "Optional[tuple[int, dict]]":
+        """Decision C6's pre-flight, run by „Umgebung starten" before the robot
+        tier starts: the 409 that refuses the start, or None (spec 40 S1).
+
+        It reads the scene-role camera's own format list
+        (``camera_enum.list_formats``, one bounded ``v4l2-ctl``). ``tower_v1``
+        needs MJPG 1920x1080 at 30 fps; a list that proves the camera cannot
+        deliver it refuses the start. ``legacy`` is NEVER refused (decision D1
+        outranks C6: a refusal could stop a rig that records today); when its
+        list proves the camera lacks the format the compose hands usb_cam, the
+        start goes ahead and ``_scene_camera_hint`` says so on ``/status``. No
+        scene camera, a path outside the capture-node allowlist (the roles
+        route takes any string, and opening a device node can have side
+        effects) and a list that cannot be read decide nothing: refuse on proof
+        only."""
+        self._scene_camera_hint = None
+        scene = next((c for c in self._hardware.cameras if c.role == "scene"), None)
+        if scene is None or not _is_allowed_camera_device(scene.path):
+            return None
+        modes = camera_enum.list_formats(scene.path)
+        if modes is None:
+            return None
+        if self._scene_camera_profile() == config_generator.SCENE_PROFILE_TOWER:
+            if camera_enum.offers(modes, *_TOWER_CAPTURE):
+                return None
+            self._log(f"[WARNUNG] {_SCENE_CAMERA_FORMAT_REFUSED_DE}")
+            return 409, {"ok": False, "code": "scene_camera_format",
+                         "message": _SCENE_CAMERA_FORMAT_REFUSED_DE}
+        wanted = self._usb_cam_format()
+        if wanted is None or camera_enum.offers(modes, *wanted):
+            return None
+        _fourcc, width, height, fps = wanted
+        self._scene_camera_hint = _SCENE_CAMERA_HINT_DE.format(
+            width=width, height=height, fps=f"{fps:g}".replace(".", ","))
+        self._log(f"[WARNUNG] {self._scene_camera_hint}")
+        return None
+
+    def _usb_cam_format(self) -> "Optional[tuple]":
+        """``(fourcc, width, height, fps)`` the compose hands usb_cam, read from
+        the Pi's .env with the compose's own defaults (yuyv, 640, 480, 30; an
+        empty value is the default, as ``${VAR:-default}`` makes it), or None for
+        a value this pre-flight cannot judge."""
+        def setting(key, default):
+            value = config_generator.read_env_var(key, self.env_file)
+            return value.strip() if value is not None and value.strip() else default
+        fourcc = _USB_CAM_FOURCC.get(setting("EDUBOTICS_CAMERA_PIXEL_FORMAT", "yuyv"))
+        try:
+            width = int(setting("EDUBOTICS_CAMERA_WIDTH", "640"))
+            height = int(setting("EDUBOTICS_CAMERA_HEIGHT", "480"))
+            fps = float(setting("EDUBOTICS_CAMERA_FRAMERATE", "30"))
+        except ValueError:
+            return None
+        if fourcc is None or width <= 0 or height <= 0 or not 0 < fps < 1000:
+            return None
+        return fourcc, width, height, fps
 
     def handle_environment_stop(self) -> "tuple[int, dict]":
         """„Stoppen": stop the robot tier ONLY (TARGETED — never ``compose
@@ -3103,6 +3240,8 @@ class AgentApp:
                     self._send_json(*app.handle_phone_toggle(body))
                 elif path == "/robot-type":
                     self._send_json(*app.handle_set_robot_type(body))
+                elif path == "/scene-camera-profile":
+                    self._send_json(*app.handle_set_scene_camera_profile(body))
                 elif path == "/environment/start":
                     self._send_json(*app.handle_environment_start(body))
                 elif path == "/environment/stop":

@@ -214,16 +214,15 @@ export const LOGOUT_BLOCK_TITLES_DE = Object.freeze({
   workflow:
     'Abmelden nicht möglich, solange ein Programm im Roboter Studio läuft — bitte zuerst stoppen.',
   // Names the ESCAPE, because „bitte zuerst abschließen" alone can be advice a
-  // student cannot take. The calibration branch is true for the whole normal
-  // three-step run AND stays true forever if the run is abandoned:
-  // `framesCaptured` LATCHES (only the next step's reset or „Kalibrierung neu
-  // starten" zeroes it) and with EDUBOTICS_FORCE_RECALIBRATION on — the default
-  // — `!calibrated` holds from session start. A student with no ChArUco board,
-  // or in the wrong room, cannot finish. The escape is real and reachable: the
-  // block is ANDed with being on „Roboter Studio", and CalibrationWizard renders
-  // as an in-page panel rather than a fixed overlay, so the nav rail stays
-  // clickable throughout. The guard itself is deliberately NOT weakened — a
-  // mid-calibration reload must still not happen by accident.
+  // student cannot take. The calibration branch is true while the robot says an
+  // arm check or the handheld lens capture runs
+  // (selectCalibrationHasUnsolvedCaptures reads the robot's calibration state,
+  // spec 40 S8). A student holding no calibration target cannot finish the
+  // handheld capture. The escape is real and reachable: the block is ANDed with
+  // being on „Roboter Studio", and the calibration panel renders in the page
+  // rather than as a fixed overlay, so the nav rail stays clickable throughout
+  // (and the panel offers „Abbrechen"). The guard itself is deliberately NOT
+  // weakened — a reload mid-capture must still not happen by accident.
   calibration:
     'Abmelden nicht möglich, solange die Kalibrierung läuft — bitte zuerst '
     + 'abschließen. Wenn das gerade nicht geht: „Roboter Studio" verlassen und '

@@ -22,6 +22,11 @@ import {
   noteUnauthorized, PI_AUTH_PHASE, setPiResetCode, usePiAuth,
 } from '../features/piAuth/piAuth';
 import LegalLinks from '../components/LegalLinks';
+import { TowerStopDialog } from '../components/TowerHint/TowerHint';
+import useTowerState, {
+  stopNeedsTowerWarning, TOWER_ARM_PROFILE, towerTierRunning, useOptionalRosbridgeUrl,
+  useRunningSceneProfile,
+} from '../hooks/useTowerState';
 
 // The typed confirmation a factory reset needs (owner decision 5, the agent's
 // _FACTORY_RESET_CONFIRM_WORD): compared case-insensitively, umlaut included.
@@ -32,9 +37,10 @@ export function factoryResetWordMatches(typed) {
 }
 
 // SA-12 (2026-11-13): the agent refuses its maintenance routes (the factory
-// reset, the robot type: agent.py::_MAINTENANCE_POST_PATHS) to a STUDENT robot
-// session with a German 403. The page does not offer them to such a session
-// and says why; everything a lesson needs stays.
+// reset, the robot type, the scene camera's profile:
+// agent.py::_MAINTENANCE_POST_PATHS) to a STUDENT robot session with a German
+// 403. The page does not offer them to such a session and says why; everything
+// a lesson needs stays.
 export const MAINTENANCE_ROLES = Object.freeze(['teacher', 'admin']);
 export const MAINTENANCE_ONLY_DE =
   'Das kann nur eine Lehrkraft oder ein Admin ändern. Für den Unterricht wird es nicht gebraucht.';
@@ -85,6 +91,11 @@ const CAMERA_ROLE_OPTIONS = [
   { value: 'gripper', label: 'Greifer' },
   { value: 'scene', label: 'Szene' },
 ];
+
+// The scene camera's profile (spec 40 S1): the agent's /status
+// `scene_camera_profile`, stored by POST /scene-camera-profile.
+const SCENE_PROFILE_TOWER = 'tower_v1';
+const SCENE_PROFILE_LEGACY = 'legacy';
 
 // A labelled step card so the wizard reads top-to-bottom like the .exe.
 // Sucher: a serif title; a lettered step gets its letter in a dark disc
@@ -142,6 +153,10 @@ export default function SystemPage() {
   const [roles, setRoles] = useState({}); // path -> 'gripper'|'scene'|''
   const [savingRoles, setSavingRoles] = useState(false);
   const [previewDevice, setPreviewDevice] = useState(null);
+  // „Turm-Kamera (Turm-Kit)": the optimistic value across its POST, as for the
+  // robot type; the agent's /status stays the authority.
+  const [savingSceneProfile, setSavingSceneProfile] = useState(false);
+  const [pendingSceneProfile, setPendingSceneProfile] = useState(null);
 
   const [startingEnv, setStartingEnv] = useState(false);
   const [stoppingEnv, setStoppingEnv] = useState(false);
@@ -226,6 +241,39 @@ export default function SystemPage() {
     return declared.length > 0 ? declared : known;
   }, [selectedProfile]);
 
+  // „Turm-Kamera (Turm-Kit)" (the Pi's half of the Windows setup box): drawn
+  // only when the agent reports the key (an older agent has neither the key
+  // nor the route) and the profile has a scene camera. The legacy start's
+  // hint is shown whenever /status carries one.
+  const sceneCameraProfile =
+    typeof agentStatus?.scene_camera_profile === 'string' ? agentStatus.scene_camera_profile : null;
+  const showTowerBox = sceneCameraProfile !== null && allowedCameraRoles.includes('scene');
+  const towerChecked = (pendingSceneProfile ?? sceneCameraProfile) === SCENE_PROFILE_TOWER;
+  const sceneCameraHint =
+    typeof agentStatus?.scene_camera_hint === 'string' && agentStatus.scene_camera_hint !== ''
+      ? agentStatus.scene_camera_hint
+      : null;
+
+  // „Stoppen" on the V1 under the camera tower (spec 40 WP-HINT, 52 §5.3 (c),
+  // §6): stopping takes the torque off the arm, so the page asks first unless
+  // the driver says the limp arm falls forward. Only while the robot tier (and
+  // so the driver) runs, on `v1_studio` with the tower; every other rig stops
+  // as today. No answer from the robot (no session, no topic) asks too (§6.3).
+  // The tower is the RUNNING tier's (X-C5): the stored `scene_camera_profile`
+  // counts from the next start, so a V1 tier listens to what it runs with
+  // (towerTierRunning). The robot type cannot change while the tier runs
+  // (POST /robot-type refuses then); an agent without the key has no tower.
+  const v1TierRunning = !!agentStatus?.robot_tier_up
+    && agentStatus?.robot_type === TOWER_ARM_PROFILE
+    && sceneCameraProfile !== null;
+  const rosbridgeUrl = useOptionalRosbridgeUrl();
+  const towerState = useTowerState({ enabled: v1TierRunning, rosbridgeUrl });
+  const runningSceneProfile = useRunningSceneProfile({ enabled: v1TierRunning, rosbridgeUrl });
+  const towerStopApplies = v1TierRunning && towerTierRunning({
+    towerState, statement: runningSceneProfile, stored: sceneCameraProfile,
+  });
+  const [towerStopOpen, setTowerStopOpen] = useState(false);
+
   useEffect(() => {
     previewRef.current = previewDevice;
   }, [previewDevice]);
@@ -287,6 +335,36 @@ export default function SystemPage() {
           /* the 5 s poll retries — the agent stays the authority */
         }
         setPendingRobotType(null);
+      }
+    },
+    [refreshAgentStatus]
+  );
+
+  // ── Schritt C — Turm-Kamera ────────────────────────────────────────────────
+  const handleTowerCameraChange = useCallback(
+    async (checked) => {
+      const next = checked ? SCENE_PROFILE_TOWER : SCENE_PROFILE_LEGACY;
+      setPendingSceneProfile(next);
+      setSavingSceneProfile(true);
+      try {
+        const { ok, data } = await sysFetch('/scene-camera-profile', {
+          method: 'POST',
+          body: { profile: next },
+        });
+        if (ok) toast.success(data.message || 'Turm-Kamera gespeichert.');
+        else toast.error(data.message || 'Die Turm-Kamera-Einstellung konnte nicht gespeichert werden.');
+      } catch {
+        toast.error('Der Agent ist nicht erreichbar.');
+      } finally {
+        setSavingSceneProfile(false);
+        // As for the robot type: drop the optimistic value only once the
+        // agent's answer has landed, so a refused change shows the stored one.
+        try {
+          await refreshAgentStatus();
+        } catch {
+          /* the 5 s poll retries — the agent stays the authority */
+        }
+        setPendingSceneProfile(null);
       }
     },
     [refreshAgentStatus]
@@ -389,7 +467,7 @@ export default function SystemPage() {
     }
   }, [cloudOnly, stopPreview, refreshAgentStatus]);
 
-  const handleStopEnv = useCallback(async () => {
+  const stopEnvironment = useCallback(async () => {
     setStoppingEnv(true);
     try {
       const { ok, data } = await sysFetch('/environment/stop', { method: 'POST' });
@@ -402,6 +480,20 @@ export default function SystemPage() {
       refreshAgentStatus();
     }
   }, [refreshAgentStatus]);
+
+  const handleStopEnv = useCallback(() => {
+    if (towerStopApplies && stopNeedsTowerWarning(towerState)) {
+      setTowerStopOpen(true);
+      return;
+    }
+    stopEnvironment();
+  }, [towerStopApplies, towerState, stopEnvironment]);
+
+  const cancelTowerStop = useCallback(() => setTowerStopOpen(false), []);
+  const confirmTowerStop = useCallback(() => {
+    setTowerStopOpen(false);
+    stopEnvironment();
+  }, [stopEnvironment]);
 
   // ── Update (ACK-early job + poll, via the shared useAgentUpdate hook) ───────
   const handleUpdate = useCallback(async () => {
@@ -910,6 +1002,45 @@ export default function SystemPage() {
                   />
                 </div>
               )}
+
+              {showTowerBox && (
+                <div className="mt-4">
+                  <label className="flex items-start gap-4 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={towerChecked}
+                      disabled={maintenanceLocked || savingSceneProfile}
+                      title={maintenanceLocked ? MAINTENANCE_ONLY_DE : undefined}
+                      onChange={(e) => handleTowerCameraChange(e.target.checked)}
+                      className="su-switch"
+                    />
+                    <span className="text-sm text-[var(--ink-2)]">
+                      <span className="font-medium text-[var(--ink)]">Turm-Kamera (Turm-Kit)</span>
+                      <br />
+                      Die Szenen-Kamera ist die Kamera auf dem Turm (1920 × 1080 MJPEG).
+                      Gilt ab dem nächsten „Umgebung starten“.
+                    </span>
+                  </label>
+                  {maintenanceLocked && (
+                    <p
+                      className="mt-1 text-[13px] text-[var(--ink-2)]"
+                      data-testid="maintenance-only-scene-camera"
+                    >
+                      {MAINTENANCE_ONLY_DE}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {sceneCameraHint !== null && (
+                <div
+                  role="status"
+                  data-testid="scene-camera-hint"
+                  className="mt-3 rounded-[14px] bg-[var(--amber-wash)] p-3 text-sm text-[color:var(--amber)]"
+                >
+                  {sceneCameraHint}
+                </div>
+              )}
             </Step>
           </>
         )}
@@ -963,6 +1094,12 @@ export default function SystemPage() {
               {stoppingEnv ? 'Wird gestoppt …' : 'Stoppen'}
             </Btn>
           </div>
+          <TowerStopDialog
+            open={towerStopOpen}
+            profile={TOWER_ARM_PROFILE}
+            onCancel={cancelTowerStop}
+            onConfirm={confirmTowerStop}
+          />
           {!cloudOnly && !canStart && (
             <p className="mt-2 text-[13px] text-[var(--ink-2)]">
               {scanRequiresLeader

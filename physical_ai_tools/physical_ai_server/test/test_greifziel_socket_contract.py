@@ -165,8 +165,6 @@ class _Ctx:
         self.board_table_z = 0.0
         self.z_table = 0.0
         self.table_plane = None
-        self.xy_correction = None
-        self.yaw_bias_rad = 0.0
         self.motion_lock = threading.RLock()
         self.claim_lock = threading.RLock()
         self.var_lock = threading.RLock()

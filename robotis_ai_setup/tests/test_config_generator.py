@@ -909,8 +909,9 @@ class TestLegacyHfTokenPurge(unittest.TestCase):
                      "HF_TOKEN_ANY_MACHINE_ENV"):
             self.assertFalse(hasattr(self.cg, name), name)
         self.assertEqual(self.cg._LEGACY_HF_KEYS, ("HF_TOKEN", "HF_TOKEN_MACHINE"))
-        # MANAGED_KEYS stays the 9 keys the compose interface is built on.
-        self.assertEqual(len(self.cg.MANAGED_KEYS), 9)
+        # MANAGED_KEYS stays the 10 keys the compose interface is built on
+        # (the 10th, EDUBOTICS_SCENE_CAMERA_PROFILE, is WP-06's, decision D32).
+        self.assertEqual(len(self.cg.MANAGED_KEYS), 10)
         for key in self.cg._LEGACY_HF_KEYS:
             self.assertNotIn(key, self.cg.MANAGED_KEYS)
 

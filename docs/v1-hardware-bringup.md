@@ -97,12 +97,16 @@ re-provisioning**, because the EEPROM window is written sign-aware.
 
 Start the environment and watch the arm container's log: „Alle 6 Servos gefunden", torque on,
 nothing moves (the activation gate). Press „Roboter aktivieren" on the Startseite: a 3 s quintic
-glide to HOME `(0, 0.64, 1.48, 0.90, 0)` with the claw open 0.90 — the arm standing up over its
-own base.
+glide to HOME `(0, 0.64, 0.64, 0, 0)` with the claw open 0.90 — since 2.41.0 the OMX's shape:
+the upper arm leaning back, forearm and claw pointing forward, level, the TCP 0.21 m above the
+table (owner decisions D46, D49; the upright `(0, 0.64, 1.48, 0.90, 0)` is gone). Joint 3 holds
+the level forearm at an estimated ~141 % of its rated torque, built without a bench test (D49 (4)):
+watch its load and temperature over a lesson (RG-H1). From this HOME a limp arm tips FORWARD.
 
 - The glide is REFUSED (arm stays torqued where it is, German `[FEHLER]`) when the straight
   joint-space line would drive a link under the table; about 29 of 1200 sampled limp-collapse
-  start poses by the box model, so seeing it once is not a fault. Lift the arm a little and
+  start poses by the box model (measured for the earlier upright HOME, not re-measured for D49's),
+  so seeing it once is not a fault. Lift the arm a little and
   press again.
 - **The edge refusal.** Joint 2 and joint 3 have windows that end AT tick 4095 (q = +π). A limp
   arm lying on that stop (tick ≥ 4056, i.e. q ≥ 3.0802 rad) is refused the torque-on:
@@ -113,6 +117,13 @@ own base.
   retries every 5 s. Provoke it once on purpose (lay the arm on a +π stop, start the
   environment), confirm both German lines, turn the joint back ~10° by hand and confirm the
   environment continues by itself.
+- **The camera-tower check** (only with the tower kit, `EDUBOTICS_SCENE_CAMERA_PROFILE=tower_v1`).
+  The driver judges every activation glide against the tower before driving it and refuses a
+  glide from a pose lying back toward the tower, leaving the arm TORQUED where it is
+  (`TOWER_GLIDE_REFUSAL_DE`); the Startseite then shows the placement hint and the „Arm lockern"
+  flow (lay the arm forward, never stand it up). Check both: a forward-lying arm activates; one
+  lying back is refused and the hint shows (rig gates RG-HINT / RG-H2 and RG-FALL in
+  `docs/KNOWN-ISSUES.md`, „Release 2.41.0"). Without the kit nothing of this exists.
 
 ## 6. VR11 — joint 4's ±110°
 
@@ -121,20 +132,22 @@ floors and confirm neither collides; never widen past ±110°.
 
 ## 7. VR5 — the grasp numbers
 
-With calibration done (VR8 first), grasp the shipped 30 mm cube and read back the achieved claw
-angle. CAD expectation: the jaws BLOCK at 0.195 / 0.206 rad (gear ratio 1 / 18/19) at the
+With calibration done (the tower kit's arm check, `docs/TURM-KIT-AUFBAU.md`), grasp the shipped
+30 mm cube and read back the achieved claw angle. CAD expectation: the jaws BLOCK at 0.195 / 0.206 rad (gear ratio 1 / 18/19) at the
 catalog's 15 mm grasp depth; over 10–20 mm a held reading stays ≥ 0.03 rad above the threshold.
 The catalog commands **0.05** with a **0.10** held margin, so HELD reads ≈0.20 against a 0.15
 threshold and an empty close reads ≈0.05. If the real block angle differs, adjust `_FIXED_CATALOG_V1.gripper_close_rad` (and, if
 needed, `grasp_held_margin_rad`) and rebuild the image. Jaw friction is unmeasured; a rubber pad
 on the blades removes the question.
 
-## 8. VR8 — touch-off, claw CLOSED
+## 8. VR8 — a table touch with the claw CLOSED
 
 The TCP is the **closed** fingertip, 108.6 mm below the tool frame; at the 0.90 open command the
-tip is only 82.6 mm below it. Teaching „Tisch vermessen" with the claw open measures the table
-≈26 mm too low and every later grasp inherits the error. The wizard shows a „Greifer ganz
-schließen" step for this arm — confirm it appears, and confirm the 26 mm.
+tip is only 82.6 mm below it. Since 2.41.0 there is no touch-off: the grasp height is the fixture
+contract's (`FINGERTIP_BELOW_EE_M["v1"]` = 0.0, defined with the claw closed) and the arm check
+calibrates the arm. The one table touch left is a Ziel by touch („Z" in Vormachen): do it with
+the claw CLOSED, or the height reads ≈26 mm too low (the app no longer says so). Confirm the
+26 mm on the bench.
 
 ## 9. VR7 — the jaw convention
 
@@ -151,8 +164,10 @@ and the box model assume this ratio.
 
 ## 11. VR10 — the mat, VR13/VR15 — the open claw
 
-Print `tools/generate_v1_mat.py`'s mat at 100 % (check the 100 mm ruler), stand the arm on the
-grey outline, and confirm the ChArUco origin lands at (0.18, 0.075). Then, with the claw open at
+The V1's mat is the tower kit's `classroom_kit/scene_mat_v1.pdf` (`tools/generate_scene_mat.py
+--arm v1`, printed by the print shop): check its two 100 mm marks, push it against the plate,
+and confirm the mat check reads it („Kalibrierung in Ordnung." after the arm check; the old
+`generate_v1_mat.py` and its ChArUco board are removed). Then, with the claw open at
 0.90: confirm the blades clear the base tower at the drawn 10 cm inner ring (CAD: ≈7 mm; contact
 at 9 cm — nothing in the software refuses a target inside the ring), and set a no-go zone next to
 a target to see how close the open claw passes it (CAD: the blades reach 22.9 mm, the housing
@@ -160,8 +175,9 @@ a target to see how close the open claw passes it (CAD: the blades reach 22.9 mm
 
 ## 12. End to end
 
-Scan → „Umgebung starten" → „Roboter aktivieren" → calibration wizard (intrinsics, scene
-extrinsic, touch-off) → Blockly „Greife Würfel" → „Bewegung" record + replay → cloud save. A
+Scan → tick „Turm-Kamera (Turm-Kit)" → „Umgebung starten" → „Roboter aktivieren" → Roboter Studio:
+the mat check, then the arm check with the clip-on target (`docs/TURM-KIT-AUFBAU.md`) → Blockly
+„Greife Würfel" → „Bewegung" record + replay → cloud save. A
 saved recording is tagged `v1_studio` and is 7 floats per point — the SAME width an OMX
 recording uses, so confirm that replaying an OMX recording here is refused with a German toast
 and not silently attempted. VR12 (smoothness) and VR14 (the goal-edge clamp at full extension,

@@ -49,7 +49,7 @@ vi.mock('react-hot-toast', () => ({
 vi.mock('../../components/Workshop/BlocklyWorkspace', () => ({ __esModule: true, default: () => <div data-testid="blockly-workspace" /> }));
 vi.mock('../../components/Workshop/RightDock', () => ({ __esModule: true, default: () => <div data-testid="right-dock" /> }));
 vi.mock('../../components/Workshop/SimStage', () => ({ __esModule: true, default: () => <div data-testid="sim-stage" /> }));
-vi.mock('../../components/Workshop/CalibrationWizard', () => ({ __esModule: true, default: () => <div data-testid="calib-wizard" /> }));
+vi.mock('../../components/Workshop/calibration/CalibrationPanel', () => ({ __esModule: true, default: () => <div data-testid="calib-panel" /> }));
 vi.mock('../../components/Workshop/LeaderToggle', () => ({ __esModule: true, default: () => <div data-testid="leader-toggle" /> }));
 vi.mock('../../components/Workshop/RunControls', () => ({ __esModule: true, default: () => <div data-testid="run-controls" /> }));
 vi.mock('../../components/Workshop/CameraFeedOverlay', () => ({ __esModule: true, default: () => <div data-testid="camera-feed" /> }));
@@ -86,6 +86,7 @@ vi.mock('../../components/Workshop/blocks/perception', () => ({
 }));
 
 const mockRos = vi.hoisted(() => ({
+  startCalibration: vi.fn(() => Promise.resolve({ success: true, message: '' })),
   getObjectCatalog: vi.fn(() => Promise.resolve({ success: false })),
   capturePose: vi.fn(),
   jogArm: vi.fn(),
@@ -116,11 +117,7 @@ vi.mock('../../services/workflowApi', () => ({
 function baseState() {
   return {
     workshop: {
-      hasIntrinsicScene: true,
-      hasHandeyeScene: true,
-      hasTableTouch: true,
-      recalibrating: false,
-      pendingVerify: false,
+      calibration: { state: 'ok' },
       selectedWorkflowId: null,
       unsavedBlocklyJson: null,
       restrictedBlocks: null,

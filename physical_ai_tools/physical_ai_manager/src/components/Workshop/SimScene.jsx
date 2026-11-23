@@ -50,14 +50,18 @@ import toast from 'react-hot-toast';
 import { useSelector } from 'react-redux';
 import ROSLIB from 'roslib';
 import {
+  boxFootprint,
   clampIntoReach,
+  fixtureLayout,
   reachAnnulus,
   reachContains,
   SIM_OBJECT_FALLBACK_SIZE_M,
   SIM_OBJECT_COLOR_HEX,
   SIM_OBJECT_HELD_COLOR_HEX,
   resolveMaxInstances,
+  towerView,
 } from './simConstants';
+import { clampIntoZone, inZone } from './fixture/inZone';
 import { gripperBand } from '../../utils/armProfile';
 import { INTERP_DELAY_MS } from '../../utils/jointStateInterpolator';
 import useSimObjects from '../../hooks/useSimObjects';
@@ -130,14 +134,12 @@ const VIEW_MAX_X = 0.32;
 const VIEW_MIN_X = -0.05;
 const VIEW_MAX_Y = 0.30;
 const VIEW_MIN_Y = -0.30;
+// The table's window everywhere but on the tower kit, whose window
+// (simConstants.towerView) also holds the mat and the tower behind the arm.
+const TODAY_VIEW = Object.freeze({ minX: VIEW_MIN_X, maxX: VIEW_MAX_X, minY: VIEW_MIN_Y, maxY: VIEW_MAX_Y });
 // Uniform metres→pixels so the reach annulus draws as a true circle. The SVG
-// box is sized to the metre ranges at this scale.
+// box is sized to the metre ranges at this scale (today 300 × 185).
 const PX_PER_M = 500;
-const SVG_W = PX_PER_M * (VIEW_MAX_Y - VIEW_MIN_Y); // 300
-const SVG_H = PX_PER_M * (VIEW_MAX_X - VIEW_MIN_X); // 185
-// Base origin (robot base, x=0 y=0) in SVG pixels.
-const ORIGIN_PX = PX_PER_M * VIEW_MAX_Y;
-const ORIGIN_PY = PX_PER_M * VIEW_MAX_X;
 // Fallback marker-square edge in px for a type WITHOUT catalog dims
 // (SIM_OBJECT_FALLBACK_SIZE_M at PX_PER_M = 15 px). A type known to catalogDims
 // sizes its square from width_m × PX_PER_M instead, so the 2D + 3D panes agree.
@@ -221,17 +223,17 @@ const UNREACHABLE_TITLE_DE = 'Hier kann der Arm nicht greifen — verschiebe das
 const DEFAULT_CATALOG = [['Würfel', 'wuerfel']];
 
 // base (x,y) → SVG pixels. +x (forward) points UP, +y (left) points LEFT.
-function baseToSvg(x, y) {
+function baseToSvg(x, y, view = TODAY_VIEW) {
   return {
-    px: PX_PER_M * (VIEW_MAX_Y - y),
-    py: PX_PER_M * (VIEW_MAX_X - x),
+    px: PX_PER_M * (view.maxY - y),
+    py: PX_PER_M * (view.maxX - x),
   };
 }
 // SVG pixels → base (x,y).
-function svgToBase(px, py) {
+function svgToBase(px, py, view = TODAY_VIEW) {
   return {
-    x: VIEW_MAX_X - py / PX_PER_M,
-    y: VIEW_MAX_Y - px / PX_PER_M,
+    x: view.maxX - py / PX_PER_M,
+    y: view.maxY - px / PX_PER_M,
   };
 }
 // Clamp a base point into the reach shape so every placement is reachable:
@@ -275,6 +277,42 @@ function clampRange(v, lo, hi) {
 function round3(v) {
   return Math.round(v * 1000) / 1000;
 }
+// The tower kit (spec 40 S8, D66): a base point snapped into the printed work
+// zone (inZone.clampIntoZone, in the fixture frame F about the joint-1 axis),
+// returned ON the editor's millimetre grid — the grid point inside the zone
+// nearest the snap, so the rounding of a point on the cut can never leave the
+// object just outside it. `moved` says whether the tap was outside the zone.
+function snapIntoZone(kit, x, y) {
+  const b = kit.baseAxisX;
+  const inside = inZone(kit.spec, x - b, y);
+  const f = inside ? { x: x - b, y } : clampIntoZone(kit.spec, x - b, y);
+  const ex = f.x + b;
+  const ey = f.y;
+  let best = null;
+  for (const dx of [0, -1, 1]) {
+    for (const dy of [0, -1, 1]) {
+      const cx = round3(round3(ex) + dx / 1000);
+      const cy = round3(round3(ey) + dy / 1000);
+      const d = Math.hypot(cx - ex, cy - ey);
+      if (inZone(kit.spec, cx - b, cy) && (!best || d < best.d)) best = { x: cx, y: cy, d };
+    }
+  }
+  return { x: best ? best.x : round3(ex), y: best ? best.y : round3(ey), moved: !inside };
+}
+// An SVG path through base points, closed.
+function polygonPath(points, view) {
+  return points.map(([x, y], i) => {
+    const { px, py } = baseToSvg(x, y, view);
+    return `${i ? 'L' : 'M'} ${px} ${py}`;
+  }).join(' ') + ' Z';
+}
+// The kit's colours on the table: the mat a light sheet, the plate a printed
+// part, the tower darker — obstacles, never zones.
+const FIXTURE_MAT_FILL = 'rgba(255,255,255,0.6)';
+const FIXTURE_MAT_STROKE = '#A39E95';
+const FIXTURE_PLATE_FILL = '#D9D4CB';
+const FIXTURE_TOWER_FILL = 'rgba(77,75,71,0.55)';
+const FIXTURE_STROKE = '#4D4B47';
 // A „Ziel setzen" point at the destination store's own precision (4 decimals).
 function round4(v) {
   const r = Math.round(v * 1e4) / 1e4;
@@ -318,6 +356,10 @@ function SimScene({
   // Defensive like the caps selector above: several tests mount SimScene with a
   // partial store, and an absent slice must degrade to "no subscription", not throw.
   const rosbridgeUrl = useSelector((st) => (st.ros ? st.ros.rosbridgeUrl : null));
+  // The tower kit is drawn — and its cut zone is the reach shape — only while
+  // the arm container STATES the tower camera (D63; revision 5, 58 m-8): under
+  // `legacy` and with no statement the table is today's, byte for byte.
+  const towerStated = useSelector((st) => (st.workshop ? st.workshop.sceneCameraProfile === 'tower_v1' : false));
   // IS A PROGRAM ACTUALLY DRIVING THE VIRTUAL ARM RIGHT NOW? This is the
   // authority question, and getting it wrong is what made the simulator go
   // stale after „Stopp": the server's SimWorld is only MEANINGFUL while a run is
@@ -339,6 +381,16 @@ function SimScene({
       : false
   ));
   const annulus = useMemo(() => reachAnnulus(caps), [caps]);
+  // The kit: fixtureLayout(caps) (null for an arm the contract does not know) or null.
+  const kit = useMemo(() => (towerStated ? fixtureLayout(caps) : null), [towerStated, caps]);
+  const kitRef = useRef(kit);
+  useEffect(() => { kitRef.current = kit; }, [kit]);
+  const view = useMemo(() => (kit ? towerView(kit) : TODAY_VIEW), [kit]);
+  const svgW = PX_PER_M * (view.maxY - view.minY);
+  const svgH = PX_PER_M * (view.maxX - view.minX);
+  // Base origin (robot base, x=0 y=0) in SVG pixels.
+  const originPx = PX_PER_M * view.maxY;
+  const originPy = PX_PER_M * view.maxX;
   const graspBand = useMemo(() => gripperBand(caps), [caps]);
   const graspBandRef = useRef(graspBand);
   useEffect(() => { graspBandRef.current = graspBand; }, [graspBand]);
@@ -427,14 +479,14 @@ function SimScene({
         setFit((prev) => (prev === null ? prev : null));
         return;
       }
-      const w = Math.floor(Math.min(availW, (availH * SVG_W) / SVG_H));
-      const h = Math.min(Math.floor(availH), Math.round((w * SVG_H) / SVG_W));
+      const w = Math.floor(Math.min(availW, (availH * svgW) / svgH));
+      const h = Math.min(Math.floor(availH), Math.round((w * svgH) / svgW));
       setFit((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
     };
     const observer = new ResizeObserver((entries) => measure(entries && entries[0]));
     observer.observe(el);
     return () => observer.disconnect();
-  }, [isSplit, tableWrapEl]);
+  }, [isSplit, tableWrapEl, svgW, svgH]);
 
   const svgRef = useRef(null);
   const draggingIdRef = useRef(null);
@@ -548,10 +600,10 @@ function SimScene({
     if (!svg) return null;
     const rect = svg.getBoundingClientRect();
     if (!rect.width || !rect.height) return null;
-    const px = ((e.clientX - rect.left) / rect.width) * SVG_W;
-    const py = ((e.clientY - rect.top) / rect.height) * SVG_H;
-    return svgToBase(px, py);
-  }, []);
+    const px = ((e.clientX - rect.left) / rect.width) * svgW;
+    const py = ((e.clientY - rect.top) / rect.height) * svgH;
+    return svgToBase(px, py, view);
+  }, [svgW, svgH, view]);
 
   // Pointer-DOWN on the empty table → place the selected type (clamped into the
   // annulus). Bound to pointerdown, NOT click: an object's <g> stops its own
@@ -587,12 +639,14 @@ function SimScene({
           return;
         }
       }
-      const { x, y } = clampToAnnulus(base.x, base.y, annulusRef.current);
+      // On the tower kit the printed zone with its cut is the reach shape.
+      const zoned = kitRef.current ? snapIntoZone(kitRef.current, base.x, base.y) : null;
+      const { x, y } = zoned || clampToAnnulus(base.x, base.y, annulusRef.current);
       // The clamp SNAPS an out-of-ring tap onto the ring boundary instead of
       // refusing it, which silently relocates the object the student aimed at --
       // and the boundary is exactly where the server's approach-clearance floor
       // refuses to grasp. Say it happened.
-      if (Math.abs(x - base.x) > 1e-6 || Math.abs(y - base.y) > 1e-6) {
+      if (zoned ? zoned.moved : (Math.abs(x - base.x) > 1e-6 || Math.abs(y - base.y) > 1e-6)) {
         toast('Objekt in den Greifbereich verschoben.', { icon: toastIcon('info') });
       }
       const nextTag = objects.length
@@ -626,7 +680,9 @@ function SimScene({
       if (id === null) return;
       const base = eventToBase(e);
       if (!base) return;
-      const { x, y } = clampToAnnulus(base.x, base.y, annulusRef.current);
+      const { x, y } = kitRef.current
+        ? snapIntoZone(kitRef.current, base.x, base.y)
+        : clampToAnnulus(base.x, base.y, annulusRef.current);
       emit({
         objects: objects.map((o) =>
           o.tag_id === id ? { ...o, x: round3(x), y: round3(y) } : o,
@@ -756,16 +812,16 @@ function SimScene({
         if (!base) return;
         // Clamped to the VIEW window only — NOT the reach annulus: an unreachable
         // Ziel is allowed, and the preview / the run start report it.
-        const x = clampRange(base.x, VIEW_MIN_X, VIEW_MAX_X);
-        const y = clampRange(base.y, VIEW_MIN_Y, VIEW_MAX_Y);
+        const x = clampRange(base.x, view.minX, view.maxX);
+        const y = clampRange(base.y, view.minY, view.maxY);
         onCreateDestination({ x: round4(x), y: round4(y) });
         return;
       }
       if (mode === 'zone') {
         const base = eventToBase(e);
         if (!base) return;
-        const x = clampRange(base.x, VIEW_MIN_X, VIEW_MAX_X);
-        const y = clampRange(base.y, VIEW_MIN_Y, VIEW_MAX_Y);
+        const x = clampRange(base.x, view.minX, view.maxX);
+        const y = clampRange(base.y, view.minY, view.maxY);
         zoneStartRef.current = { x, y };
         setZoneDraft({ x0: x, y0: y, x1: x, y1: y });
         if (svgRef.current && typeof svgRef.current.setPointerCapture === 'function') {
@@ -775,7 +831,7 @@ function SimScene({
       }
       handlePlace(e);
     },
-    [mode, eventToBase, handlePlace, canCreateZiel, onCreateDestination],
+    [mode, eventToBase, handlePlace, canCreateZiel, onCreateDestination, view],
   );
 
   const handleSvgPointerMove = useCallback(
@@ -784,14 +840,14 @@ function SimScene({
         if (!zoneStartRef.current) return;
         const base = eventToBase(e);
         if (!base) return;
-        const x = clampRange(base.x, VIEW_MIN_X, VIEW_MAX_X);
-        const y = clampRange(base.y, VIEW_MIN_Y, VIEW_MAX_Y);
+        const x = clampRange(base.x, view.minX, view.maxX);
+        const y = clampRange(base.y, view.minY, view.maxY);
         setZoneDraft((d) => (d ? { ...d, x1: x, y1: y } : d));
         return;
       }
       handlePointerMove(e);
     },
-    [mode, eventToBase, handlePointerMove],
+    [mode, eventToBase, handlePointerMove, view],
   );
 
   const handleSvgPointerUp = useCallback(() => {
@@ -875,8 +931,8 @@ function SimScene({
   // take the min corner + |Δ| for the SVG <rect> origin/size.
   const draftRect = zoneDraft
     ? (() => {
-        const a = baseToSvg(zoneDraft.x0, zoneDraft.y0);
-        const b = baseToSvg(zoneDraft.x1, zoneDraft.y1);
+        const a = baseToSvg(zoneDraft.x0, zoneDraft.y0, view);
+        const b = baseToSvg(zoneDraft.x1, zoneDraft.y1, view);
         return {
           x: Math.min(a.px, b.px),
           y: Math.min(a.py, b.py),
@@ -1022,7 +1078,7 @@ function SimScene({
     >
       <svg
         ref={svgRef}
-        viewBox={`0 0 ${SVG_W} ${SVG_H}`}
+        viewBox={`0 0 ${svgW} ${svgH}`}
         style={isSplit && fit ? { width: fit.w, height: fit.h } : undefined}
         className={
           (isSplit && fit ? 'block' : 'w-full h-auto')
@@ -1035,9 +1091,31 @@ function SimScene({
         role="application"
         aria-label="Simulator-Tisch — Objekte, Sperrzonen und Ziele platzieren"
       >
+        {/* The tower kit (tower_v1 only): the mat with its notch, under the
+            zone; the plate and the tower's footprint (every oriented box seen
+            from above, the bridge and both head boxes included) over it. */}
+        {kit && (
+          <path
+            data-testid="fixture-mat"
+            d={polygonPath(kit.mat, view)}
+            fill={FIXTURE_MAT_FILL}
+            stroke={FIXTURE_MAT_STROKE}
+            strokeWidth="1"
+          />
+        )}
         {/* Reach shape (graspable ring, or the sector of an arm that
-            reaches only part of the circle — the V1's ±90°) */}
-        {annulus.sector ? (
+            reaches only part of the circle — the V1's ±90°; on the tower kit
+            the printed work zone with the corner next to the tower cut out) */}
+        {kit ? (
+          <path
+            data-testid="reach-zone"
+            d={polygonPath(kit.zone, view)}
+            fill="rgba(61,190,90,0.12)"
+            stroke="#3DBE5A"
+            strokeWidth="1"
+            strokeDasharray="4 3"
+          />
+        ) : annulus.sector ? (
           <path
             data-testid="reach-sector"
             d={sectorPath(annulus)}
@@ -1049,8 +1127,8 @@ function SimScene({
         ) : (
           <>
             <circle
-              cx={ORIGIN_PX}
-              cy={ORIGIN_PY}
+              cx={originPx}
+              cy={originPy}
               r={annulus.outer * PX_PER_M}
               fill="rgba(61,190,90,0.12)"
               stroke="#3DBE5A"
@@ -1058,8 +1136,8 @@ function SimScene({
               strokeDasharray="4 3"
             />
             <circle
-              cx={ORIGIN_PX}
-              cy={ORIGIN_PY}
+              cx={originPx}
+              cy={originPy}
               r={annulus.inner * PX_PER_M}
               fill="var(--bg-sunk)"
               stroke="#3DBE5A"
@@ -1068,11 +1146,35 @@ function SimScene({
             />
           </>
         )}
+        {kit && (
+          <>
+            <path
+              data-testid="fixture-plate"
+              d={polygonPath([
+                kit.plate[0], [kit.plate[1][0], kit.plate[0][1]],
+                kit.plate[1], [kit.plate[0][0], kit.plate[1][1]],
+              ], view)}
+              fill={FIXTURE_PLATE_FILL}
+              stroke={FIXTURE_STROKE}
+              strokeWidth="1"
+            />
+            {kit.boxes.map((box) => (
+              <path
+                key={box.name}
+                data-testid={`fixture-box-${box.name}`}
+                d={polygonPath(boxFootprint(box), view)}
+                fill={FIXTURE_TOWER_FILL}
+                stroke={FIXTURE_STROKE}
+                strokeWidth="0.75"
+              />
+            ))}
+          </>
+        )}
         {/* Robot base marker */}
-        <circle cx={ORIGIN_PX} cy={ORIGIN_PY} r="4" fill="#4D4B47" />
+        <circle cx={originPx} cy={originPy} r="4" fill="#4D4B47" />
         <text
-          x={ORIGIN_PX + 7}
-          y={ORIGIN_PY + 4}
+          x={originPx + 7}
+          y={originPy + 4}
           fontSize="9"
           fill="#4D4B47"
         >
@@ -1082,8 +1184,8 @@ function SimScene({
         {/* No-go zones (top-down footprint, drawn under the objects) */}
         {zones.map((z, i) => {
           if (!Array.isArray(z.min) || !Array.isArray(z.max)) return null;
-          const a = baseToSvg(z.min[0], z.min[1]);
-          const b = baseToSvg(z.max[0], z.max[1]);
+          const a = baseToSvg(z.min[0], z.min[1], view);
+          const b = baseToSvg(z.max[0], z.max[1], view);
           const x = Math.min(a.px, b.px);
           const y = Math.min(a.py, b.py);
           const w = Math.abs(a.px - b.px);
@@ -1127,7 +1229,7 @@ function SimScene({
             marker must reach the table like a tap anywhere else. */}
         {markerList.map((m) => {
           if (!m || !Number.isFinite(m.x) || !Number.isFinite(m.y)) return null;
-          const { px, py } = baseToSvg(m.x, m.y);
+          const { px, py } = baseToSvg(m.x, m.y, view);
           const color = MARKER_COLORS[m.kind] || MARKER_COLORS.pin;
           const grow = m.highlighted ? 2 : 0;
           const sw = m.highlighted ? 3 : 1.5;
@@ -1163,7 +1265,7 @@ function SimScene({
 
         {/* Placed objects */}
         {objects.map((o) => {
-          const { px, py } = baseToSvg(o.x || 0, o.y || 0);
+          const { px, py } = baseToSvg(o.x || 0, o.y || 0, view);
           const isSel = o.tag_id === selectedId;
           // Skip a row the 3D twin cannot key (UrdfTwin.simObjectKey returns
           // null without a tag_id, so it renders no mesh) -- otherwise the two
@@ -1190,7 +1292,10 @@ function SimScene({
           // A saved object outside the reach shape is KEPT where it is (a load
           // never moves it) and marked: the arm cannot grasp it there (N6/N11).
           // A held object travels with the gripper and is never judged.
-          const unreachable = !isHeld && !reachContains(annulus, o.x || 0, o.y || 0);
+          // On the tower kit: outside the printed zone (D66).
+          const unreachable = !isHeld && (kit
+            ? !inZone(kit.spec, (o.x || 0) - kit.baseAxisX, o.y || 0)
+            : !reachContains(annulus, o.x || 0, o.y || 0));
           return (
             <g
               key={o.tag_id}
@@ -1428,6 +1533,7 @@ function SimScene({
           showReach={showReach}
           markers={markerList}
           ghostJoints={ghostJoints}
+          fixture={kit || undefined}
         />
       </Suspense>
     </div>

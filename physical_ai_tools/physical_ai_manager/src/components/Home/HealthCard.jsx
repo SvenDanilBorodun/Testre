@@ -21,11 +21,12 @@
 // report „keine erkannt" on every fresh session.
 //
 // `setCalibrationStatus` is dispatched from exactly ONE place in the app —
-// CalibrationWizard.jsx — so on the Start page those Redux flags are all
-// `false` until the student has opened Roboter Studio in this session.
-// Rendering „Kalibrierung fehlt" from that would be an invented claim about
-// the rig, so this asks the robot once (the wizard's own comment calls the
-// read cheap: a few file-existence checks) and shows „—" until it answers.
+// Roboter Studio's calibration panel (Workshop/calibration/CalibrationPanel.jsx)
+// — so on the Start page those Redux flags are all `false` until the student
+// has opened Roboter Studio in this session. Rendering „Kalibrierung fehlt"
+// from that would be an invented claim about the rig, so this asks the robot
+// once (/calibration/status is cheap: whether a valid arm check is stored) and
+// shows „—" until it answers.
 //
 // Both are ONE shot per connection, never polled. Neither dispatches into
 // Redux: these answers belong to this card, and writing `imageTopicList` from
@@ -136,7 +137,7 @@ export default function HealthCard({ jointsLive = null, cloudOnly = false }) {
       cameraCount,
       expectedCameras: roles ? roles.length : null,
       calibration,
-      // A profile without Roboter Studio never runs the calibration wizard, so
+      // A profile without Roboter Studio never runs the calibration, so
       // the row would be permanently „—". Absent caps keep it visible: hiding a
       // row on missing information is itself a claim.
       showCalibration: caps ? caps.roboter_studio !== false : true,

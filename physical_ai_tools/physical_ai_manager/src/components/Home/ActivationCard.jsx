@@ -24,8 +24,16 @@
 // „nicht aktiviert" there would be a claim about the rig that nobody checked,
 // and greying the button out would strand a student on an image whose agent is
 // simply slow to publish its first tick.
+//
+// THE V1 UNDER THE CAMERA TOWER (spec 40 WP-HINT, 52 §5.3 (a); D56, D57 Q1).
+// The driver publishes its own verdict for the activation glide from the live
+// pose (/edubotics/tower_state). While that is not `clear`, the button is held
+// back and TowerActivationHint shows the animation and the way to lay the arm
+// forward (it frees and locks it through /workshop/hand_guide). No topic — any
+// other profile, the legacy camera, an older image — is today's card, byte for
+// byte; the driver refuses at the press anyway (refuse-only, D53).
 
-import React, { useCallback } from 'react';
+import React, { useCallback, useState } from 'react';
 import { useSelector } from 'react-redux';
 
 import { Btn } from '../EbUI';
@@ -33,6 +41,9 @@ import { Led, Plate } from '../sucher';
 import useRobotActivation, { ACTIVATING, ACTIVE, FAILED } from '../../hooks/useRobotActivation';
 import { selectWorkflowRunning } from '../../features/workshop/workshopSlice';
 import { stripSeverityPrefix, isHardError } from '../../utils/homeHealth';
+import useTowerState, { GLIDE_CLEAR, TOWER_ARM_PROFILE } from '../../hooks/useTowerState';
+import { TowerActivationHint } from '../TowerHint/TowerHint';
+import { TOWER_HINT_ACTIVATE_DE } from '../TowerHint/towerHintCopy';
 
 const TITLE = 'Roboter aktivieren';
 
@@ -115,11 +126,22 @@ export default function ActivationCard() {
   const taskRunning = useSelector((s) => s.tasks.taskStatus.running);
   const workflowRunning = useSelector((s) => (s.workshop ? selectWorkflowRunning(s) : false));
   const caps = useSelector((s) => s.tasks.taskStatus.capabilities);
+  const robotProfile = useSelector((s) => s.tasks.taskStatus.robotProfile);
+  const rosbridgeUrl = useSelector((s) => (s.ros ? s.ros.rosbridgeUrl : ''));
   const connected = heartbeatStatus === 'connected';
 
   const { status, activate, calling, error } = useRobotActivation({
     enabled: connected,
   });
+
+  // The tower verdict exists only for the V1; every other profile never asks.
+  const towerState = useTowerState({
+    enabled: connected && robotProfile === TOWER_ARM_PROFILE,
+    rosbridgeUrl,
+  });
+  // The panel stays while the arm it freed is limp, whatever the verdict.
+  const [towerFreeing, setTowerFreeing] = useState(false);
+  const towerHold = (towerState !== null && towerState.glide !== GLIDE_CLEAR) || towerFreeing;
 
   const state = status?.state ?? null;
   const busy = state === ACTIVATING || calling;
@@ -210,6 +232,13 @@ export default function ActivationCard() {
         {reason && !busy && (
           <p className="su-act__note text-[var(--ink-2)]">{reason}</p>
         )}
+        {towerHold && (
+          <TowerActivationHint
+            profile={TOWER_ARM_PROFILE}
+            blockedReason={reason}
+            onActiveChange={setTowerFreeing}
+          />
+        )}
         <div className="su-act__action">
           {teleopOwnsTheArm ? (
             <p className="su-act__note text-[var(--ink-2)]">
@@ -221,8 +250,8 @@ export default function ActivationCard() {
             variant={isActive ? 'secondary' : 'primary'}
             size={isActive ? 'md' : 'lg'}
             onClick={onClick}
-            disabled={!!reason}
-            title={reason || undefined}
+            disabled={!!reason || towerHold}
+            title={reason || (towerHold ? TOWER_HINT_ACTIVATE_DE : undefined)}
           >
             {busy
               ? 'Roboter wird aktiviert …'

@@ -11,10 +11,9 @@ invisible.
 
 ``physical_ai_server.py`` needs rclpy, so the callback is extracted by name with
 ``ast`` and exec'd onto a stub ``self`` — the deps-free pattern
-``test_workshop_capture_pose.py`` established. Everything BELOW the callback is
-real: a real ``cv2.FileStorage`` handeye YAML on disk, the real
-``project_pixel_to_table``, the real ``motion.table_z_at`` and the real
-``WorkflowManager``.
+``test_workshop_capture_pose.py`` established. The tower calibration's click
+(``autocal.service.Click``) is handed in; everything BELOW the callback is real:
+the real ``project_pixel_to_table`` and the real ``WorkflowManager``.
 """
 
 from __future__ import annotations
@@ -24,10 +23,10 @@ import math
 import textwrap
 from pathlib import Path
 
-import cv2
 import numpy as np
 import pytest
 
+from physical_ai_server.workflow.autocal.service import Click
 from physical_ai_server.workflow.handlers import motion as M
 from physical_ai_server.workflow.workflow_manager import WorkflowManager
 
@@ -93,28 +92,23 @@ class _Request:
         self.camera = camera
 
 
-class _CalibManager:
-    def __init__(self, path: Path):
-        self._path = path
-        self._intrinsics = {'scene': {'K': _K, 'dist': _DIST}}
+class _TowerCalibration:
+    """The calibration service's click: the pixel as its studio pixel, the
+    calibration to project it with, the mat's surface and the grasp height."""
 
-    def has_intrinsics(self, camera):
-        return camera in self._intrinsics
+    def __init__(self, z: float, transform=_T):
+        self._z = z
+        self._calibration = {'intrinsics': {'K': _K, 'dist': _DIST},
+                             'T_cam_to_w': transform}
 
-    def _handeye_path(self, camera):
-        return self._path
-
-    def read_verify_correction(self, camera):
-        return None
+    def click(self, camera, u, v):
+        return Click(None, float(u), float(v), self._calibration, self._z, self._z)
 
 
 class _Node:
-    def __init__(self, path: Path, wfm: WorkflowManager | None):
-        self._calib = _CalibManager(path)
+    def __init__(self, calibration: _TowerCalibration, wfm: WorkflowManager | None):
+        self.scene_calibration = calibration
         self._wfm = wfm
-
-    def _get_or_create_calibration_manager(self):
-        return self._calib
 
     def _get_or_create_workflow_manager(self):
         return self._wfm
@@ -123,30 +117,15 @@ class _Node:
         return _Logger()
 
 
-def _write_handeye(tmp_path: Path, z_table: float,
-                   table_plane: tuple[float, float, float] | None = None,
-                   board_table_z: float | None = None) -> Path:
-    path = tmp_path / 'scene_handeye.yaml'
-    fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_WRITE)
-    fs.write('transform', _T)
-    fs.write('z_table', float(z_table))
-    fs.write('board_table_z',
-             float(board_table_z if board_table_z is not None else z_table))
-    if table_plane is not None:
-        fs.write('table_plane', np.array([float(v) for v in table_plane]))
-    fs.release()
-    return path
-
-
 def _wfm() -> WorkflowManager:
     return WorkflowManager(publisher=lambda _p: None, load_destinations=lambda: {})
 
 
 # ── the happy path still works end to end ───────────────────────────────────
 
-def test_a_clean_click_projects_persists_and_reports_success(tmp_path):
+def test_a_clean_click_projects_persists_and_reports_success():
     wfm = _wfm()
-    node = _Node(_write_handeye(tmp_path, 0.0125), wfm)
+    node = _Node(_TowerCalibration(0.0125), wfm)
     resp = _mark_destination(node, _Request('Ablage'), _Response())
     assert resp.success is True
     assert 'gespeichert' in resp.message
@@ -162,9 +141,9 @@ def test_a_clean_click_projects_persists_and_reports_success(tmp_path):
 
 @pytest.mark.parametrize('label', ['A!', 'A/B', '日本', 'A\nB', 'A]B', 'x' * 41,
                                    '   '])
-def test_a_bad_label_is_refused_in_german_and_nothing_is_stored(tmp_path, label):
+def test_a_bad_label_is_refused_in_german_and_nothing_is_stored(label):
     wfm = _wfm()
-    node = _Node(_write_handeye(tmp_path, 0.0125), wfm)
+    node = _Node(_TowerCalibration(0.0125), wfm)
     resp = _mark_destination(node, _Request(label), _Response())
     assert resp.success is False, label
     assert 'Ungültiger Ziel-Name' in resp.message
@@ -175,16 +154,16 @@ def test_a_bad_label_is_refused_in_german_and_nothing_is_stored(tmp_path, label)
     assert '\n' not in resp.message
 
 
-def test_the_refusal_zeroes_the_coordinates_so_no_client_uses_them(tmp_path):
-    node = _Node(_write_handeye(tmp_path, 0.0125), _wfm())
+def test_the_refusal_zeroes_the_coordinates_so_no_client_uses_them():
+    node = _Node(_TowerCalibration(0.0125), _wfm())
     resp = _mark_destination(node, _Request('A!'), _Response())
     assert (resp.world_x, resp.world_y, resp.world_z) == (0.0, 0.0, 0.0)
 
 
-def test_a_padded_label_is_stored_under_the_trimmed_key(tmp_path):
+def test_a_padded_label_is_stored_under_the_trimmed_key():
     """React's field validator trims, so the block carries 'Ablage'."""
     wfm = _wfm()
-    node = _Node(_write_handeye(tmp_path, 0.0125), wfm)
+    node = _Node(_TowerCalibration(0.0125), wfm)
     resp = _mark_destination(node, _Request('  Ablage  '), _Response())
     assert resp.success is True
     assert list(wfm.get_destinations()) == ['Ablage']
@@ -192,21 +171,15 @@ def test_a_padded_label_is_stored_under_the_trimmed_key(tmp_path):
 
 # ── §8.1 — a non-finite coordinate can no longer be stored as a success ─────
 
-def test_a_non_finite_projection_is_refused_rather_than_stored(tmp_path):
+def test_a_non_finite_projection_is_refused_rather_than_stored():
     """No ordinary trigger — `project_pixel_to_table` returns None, not NaN, on
     every degenerate pixel the audit could drive. It needs a NaN-bearing
-    calibration YAML, which is exactly the defence-in-depth case: a corrupt
-    `transform` used to reach `set_destination` and be reported as saved."""
+    calibration, which is exactly the defence-in-depth case: a corrupt camera
+    pose used to reach `set_destination` and be reported as saved."""
     bad_T = _T.copy()
     bad_T[0, 3] = float('nan')
-    path = tmp_path / 'scene_handeye.yaml'
-    fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_WRITE)
-    fs.write('transform', bad_T)
-    fs.write('z_table', 0.0125)
-    fs.write('board_table_z', 0.0125)
-    fs.release()
     wfm = _wfm()
-    node = _Node(path, wfm)
+    node = _Node(_TowerCalibration(0.0125, transform=bad_T), wfm)
     resp = _mark_destination(node, _Request('Ablage'), _Response())
     assert resp.success is False
     assert 'Koordinaten' in resp.message
@@ -215,52 +188,40 @@ def test_a_non_finite_projection_is_refused_rather_than_stored(tmp_path):
 
 # ── the pre-existing refusals are untouched ────────────────────────────────
 
-def test_an_unmeasured_table_still_refuses_with_the_touch_off_sentence(tmp_path):
-    path = tmp_path / 'scene_handeye.yaml'
-    fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_WRITE)
-    fs.write('transform', _T)
-    fs.release()
-    node = _Node(path, _wfm())
-    resp = _mark_destination(node, _Request('Ablage'), _Response())
-    assert resp.success is False
-    assert 'Tisch vermessen' in resp.message
-
-
-def test_a_missing_workflow_manager_stays_best_effort(tmp_path):
+def test_a_missing_workflow_manager_stays_best_effort():
     """The projection IS the primary output; only the persist is a bonus."""
-    node = _Node(_write_handeye(tmp_path, 0.0125), None)
+    node = _Node(_TowerCalibration(0.0125), None)
     resp = _mark_destination(node, _Request('Ablage'), _Response())
     assert resp.success is True
     assert resp.world_z == pytest.approx(0.0125, abs=1e-9)
 
 
-# ── the click is PLANE-TRACKED, so a later touch-off moves it ──────────────
+# ── the click is PLANE-TRACKED, so a later table moves it ──────────────────
 
-def test_the_click_is_recorded_as_a_reading_off_the_plane_not_a_measurement(
-        tmp_path):
-    """A camera click is a point ON THE TABLE: its z was read off the plane the
-    touch-off had drawn, so it is a cached answer, not a measurement. „Position
-    merken" is the opposite and stays verbatim."""
+def test_the_click_is_recorded_as_a_reading_off_the_plane_not_a_measurement():
+    """A camera click is a point ON THE TABLE: its z was read off the plane in
+    force, so it is a cached answer, not a measurement. „Position merken" is the
+    opposite and stays verbatim."""
     wfm = _wfm()
-    node = _Node(_write_handeye(tmp_path, 0.0125), wfm)
+    node = _Node(_TowerCalibration(0.0125), wfm)
     _mark_destination(node, _Request('Ablage'), _Response())
     assert wfm.get_destinations()['Ablage']['plane_tracked'] is True
 
 
-def test_a_pin_clicked_before_a_re_touch_off_follows_the_new_plane(tmp_path):
+def test_a_pin_clicked_before_a_re_touch_off_follows_the_new_plane():
     """The behavioural half of the flag, and the whole point of §9.2(a):
     `_persisted_destinations` is written only by `set_destination` and never
-    cleared, while EDUBOTICS_FORCE_RECALIBRATION re-runs „Tisch vermessen" every
-    lesson. The click below happened on a table believed level."""
+    cleared, while a later calibration may put the table elsewhere. The click
+    below happened on a table believed level."""
     wfm = _wfm()
-    node = _Node(_write_handeye(tmp_path, 0.0), wfm)
+    node = _Node(_TowerCalibration(0.0), wfm)
     resp = _mark_destination(node, _Request('Ablage'), _Response())
     assert resp.success is True
     stored = wfm.get_destinations()['Ablage']
     assert stored['z'] == pytest.approx(0.0, abs=1e-9)
 
-    # Next lesson: the touch-off finds the table tilted 11 deg about +x with
-    # z_table 0 at the tap centroid (0.10, 0). The pin sits at x = 0.20.
+    # Next lesson the table in force is tilted 11 deg about +x with z_table 0
+    # at (0.10, 0). The pin sits at x = 0.20.
     a = math.tan(math.radians(11.0))
     later = _Ctx(table_plane=(a, 0.0, -a * 0.10), z_table=0.0)
     resolved_mm = M.resolve_destination_z(later, stored) * 1000.0

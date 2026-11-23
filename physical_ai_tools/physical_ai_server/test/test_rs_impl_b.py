@@ -582,14 +582,14 @@ def test_a_real_grasp_still_gets_the_grasp_warning():
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# RS-30 — a projection failure was reported as „Tisch vermessen"
+# RS-30 — a projection failure was reported as a missing grasp height
 # ══════════════════════════════════════════════════════════════════════════
 
 def test_a_projection_failure_names_the_camera_not_the_touch_off():
     """Measured 2026-09-07 with the calibration COMPLETE (intrinsics, extrinsics
     and board_table_z all present): „sehe ich" → True, „Anzahl" → 1, and
-    „finde"/„Greife" → „bitte zuerst „Tisch vermessen" abschließen." — a
-    touch-off the student had already done."""
+    „finde"/„Greife" asked for the missing grasp height — a calibration step the
+    student had already done."""
     ctx = Ctx('omx_full')
     ctx.scene_intrinsics = {'K': np.eye(3), 'dist': np.zeros(5)}
     ctx.scene_extrinsics = np.eye(4)
@@ -599,8 +599,8 @@ def test_a_projection_failure_names_the_camera_not_the_touch_off():
     d.extras['world_error'] = 'projection'
     with pytest.raises(WorkflowError) as exc:
         motion._resolve_target(d, ctx)
-    assert 'Kamera-Ausrichtung' in str(exc.value)
-    assert 'Tisch vermessen' not in str(exc.value)
+    assert str(exc.value) == motion.PROJECTION_FAILED_DE
+    assert str(exc.value) != motion.CALIBRATION_FIRST_DE
 
 
 def test_a_genuinely_missing_touch_off_still_says_tisch_vermessen():
@@ -612,7 +612,7 @@ def test_a_genuinely_missing_touch_off_still_says_tisch_vermessen():
     d.world_xyz_m = None
     with pytest.raises(WorkflowError) as exc:
         motion._resolve_target(d, ctx)
-    assert 'Tisch vermessen' in str(exc.value)
+    assert str(exc.value) == motion.CALIBRATION_FIRST_DE
 
 
 # ══════════════════════════════════════════════════════════════════════════

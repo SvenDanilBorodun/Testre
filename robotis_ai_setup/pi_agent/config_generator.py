@@ -90,6 +90,29 @@ class HardwareConfig:
     cameras: list = field(default_factory=list)  # list[CameraDevice], 0-N cameras
 
 
+# ── The scene camera's profile ───────────────────────────────────────────────
+
+SCENE_CAMERA_PROFILE_KEY = "EDUBOTICS_SCENE_CAMERA_PROFILE"
+SCENE_PROFILE_LEGACY, SCENE_PROFILE_TOWER = "legacy", "tower_v1"
+# What a raw value loses at both ends before the lookup: blanks and quotes.
+# The SAME set as scene_split._PROFILE_STRIP (the Pi agent ships without
+# scene_split, which needs numpy and cv2 for its pixel functions);
+# tests/test_scene_profile_value_table.py holds every reader of the key equal.
+_SCENE_PROFILE_STRIP = ' \t\r\n\v\f"\''
+
+
+def scene_camera_profile_of(value) -> str:
+    """The profile a raw ``EDUBOTICS_SCENE_CAMERA_PROFILE`` value selects
+    (spec 40 S1's one value table): ``tower_v1`` when the value, stripped of
+    blanks and quotes at both ends and lower-cased, is ``tower_v1``; ``legacy``
+    for anything else, ``None`` and a non-string included."""
+    if not isinstance(value, str):
+        return SCENE_PROFILE_LEGACY
+    if value.strip(_SCENE_PROFILE_STRIP).lower() == SCENE_PROFILE_TOWER:
+        return SCENE_PROFILE_TOWER
+    return SCENE_PROFILE_LEGACY
+
+
 # ── Managed-key model ────────────────────────────────────────────────────────
 
 # Keys this generator owns. Anything in the existing .env that is NOT in this
@@ -130,6 +153,14 @@ MANAGED_KEYS = frozenset({
     "EDUBOTICS_BIND_HOST",
     "EDUBOTICS_ROS_NET_SUBNET",
     "EDUBOTICS_ROS_NET_GATEWAY",
+    # EDUBOTICS_SCENE_CAMERA_PROFILE is the scene camera's profile (tower_v1 |
+    # legacy; spec 40 S1, decision D32), set by the System tab's „Turm-Kamera"
+    # box (POST /scene-camera-profile). MANAGED like the robot type, and
+    # sticky: a regenerate carries the stored value forward, so a scan or a
+    # camera-role change never switches the tower camera off. The arm container
+    # reads it (entrypoint_omx.sh hands the scene slot to scene_camera_node.py,
+    # the ingest node's size check, the activation agent's profile statement).
+    SCENE_CAMERA_PROFILE_KEY,
     # CAMERA_DEVICE_N / CAMERA_NAME_N are handled by prefix-match below because
     # the count varies with how many cameras are connected.
 })
@@ -338,7 +369,7 @@ _LEGACY_HF_KEYS = ("HF_TOKEN", "HF_TOKEN_MACHINE")
 def _read_unmanaged_lines(path: str) -> list[str]:
     """Return non-managed lines (comments, blanks, unknown KEY=VALUE) from an
     existing .env so a regenerate doesn't wipe operator-added overrides like
-    EDUBOTICS_CAMERA_PIXEL_FORMAT, EDUBOTICS_VCODEC or the calibration knobs.
+    EDUBOTICS_CAMERA_PIXEL_FORMAT, EDUBOTICS_VCODEC or EDUBOTICS_TAG_SIZE_M.
 
     ONE exception to "everything unmanaged is preserved verbatim": the legacy
     ``HF_TOKEN`` / ``HF_TOKEN_MACHINE`` pair is ALWAYS dropped (see
@@ -466,8 +497,14 @@ def _opi_managed_lines(output_path: str, lan_open: Optional[bool],
                        ros_net_subnet: Optional[str],
                        robot_type: str = DEFAULT_ROBOT_PROFILE) -> list[str]:
     """The Orange-Pi managed lines shared by every .env variant: registry pins,
-    the robot profile id, the explicit usb_cam source, and the LAN/docker-
-    network block (with the DERIVED bind host + gateway).
+    the robot profile id, the scene camera's profile, the explicit usb_cam
+    source, and the LAN/docker-network block (with the DERIVED bind host +
+    gateway).
+
+    The scene camera's profile is carried forward from the stored value
+    (``POST /scene-camera-profile`` is its one writer), written as the profile
+    it reads as (``scene_camera_profile_of``): a hand-edited typo becomes
+    ``legacy``, the profile every container reader already took it for.
 
     ``robot_type`` is VALIDATED against ``constants.ROBOT_PROFILES`` here — the
     single emit site for the key, so an unknown id can never be written into the
@@ -476,6 +513,8 @@ def _opi_managed_lines(output_path: str, lan_open: Optional[bool],
     resolve`` degrades the same way, and a hand-edited typo must not make the
     rig unstartable."""
     robot_type = resolve_robot_type(robot_type)
+    scene_camera_profile = scene_camera_profile_of(
+        read_env_var(SCENE_CAMERA_PROFILE_KEY, output_path))
     lan_open_str = _resolve_lan_open(output_path, lan_open)
     bind_host = "0.0.0.0" if lan_open_str == "1" else "127.0.0.1"
     subnet = _resolve_ros_net_subnet(output_path, ros_net_subnet)
@@ -496,6 +535,7 @@ def _opi_managed_lines(output_path: str, lan_open: Optional[bool],
         # physical_ai_server's environment: list). MANAGED — a stale value is
         # superseded; agent callers carry the on-disk value forward.
         f"EDUBOTICS_ROBOT_TYPE={robot_type}",
+        f"{SCENE_CAMERA_PROFILE_KEY}={scene_camera_profile}",
         # The Pi is always the in-container usb_cam path — set it EXPLICITLY
         # (don't lean on the entrypoint's non-WSL auto-detect alone).
         "EDUBOTICS_CAMERA_SOURCE=usb_cam",
@@ -651,8 +691,9 @@ def generate_cloud_only_env(output_path: str = ENV_FILE,
     ``EDUBOTICS_BIND_HOST`` and compose reads ``REGISTRY`` / ``IMAGE_TAG`` /
     ``EDUBOTICS_ROS_NET_SUBNET``). ``robot_type`` is emitted for MANAGED-key
     symmetry with :func:`generate_env_file` (a stale hand-pinned value is
-    superseded here too). Operator overrides are preserved; the legacy HF_TOKEN
-    pair is dropped.
+    superseded here too); the scene camera's profile is carried forward as
+    there. Operator overrides are preserved; the legacy HF_TOKEN pair is
+    dropped.
     """
     domain_id = _resolve_ros_domain_id()
     preserved = _read_unmanaged_lines(output_path)

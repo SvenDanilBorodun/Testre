@@ -91,10 +91,6 @@ from physical_ai_interfaces.msg import (
     WorkflowStatus,
 )
 from physical_ai_interfaces.srv import (
-    CalibrationCaptureFrame,
-    CalibrationHistory,
-    CalibrationPreview,
-    CalibrationSolve,
     CalibrationStatus,
     CancelCalibration,
     ControlHfServer,
@@ -114,7 +110,6 @@ from physical_ai_interfaces.srv import (
     StartCloudInference,
     StartWorkflow,
     StopWorkflow,
-    VerifyCalibration,
     WorkflowContinue,
     WorkflowPause,
     WorkflowSetBreakpoints,
@@ -147,6 +142,7 @@ from physical_ai_server.utils.parameter_utils import (
     log_parameters,
     parse_topic_list_with_names,
 )
+from physical_ai_server.workflow.studio_camera import STUDIO_CAMERA, StudioCamera
 
 import numpy as np
 import rclpy
@@ -202,7 +198,7 @@ _LEADER_TEACH_ABORT_MESSAGES_DE = {
 # While the arm is limp the JointTrajectoryController keeps the reference it held
 # BEFORE the torque-off (usually HOME), and the OMX servos run a 50 ms time-based
 # profile (Drive Mode 4) — so Torque Enable snapped a hand-guided arm back to that
-# stale reference in ~50 ms: the "jumps to home" after „Tisch vermessen" and
+# stale reference in ~50 ms: the "jumps to home" after a hand-guide and
 # „Arm festsetzen". A single-point trajectory at the MEASURED pose is published
 # first, and torque is enabled only after the controller has adopted it. The
 # Feetech driver needs none of this (set_torque seeds Goal = Present itself, and
@@ -226,6 +222,12 @@ _MANUAL_HOME_MIN_DURATION_S = 3.0
 # Every arm joint already this close to HOME → answer „steht bereits in der
 # Grundstellung" instead of running a 3 s glide that goes nowhere.
 _MANUAL_HOME_ALREADY_THERE_RAD = 0.01
+# /edubotics/home_glide_state (spec 40 WP-12, 52 §5.1): the V1's manual home
+# glide's tower verdict for the live pose, latched and re-sent at 2 Hz for the
+# home-glide prompt; judged again once a joint moved more than two servo ticks.
+_HOME_GLIDE_STATE_TOPIC = '/edubotics/home_glide_state'
+_HOME_GLIDE_STATE_PERIOD_S = 0.5
+_HOME_GLIDE_REJUDGE_RAD = 2 * 2.0 * math.pi / 4096
 # Timeout (s) for acquiring the manual-control mutex in a driving/torque-switch
 # callback. If a jog/replay drive is holding it, a new manual op is refused in
 # German rather than queueing (the callbacks run on the reentrant preempt group,
@@ -335,24 +337,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # / record(start) / (transiently) jog+replay; closed by hand_guide(false)
         # / record(cancel).
         self.on_manual = False
-        # W1 — force recalibration on every fresh container start (DEFAULT ON).
-        # Read ONCE at startup. When ON, calibration_status_callback reports the
-        # scene calibration as ABSENT (intrinsics + extrinsic + table-plane) until
-        # the FULL flow's last step (the touch-off plane solve) completes THIS
-        # boot — at which point _recalibrated_this_boot latches True and the
-        # reported status reflects the real on-disk YAMLs again. No YAML is
-        # deleted; the latch resets on the next restart. One-var rollback: set
-        # EDUBOTICS_FORCE_RECALIBRATION=0 (or false/no/off) for the classroom.
-        self._force_recalib = os.environ.get(
-            'EDUBOTICS_FORCE_RECALIBRATION', '1'
-        ).strip().lower() not in ('0', 'false', 'no', 'off', '')
-        self._recalibrated_this_boot = False
-        # W5 — collected ground-truth verify points for /calibration/verify:
-        # each entry is (truth_xy, detected_xy, truth_yaw_rad|None,
-        # detected_yaw_rad|None). Mutated only inside the verify callback (which
-        # runs on the reentrant preempt group), so guard it with a lock.
-        self._verify_points: list = []
-        self._verify_lock = threading.Lock()
         # True while the eager background policy load (START_INFERENCE ->
         # _eager_load_policy thread) is in flight; the inference FPS timer
         # skips its tick and re-publishes INFERENCE_LOADING instead.
@@ -372,18 +356,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self._workflow_detections_state: tuple[float, list] = (0.0, [])
         self._workflow_last_detections: list = []
         self._workflow_last_detections_ts: float = 0.0
-        # Cleared by /calibration/start, set by /calibration/cancel. The
-        # touch-off (table_touch) step polls this so a manual-teach session
-        # can be aborted mid-flight.
-        self._calibration_stop_event = threading.Event()
-        # Serialises follower-torque switching. /calibration/solve runs on the
-        # node default (mutually-exclusive) group, but /calibration/cancel runs
-        # on the REENTRANT _preempt_cb_group — so a cancel can fire while a
-        # touch-off solve is mid-flight, and both call _set_follower_torque on
-        # the shared lazily-created _dxl_torque_client. Without a lock the
-        # lazy `getattr(...) is None` create is a check-then-set race (two
-        # clients created, one leaked) and two concurrent call_async race the
-        # same client. The lock makes the torque switch atomic.
+        # Serialises follower-torque switching. The manual services run on the
+        # REENTRANT _preempt_cb_group and the idle watchdog on a group of its
+        # own, so two torque switches can overlap, and both call
+        # _set_follower_torque on the shared lazily-created _dxl_torque_client.
+        # Without a lock the lazy `getattr(...) is None` create is a
+        # check-then-set race (two clients created, one leaked) and two
+        # concurrent call_async race the same client. The lock makes the torque
+        # switch atomic.
         self._dxl_torque_lock = threading.Lock()
 
         # Batch 2b — manual-control (jog / hand-guide / record / replay).
@@ -577,6 +557,27 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # ~0.18 ms. Never put a high-rate subscription back on the main node.
         self._ensure_sensor_executor()
 
+        # Roboter Studio's tower camera (spec 40 S1, D63): its OWN node and
+        # executor, never this node or the sensor node. Built here, outside any
+        # try (the constructor touches no ROS), so the recorder's provider
+        # always has it; a start failure leaves it inert: no studio picture,
+        # profile unknown (nothing stamped, nothing refused).
+        self.studio_camera = StudioCamera(
+            rclpy.create_node, SingleThreadedExecutor, time.monotonic, time.sleep)
+        try:
+            self.studio_camera.start()
+        except Exception as e:  # noqa: BLE001 — never fatal at boot
+            self.get_logger().error(f'studio camera not started: {type(e).__name__}: {e}')
+
+        # Roboter Studio's tower calibration (spec 40 S4, WP-13): the mat check,
+        # the arm check as a program, the program-start gate. Built outside any
+        # try (the constructor touches no ROS); its state topic inside one.
+        self.scene_calibration = self._build_scene_calibration()
+        try:
+            self._init_calibration_state()
+        except Exception as e:  # noqa: BLE001 — never fatal at boot
+            self.get_logger().error(f'calibration state not started: {type(e).__name__}: {e}')
+
         # EduBotics teleop force/collision e-stop (Rule §2 software guard, teleop-only).
         # Arms the read-only force monitor + the safe-home/resync orchestration.
         self._init_collision_monitor()
@@ -600,6 +601,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self._manual_idle_watchdog_cb,
             callback_group=MutuallyExclusiveCallbackGroup(),
         )
+        # The V1's home-glide hint (/edubotics/home_glide_state, WP-12): its own
+        # timer and group; never fatal at boot.
+        try:
+            self._init_home_glide_state()
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().error(f'home glide state not started: {e!r}')
 
         self.previous_data_manager_status = None
 
@@ -632,8 +639,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # publisher that sends before discovery has matched the subscriber in the
         # OTHER container (the JointTrajectoryController / the Feetech driver,
         # both VOLATILE) delivers nothing — and the first message a fresh server
-        # sends is typically the pre-torque HOLD („Tisch vermessen" or „Arm
-        # festsetzen" as the first manual action after activation), so a lazily
+        # sends is typically the pre-torque HOLD („Arm festsetzen" as the first
+        # manual action after activation), so a lazily
         # created publisher lost exactly the message that stops the snap, or the
         # first chunk of the first jog (a jump). Best-effort: a failure here
         # falls back to the lazy creation in _trajectory_publisher.
@@ -1069,11 +1076,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # (get_weight_save_root_path, get_available_list) used by inference-side
         # callbacks. There is no instance.
         self.training_manager = None
-        # Calibration manager is constructed lazily on first calibration call
-        # — same pattern as TrainingManager — so a server that never enters
-        # Roboter Studio doesn't pay the OpenCV-aruco import cost.
-        self.calibration_manager = None
-        # Workflow runtime is also lazily constructed.
+        # Workflow runtime is lazily constructed.
         self.workflow_manager = None
         # Roboter Studio Phase-3 simulation runtime: a parallel WorkflowManager
         # driving a virtual arm (SimArm) + synthetic perception (SimPerception)
@@ -1280,7 +1283,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         if self.communicator is None:
             return
         # Audit fix 3 — on_calibration joins the mode gate (parity with
-        # _assert_no_other_active): a touch-off/extrinsic capture is an active
+        # _assert_no_other_active): the handheld lens capture is an active
         # mode; READY every ~4 s during it was a divergence, not a feature.
         # D8 — a leader-arm take joins it for the same parity reason.
         if (self.on_recording or self.on_inference or self.on_workflow
@@ -1301,10 +1304,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # in-flight long-running calibration callback: /calibration/cancel
         # and /calibration/status. Without a reentrant group on
         # cancel/status they would queue behind a blocking calibration
-        # callback and the stop-event polling at 50ms cadence would be
-        # unreachable. Read-only services (status) and preemption services
-        # (cancel) are safe to dispatch concurrently because they only
-        # set/clear flags and read disk state.
+        # callback (the mat check reads three frames). Read-only services
+        # (status) and preemption services (cancel) are safe to dispatch
+        # concurrently because they only set/clear flags and read disk state.
         from rclpy.callback_groups import ReentrantCallbackGroup
         self._preempt_cb_group = ReentrantCallbackGroup()
         # Dedicated group for the HuggingFace services. whoami()/login do
@@ -1333,12 +1335,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             ('/huggingface/control', ControlHfServer, self.control_hf_server_callback),
             ('/training/get_training_info', GetTrainingInfo, self.get_training_info_callback),
             ('/calibration/start', StartCalibration, self.calibration_start_callback),
-            (
-                '/calibration/capture_frame',
-                CalibrationCaptureFrame,
-                self.calibration_capture_callback,
-            ),
-            ('/calibration/solve', CalibrationSolve, self.calibration_solve_callback),
             (
                 '/calibration/cancel',
                 CancelCalibration,
@@ -1426,29 +1422,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self.workflow_set_breakpoints_callback,
                 self._preempt_cb_group,
             ),
-            # Phase-2 calibration helpers (see CalibrationManager). The live
-            # ChArUco preview is polled a few Hz while the intrinsic step is
-            # active; it runs the lock-free detector and must NOT queue behind /
-            # starve the 1 Hz heartbeat on the node default group, so it rides
-            # the reentrant preempt group like /calibration/status.
-            (
-                '/calibration/preview',
-                CalibrationPreview,
-                self.calibration_preview_callback,
-                self._preempt_cb_group,
-            ),
-            # The verify "add_point" branch grabs a scene frame + runs the
-            # AprilTag detector (blocking), so it rides the reentrant preempt
-            # group — otherwise it queues behind / starves the 1 Hz heartbeat
-            # timer on the node default mutually-exclusive group (the documented
-            # whoami/HF pattern).
-            (
-                '/calibration/verify',
-                VerifyCalibration,
-                self.calibration_verify_callback,
-                self._preempt_cb_group,
-            ),
-            ('/calibration/history', CalibrationHistory, self.calibration_history_callback),
             # Cloud-Inferenz (spec §5.5 item 4): the node-default MutuallyExclusive group, so both
             # serialize with /task/command's FINISH/STOP and with the cloud tick; neither blocks.
             (cloud_contract.START_SERVICE, StartCloudInference, self.start_cloud_inference_callback),
@@ -1646,6 +1619,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         if daten is not None:
             self.data_manager._dataset_lease = daten.claim_record_lease
             self.data_manager._sync_download = daten.start_sync_download
+        # D58: the scene camera this robot records with, with or without Daten:
+        # the arm container's statement through the studio camera (D63). No
+        # studio camera = no provider = unknown (nothing stamped, nothing refused).
+        studio_camera = getattr(self, 'studio_camera', None)
+        self.data_manager._scene_camera_profile = (
+            studio_camera.provider if studio_camera is not None else None)
         self.communicator.clear_latest_data()
 
         # D19: a second START used to replace the manager and leave the first run's timer
@@ -4228,40 +4207,33 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
         Roboter Studio (incl. calibration) runs FOLLOWER-ONLY, so there is no
         leader broadcaster to suspend — the workflow/calibration trajectory
-        publisher is the sole writer on /leader/joint_trajectory. The
-        single-shot scene-cam calibration also moves the arm zero times. The
-        2026-06-17 teleop arbiter that used to bracket this is removed.
+        publisher is the sole writer on /leader/joint_trajectory. The flag is
+        the handheld lens step's (it moves the arm zero times); the arm check
+        runs as a program and claims ``on_workflow``. The 2026-06-17 teleop
+        arbiter that used to bracket this is removed.
         """
         self.on_calibration = active
 
-    def _get_or_create_calibration_manager(self):
-        if self.calibration_manager is not None:
-            return self.calibration_manager
-        try:
-            from physical_ai_server.workflow.calibration_manager import CalibrationManager
-        except ImportError as e:
-            self.get_logger().error(f'Cannot import CalibrationManager: {e}')
-            return None
-        self.calibration_manager = CalibrationManager(
-            get_frame=self._get_latest_camera_frame,
-            get_gripper_pose=self._get_current_gripper_pose,
-            get_approach_axis=self._get_approach_axis_local,
-        )
-        return self.calibration_manager
-
     def _get_latest_camera_frame(self, camera: str):
-        """Provider hook for the calibration manager + colour profile
-        capture. Returns the most recent BGR frame for the named camera,
+        """Provider hook for the workflow runtime's camera frames. Returns
+        the most recent BGR frame for the named camera,
         or None when no frame has arrived yet / decode fails. Delegates to
         ``Communicator.get_latest_bgr_frame``, which decodes the cached
         ``CompressedImage`` JPEG via cv2.imdecode.
+
+        ``'scene_studio'`` (the tower camera's own picture, Roboter Studio
+        only) is answered by the studio camera, which subscribes on demand and
+        may wait up to its first-frame wait; every other camera keeps this path.
         """
+        if camera == STUDIO_CAMERA:
+            found = self.studio_camera.latest_frame(math.inf)
+            return None if found is None else found[0]
         if self.communicator is None:
             return None
         getter = getattr(self.communicator, 'get_latest_bgr_frame', None)
         if not callable(getter):
             self.get_logger().warning(
-                'Communicator has no get_latest_bgr_frame; calibration capture disabled. '
+                'Communicator has no get_latest_bgr_frame; camera frames disabled. '
                 'Update communicator.py to the post-v1.1 build.'
             )
             return None
@@ -4274,6 +4246,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     def _get_camera_frame_age(self, camera: str):
         """Age (seconds) of the latest frame for the named camera, or None.
         Drives the workflow perception staleness gate (reject a frozen camera)."""
+        if camera == STUDIO_CAMERA:
+            return self.studio_camera.frame_age()
         if self.communicator is None:
             return None
         getter = getattr(self.communicator, 'get_camera_msg_age_s', None)
@@ -4285,8 +4259,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             return None
 
     def _get_current_gripper_pose(self):
-        """Provider hook for hand-eye calibration. Returns ``(R 3x3, t 3,)``
-        of gripper-in-base, or None when joint state hasn't arrived yet or
+        """The follower's FK end-effector pose ``(R 3x3, t 3,)`` (gripper in
+        base, „Position merken"), or None when joint state hasn't arrived yet or
         FK is unavailable. Computes FK via the same IKSolver instance used
         by the Roboter Studio workflow runtime so the URDF is loaded exactly
         once per server lifetime."""
@@ -4314,73 +4288,141 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self.get_logger().warning(f'FK call failed: {e}')
             return None
 
-    def _get_approach_axis_local(self):
-        """Provider hook: the tool direction in the frame
-        :meth:`_get_current_gripper_pose` reports, taken from the SOLVER.
-
-        The touch-off verticality gate needs it, and it is a per-arm frame
-        convention — the OMX's FK points the tool along local +x, the V1's
-        along +z. ``None`` (no solver yet) leaves the
-        manager on its OMX default, which is what it did before this existed."""
-        ik = self._build_ik_solver()
-        if ik is None:
+    # ------------------------------------------------------------------
+    # The tower calibration (spec 40 S4; WP-13)
+    # ------------------------------------------------------------------
+    def _build_scene_calibration(self):
+        """The calibration service of this arm, or None for an arm the fixture
+        contract does not know (no tower kit exists for it: nothing changes)."""
+        from physical_ai_server.workflow import scene_fixture
+        from physical_ai_server.workflow.autocal import service as calibration_service
+        profile = getattr(self, '_arm_profile', None)
+        if scene_fixture.arm_key(getattr(profile, 'profile_id', None)) is None:
             return None
-        return getattr(ik, 'approach_axis_local', None)
+        return calibration_service.SceneCalibration(
+            profile, self.studio_camera,
+            os.environ.get('EDUBOTICS_CALIB_DIR', '/root/.cache/edubotics/calibration'),
+            detect=lambda frame, roi=None: calibration_service.detect_tags(self._build_perception(), frame, roi),
+            get_joints=lambda: (self.communicator.get_latest_follower_joints()
+                                if self.communicator is not None else None),
+            fk=lambda q: self._build_ik_solver().fk(q),
+            guard_parts=self._calibration_guard_parts,
+            start_program=self._start_calibration_program,
+            stop_program=self._stop_calibration_program,
+            claim_mode=self._claim_calibration_mode,
+            release_mode=lambda: self._set_calibration_active(False),
+            log=self._calibration_log,
+            log_internal=lambda text: self.get_logger().warning(str(text)),
+            on_state=self._publish_calibration_state)
+
+    def _calibration_guard_parts(self, calibration):
+        """The arm check's last gate (``guard_margin``, spec 40 S4): the solved
+        arm model — this profile's solver with the solve's joint offsets, axis
+        tilts and mat slopes, the contract's fingertip and joint-1 window — and
+        the tower guard on it with the calibrated residual, the tower where the
+        arm check placed it and the gate's droop envelope."""
+        from physical_ai_server.workflow import arm_model, fixture_guard, scene_fixture
+        from physical_ai_server.workflow.autocal import service as calibration_service
+        profile = getattr(self, '_arm_profile', None) or robot_profiles.resolve(None)
+        kind = scene_fixture.arm_key(profile.profile_id)
+        model = arm_model.CalibratedIK(
+            self._build_profile_ik(profile), offsets=calibration['joint_offsets_rad'],
+            axis_tilts=calibration['axis_tilts_rad'], slopes=calibration['tilt'],
+            fingertip_m=scene_fixture.FINGERTIP_BELOW_EE_M[kind],
+            joint1_window_deg=scene_fixture.ARMS[kind]['joint1_window_deg'])
+        guard = fixture_guard.make_guard(
+            profile.profile_id, model.guard_frames, base_axis_x=model.base_axis_x,
+            arm_check={'tower_pose': calibration['tower_pose'],
+                       'droop_envelope_rad': calibration_service.guard_margin_envelope(calibration, kind)},
+            contract_hash=calibration.get('contract_hash'))
+        return model, guard
+
+    def _init_calibration_state(self):
+        """``/edubotics/calibration_state`` (std_msgs/String, JSON): latched and
+        re-published at 1 Hz from its own callback group, and at once on every
+        change of the service's state."""
+        service = getattr(self, 'scene_calibration', None)
+        if service is None:
+            return
+        from physical_ai_server.workflow.autocal import service as calibration_service
+        qos = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST, reliability=ReliabilityPolicy.RELIABLE,
+                         durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self._calibration_state_publisher = self.create_publisher(String, calibration_service.STATE_TOPIC, qos)
+        self._calibration_state_timer = self.create_timer(
+            1.0, self._publish_calibration_state, callback_group=MutuallyExclusiveCallbackGroup())
+        self._publish_calibration_state()
+
+    def _publish_calibration_state(self, _state=None):
+        service = getattr(self, 'scene_calibration', None)
+        publisher = getattr(self, '_calibration_state_publisher', None)
+        if service is None or publisher is None:
+            return
+        try:
+            msg = String()
+            msg.data = service.state_json()
+            publisher.publish(msg)
+        except Exception as e:  # noqa: BLE001 — a state publish never breaks its caller
+            self.get_logger().warning(f'calibration state not published: {type(e).__name__}: {e}')
+
+    def _calibration_log(self, text):
+        """A German line of the calibration service in the Protokoll."""
+        self._emit_workflow_status({'log_message': str(text)})
+
+    def _start_calibration_program(self, workflow_json, workflow_id):
+        """The calibration service's internal program (the arm check, its way
+        home), through the ordinary program start: mode arbitration, the leader
+        gate, the torque assertion and every guard of a real run apply."""
+        import types
+        request = types.SimpleNamespace(workflow_json=workflow_json, workflow_id=workflow_id)
+        response = types.SimpleNamespace(success=False, message='', unreachable_block_ids=[],
+                                         unreachable_messages=[])
+        self.workflow_start_callback(request, response)
+        return bool(response.success), str(response.message or '')
+
+    def _stop_calibration_program(self, workflow_id):
+        """Stop the real manager's run when it is still the service's program."""
+        manager = getattr(self, 'workflow_manager', None)
+        if manager is not None and manager.is_running and manager.workflow_id == workflow_id:
+            manager.stop()
+
+    def _claim_calibration_mode(self):
+        """The handheld step's claim of the calibration mode (spec 40 S4): while
+        the student moves the target by hand in front of the camera nothing else
+        may move the arm or start. Claimed under _mode_lock like every claim;
+        the mode 'handheld' takes no relaxation, so another calibration step,
+        a program, a recording or Handbetrieb refuses it with its own sentence."""
+        with self._mode_lock:
+            ok, msg = self._assert_no_other_active('handheld')
+            if ok:
+                self._set_calibration_active(True)
+        return ok, msg
+
+    def _workflow_start_gate(self, workflow_json, workflow_id):
+        """The real manager's start gate: the mat check of every real program."""
+        service = getattr(self, 'scene_calibration', None)
+        if service is None:
+            return None
+        return service.program_start_gate(workflow_json, workflow_id)
+
+    def _on_workflow_run_end(self, workflow_id, phase):
+        """The real manager's run ended (``phase`` None: never started)."""
+        self._workflow_scene_camera = 'scene'
+        service = getattr(self, 'scene_calibration', None)
+        if service is not None:
+            service.on_program_end(workflow_id, phase)
 
     def calibration_start_callback(self, request, response):
-        ok, msg = self._assert_no_other_active('calibration')
-        if not ok:
-            response.success = False
-            response.message = msg
+        # The tower calibration's steps (spec 40 S4): the mat check (three
+        # frames, no motion), the arm check (a program: the workflow start's own
+        # arbitration applies, never on_calibration), the target's removal, the
+        # handheld lens step and the way home the arm check starts from (step
+        # 'home', X-TARGETSTART). Nothing else is a step any more (decision D15).
+        service = getattr(self, 'scene_calibration', None)
+        if service is not None and request.step in service.STEPS:
+            response.success, response.message = service.start(request.step)
             return response
-        manager = self._get_or_create_calibration_manager()
-        if manager is None:
-            response.success = False
-            response.message = 'Kalibrierung kann nicht initialisiert werden.'
-            return response
-        # Clear any leftover stop flag from a previous cancel so the
-        # newly-started step's touch-off capture isn't aborted on its
-        # very first tick.
-        self._calibration_stop_event.clear()
-        # If a previous touch-off session left the follower torqued OFF (the
-        # student switched to another step without cancelling), re-torque before
-        # starting the new step so the arm is never left limp. If the re-torque
-        # persistently fails, REFUSE to start the new step and keep the mutex
-        # held + the step marked (so a retry re-attempts the re-torque) rather
-        # than proceeding onto — and later releasing the mutex over — a limp arm.
-        if (getattr(self, '_active_calib_step', None) == 'table_touch'
-                and request.step != 'table_touch'):
-            if not self._retorque_follower_or_keep_locked(response):
-                return response
-        # Touch-off ("Tisch vermessen") is a MANUAL-TEACH step: the student
-        # hand-guides the torque-off follower to tap the table. No image, no
-        # arm motion driven by us.
-        if request.step == 'table_touch':
-            success, message = manager.start_table_touch()
-            if success:
-                # Mark the step ONLY after a successful start: a FAILED start
-                # (e.g. extrinsic not yet calibrated) never torqued the follower
-                # off, so leaving _active_calib_step at 'table_touch' would
-                # wrongly fire the re-torque path on the next /start or /cancel
-                # (MEDIUM ride-along). Set it BEFORE the torque-off so a later
-                # abort still correctly re-torques the now-limp arm.
-                self._active_calib_step = request.step
-                if not self._set_follower_torque(False):
-                    message += (' [Hinweis: Arm konnte nicht automatisch '
-                                'freigeschaltet werden — bitte vorsichtig führen.'
-                                + self._last_torque_reason() + ']')
-                self._set_calibration_active(True)
-            response.success = success
-            response.message = message
-            return response
-        # Non-touch steps drive no torque side-effect; marking the step
-        # unconditionally is safe (and needed by capture_frame/solve routing).
-        self._active_calib_step = request.step
-        success, message = manager.start_step(request.camera, request.step)
-        if success:
-            self._set_calibration_active(True)
-        response.success = success
-        response.message = message
+        response.success = False
+        response.message = 'Diesen Kalibrier-Schritt gibt es für diesen Roboter nicht.'
         return response
 
     def _last_torque_reason(self) -> str:
@@ -4408,8 +4450,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
     def _set_follower_torque(self, enabled: bool) -> bool:
         """Enable/disable follower servo torque via the Dynamixel hardware
-        interface (std_srvs/SetBool, ABI-safe). Used by the touch-off step to
-        let the student hand-guide the limp arm, then re-torque on finish.
+        interface (std_srvs/SetBool, ABI-safe). Used by Handbetrieb to let the
+        student hand-guide the limp arm, then re-torque on finish.
         Returns True on a confirmed switch.
 
         The BOOL return is deliberately unchanged (five call sites and four test
@@ -4548,7 +4590,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
         ``allow_stale`` (the pre-energise use ONLY): a readback older than
         _FOLLOWER_JOINT_MAX_AGE_S is still used. While a service callback on the
-        node-default mutually-exclusive group runs (``/calibration/solve``), the
+        node-default mutually-exclusive group runs (``/calibration/start``), the
         follower /joint_states subscription on that same group is starved, so on
         a RE-TRY of a failed torque switch the cached pose is seconds old — yet it
         was read while the arm was limp, which is still far closer to the truth
@@ -4606,11 +4648,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             time.sleep(0.02)
 
     def _retorque_follower_or_keep_locked(self, response) -> bool:
-        """Re-assert follower torque after a touch-off that left the arm limp.
+        """Re-assert follower torque after a session that left the arm limp.
 
-        The touch-off torques the follower OFF for hand-guiding; on every
-        finish/cancel path the arm MUST be re-torqued before the calibration
-        mutex (on_calibration) is released — otherwise a subsequent workflow /
+        Handbetrieb torques the follower OFF for hand-guiding; on every
+        finish/cancel path the arm MUST be re-torqued before the session's
+        claim is released — otherwise a subsequent workflow /
         recording / inference start drives a LIMP follower (the arm_controller
         writes Goal Position but Torque Enable is 0, so the servos ignore it and
         slump under gravity). Nothing else re-asserts follower torque before
@@ -4618,17 +4660,17 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         Roboter-Studio path).
 
         Tries the torque-on switch up to 3 times. On success returns True (the
-        caller may then release the mutex). On persistent failure it does NOT
-        release the mutex — it leaves on_calibration True so the next mode start
-        is refused, sets a German error on ``response``, and returns False. The
-        arm is never left limp with the mutex released.
+        caller may then release its claim). On persistent failure the caller
+        keeps its claim so the next mode start is refused; this sets a German
+        error on ``response`` and returns False. The arm is never left limp with
+        the claim released.
         """
         for _ in range(3):
             if self._set_follower_torque(True):
                 return True
         self.get_logger().error(
-            'Follower re-torque failed after touch-off — keeping the '
-            'calibration mutex held so no motion runs against a limp arm.')
+            'Follower re-torque failed — the session stays claimed so no '
+            'motion runs against a limp arm.')
         response.message = (
             'Arm konnte nicht wieder verriegelt werden — der Greifer ist noch '
             'frei beweglich. Bitte die Umgebung neu starten, bevor du '
@@ -4637,192 +4679,26 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         response.success = False
         return False
 
-    def calibration_capture_callback(self, request, response):
-        manager = self.calibration_manager
-        if manager is None:
-            response.success = False
-            response.message = 'Kalibrierung wurde nicht gestartet.'
-            return response
-        # Touch-off capture: record an FK table-contact point (no image).
-        if getattr(self, '_active_calib_step', None) == 'table_touch':
-            try:
-                success, captured, required, message = manager.capture_touch_point()
-            except Exception as e:
-                self.get_logger().error(f'capture_touch_point raised: {e}')
-                response.success = False
-                response.frames_captured = 0
-                response.frames_required = 0
-                response.last_view_rms = 0.0
-                response.message = 'Tisch-Punkt konnte nicht erfasst werden.'
-                return response
-            response.success = success
-            response.frames_captured = captured
-            response.frames_required = required
-            response.last_view_rms = 0.0
-            response.message = message
-            return response
-        # Wrap the manager call so an unhandled solver/cv2 exception
-        # surfaces as a German message instead of a Python traceback,
-        # and the on_calibration mutex isn't poisoned by an exception
-        # path that bypassed every release branch.
-        try:
-            success, captured, required, last_rms, message = manager.capture_frame(request.camera)
-        except Exception as e:
-            self.get_logger().error(f'capture_frame raised: {e}')
-            response.success = False
-            response.frames_captured = 0
-            response.frames_required = 0
-            response.last_view_rms = 0.0
-            response.message = (
-                'Kalibrier-Aufnahme fehlgeschlagen. Bitte erneut versuchen.'
-            )
-            return response
-        response.success = success
-        response.frames_captured = captured
-        response.frames_required = required
-        response.last_view_rms = last_rms
-        response.message = message
-        # Phase-2 wizard UX: surface the 4x4 coverage cell + 1/2/3 quality badge
-        # for the just-captured INTRINSIC frame so the React side can fill the
-        # coverage mosaic + quality strip. Returns (0, 0) for an extrinsic /
-        # touch-off capture or a failed capture (the wizard only consumes these
-        # on success). Best-effort: a meta lookup error never fails the capture.
-        try:
-            cell, quality = manager.last_intrinsic_capture_meta(request.camera)
-        except Exception:  # noqa: BLE001
-            cell, quality = 0, 0
-        response.coverage_cell = int(cell)
-        response.quality = int(quality)
-        return response
-
-    def calibration_solve_callback(self, request, response):
-        manager = self.calibration_manager
-        if manager is None:
-            response.success = False
-            response.message = 'Kalibrierung wurde nicht gestartet.'
-            return response
-        # Touch-off solve: fit the table plane, then re-torque the follower so
-        # it holds again. A FAILED fit (too few points) keeps torque OFF so the
-        # student can keep tapping; only success / an exception re-torques.
-        # On EITHER terminal path the follower MUST be re-torqued before the
-        # mutex is released — _retorque_follower_or_keep_locked keeps the mutex
-        # HELD (and surfaces a German error) if it can't, so no later motion
-        # ever runs against a limp arm.
-        if request.step == 'table_touch':
-            try:
-                success, residual, message = manager.solve_table_plane(
-                    request.camera or 'scene')
-            except Exception as e:
-                self.get_logger().error(f'solve_table_plane raised: {e}')
-                response.reprojection_error = 0.0
-                response.method_disagreement = 0.0
-                if not self._retorque_follower_or_keep_locked(response):
-                    # Mutex stays held; response already carries the German
-                    # re-torque-failure message. Keep the step marked so a
-                    # later /start re-attempts the re-torque too.
-                    return response
-                self._set_calibration_active(False)
-                self._active_calib_step = None
-                response.success = False
-                response.message = (
-                    'Tischvermessung fehlgeschlagen. Bitte erneut starten.'
-                )
-                return response
-            response.reprojection_error = float(residual)
-            response.method_disagreement = 0.0
-            if success:
-                if not self._retorque_follower_or_keep_locked(response):
-                    # Plane WAS measured + persisted, but the arm is still limp
-                    # — refuse the success so the student restarts before any
-                    # motion. The mutex stays held.
-                    response.reprojection_error = float(residual)
-                    return response
-                self._set_calibration_active(False)
-                self._active_calib_step = None
-                # W1 — the touch-off plane solve is the FINAL step of the full
-                # calibration flow; its success marks the rig as recalibrated for
-                # this boot, so the force-recalib gate in
-                # calibration_status_callback stops hiding the on-disk YAMLs.
-                self._recalibrated_this_boot = True
-            response.success = success
-            response.message = message
-            return response
-
-        # Same guard as capture_frame: an unhandled solver/numpy/cv2
-        # exception used to leave on_calibration stuck True forever.
-        # Force-release on the exception path so the student can retry
-        # from a clean state.
-        try:
-            success, reproj, disagreement, message = manager.solve(request.camera, request.step)
-        except Exception as e:
-            self.get_logger().error(f'solve raised: {e}')
-            self._set_calibration_active(False)
-            response.success = False
-            response.reprojection_error = 0.0
-            response.method_disagreement = 0.0
-            response.message = (
-                'Kalibrier-Lösung fehlgeschlagen. Bitte erneut starten und neu erfassen.'
-            )
-            return response
-        response.success = success
-        response.reprojection_error = reproj
-        response.method_disagreement = disagreement
-        response.message = message
-        # Release the mutex on every successful solve, not just handeye.
-        # Intrinsic-only or handeye-only sessions are valid student flows
-        # and leaving on_calibration stuck blocks recording / inference /
-        # training when they navigate away (audit §1.3).
-        if success:
-            self._set_calibration_active(False)
-        return response
-
     def calibration_cancel_callback(self, request, response):
-        """Drop in-flight calibration buffers and release the mutex.
-        Called by the frontend wizard's cleanup useEffect when the
-        student navigates away mid-step. Idempotent — returns success
-        even if no step was active. Camera '' (empty) cancels every
-        camera; otherwise narrows to the named camera. Also signals
-        ``_calibration_stop_event`` so an in-flight touch-off capture
-        halts within ≤50 ms instead of running to completion."""
-        camera = request.camera if request.camera else None
-        # Set BEFORE dropping buffers so a mid-flight chunked_publish
-        # observes the stop on its next poll without racing the manager.
-        self._calibration_stop_event.set()
-        # If a touch-off session was active the follower was torqued OFF for
-        # hand-guiding — re-torque it BEFORE releasing the mutex so the arm is
-        # never left limp on cancel. If the re-torque persistently fails, keep
-        # the mutex held + the step marked (so a later cancel/start retries) and
-        # fail loud in German instead of silently releasing onto a limp arm.
-        if getattr(self, '_active_calib_step', None) == 'table_touch':
-            if not self._retorque_follower_or_keep_locked(response):
-                manager = self.calibration_manager
-                if manager is not None:
-                    try:
-                        manager.cancel_step(camera)  # drop buffers; keep mutex
-                    except Exception as e:
-                        self.get_logger().warning(f'cancel_step raised: {e}')
-                return response
-        self._active_calib_step = None
-        manager = self.calibration_manager
-        if manager is not None:
-            try:
-                _ok, _msg = manager.cancel_step(camera)
-            except Exception as e:
-                self.get_logger().warning(f'cancel_step raised: {e}')
-        self._set_calibration_active(False)
+        """Stop the calibration step under way. Idempotent — returns success
+        even if no step was active."""
+        # An arm check under way is stopped first: nothing is written and the
+        # arm stays where it is (spec 40 S4). The handheld step likewise.
+        service = getattr(self, 'scene_calibration', None)
+        cancelled = service.cancel() if service is not None else None
+        if cancelled is not None:
+            response.success, response.message = cancelled
+            return response
         response.success = True
-        response.message = (
-            'Kalibrierung abgebrochen.' if camera is None
-            else f'Kalibrierung für {camera} abgebrochen.'
-        )
+        response.message = 'Kalibrierung abgebrochen.'
         return response
 
     def calibration_status_callback(self, request, response):
-        """Report which calibration artefacts already exist on disk so
-        the wizard can show the right per-step badges after a page
-        reload. Reads the persisted YAMLs via has_intrinsics /
-        has_extrinsic — no manager state required, so works even when the
-        server hasn't seen any /calibration/start call yet in its lifetime.
+        """Report whether this robot is calibrated, so the page shows the
+        right state after a reload (spec 40 S4). Under the tower camera (the
+        arm container states ``tower_v1``) the three scene fields all mean „a
+        valid arm check exists" and the message is the calibration state's
+        sentence; anywhere else nothing is calibrated.
 
         WS4 (2026-06-17): the gripper camera is no longer calibrated
         (scene-cam-only). The CalibrationStatus.srv still carries the two
@@ -4831,187 +4707,68 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         frontend that still ANDs them into its gate is never blocked. The
         vestigial ``has_color_profile`` field is likewise reported ``True``
         (the colour-detection workflow was removed — named-object grasping is
-        AprilTag-only). The current frontend gate (WorkshopPage.js) requires
-        only scene intrinsics + scene extrinsic + the touch-off.
+        AprilTag-only).
         """
-        try:
-            from physical_ai_server.workflow.calibration_manager import (
-                CalibrationManager,
-            )
-            mgr = CalibrationManager()
-            # Gripper + colour-profile fields are vestigial — always satisfied
-            # (not required; colour detection was removed).
-            response.has_gripper_intrinsics = True
-            response.has_gripper_handeye = True
-            response.has_color_profile = True
-            response.has_scene_intrinsics = bool(mgr.has_intrinsics('scene'))
-            response.has_scene_handeye = bool(mgr.has_extrinsic('scene'))
-            # has_table_plane is a post-rebuild field; set it getattr-safe so a
-            # pre-rebuild compiled interface (lacking the field) doesn't crash.
-            if hasattr(response, 'has_table_plane'):
-                response.has_table_plane = bool(mgr.has_table_plane('scene'))
-            # W1 — force a FULL recalibration on every fresh container start.
-            # While the flag is ON and the touch-off plane solve hasn't completed
-            # THIS boot, report the scene calibration as absent (intrinsics +
-            # extrinsic + table-plane) so the wizard re-runs the whole flow. The
-            # YAMLs are untouched on disk; once the student re-runs the flow to
-            # the touch-off, _recalibrated_this_boot latches and the real status
-            # is reported for the rest of the session. Resets next restart.
-            if self._force_recalib and not self._recalibrated_this_boot:
-                response.has_scene_intrinsics = False
-                response.has_scene_handeye = False
-                if hasattr(response, 'has_table_plane'):
-                    response.has_table_plane = False
-            response.success = True
-            response.message = 'Kalibrier-Status geladen.'
-        except Exception as e:
-            self.get_logger().warning(f'status read failed: {e}')
-            # On a read failure, leave gripper fields satisfied (not the
-            # blocker) but mark scene fields incomplete so the wizard shows.
-            response.has_gripper_intrinsics = True
-            response.has_gripper_handeye = True
-            response.has_color_profile = True
-            response.has_scene_intrinsics = False
-            response.has_scene_handeye = False
-            response.success = False
-            response.message = 'Status konnte nicht gelesen werden.'
+        service = getattr(self, 'scene_calibration', None)
+        camera = getattr(self, 'studio_camera', None)
+        if service is not None and camera is not None and camera.profile() == 'tower_v1':
+            calibrated, message = service.status()
+        else:
+            from physical_ai_server.workflow.handlers.motion import CALIBRATION_FIRST_DE
+            calibrated, message = False, CALIBRATION_FIRST_DE
+        response.has_gripper_intrinsics = True
+        response.has_gripper_handeye = True
+        response.has_color_profile = True
+        response.has_scene_intrinsics = calibrated
+        response.has_scene_handeye = calibrated
+        # has_table_plane is a post-rebuild field; set it getattr-safe so a
+        # pre-rebuild compiled interface (lacking the field) doesn't crash.
+        if hasattr(response, 'has_table_plane'):
+            response.has_table_plane = calibrated
+        response.success = True
+        response.message = message
         return response
 
     def mark_destination_callback(self, request, response):
-        """Project a pixel click on a calibrated camera to a base-frame
-        point on the table plane."""
-        manager = self._get_or_create_calibration_manager()
-        if manager is None or not manager.has_intrinsics(request.camera):
+        """Project a pixel click on the scene camera to a base-frame point on
+        the mat (spec 40 S4, A17): the click lands on the outside stream, the
+        calibration service maps it to the studio pixel and projects it with
+        the tower calibration onto the mat; its height is the fixture's grasp
+        height (S5). Any other click (another camera, no tower calibration) is
+        refused."""
+        service = getattr(self, 'scene_calibration', None)
+        tower = None
+        if service is not None:
+            try:
+                tower = service.click(request.camera, request.pixel_x, request.pixel_y)
+            except Exception as e:
+                self.get_logger().error(f'mark_destination failed: {e}')
+                response.success = False
+                response.message = 'Projektion fehlgeschlagen — bitte Kalibrierung prüfen.'
+                return response
+        if tower is not None and tower.message_de is not None:
+            response.success = False
+            response.world_x = 0.0
+            response.world_y = 0.0
+            response.world_z = 0.0
+            response.message = tower.message_de
+            return response
+        if tower is None:
             response.success = False
             response.message = (
                 f'Kamera {request.camera} ist nicht kalibriert.'
             )
             return response
         try:
-            import cv2
             from physical_ai_server.workflow.projection import project_pixel_to_table
-            handeye_path = manager._handeye_path(request.camera)
-            if not handeye_path.exists():
-                response.success = False
-                response.message = (
-                    f'Hand-Auge-Kalibrierung der {request.camera}-Kamera fehlt.'
-                )
-                return response
-            fs = cv2.FileStorage(str(handeye_path), cv2.FILE_STORAGE_READ)
-            T = fs.getNode('transform').mat()
-            z_table_node = fs.getNode('z_table')
-            # No 0.0 fallback — refuse if the grasp height was never measured.
-            z_table = float(z_table_node.real()) if not z_table_node.empty() else None
-            # board_table_z = the SURFACE height — the plane the click ray is
-            # intersected with to recover (x, y). z_table = the MEASURED grasp
-            # height — what move_to/drop_at descend to. Don't conflate them.
-            board_z_node = fs.getNode('board_table_z')
-            board_table_z = (
-                float(board_z_node.real()) if not board_z_node.empty() else None
-            )
-            # The MEASURED table tilt (a, b, c) from the touch-off, written into
-            # this same YAML by CalibrationManager._write_table_plane. Read here
-            # so a pinned destination can store the table height at ITS OWN
-            # (x, y) instead of the scalar taken at the tap centroid — see the
-            # comment on the persist below.
-            plane_node = fs.getNode('table_plane')
-            table_plane = None
-            if not plane_node.empty():
-                try:
-                    raw_plane = plane_node.mat()
-                    if raw_plane is not None and len(raw_plane.ravel()) >= 3:
-                        table_plane = tuple(
-                            float(v) for v in raw_plane.ravel()[:3])
-                except Exception:  # noqa: BLE001 — a bad plane falls back below
-                    table_plane = None
-            fs.release()
-            # The grasp height (z_table) is what move_to/drop_at descend to, so a
-            # destination is only meaningful once the touch-off has run.
-            if z_table is None:
-                response.success = False
-                response.message = (
-                    'Die Tischhöhe ist noch nicht vermessen — bitte zuerst den '
-                    'Schritt „Tisch vermessen" abschließen.'
-                )
-                return response
-            K = manager._intrinsics[request.camera]['K']
-            dist = manager._intrinsics[request.camera]['dist']
-            # Recover (x, y) by intersecting the ray with the table SURFACE
-            # (board_table_z), NOT the grasp height — same tilted-camera lateral
-            # error fix as perception. Then store z = z_table so the descend is
-            # correct. Fall back to z_table for the projection plane only when an
-            # old YAML predates board_table_z (better than refusing the click).
-            surface_z = board_table_z if board_table_z is not None else z_table
-            point = project_pixel_to_table(
-                float(request.pixel_x), float(request.pixel_y), K, dist, T,
-                surface_z,
-            )
+            lens = tower.calibration['intrinsics']
+            point = project_pixel_to_table(tower.u_full, tower.v_full, lens['K'], lens['dist'],
+                                           tower.calibration['T_cam_to_w'], tower.surface_z)
             if point is None:
                 response.success = False
-                response.message = (
-                    'Klick konnte nicht auf den Tisch projiziert werden.'
-                )
+                response.message = 'Klick konnte nicht auf den Tisch projiziert werden.'
                 return response
-            # W5 — apply the ground-truth XY correction (identity when the
-            # accuracy-verify step was never run) so a pinned destination gets
-            # the SAME correction a named grasp does. z / table_plane unchanged.
-            corr_x, corr_y = float(point[0]), float(point[1])
-            try:
-                corr = manager.read_verify_correction(request.camera)
-                if corr is not None and corr.get('xy_correction') is not None:
-                    from physical_ai_server.workflow.calibration_manager import (
-                        CalibrationManager,
-                    )
-                    corr_x, corr_y = CalibrationManager.apply_xy_correction(
-                        (corr_x, corr_y), corr['xy_correction']
-                    )
-            except Exception as e:
-                self.get_logger().warning(
-                    f'mark_destination correction skipped: {e}'
-                )
-            # The grasp height AT THIS PIN, not at the tap centroid. The scalar
-            # z_table is `a·cx + b·cy + c` evaluated at the touch-off CENTROID,
-            # so on a tilted table every pin elsewhere inherited the middle of
-            # the table's height. Measured (tap centroid (0.18, 0), pin 12 cm
-            # further out): 4° → local surface +8.39 mm while the pin stored
-            # 0.00 mm, and the workspace-floor guard — which DOES evaluate the
-            # plane at the target's own (x, y) — did not object. Higher up,
-            # the same guard refuses the pin with „Zielpunkt liegt unter der
-            # Tischebene.", a message the student cannot act on because the
-            # destination they pinned is on the table. Re-derived 2026-09-08
-            # over that same 12 cm lever, WORKSPACE_FLOOR_MARGIN_M = 0.01 and a
-            # stored pin z of 0.00 — the threshold is per CONSUMER, because each
-            # adds its own clearance:
-            #
-            #   consumer          added    under the surface at   REFUSED at
-            #   move_to <pin>     0        0.00°                   4.76°
-            #   pickup <pin>      0.012    5.71°                  10.39°
-            #   named grasp       0.015    7.13°                  11.77°
-            #
-            # An earlier revision said „from ~7° up the same guard refuses EVERY
-            # such pin". 7.13° is neither pin refusal — it is where the
-            # NAMED-OBJECT grasp (a different path, a different clearance) first
-            # drops below the surface.
-            #
-            # motion.table_z_at is the ONE shared answer to "how high is the
-            # table here" (Implementer B owns it); it is duck-typed on
-            # table_plane + z_table, honours the single rollback knob
-            # EDUBOTICS_GRASP_Z_FROM_PLANE, and falls back to the scalar for a
-            # malformed/absent plane — so this is byte-identical to the old
-            # behaviour on an untilted table or with the knob off.
-            pin_z = float(z_table)
-            try:
-                import types as _types
-                from physical_ai_server.workflow.handlers.motion import table_z_at
-                holder = _types.SimpleNamespace(
-                    table_plane=table_plane, z_table=z_table)
-                resolved = table_z_at(holder, corr_x, corr_y)
-                if resolved is not None and math.isfinite(resolved):
-                    pin_z = float(resolved)
-            except Exception as e:  # noqa: BLE001 — never fail a click on this
-                self.get_logger().warning(
-                    f'mark_destination plane height skipped: {e}'
-                )
+            pin_x, pin_y, pin_z = float(point[0]), float(point[1]), tower.grasp_z
             # Persist into the WorkflowManager so the next workflow run
             # can resolve "ablegen bei <label>" without a second click.
             # ORDER: the persist runs BEFORE `response.success = True`, because
@@ -5021,17 +4778,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             try:
                 wfm = self._get_or_create_workflow_manager()
                 if wfm is not None and request.label:
-                    # Store the grasp height, matching response.world_z —
-                    # point[2] is the surface plane used only for (x, y). The
-                    # corrected (corr_x, corr_y) is what response carried, so the
-                    # persisted destination matches the click feedback exactly.
+                    # Store the grasp height, matching response.world_z — the
+                    # mat's surface is used only for (x, y), so the persisted
+                    # destination matches the click feedback exactly.
                     wfm.set_destination(
                         request.label,
-                        corr_x, corr_y, pin_z,
+                        pin_x, pin_y, pin_z,
                         # A camera click is a point ON THE TABLE: pin_z is a
                         # reading off the plane, not a measurement of anything,
-                        # so the next run re-asks the plane in force rather than
-                        # descending to a value „Tisch vermessen" has replaced.
+                        # so the next run re-asks the plane in force.
                         # See motion.resolve_destination_z.
                         plane_tracked=True,
                     )
@@ -5052,8 +4807,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 # feedback is still the useful answer.
                 pass
             response.success = True
-            response.world_x = corr_x
-            response.world_y = corr_y
+            response.world_x = pin_x
+            response.world_y = pin_y
             response.world_z = pin_z
             response.message = f'Ziel "{request.label}" gespeichert.'
             return response
@@ -5290,16 +5045,17 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         light ctx-shim. Raises ``motion.WorkflowError`` on a floor violation /
         unreachable target.
 
-        ``require_floor``: when True and the table height is UNKNOWN (no touch-off
-        yet: both ``z_table`` and ``table_plane`` absent), REFUSE — ``_solve_or_raise``
-        can only enforce the floor when a height is known, so a downward move / a
-        drive-to on an uncalibrated rig has no floor and could drive the tool into
-        the table. Downward cartesian-Z and ``drive_to`` pass True; joint jog and
-        X/Y/roll leave it False (they can't descend past a known floor unaided).
+        ``require_floor``: when True and the table height is UNKNOWN (both
+        ``z_table`` and ``table_plane`` absent: an arm the fixture contract does
+        not know), REFUSE — ``_solve_or_raise`` can only enforce the floor when a
+        height is known, so a downward move / a drive-to there has no floor and
+        could drive the tool into the table. Downward cartesian-Z and
+        ``drive_to`` pass True; joint jog and X/Y/roll leave it False (they
+        can't descend past a known floor unaided).
 
         ``hover`` (the pin block's „fahre dorthin", owner decision Q11): the
-        target's own z is IGNORED — it is the height the pin was clicked at, on
-        a table that may have been re-measured since. The point is re-asked on
+        target's own z is IGNORED — it is the height the pin was clicked at,
+        under a calibration that may have changed since. The point is re-asked on
         the plane IN FORCE (``motion.table_z_at``, exactly what a program
         resolves a plane-tracked pin to) and approached at the program's hover
         (``motion.table_ziel_hover``), so the jog stops where the program would."""
@@ -5313,10 +5069,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         z_table = calib.get('z_table')
         table_plane = calib.get('table_plane')
         if require_floor and z_table is None and table_plane is None:
-            raise _motion.WorkflowError(
-                'Tisch noch nicht vermessen — bitte zuerst „Tisch vermessen" in '
-                'der Kalibrierung abschließen, bevor der Arm nach unten oder zu '
-                'einem Ziel gefahren wird.')
+            raise _motion.WorkflowError(_motion.CALIBRATION_FIRST_DE)
         _profile = getattr(self, '_arm_profile', None)
         shim = SimpleNamespace(
             ik=ik,
@@ -5337,12 +5090,17 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             x, y = float(target[0]), float(target[1])
             table_z = _motion.table_z_at(shim, x, y)
             if table_z is None:
-                raise _motion.WorkflowError(
-                    'Tisch noch nicht vermessen — bitte zuerst „Tisch vermessen" in '
-                    'der Kalibrierung abschließen, bevor der Arm nach unten oder zu '
-                    'einem Ziel gefahren wird.')
+                raise _motion.WorkflowError(_motion.CALIBRATION_FIRST_DE)
             target = _motion.table_ziel_hover(shim, (x, y, table_z), roll)
-        return _motion._solve_or_raise(shim, target, roll=roll)
+        arm_q = _motion._solve_or_raise(shim, target, roll=roll)
+        # D42: the arm model's pose misses this target by more than its
+        # acceptance (the sector edge) — the drive still goes, the student hears
+        # how close it gets. One target per call, so once.
+        from physical_ai_server.workflow import arm_model as _arm_model
+        warning = _arm_model.refinement_warning(ik, 'Ziel')
+        if warning is not None:
+            shim.log(warning)
+        return arm_q
 
     def _compute_jog_target(self, mode, request, joints):
         """Resolve a jog request into the achieved 6-joint vector + the FK world
@@ -5454,6 +5212,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             q_end = list(arm_q) + [grip]
         else:
             raise _motion.WorkflowError('Unbekannter Handbetrieb-Modus.')
+
+        # The camera tower (spec 40 S6.2, WP-12): the step from the live pose is
+        # judged like a program's leg; under legacy there is no guard.
+        fixture_guard = getattr(self, '_fixture_guard', None)
+        guard = fixture_guard() if callable(fixture_guard) else None
+        if guard is not None:
+            verdict = _motion.tower_leg_verdict(guard, arm + [grip], q_end, n)
+            if verdict is not None:
+                raise _motion.tower_refusal(verdict)
 
         world = (0.0, 0.0, 0.0)
         fk = ik.fk(q_end[:n])
@@ -5613,7 +5380,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     return response
                 if (request.mode or '').strip().lower() == 'home':
                     # The warned, slow glide to the Grundstellung that the React
-                    # side offers after a re-lock (touch-off, „Arm festsetzen",
+                    # side offers after a re-lock („Arm festsetzen",
                     # recording stop). Same planner as the `home` block.
                     self._run_manual_home_glide(joints, exit_gen, response)
                     return response
@@ -5669,7 +5436,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                         0, self._manual_transient_ops - 1)
                     self._recompute_on_manual_locked()
 
-    def _plan_manual_home_legs(self, joints):
+    def _plan_manual_home_legs(self, joints, quiet=False):
         """Legs ``[(q_from, q_to, duration), …]`` from the live pose ``joints``
         (n arm joints + gripper) to the profile HOME, gripper CARRIED (a held
         object stays held — the `home` block's rule).
@@ -5682,7 +5449,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         drive a link through the table (measured: 4,193 of 20,069 near-table
         starts, worst 87.6 mm). A manual jog has no Sperrzonen (they live in a
         run payload), so ``zones`` is None, as for every other jog. Raises
-        ``motion.WorkflowError`` (German) on a refusal."""
+        ``motion.WorkflowError`` (German) on a refusal.
+
+        The camera tower (spec 40 WP-12): the manual guard is the planner's rung
+        condition, so a rung it refuses is not taken and, with none left, the
+        planner refuses with ``home_planner.TowerRefusal``. ``quiet`` drops the
+        route's notes (the home-glide state plans the same route at 2 Hz)."""
         from types import SimpleNamespace
         from physical_ai_server.workflow import home_planner
         from physical_ai_server.workflow.handlers import motion as _motion
@@ -5704,6 +5476,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         q_home = [float(v) for v in home] + [q_start[n]]
 
         def _log(text):
+            if quiet:
+                return
             self.get_logger().warning(str(text))
             # Also handed back to the student with the result: a lift over a via
             # is a motion they did not see coming from the countdown text alone.
@@ -5719,8 +5493,92 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             log=_log,
             num_arm_joints=n,
         )
+        fixture_guard = getattr(self, '_fixture_guard', None)
+        guard = fixture_guard() if callable(fixture_guard) else None
+        if guard is None:
+            return home_planner.plan_floor_checked_home_route(
+                shim, q_start, q_home, _MANUAL_HOME_MIN_DURATION_S)
         return home_planner.plan_floor_checked_home_route(
-            shim, q_start, q_home, _MANUAL_HOME_MIN_DURATION_S)
+            shim, q_start, q_home, _MANUAL_HOME_MIN_DURATION_S, tower=guard)
+
+    def _init_home_glide_state(self):
+        """``/edubotics/home_glide_state`` (spec 40 WP-12, 52 §5.1): on the V1
+        only, a 2 Hz timer of its own group; the latched publisher itself is
+        created on the first tick under ``tower_v1``, so the OMX profiles,
+        ``legacy`` and a profile never stated get none (D1)."""
+        self._home_glide_pub = None
+        self._home_glide_gen = 0
+        self._home_glide_judged = None
+        self._home_glide_timer = None
+        if getattr(getattr(self, '_arm_profile', None), 'profile_id', None) != 'v1_studio':
+            return
+        self._home_glide_timer = self.create_timer(
+            _HOME_GLIDE_STATE_PERIOD_S, self._home_glide_state_tick,
+            callback_group=MutuallyExclusiveCallbackGroup())
+
+    def _home_glide_idle(self) -> bool:
+        """The studio is idle: no manual drive or take, no program, recording or
+        inference owns the arm."""
+        return not (getattr(self, 'on_workflow', False) or getattr(self, 'on_recording', False)
+                    or getattr(self, 'on_inference', False)
+                    or getattr(self, '_manual_record_active', False)
+                    or getattr(self, '_manual_transient_ops', 0) > 0)
+
+    def _home_glide_verdict(self, joints) -> str:
+        """What the press of „Grundstellung" would get from ``joints``, as the
+        hint reads it: ``'refused'`` (the tower refuses every rung),
+        ``'unjudgeable'`` (the guard cannot judge it, no pose, or the planning
+        failed), else ``'clear'`` — a floor or Sperrzone refusal is not the
+        tower's, and the press then says it as today."""
+        from physical_ai_server.workflow import home_planner
+        from physical_ai_server.workflow.handlers.motion import WorkflowError
+        if joints is None:
+            return 'unjudgeable'
+        try:
+            self._plan_manual_home_legs(joints, quiet=True)
+        except home_planner.TowerRefusal as e:
+            return 'refused' if e.reason == 'too_close' else 'unjudgeable'
+        except WorkflowError:
+            return 'clear'
+        except Exception:  # noqa: BLE001 — a hint that cannot be computed is never 'clear'
+            return 'unjudgeable'
+        return 'clear'
+
+    def _home_glide_state_tick(self):
+        """One 2 Hz tick of ``/edubotics/home_glide_state`` ``{v, glide, gen}``:
+        while the V1's studio is idle under ``tower_v1``, the verdict for the
+        live pose, judged again only once a joint (or the claw) moved more than
+        _HOME_GLIDE_REJUDGE_RAD from the reading it was judged for (the driver's
+        tower-state resolution); the press re-plans its own pose. Never raises."""
+        try:
+            camera = getattr(self, 'studio_camera', None)
+            if camera is None or camera.profile() != 'tower_v1' or not self._home_glide_idle():
+                return
+            n = self._profile_n()
+            joints = None
+            if not self._follower_joints_stale() and self.communicator is not None:
+                live = self.communicator.get_latest_follower_joints()
+                if live and len(live) >= n + 1:
+                    values = [float(v) for v in live[:n + 1]]
+                    if all(math.isfinite(v) for v in values):
+                        joints = values
+            judged = self._home_glide_judged
+            moved = (judged is None or (judged[0] is None) != (joints is None)
+                     or (joints is not None and any(abs(a - b) > _HOME_GLIDE_REJUDGE_RAD
+                                                    for a, b in zip(judged[0], joints))))
+            if moved:
+                judged = self._home_glide_judged = (joints, self._home_glide_verdict(joints))
+            if self._home_glide_pub is None:
+                self._home_glide_pub = self.create_publisher(
+                    String, _HOME_GLIDE_STATE_TOPIC,
+                    QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                               durability=DurabilityPolicy.TRANSIENT_LOCAL))
+            self._home_glide_gen += 1
+            msg = String()
+            msg.data = json.dumps({'v': 1, 'glide': judged[1], 'gen': self._home_glide_gen})
+            self._home_glide_pub.publish(msg)
+        except Exception as e:  # noqa: BLE001 — a hint never breaks the node
+            self.get_logger().warning(f'home glide state not published: {e!r}')
 
     def _run_manual_home_glide(self, joints, exit_gen, response) -> None:
         """Body of /workshop/jog mode 'home'. Runs with ``_manual_lock`` HELD and
@@ -6626,13 +6484,33 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         re-segments through the velocity floor (handlers/trajectory) and holds
         _manual_lock for the whole publish. Points from ``points_json`` (inline,
         CONTRACT B) OR a server-persisted trajectory named ``name``."""
-        from physical_ai_server.workflow.handlers.motion import WorkflowError
+        from physical_ai_server.workflow.handlers.motion import TowerCheckStopped, WorkflowError
         from physical_ai_server.workflow.handlers.trajectory import (
-            REPLAY_PUBLISHES_VELOCITIES, clamp_speed, extract_points,
+            MANUAL_REPLAY_ANSWER_LATE_S, MANUAL_REPLAY_ENDED_DE, REPLAY_PUBLISHES_VELOCITIES,
+            clamp_speed, extract_points, judge_replay_tower, refuse_outside_joint1_window,
             refuse_wrapped_joint_jumps, refuse_wrapped_lead_in, resegment_trajectory,
         )
         response.success = False
         response.message = ''
+        # The take's tower check below can take a while (X-REPLAYCHECK). A
+        # „Beenden" (hand_guide false bumps the exit generation) from here on
+        # ends it at its next piece and refuses the claim; an answer later than
+        # MANUAL_REPLAY_ANSWER_LATE_S may find the page no longer waiting, so a
+        # refusal that late is said on /task/status too.
+        asked_at = time.monotonic()
+        with self._mode_lock:
+            session_gen = self._manual_exit_gen
+
+        def _notice(text):
+            # Resolved at call time: the ast-loaded node stubs of the manual
+            # tests carry no _publish_manual_notice.
+            (getattr(self, '_publish_manual_notice', None) or (lambda _t: None))(text)
+
+        def _answer(message):
+            response.message = message
+            if time.monotonic() - asked_at > MANUAL_REPLAY_ANSWER_LATE_S:
+                _notice(message)
+            return response
 
         # F6 — refuse a driven replay against a STALE follower readback (frozen
         # joint stream) so the lead-in never seeds from an old pose. Pre-claim.
@@ -6689,15 +6567,28 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 response.message = 'Keine Aufnahme angegeben.'
                 return response
         n = self._profile_n()
+        # The camera tower (spec 40 S6.2, WP-12): the take is judged here, once,
+        # as ONE polyline, and its lead-in from the live pose inside
+        # _segment_from (every build) — together the whole path, judged before
+        # the first publish. Under legacy there is no guard.
+        fixture_guard = getattr(self, '_fixture_guard', None)
+        guard = fixture_guard() if callable(fixture_guard) else None
         try:
             points = extract_points(traj, num_arm_joints=n)
             refuse_wrapped_joint_jumps(
                 points, getattr(self._build_ik_solver(), 'joint_limits', None),
                 num_arm_joints=n)
             # (the LEAD-IN twin of this check runs inside _segment_from below)
+            refuse_outside_joint1_window(
+                points, getattr(self._build_ik_solver(), 'joint_limits', None),
+                num_arm_joints=n)
+            if guard is not None:
+                judge_replay_tower(guard, [p[:n + 1] for p in points], n, notice=_notice,
+                                   should_stop=lambda: self._manual_exit_gen != session_gen)
+        except TowerCheckStopped:
+            return _answer(MANUAL_REPLAY_ENDED_DE)
         except WorkflowError as e:
-            response.message = str(e)
-            return response
+            return _answer(str(e))
         speed = clamp_speed(request.speed)
 
         current = None
@@ -6706,16 +6597,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         except Exception:  # noqa: BLE001
             current = None
         if not current or len(current) < n + 1:
-            response.message = ('Aktuelle Armstellung ist noch nicht bekannt — '
-                                'bitte kurz warten und erneut versuchen.')
-            return response
+            return _answer('Aktuelle Armstellung ist noch nicht bekannt — '
+                           'bitte kurz warten und erneut versuchen.')
         current = [float(v) for v in current[:n + 1]]
         # Non-finite guard: a NaN/Inf readback would publish NaN through the
         # lead-in (garbage arm command) or crash build_segment on an Inf delta.
         if not all(math.isfinite(v) for v in current):
-            response.message = ('Aktuelle Armstellung ist ungültig — bitte kurz '
-                                'warten und erneut versuchen.')
-            return response
+            return _answer('Aktuelle Armstellung ist ungültig — bitte kurz '
+                           'warten und erneut versuchen.')
         # Floor guard for the synthetic lead-in (the recorded points are reachable-
         # above-table by construction; the current-pose→start interpolation is
         # not). Returns None (no check) when the floor is unknown → lead-in behaves
@@ -6732,6 +6621,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
         def _segment_from(pose):
             refuse_wrapped_lead_in(pose, points[0], joint_limits, num_arm_joints=n)
+            if guard is not None:
+                # one leg: a „Beenden" meanwhile is refused at the claim (and,
+                # in the daemon's rebuild, by _run_replay's exit check)
+                judge_replay_tower(guard, [pose[:n + 1], points[0][:n + 1]], n, notice=_notice)
             return resegment_trajectory(
                 points, speed, lead_in_from=pose,
                 lead_in_floor_check=lead_floor,
@@ -6767,11 +6660,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # pose before driving.
             segmented = _segment_from(current)
         except WorkflowError as e:
-            response.message = str(e)
-            return response
+            return _answer(str(e))
         if not segmented:
-            response.message = 'Die Aufnahme enthält keine Bewegung.'
-            return response
+            return _answer('Die Aufnahme enthält keine Bewegung.')
 
         # Pre-create the trajectory publisher on the executor thread so the daemon
         # never races a cross-thread create_publisher (mirrors _ensure_sim_publisher).
@@ -6792,34 +6683,38 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # clear happen in _run_replay AFTER it acquires _manual_lock (never clear
         # the shared stop-event unlocked — it could defeat an in-flight jog's
         # abort). _mode_lock is RELEASED before the daemon starts (it acquires
-        # _manual_lock, not _mode_lock → no deadlock).
+        # _manual_lock, not _mode_lock → no deadlock). A refusal is answered after
+        # the lock is released (_answer may publish a notice).
         with self._mode_lock:
             ok, msg = self._assert_no_other_active('manual')
-            if not ok:
-                response.message = msg
-                return response
             existing = self._manual_replay_thread
-            if existing is not None and existing.is_alive():
-                response.message = 'Es läuft bereits eine Wiedergabe.'
-                return response
-            # FIX 1 — a replay is a TRANSIENT op: it claims a refcount slot for the
-            # duration of the drive (released in _run_replay's finally), instead of
-            # the old per-call `opened` boolean. FIX 4 — snapshot the exit
-            # generation so a „Beenden" that lands before the daemon drives aborts
-            # it (checked in _run_replay under _manual_lock).
-            self._manual_transient_ops += 1
-            self._recompute_on_manual_locked()
-            exit_gen = self._manual_exit_gen
-            thread = threading.Thread(
-                target=self._run_replay,
-                args=(segmented, exit_gen, _rebuild_from_live_pose),
-                name='workshop-replay',
-                daemon=True,
-            )
-            self._manual_replay_thread = thread
-            # Finding 2 — stamp activity INSIDE the claim lock (see the jog claim)
-            # so the idle watchdog never clobbers this fresh replay ref.
-            self._manual_last_activity_mono = time.monotonic()
+            if ok and existing is not None and existing.is_alive():
+                ok, msg = False, 'Es läuft bereits eine Wiedergabe.'
+            if ok and self._manual_exit_gen != session_gen:
+                # X-REPLAYCHECK — a „Beenden" after the take's last piece or
+                # while the lead-in was judged: never drive after it.
+                ok, msg = False, MANUAL_REPLAY_ENDED_DE
+            if ok:
+                # FIX 1 — a replay is a TRANSIENT op: it claims a refcount slot for the
+                # duration of the drive (released in _run_replay's finally), instead of
+                # the old per-call `opened` boolean. FIX 4 — snapshot the exit
+                # generation so a „Beenden" that lands before the daemon drives aborts
+                # it (checked in _run_replay under _manual_lock).
+                self._manual_transient_ops += 1
+                self._recompute_on_manual_locked()
+                exit_gen = self._manual_exit_gen
+                thread = threading.Thread(
+                    target=self._run_replay,
+                    args=(segmented, exit_gen, _rebuild_from_live_pose),
+                    name='workshop-replay',
+                    daemon=True,
+                )
+                self._manual_replay_thread = thread
+                # Finding 2 — stamp activity INSIDE the claim lock (see the jog claim)
+                # so the idle watchdog never clobbers this fresh replay ref.
+                self._manual_last_activity_mono = time.monotonic()
+        if not ok:
+            return _answer(msg)
         thread.start()
         response.success = True
         response.message = 'Wiedergabe gestartet.'
@@ -6893,6 +6788,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         (limp) arm between the claim and here also aborts the drive."""
         from types import SimpleNamespace
         from physical_ai_server.workflow.handlers.motion import WorkflowError
+        from physical_ai_server.workflow.handlers.trajectory import MANUAL_REPLAY_ENDED_DE
         from physical_ai_server.workflow.trajectory_builder import chunked_publish
         acquired = self._manual_lock.acquire(timeout=30.0)
         keep_session = False
@@ -6909,9 +6805,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self.get_logger().warning(
                     'replay aborted — Handbetrieb was ended before the drive '
                     'started.')
-                self._publish_manual_notice(
-                    'Wiedergabe abgebrochen — der Handbetrieb wurde beendet, '
-                    'bevor sich der Arm bewegt hat. Bitte erneut abspielen.')
+                self._publish_manual_notice(MANUAL_REPLAY_ENDED_DE)
                 return
             # FIX 2 — a record start seized the (limp) arm between the callback's
             # claim and here; driving now would fight the student's hand. Mirror
@@ -6941,9 +6835,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             if self._manual_exit_gen != exit_gen:
                 self.get_logger().warning(
                     'replay aborted — Handbetrieb was ended during the re-torque.')
-                self._publish_manual_notice(
-                    'Wiedergabe abgebrochen — der Handbetrieb wurde beendet, '
-                    'bevor sich der Arm bewegt hat. Bitte erneut abspielen.')
+                self._publish_manual_notice(MANUAL_REPLAY_ENDED_DE)
                 return
             # Lead-in from the arm's LIVE pose, now that we own the arm and it is
             # torqued (see _rebuild_from_live_pose). A refusal here is told to the
@@ -7024,6 +6916,16 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     # Roboter Studio — workflow runtime services
     # ------------------------------------------------------------------
     def _emit_workflow_status(self, payload: dict) -> None:
+        # The calibration service follows its arm-check program's blocks (WP-13).
+        service = getattr(self, 'scene_calibration', None)
+        if service is not None:
+            try:
+                service.on_workflow_status(payload)
+            except Exception as e:  # noqa: BLE001 — never in the way of the status
+                self.get_logger().warning(f'calibration status hook failed: {type(e).__name__}: {e}')
+        # A run on the tower camera's own picture detects in studio pixels; the
+        # page shows the outside stream (A17), so its overlay gets those.
+        studio = getattr(self, '_workflow_scene_camera', 'scene') == STUDIO_CAMERA
         try:
             msg = WorkflowStatus()
             msg.workflow_id = str(payload.get('workflow_id', ''))
@@ -7041,6 +6943,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 try:
                     cx, cy = d.centroid_px
                     bx, by, bw, bh = d.bbox_px
+                    if studio:
+                        from physical_ai_server.workflow.autocal import service as calibration_service
+                        cx, cy = calibration_service.outside_pixel(cx, cy)
+                        bw, bh = calibration_service.outside_size(bw, bh)
                     det = Detection()
                     det.cx = int(cx)
                     det.cy = int(cy)
@@ -7164,9 +7070,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             load_calibration=self._load_workflow_calibration,
             emit_status=self._emit_workflow_status,
             on_finished=self._on_workflow_finished,
-            get_scene_frame=lambda: self._get_latest_camera_frame('scene'),
+            # The run's scene camera: the tower camera's own picture
+            # ('scene_studio') when the run has the tower calibration, else the
+            # outside stream (``_load_workflow_calibration`` decides per run).
+            get_scene_frame=lambda: self._get_latest_camera_frame(
+                getattr(self, '_workflow_scene_camera', 'scene')),
             get_gripper_frame=lambda: self._get_latest_camera_frame('gripper'),
-            get_scene_frame_age=lambda: self._get_camera_frame_age('scene'),
+            get_scene_frame_age=lambda: self._get_camera_frame_age(
+                getattr(self, '_workflow_scene_camera', 'scene')),
             get_current_pose_xyz=self._get_current_gripper_xyz,
             # Audit S2: lambda so the call is deferred to workflow start
             # time (communicator may not yet be wired at WorkflowManager
@@ -7189,6 +7100,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # Roboter Studio text programs (§3.3): the DATA-socket RPC server,
             # or None when the coding suite is not up (runs refused in German).
             code_rpc=getattr(self, '_code_rpc', None),
+            # The camera tower (spec 40 S6.2, WP-12): each run's guard, scoped by
+            # the stated scene-camera profile (None under legacy).
+            fixture_guard_provider=getattr(self, '_fixture_guard', None),
+            # The tower calibration (spec 40 S4, WP-13): the mat check at the
+            # start of every real program, and the run's end for its service.
+            start_gate=getattr(self, '_workflow_start_gate', None),
+            on_run_end=getattr(self, '_on_workflow_run_end', None),
         )
         return self.workflow_manager
 
@@ -7548,10 +7466,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         publisher → SimArm.publish, perception → SimPerception, joints → SimArm,
         scene frame → a 1x1 non-None dummy (only the None-check matters), scene
         age → 0.0, calibration → empty dict (the critical bypass so
-        _attach_named_world preserves the preset world_xyz_m). The IK + object
-        catalog are the REAL ones, and emit_status / on_finished are reused so
-        the React editor, the on_workflow mutex, and status all behave
-        identically to a real run."""
+        _attach_named_world preserves the preset world_xyz_m). The IK is the
+        simulator's own arm model (``_build_sim_ik_solver``: the plate's lift
+        and the joint-1 window, never this rig's arm check), for SimArm AND the
+        manager; the object catalog is the REAL one, and emit_status /
+        on_finished are reused so the React editor, the on_workflow mutex, and
+        status all behave identically to a real run."""
         if self.sim_workflow_manager is not None:
             return self.sim_workflow_manager
         try:
@@ -7573,12 +7493,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         _profile = getattr(self, '_arm_profile', None)
         _home = getattr(_profile, 'home_joints_rad', None)
         _g_open = getattr(_profile, 'gripper_open_rad', None)
+        # A node without the simulator builder (a test's stub) keeps one solver.
+        sim_ik_factory = getattr(self, '_build_sim_ik_solver', self._build_ik_solver)
+        _fixture_guard = getattr(self, '_fixture_guard', None)
         sim_arm = SimArm(
             # Real-time playback: each chunk's waypoints go out at their own
             # time_from_start from SimArm's player thread, the way the rig's
             # JointTrajectoryController plays them — not as one burst per second.
             frame_sink=self._publish_sim_frame,
-            ik=self._build_ik_solver(),
+            ik=sim_ik_factory(),
             objects=list(getattr(self, '_sim_objects', []) or []),
             num_arm_joints=self._profile_n(),
             home_full_joints=(
@@ -7611,7 +7534,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             sim_table_z = 0.0
         self.sim_workflow_manager = WorkflowManager(
             publisher=sim_arm.publish,
-            ik_factory=self._build_ik_solver,
+            ik_factory=sim_ik_factory,
             perception_factory=lambda: SimPerception(
                 list(getattr(self, '_sim_objects', []) or []),
                 self._load_object_catalog_tolerant(),
@@ -7655,6 +7578,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # person can put an object back) and every sentence names the
             # Sim-Tisch instead of the camera. ONLY this builder passes it.
             simulated=True,
+            # The camera tower: guarded exactly when the real arm is (spec 40
+            # S6.2 revision 5, 58 m-8), its own arm model against the tower
+            # where the simulator draws it.
+            fixture_guard_provider=(None if _fixture_guard is None
+                                    else (lambda: _fixture_guard(simulated=True))),
         )
         return self.sim_workflow_manager
 
@@ -7730,30 +7658,114 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self.get_logger().warning(f'Sim object catalog load failed: {e}')
             return None
 
-    def _build_ik_solver(self):
-        """Return the arm's IK solver, built ONCE per server lifetime.
+    def _build_profile_ik(self, profile):
+        """The profile's own solver, through its ``build_ik`` factory (the
+        kinematics seam — a genuinely new arm plugs its solver in there). For
+        OMX the closed-form analytical IKSolver: exact geometry with the OMX-F
+        kinematics baked in, so it needs NO ``/robot_description`` fetch and is
+        ALWAYS available. If the URDF parameter happens to be local we pass it
+        so the solver can verify its baked constants; we never block on a
+        cross-node fetch."""
+        urdf_string = None
+        if self.has_parameter('robot_description'):
+            urdf_string = self.get_parameter('robot_description').value or None
+        return profile.build_ik(urdf_string=urdf_string)
 
-        Construction goes through the resolved ArmProfile's ``build_ik`` factory
-        (the kinematics seam — a genuinely new arm plugs its solver in there).
-        For OMX this returns the closed-form analytical IKSolver: exact geometry
-        with the OMX-F kinematics baked in, so it needs NO ``/robot_description``
-        fetch and is ALWAYS available (the old "robot_description not available;
-        IK disabled" failure mode is gone). If the URDF parameter happens to be
-        local we pass it so the solver can verify its baked constants; we never
-        block on a cross-node fetch."""
+    def _build_ik_solver(self):
+        """Return the REAL robot's arm model, built ONCE per server lifetime:
+        the profile's solver seen in the tower kit's world (``arm_model.
+        CalibratedIK``: the plate's lift, this rig's arm check — joint offsets,
+        axis tilts, mat slopes — read again whenever a new one is stored, the
+        joint-1 window and the contract's fingertip offset; spec 40 S6.1)."""
         cached = getattr(self, '_ik_solver', None)
         if cached is not None:
             return cached
         try:
-            urdf_string = None
-            if self.has_parameter('robot_description'):
-                urdf_string = self.get_parameter('robot_description').value or None
+            from physical_ai_server.workflow import arm_model
             profile = getattr(self, '_arm_profile', None) or robot_profiles.resolve(None)
-            self._ik_solver = profile.build_ik(urdf_string=urdf_string)
+            calib_dir = os.environ.get('EDUBOTICS_CALIB_DIR', '/root/.cache/edubotics/calibration')
+            self._ik_solver = arm_model.for_robot(
+                self._build_profile_ik(profile), profile.profile_id, calib_dir)
             return self._ik_solver
         except Exception as e:
             self.get_logger().error(f'IKSolver init failed: {e}')
             return None
+
+    def _build_sim_ik_solver(self):
+        """Return the SIMULATOR's arm model, built once: the same solver with
+        the plate's lift and the joint-1 window only — never this rig's arm
+        check, and the solver's own fingertip constant (spec 40 S6.1, N12)."""
+        cached = getattr(self, '_sim_ik_solver', None)
+        if cached is not None:
+            return cached
+        try:
+            from physical_ai_server.workflow import arm_model
+            profile = getattr(self, '_arm_profile', None) or robot_profiles.resolve(None)
+            self._sim_ik_solver = arm_model.for_simulator(self._build_profile_ik(profile))
+            return self._sim_ik_solver
+        except Exception as e:
+            self.get_logger().error(f'Simulator IKSolver init failed: {e}')
+            return None
+
+    def _fixture_guard(self, simulated=False):
+        """The camera tower's guard for a Roboter-Studio motion now, or None
+        (spec 40 S6.2 'Scope' and 'Where'; decisions D63, D65; WP-12).
+
+        Scoped by the scene-camera profile the arm container STATES
+        (``studio_camera.profile()``): ``legacy`` → None, today's code path in
+        every caller; ``tower_v1`` and ``None`` (no statement yet: silence is
+        never ``legacy``) → the guard, for the manual paths (jog, home glide,
+        /workshop/replay) and the programs of both managers (the real ones are
+        held by the mat check under ``None`` as well; a simulator program has
+        nothing else). With a valid arm check of this profile the tower stands
+        where the arm check measured it (``tower_pose``) and the calibrated
+        residual and the kit's droop envelope apply; without one, the contract
+        place, the uncalibrated residual and the design envelope. The
+        simulator's guard (``simulated``) judges its own arm model against the
+        tower where the simulator draws it, the contract place, with the same
+        residual and envelope. Anything the guard needs and cannot get refuses
+        every leg (``RefusingGuard``), never passes one. Built once per
+        (profile, store version, arm model) and reused."""
+        camera = getattr(self, 'studio_camera', None)
+        try:
+            scene = camera.profile() if camera is not None else None
+        except Exception:  # noqa: BLE001 — an unreadable statement is no statement
+            scene = None
+        if scene == 'legacy':
+            return None
+        from physical_ai_server.workflow import fixture_guard
+        from physical_ai_server.workflow.autocal import store
+        profile_id = getattr(getattr(self, '_arm_profile', None), 'profile_id', None)
+        build = getattr(self, '_build_sim_ik_solver', self._build_ik_solver) if simulated else self._build_ik_solver
+        ik = build()
+        calib_dir = os.environ.get('EDUBOTICS_CALIB_DIR', '/root/.cache/edubotics/calibration')
+        key = (scene, profile_id, store.version(), calib_dir, id(ik))
+        cache = getattr(self, '_fixture_guard_cache', None) or {}
+        cached = cache.get(bool(simulated))
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        frames = getattr(ik, 'guard_frames', None)
+        if not callable(frames):
+            guard = fixture_guard.RefusingGuard('no arm model with guard frames')
+        else:
+            arm_check, contract = None, None
+            got = store.Store(calib_dir).read(profile_id) if profile_id else None
+            if got is not None and got.status == 'ok':
+                # The stored envelope holds one value per arm joint; the guard
+                # reads joints 2..4 (spec 40 S6.2: env_j = droop_envelope_rad[j-1]).
+                envelope = got.data.get('droop_envelope_rad')
+                if isinstance(envelope, (list, tuple)) and len(envelope) == 5:
+                    envelope = list(envelope[1:4])
+                arm_check = {'tower_pose': (0.0, 0.0, 0.0) if simulated else got.data.get('tower_pose'),
+                             'droop_envelope_rad': envelope}
+                contract = got.data.get('contract_hash')
+            guard = fixture_guard.make_guard(
+                profile_id, frames, base_axis_x=getattr(ik, 'base_axis_x', None),
+                arm_check=arm_check, contract_hash=contract)
+        if isinstance(guard, fixture_guard.RefusingGuard):
+            self.get_logger().error(f'camera tower guard refuses every motion: {guard.why}')
+        self._fixture_guard_cache = {**cache, bool(simulated): (key, guard)}
+        return guard
 
     def _build_perception(self):
         # Cache the Perception instance (AprilTag detector) for the server
@@ -7789,112 +7801,67 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         return (float(t[0]), float(t[1]), float(t[2]))
 
     def _load_workflow_calibration(self):
-        """Load scene intrinsics + extrinsic + the two table-height keys for
-        the workflow runtime. Returns a dict consumed by ``WorkflowContext``.
+        """Load scene intrinsics + extrinsic + the three table keys for the
+        workflow runtime. Returns a dict consumed by ``WorkflowContext``.
 
-        WS4 (2026-06-17): the scene extrinsic is now the single-shot
-        board-on-table transform; it is still persisted to
-        ``scene_handeye.yaml`` (same filename), so this loader is
-        unchanged. The gripper camera is never loaded here (and never was
-        — this has always been scene-only, which is why dropping gripper
-        calibration is safe for the runtime).
+        THE TABLE IS THE FIXTURE'S, by design (spec 40 S5; decision D29: the
+        touch-off no longer sets it). In Roboter Studio's world the mat lies
+        flat — the arm model (``_build_ik_solver``) carries its tilt — so every
+        real run gets the contract's constants. DUAL Z-KEY (don't conflate):
+        - ``board_table_z`` = the mat's top, ``MAT_THICKNESS_M``: the plane the
+          camera ray is intersected with to recover an object's (x, y) — the
+          object sits ON the surface. Used by the named-object projection.
+        - ``z_table`` = the end effector's height when the fingertips touch the
+          mat, ``MAT_THICKNESS_M + FINGERTIP_BELOW_EE_M[arm]``: the DESCEND
+          target for motion.pickup — NOT a projection plane.
+        - ``table_plane`` = ``None``: the plane is horizontal.
+        A profile the contract does not know gets none of the three, so grasps
+        refuse rather than guess.
 
-        DUAL Z-KEY (don't conflate — see CLAUDE.md):
-        - ``board_table_z`` = the table SURFACE height (written by the extrinsic
-          solve, default 0). This is the plane the camera ray must intersect to
-          recover an object's (x, y) — the object sits ON the surface, NOT at the
-          gripper's grasp height. Used by the named-object tag-pose projection.
-        - ``z_table`` = the MEASURED end-effector-frame grasp height (written ONLY
-          by the touch-off, ~finger-length ABOVE the surface). This is the
-          DESCEND target for motion.pickup — NOT a projection plane. NO 0.0
-          fallback: a missing ``z_table`` leaves it None so grasp correctly
-          refuses ("Tisch vermessen zuerst").
-
-        ``table_plane`` (a, b, c) is the MEASURED EE-frame tilt from the touch-off;
-        it rides along for motion's descend, NOT for object projection (it is
-        offset above the surface, so projecting objects onto it reintroduces the
-        lateral error on a tilted camera that board_table_z avoids)."""
+        THE CAMERA IS THE TOWER'S (spec 40 S4, WP-13): when the calibration
+        service's start gate approved this run, the camera is the tower
+        camera's own picture (``scene_studio``) with the arm check's lens and
+        the mat check's pose, ``image_size`` (guard G4) and the stored arm
+        check's ``droop_envelope_rad`` (the arrival trim, S6.6). Without that
+        approval the run has no camera calibration and the looking blocks
+        refuse in German: decision D15 removed the legacy calibration, whose
+        YAMLs are never read again."""
         from pathlib import Path
         import os
-        import cv2
 
         calib_dir = Path(os.environ.get(
             'EDUBOTICS_CALIB_DIR', '/root/.cache/edubotics/calibration'
         ))
-        scene_intrinsic_path = calib_dir / 'scene_intrinsics.yaml'
-        scene_handeye_path = calib_dir / 'scene_handeye.yaml'
 
         result: dict = {}
-        if scene_intrinsic_path.exists():
+        service = getattr(self, 'scene_calibration', None)
+        tower = service.run_calibration() if service is not None else None
+        self._workflow_scene_camera = STUDIO_CAMERA if tower is not None else 'scene'
+        if tower is not None:
+            result['scene_intrinsics'] = tower['intrinsics']
+            result['scene_extrinsics'] = tower['T_cam_to_w']
+            result['image_size'] = tower['image_size']
+            # The arrival trim (spec 40 S6.6) runs only with a valid arm check:
+            # its droop envelope (one value per arm joint) bounds the trim.
+            from physical_ai_server.workflow.autocal import store
+            profile_id = getattr(getattr(self, '_arm_profile', None), 'profile_id', None)
             try:
-                fs = cv2.FileStorage(str(scene_intrinsic_path), cv2.FILE_STORAGE_READ)
-                K = fs.getNode('camera_matrix').mat()
-                dist = fs.getNode('distortion_coefficients').mat()
-                src_node = fs.getNode('source')
-                source = src_node.string() if not src_node.empty() else ''
-                fs.release()
-                # #1 (2026-06-19): per-rig intrinsic calibration is mandatory.
-                # A stale factory-default YAML (guessed K) from an older install
-                # must NOT be loaded — leave scene_intrinsics absent so detection
-                # projection refuses loudly and the student calibrates for real.
-                if source == 'factory_default':
-                    self.get_logger().warning(
-                        'Ignoring factory-default scene_intrinsics.yaml — a '
-                        'per-rig intrinsic calibration is now required.'
-                    )
-                elif K is not None and dist is not None:
-                    result['scene_intrinsics'] = {'K': K, 'dist': dist}
-            except Exception as e:
-                self.get_logger().warning(
-                    f'scene_intrinsics.yaml load failed: {e}'
-                )
-        if scene_handeye_path.exists():
-            try:
-                fs = cv2.FileStorage(str(scene_handeye_path), cv2.FILE_STORAGE_READ)
-                T = fs.getNode('transform').mat()
-                z_node = fs.getNode('z_table')
-                # No 0.0 fallback: leave z_table absent if the YAML lacks it.
-                z_table = float(z_node.real()) if not z_node.empty() else None
-                # board_table_z = the SURFACE height (the projection plane).
-                # Written by the extrinsic solve, so present whenever the
-                # extrinsic is. No 0.0 fallback here either — absence means an
-                # old YAML; the projection then has no plane and refuses loudly.
-                board_z_node = fs.getNode('board_table_z')
-                board_table_z = (
-                    float(board_z_node.real()) if not board_z_node.empty() else None
-                )
-                plane_node = fs.getNode('table_plane')
-                plane_mat = plane_node.mat() if not plane_node.empty() else None
-                fs.release()
-                if T is not None:
-                    result['scene_extrinsics'] = T
-                if z_table is not None:
-                    result['z_table'] = z_table
-                if board_table_z is not None:
-                    result['board_table_z'] = board_table_z
-                if plane_mat is not None and plane_mat.size == 3:
-                    flat = [float(v) for v in plane_mat.reshape(-1)]
-                    result['table_plane'] = (flat[0], flat[1], flat[2])
-            except Exception as e:
-                self.get_logger().warning(
-                    f'scene_handeye.yaml load failed: {e}'
-                )
-        # W5 — ground-truth XY correction + yaw bias (identity / 0 when the
-        # student never ran the accuracy-verify step). perception_blocks
-        # (_attach_named_world) + mark_destination apply these AFTER projecting
-        # to base, via CalibrationManager.apply_xy_correction. Default safe:
-        # xy_correction None → no correction; yaw_bias_rad 0.0 → no change.
-        result['xy_correction'] = None
-        result['yaw_bias_rad'] = 0.0
-        try:
-            manager = self._get_or_create_calibration_manager()
-            if manager is not None:
-                corr = manager.read_verify_correction('scene')
-                if corr is not None:
-                    result['xy_correction'] = corr.get('xy_correction')
-                    result['yaw_bias_rad'] = float(corr.get('yaw_bias_rad', 0.0))
-        except Exception as e:
-            self.get_logger().warning(f'verify correction load failed: {e}')
+                got = store.Store(str(calib_dir)).read(profile_id) if profile_id else None
+            except Exception as e:  # noqa: BLE001 — an unreadable arm check is no arm check
+                self.get_logger().warning(f'arm check read for the arrival trim failed: {e}')
+                got = None
+            envelope = (got.data.get('droop_envelope_rad')
+                        if got is not None and got.status == 'ok' else None)
+            if isinstance(envelope, (list, tuple)):
+                result['droop_envelope_rad'] = list(envelope)
+        from physical_ai_server.workflow import scene_fixture
+        profile = getattr(self, '_arm_profile', None) or robot_profiles.resolve(None)
+        arm = scene_fixture.arm_key(getattr(profile, 'profile_id', None))
+        if arm is not None:
+            result['board_table_z'] = scene_fixture.MAT_THICKNESS_M
+            result['z_table'] = (scene_fixture.MAT_THICKNESS_M
+                                 + scene_fixture.FINGERTIP_BELOW_EE_M[arm])
+            result['table_plane'] = None
         return result
 
     def workflow_start_callback(self, request, response):
@@ -8292,341 +8259,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         return response
 
     # ------------------------------------------------------------------
-    # Phase-2 calibration helpers — preview / verify / history
-    # ------------------------------------------------------------------
-    # These are presently lightweight stubs that report not-implemented
-    # so the React UI can render a clear "noch nicht verfügbar" message
-    # rather than failing with rosbridge "service not advertised". Full
-    # implementations live behind ROBOTER_STUDIO_DEFERRED.md §1.2.
-    def calibration_preview_callback(self, request, response):
-        """Live ChArUco corner overlay for the intrinsic wizard (polled ~3-4 Hz).
-
-        Grabs the latest scene-camera frame and runs the manager's LOCK-FREE
-        ``detect_preview`` so the poll never queues behind a multi-second
-        intrinsic solve (and, on the reentrant preempt group, never starves the
-        1 Hz heartbeat). The returned corner pixels are in the camera's NATIVE
-        resolution — the SAME resolution the :8080 MJPEG stream serves (both
-        come from the one ``/scene/image_raw/compressed`` topic; web_video_server
-        only re-encodes JPEG quality, it does not resize), so the React SVG
-        overlay's ``naturalSize`` viewBox lines up with no offset.
-        """
-        response.detected = False
-        response.corners_x = []
-        response.corners_y = []
-        response.board_area_pct = 0
-        manager = self.calibration_manager
-        if manager is None:
-            response.message = 'Kalibrierung wurde nicht gestartet.'
-            return response
-        camera = (getattr(request, 'camera', '') or 'scene')
-        frame = self._get_latest_camera_frame(camera)
-        if frame is None:
-            response.message = 'Kein Kamerabild verfügbar.'
-            return response
-        # Freshness gate: never preview against a frozen camera (mirrors the
-        # workflow perception staleness gate). Age is advisory — None means the
-        # provider can't report it, in which case we proceed.
-        age = self._get_camera_frame_age(camera)
-        if age is not None and age > 1.0:
-            response.message = 'Kamerabild ist veraltet — bitte Kamera prüfen.'
-            return response
-        try:
-            detected, xs, ys, area_pct = manager.detect_preview(frame)
-        except Exception as e:  # noqa: BLE001 — preview is advisory, never fatal
-            self.get_logger().warning(f'Calibration preview failed: {e}')
-            response.message = 'Vorschau fehlgeschlagen.'
-            return response
-        response.detected = bool(detected)
-        response.corners_x = [float(x) for x in xs]
-        response.corners_y = [float(y) for y in ys]
-        response.board_area_pct = int(area_pct)
-        response.message = 'Tafel erkannt.' if detected else 'Tafel nicht erkannt.'
-        return response
-
-    def _verify_reset_response(self, response):
-        """Zero-fill the VerifyCalibration response numeric fields so every
-        return path is fully populated regardless of the branch."""
-        response.detected_x = 0.0
-        response.detected_y = 0.0
-        response.detected_yaw_deg = 0.0
-        response.has_detection = False
-        response.point_count = 0
-        response.residual_mm_mean = 0.0
-        response.residual_mm_max = 0.0
-        response.yaw_bias_deg = 0.0
-        response.mirror_detected = False
-        return response
-
-    def calibration_verify_callback(self, request, response):
-        """W5 — ground-truth correction + orientation verify.
-
-        Routes ``add_point`` / ``solve`` / ``reset``. The student places a single
-        tag36h11 at a KNOWN base (x, y) (+ optional yaw); ``add_point`` projects
-        the detected tag with the CURRENT scene calibration (the same intrinsics +
-        extrinsic + board_table_z projection path mark_destination /
-        _attach_named_world use) and records (truth, detected). ``solve`` fits a 2D
-        similarity (Umeyama, via CalibrationManager.fit_xy_correction); on success
-        it persists xy_correction + yaw_bias into scene_handeye.yaml, on a
-        mirror/handedness flip it refuses + persists nothing. German throughout."""
-        import math as _math
-
-        self._verify_reset_response(response)
-        command = (getattr(request, 'command', '') or '').strip().lower()
-
-        if command == 'reset':
-            with self._verify_lock:
-                self._verify_points = []
-            response.success = True
-            response.message = 'Prüfpunkte zurückgesetzt.'
-            response.point_count = 0
-            return response
-
-        if command == 'add_point':
-            return self._verify_add_point(request, response)
-
-        if command == 'solve':
-            return self._verify_solve(response)
-
-        response.success = False
-        response.message = (
-            f'Unbekannter Befehl „{command}". Erwartet: add_point, solve, reset.'
-        )
-        return response
-
-    def _verify_add_point(self, request, response):
-        """Detect exactly one tag in the current scene frame, project its centre
-        to base, read its yaw, and append (truth, detected) to the verify buffer.
-        Fails loud in German on: camera not calibrated / no frame / no tag /
-        multiple tags."""
-        import math as _math
-
-        calib = self._load_workflow_calibration()
-        scene_intr = calib.get('scene_intrinsics')
-        T = calib.get('scene_extrinsics')
-        board_table_z = calib.get('board_table_z')
-        if scene_intr is None or T is None or board_table_z is None:
-            response.success = False
-            response.message = (
-                'Die Szenen-Kamera ist noch nicht vollständig kalibriert '
-                '(Intrinsik + Extrinsik). Bitte zuerst die Kalibrierung '
-                'abschließen.'
-            )
-            return response
-
-        bgr = self._get_latest_camera_frame('scene')
-        if bgr is None:
-            response.success = False
-            response.message = 'Kein Kamerabild der Szenen-Kamera verfügbar.'
-            return response
-
-        try:
-            from physical_ai_server.workflow.perception import Perception
-            from physical_ai_server.workflow.projection import project_pixel_to_table
-            from physical_ai_server.workflow.tag_pose import tag_yaw_base
-        except Exception as e:
-            self.get_logger().error(f'verify add_point import failed: {e}')
-            response.success = False
-            response.message = 'Erkennungsmodul fehlt.'
-            return response
-
-        perc = Perception()
-        if not perc.apriltag_available():
-            response.success = False
-            response.message = (
-                'Der AprilTag-Detektor ist nicht verfügbar (pupil_apriltags fehlt).'
-            )
-            return response
-
-        try:
-            detections = perc.detect(bgr, camera='scene', mode='apriltag', aruco_id=None)
-        except Exception as e:
-            self.get_logger().error(f'verify add_point detect failed: {e}')
-            response.success = False
-            response.message = 'Markererkennung fehlgeschlagen.'
-            return response
-
-        if not detections:
-            response.success = False
-            response.message = (
-                'Kein AprilTag im Bild erkannt. Bitte genau einen Tag flach in '
-                'die Sicht der Szenen-Kamera legen.'
-            )
-            return response
-        if len(detections) > 1:
-            response.success = False
-            response.message = (
-                f'{len(detections)} Tags erkannt. Bitte genau einen Tag in der '
-                'Sicht lassen.'
-            )
-            return response
-
-        d = detections[0]
-        K = scene_intr['K']
-        dist = scene_intr['dist']
-        try:
-            cx, cy = d.centroid_px
-            point = project_pixel_to_table(
-                float(cx), float(cy), K, dist, T, float(board_table_z)
-            )
-        except Exception as e:
-            self.get_logger().error(f'verify add_point projection failed: {e}')
-            point = None
-        if point is None:
-            response.success = False
-            response.message = (
-                'Der erkannte Tag konnte nicht auf den Tisch projiziert werden — '
-                'bitte Kalibrierung prüfen.'
-            )
-            return response
-
-        detected_x = float(point[0])
-        detected_y = float(point[1])
-        detected_yaw = None
-        if getattr(d, 'corners_px', None) is not None:
-            try:
-                detected_yaw = tag_yaw_base(
-                    d.corners_px, K, dist, T, float(board_table_z)
-                )
-            except Exception as e:
-                self.get_logger().warning(f'verify add_point yaw failed: {e}')
-                detected_yaw = None
-
-        truth_xy = (float(request.truth_x), float(request.truth_y))
-        truth_yaw = None
-        if bool(getattr(request, 'has_yaw', False)):
-            truth_yaw = _math.radians(float(request.truth_yaw_deg))
-
-        with self._verify_lock:
-            self._verify_points.append(
-                (truth_xy, (detected_x, detected_y), truth_yaw, detected_yaw)
-            )
-            count = len(self._verify_points)
-
-        response.success = True
-        response.has_detection = True
-        response.detected_x = detected_x
-        response.detected_y = detected_y
-        response.detected_yaw_deg = (
-            _math.degrees(detected_yaw) if detected_yaw is not None else 0.0
-        )
-        response.point_count = int(count)
-        # Live per-point error (mm) so the student sees the residual building up.
-        err_mm = _math.hypot(detected_x - truth_xy[0],
-                             detected_y - truth_xy[1]) * 1000.0
-        response.message = (
-            f'Punkt {count} erfasst (Abweichung {err_mm:.0f} mm). '
-            'Empfohlen: 4–6 über die Arbeitsfläche verteilte Punkte.'
-        )
-        return response
-
-    def _verify_solve(self, response):
-        """Fit + persist the ground-truth correction from the collected points."""
-        import math as _math
-        from physical_ai_server.workflow.calibration_manager import (
-            VERIFY_MIN_POINTS as _VERIFY_MIN_POINTS,
-        )
-
-        with self._verify_lock:
-            points = list(self._verify_points)
-
-        n = len(points)
-        response.point_count = int(n)
-        # The floor is calibration_manager.VERIFY_MIN_POINTS, INTERPOLATED, not
-        # a literal. It said „Mindestens zwei" while the layer below refuses at
-        # three, so at n ∈ {0, 1} this gate told the student two points were
-        # enough; at n = 2 it passed and the manager's own „drei" refusal was
-        # surfaced verbatim, i.e. two German numbers for one floor. („Prüfpunkte"
-        # is the word both messages use now — the step is called „Genauigkeit
-        # prüfen", so that is the student's own word, not „Referenzpunkte".)
-        if n < _VERIFY_MIN_POINTS:
-            response.success = False
-            response.message = (
-                f'Mindestens {_VERIFY_MIN_POINTS} Prüfpunkte werden benötigt '
-                '(empfohlen 4–6, über die Arbeitsfläche verteilt). Bitte mehr '
-                'Punkte erfassen.'
-            )
-            return response
-
-        truth_xy = [p[0] for p in points]
-        detected_xy = [p[1] for p in points]
-        # Yaw pairs only where BOTH truth and detected yaw are present.
-        truth_yaws = []
-        detected_yaws = []
-        for _t, _d, ty, dy in points:
-            if ty is not None and dy is not None:
-                truth_yaws.append(ty)
-                detected_yaws.append(dy)
-        ty_arg = truth_yaws or None
-        dy_arg = detected_yaws or None
-
-        manager = self._get_or_create_calibration_manager()
-        if manager is None:
-            response.success = False
-            response.message = 'Kalibrierung kann nicht initialisiert werden.'
-            return response
-
-        try:
-            result = manager.fit_xy_correction(
-                truth_xy, detected_xy, truth_yaws=ty_arg, detected_yaws=dy_arg
-            )
-        except Exception as e:
-            self.get_logger().error(f'verify solve fit failed: {e}')
-            response.success = False
-            response.message = 'Korrekturberechnung fehlgeschlagen.'
-            return response
-
-        response.point_count = int(result.get('point_count', n))
-        response.residual_mm_mean = float(result.get('residual_mm_mean', 0.0))
-        response.residual_mm_max = float(result.get('residual_mm_max', 0.0))
-        response.yaw_bias_deg = _math.degrees(float(result.get('yaw_bias_rad', 0.0)))
-        response.mirror_detected = bool(result.get('mirror_detected', False))
-
-        if not result.get('ok'):
-            # Includes the mirror/handedness case — persist nothing, surface the
-            # German message verbatim.
-            response.success = False
-            response.message = result.get('message', 'Korrektur fehlgeschlagen.')
-            return response
-
-        wrote = False
-        try:
-            wrote = manager.write_verify_correction(
-                'scene',
-                result['xy_correction'],
-                float(result.get('yaw_bias_rad', 0.0)),
-                float(result.get('residual_mm_mean', 0.0)),
-                int(result.get('point_count', n)),
-            )
-        except Exception as e:
-            self.get_logger().error(f'verify solve persist failed: {e}')
-            wrote = False
-
-        if not wrote:
-            response.success = False
-            response.message = (
-                'Korrektur berechnet, konnte aber nicht gespeichert werden — '
-                'bitte die Szenen-Extrinsik prüfen.'
-            )
-            return response
-
-        response.success = True
-        msg = result.get('message', 'Korrektur gespeichert.')
-        if response.point_count < 4:
-            msg += (' Hinweis: für eine zuverlässige Korrektur werden 4–6 '
-                    'verteilte Punkte empfohlen.')
-        response.message = msg
-        return response
-
-    def calibration_history_callback(self, request, response):
-        response.success = True
-        response.timestamps = []
-        response.step_names = []
-        response.reprojection_errors_px = []
-        response.agreement_deg = []
-        response.message = 'Kalibrierungsverlauf wird in einer späteren Version aktiviert.'
-        return response
-
-    # ------------------------------------------------------------------
     # Phase-2 sensor snapshot publisher (~5 Hz while a workflow runs)
     # ------------------------------------------------------------------
     def _sensor_snapshot_timer_callback(self):
@@ -8891,8 +8523,10 @@ def main(args=None):
         # Cleanup HF API Worker before destroying node
         node._cleanup_hf_api_worker()
         # The sensor executor and its node go first: stop flag, executor
-        # shutdown, sensor node destroyed — all before the main node.
+        # shutdown, sensor node destroyed — all before the main node; the
+        # studio camera's node the same way.
         node._shutdown_sensor_executor()
+        node.studio_camera.shutdown()
         executor.shutdown()
         node.destroy_node()
         # try_shutdown, never shutdown: on an environment stop (SIGINT/SIGTERM)

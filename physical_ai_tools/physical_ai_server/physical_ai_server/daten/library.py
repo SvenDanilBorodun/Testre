@@ -51,6 +51,7 @@ from typing import Optional
 import av
 import numpy as np
 
+from physical_ai_server import scene_provenance
 from physical_ai_server.daten import contract as C
 from physical_ai_server.data_processing import dataset_hints as hints_mod
 from physical_ai_server.data_processing import dataset_paths
@@ -319,6 +320,8 @@ class Library:
                            if isinstance(total_frames, int) and isinstance(fps, (int, float)) and fps else None),
             'cameras': camera_list(info) if info else [], 'joints': joint_names(info) if info else
             {'state': [], 'action': []}, 'stat_names': {}, 'tasks': [],
+            # D58: 'legacy' | 'tower_v1' | None (a stamp that cannot be read)
+            'scene_camera_profile': scene_provenance.dataset_profile(path),
         }
         if state == 'ok':
             try:

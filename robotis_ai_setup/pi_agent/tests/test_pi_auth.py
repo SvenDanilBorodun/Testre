@@ -1141,7 +1141,8 @@ class TestMaintenanceRoutes(_GatewayBase):
     RESET = {"confirm": True, "confirm_again": True, "confirm_text": "ZURÜCKSETZEN"}
 
     def test_the_table(self):
-        self.assertEqual(agent._MAINTENANCE_POST_PATHS, frozenset({"/factory-reset", "/robot-type"}))
+        self.assertEqual(agent._MAINTENANCE_POST_PATHS,
+                         frozenset({"/factory-reset", "/robot-type", "/scene-camera-profile"}))
         self.assertEqual(agent._MAINTENANCE_ROLES, frozenset({"teacher", "admin"}))
 
     def test_a_student_session_cannot_reset_or_change_the_robot_type(self):

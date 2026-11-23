@@ -57,8 +57,8 @@ FRAMES — the one thing to keep straight:
   the 87.35 mm blade). A grasp targets ``z_table + object_height −
   grasp_depth`` exactly like the OMX.
 
-  TOUCH-OFF NOTE (rig gate VR8): this claw ROTATES, so its tip height depends
-  on the jaw opening. „Tisch vermessen" must therefore be taught with the claw
+  TIP-HEIGHT NOTE (rig gate VR8): this claw ROTATES, so its tip height depends
+  on the jaw opening. A table height taught by touch therefore needs the claw
   CLOSED. NOT everywhere pessimistic, measured on the meshes: opening the claw
   first moves the tips DOWN, by up to 0.46 mm, before they rise past the closed
   height at ≈0.22 rad (the blade pivots sit 9.25 mm off the tool axis) — small

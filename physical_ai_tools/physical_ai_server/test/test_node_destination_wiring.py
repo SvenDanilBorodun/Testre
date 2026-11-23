@@ -162,33 +162,6 @@ def _plane(degrees: float) -> tuple[float, float, float]:
     return (a, 0.0, -a * _CENTROID_X)
 
 
-def test_mark_destination_asks_the_shared_helper_for_the_height():
-    fn = _function('mark_destination_callback')
-    assert 'table_z_at' in _call_names(fn), (
-        'the pin height must come from motion.table_z_at — the ONE shared '
-        '"how high is the table here" answer')
-
-
-def test_mark_destination_evaluates_the_plane_at_the_pin_not_the_centroid():
-    fn = _function('mark_destination_callback')
-    calls = [c for c in _calls(fn)
-             if isinstance(c.func, ast.Name) and c.func.id == 'table_z_at']
-    assert calls, 'table_z_at is not called'
-    args = [a.id for a in calls[0].args if isinstance(a, ast.Name)]
-    assert args[-2:] == ['corr_x', 'corr_y'], (
-        f'table_z_at must be asked about the CORRECTED pin coordinates, got '
-        f'{args}')
-
-
-def test_mark_destination_reads_the_measured_plane_from_the_yaml():
-    fn = _function('mark_destination_callback')
-    reads = [c for c in _calls(fn)
-             if isinstance(c.func, ast.Attribute) and c.func.attr == 'getNode'
-             and c.args and isinstance(c.args[0], ast.Constant)
-             and c.args[0].value == 'table_plane']
-    assert reads, 'the callback never reads table_plane'
-
-
 def test_the_response_and_the_persisted_pin_agree():
     """The click feedback the student sees and the value the next run descends
     to must be the same number."""
@@ -261,7 +234,7 @@ def test_a_malformed_plane_falls_back_to_the_scalar_rather_than_failing_open():
 
 
 def test_no_table_height_at_all_is_reported_as_none():
-    """The callback keeps its own „Tisch vermessen" refusal for this case."""
+    """Nothing is invented for this case: the caller decides."""
     holder = types.SimpleNamespace(table_plane=None, z_table=None)
     assert M.table_z_at(holder, 0.30, 0.0) is None
 

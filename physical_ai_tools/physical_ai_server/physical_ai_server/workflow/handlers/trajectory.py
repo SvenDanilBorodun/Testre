@@ -44,6 +44,7 @@ recorded/replayed *inference* action.
 from __future__ import annotations
 
 import math
+import threading
 from typing import Any
 
 from physical_ai_server.workflow.handlers.motion import (
@@ -52,6 +53,8 @@ from physical_ai_server.workflow.handlers.motion import (
     _release_motion_lock,
     _require_seeded_start_pose,
     _warn_unreadable_zones,
+    tower_path_verdict,
+    tower_refusal,
 )
 from physical_ai_server.workflow.trajectory_builder import (
     DEFAULT_FPS,
@@ -100,6 +103,27 @@ MAX_TRAJECTORY_SPAN_S = 600.0
 REPLAY_PUBLISHES_VELOCITIES = False
 # Floor on one recorded pair's playback step (see resegment_trajectory).
 _MIN_PAIR_DT_S = 0.001
+# The joint-1 window on replays (spec 40 S6.3; decision D34). The arm model cuts
+# joint 1 to the contract's window (the OMX: ±100°) in ``joint_limits``, which
+# the IK, the jog and the Positionen honour; a recorded take is a joint path
+# and never asks the IK, so both replay paths check it here. A reading at the
+# window's edge may sit this far outside it (servo readback noise at a stop,
+# the Positionen's tolerance).
+TOWER_JOINT1_WINDOW_DE = 'Diese Bewegung dreht den Arm zu weit nach hinten zum Kameraturm.'
+_JOINT1_WINDOW_TOL_RAD = 0.005
+# The tower check of a long take takes a moment (decision D70: a 120 s take
+# judged before its first chunk, about 0.5-1.3 s here, plausibly 3-5 times that
+# on a Pi): past this much the Protokoll says why the arm waits, once.
+TOWER_CHECK_SLOW_S = 1.0
+TOWER_CHECK_SLOW_DE = 'Die Bewegung wird auf Abstand zum Kameraturm geprüft – einen Moment …'
+# /workshop/replay answers once the take's tower check has ended, and on a Pi
+# that check of a fast 120 s take can outlast the page's 10 s service timeout
+# (useRosServiceCaller): a refusal answered later than this is said on
+# /task/status too (X-REPLAYCHECK).
+MANUAL_REPLAY_ANSWER_LATE_S = 8.0
+# A manual replay that „Beenden" (hand_guide false) ended before the arm moved.
+MANUAL_REPLAY_ENDED_DE = ('Wiedergabe abgebrochen — der Handbetrieb wurde beendet, '
+                          'bevor sich der Arm bewegt hat. Bitte erneut abspielen.')
 # Contract-B point layout: [j1..jn, grip, t_s] — (num_arm_joints + 2) floats.
 # 7 is the OMX width (n=5); extract_points/resegment_trajectory take the arm's
 # ``num_arm_joints`` and derive the width, asserting it EXACTLY (§16.4 rail #2).
@@ -283,6 +307,46 @@ def refuse_wrapped_lead_in(current, first_point, joint_limits,
                 'fahren. Bitte den Arm freischalten, Gelenk '
                 f'{j + 1} von Hand näher an die Startstellung drehen und erneut '
                 'abspielen.')
+
+
+def refuse_outside_joint1_window(points, joint_limits, num_arm_joints: int = 5) -> None:
+    """Refuse (German ``WorkflowError``, :data:`TOWER_JOINT1_WINDOW_DE`) a
+    recording whose joint 1 leaves ``joint_limits[0]`` — on the arm model, the
+    contract's joint-1 window (spec 40 S6.3). ``joint_limits`` None/empty → no
+    check (a profile-less caller keeps today's behaviour)."""
+    if not joint_limits or int(num_arm_joints) < 1:
+        return
+    try:
+        lo, hi = (float(v) for v in joint_limits[0])
+    except (TypeError, ValueError):
+        return
+    for p in points:
+        joint1 = float(p[0])
+        if joint1 < lo - _JOINT1_WINDOW_TOL_RAD or joint1 > hi + _JOINT1_WINDOW_TOL_RAD:
+            raise WorkflowError(TOWER_JOINT1_WINDOW_DE)
+
+
+def judge_replay_tower(guard, path, num_arm_joints: int, notice=None, should_stop=None) -> None:
+    """Judge a replay's path — the lead-in's start (when there is one) and the
+    take's recorded points, full joint vectors — against the camera tower as
+    ONE polyline (spec 40 S6.2, D70), before its first chunk; raise the German
+    refusal. ``notice`` (optional) is told :data:`TOWER_CHECK_SLOW_DE` once when
+    the check runs longer than :data:`TOWER_CHECK_SLOW_S`, while it runs.
+    ``should_stop`` (optional) is asked between the check's pieces; when it
+    answers true the check ends with ``motion.TowerCheckStopped``."""
+    timer = None
+    if notice is not None:
+        timer = threading.Timer(TOWER_CHECK_SLOW_S, notice, args=(TOWER_CHECK_SLOW_DE,))
+        timer.daemon = True
+        timer.start()
+    try:
+        verdict = tower_path_verdict(guard, path, int(num_arm_joints), should_stop=should_stop)
+    finally:
+        if timer is not None:
+            timer.cancel()
+            timer.join(1.0)          # a notice already being said is said before the first chunk
+    if verdict is not None:
+        raise tower_refusal(verdict)
 
 
 def _add_finite_diff_velocities(
@@ -555,6 +619,9 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
     refuse_wrapped_joint_jumps(
         points, getattr(getattr(ctx, 'ik', None), 'joint_limits', None),
         num_arm_joints=n)
+    refuse_outside_joint1_window(
+        points, getattr(getattr(ctx, 'ik', None), 'joint_limits', None),
+        num_arm_joints=n)
     # Run-bar Tempo. „langsam"/„schnell" slow or speed up EVERY other motion
     # block (via motion._publish_motion's single choke point) and had no effect
     # at all here: replay does not go through _publish_motion, and the Blockly
@@ -614,6 +681,13 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
     if not segmented:
         raise WorkflowError('Die Aufnahme enthält keine Bewegung.')
     _refuse_if_replay_crosses_a_zone(ctx, segmented, n)
+    # The camera tower: the lead-in and the take as ONE polyline, before the
+    # first chunk (the lead-in is the straight joint line from the arm's pose
+    # to the take's start, each recorded pair a straight line too).
+    guard = getattr(ctx, 'fixture_guard', None)
+    if guard is not None:
+        path = ([lead_in[:n + 1]] if lead_in is not None else []) + [p[:n + 1] for p in points]
+        judge_replay_tower(guard, path, n, notice=ctx.log, should_stop=ctx.should_stop)
 
     # Serialize against the main stack + hat handlers through the ONE acquire
     # helper (motion._hold_motion_lock), exactly like motion._publish_motion.

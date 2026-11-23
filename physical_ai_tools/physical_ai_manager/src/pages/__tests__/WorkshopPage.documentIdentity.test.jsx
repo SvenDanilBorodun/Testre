@@ -128,7 +128,7 @@ vi.mock('../../components/Workshop/code/codeAssetDocument', async (importOrigina
     },
   };
 });
-vi.mock('../../components/Workshop/CalibrationWizard', () => ({ __esModule: true, default: () => <div data-testid="calib-wizard" /> }));
+vi.mock('../../components/Workshop/calibration/CalibrationPanel', () => ({ __esModule: true, default: () => <div data-testid="calib-panel" /> }));
 vi.mock('../../components/Workshop/LeaderToggle', () => ({ __esModule: true, default: () => <div data-testid="leader-toggle" /> }));
 vi.mock('../../components/Workshop/CameraFeedOverlay', () => ({ __esModule: true, default: () => <div data-testid="camera-feed" /> }));
 vi.mock('../../components/Workshop/DebugPanel', () => ({ __esModule: true, default: () => <div data-testid="debug-panel" /> }));
@@ -158,6 +158,7 @@ vi.mock('../../components/Workshop/blocks/perception', () => ({
 // ONE object for the file: the page's catalog effect depends on the
 // function's identity, and a fresh one per render re-fetched forever.
 const mockRos = vi.hoisted(() => ({
+  startCalibration: vi.fn(() => Promise.resolve({ success: true, message: '' })),
   getObjectCatalog: vi.fn(() => Promise.resolve({ success: true, type_names: ['wuerfel'], labels_de: ['Würfel'] })),
   capturePose: vi.fn(),
   jogArm: vi.fn(),
@@ -200,11 +201,7 @@ vi.mock('react-hot-toast', () => ({
 function baseState(over = {}) {
   return {
     workshop: {
-      hasIntrinsicScene: true,
-      hasHandeyeScene: true,
-      hasTableTouch: true,
-      recalibrating: false,
-      pendingVerify: false,
+      calibration: { state: 'ok' },
       selectedWorkflowId: null,
       unsavedBlocklyJson: null,
       restrictedBlocks: null,

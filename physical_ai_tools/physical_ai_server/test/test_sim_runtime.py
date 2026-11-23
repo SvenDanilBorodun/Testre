@@ -280,8 +280,6 @@ class _SimDetectCtx:
         self.board_table_z = None
         self.z_table = None
         self.table_plane = None
-        self.xy_correction = None
-        self.yaw_bias_rad = 0.0
         self.claimed_tags = set()
         self.skipped_tags = set()
         self.claim_lock = threading.RLock()

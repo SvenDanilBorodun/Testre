@@ -213,6 +213,23 @@ def _daten_texts():
         return module
 
 
+def _scene_provenance():
+    """``scene_provenance`` (D58, stdlib only): by package name in the image, by
+    file path for the deps-free loaders."""
+    try:
+        return importlib.import_module('physical_ai_server.scene_provenance')
+    except ImportError:
+        spec = importlib.util.spec_from_file_location(
+            '_edubotics_dm_scene_provenance',
+            str(Path(__file__).resolve().parent.parent / 'scene_provenance.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+
+scene_provenance = _scene_provenance()
+
+
 def _recorder_locked(method):
     """Run a public DataManager mutator under the recorder lock (round 5, O1).
 
@@ -2060,7 +2077,25 @@ class DataManager:
                     # A FINISH/STOP ended the Start's wait (G-8): never create a
                     # dataset for a session that is already over, and say nothing.
                     return False
+                # D58: the scene camera this robot records with now (profile
+                # None = unknown: nothing is refused, nothing is stamped).
+                live = self._live_scene_profile()
+                name = str(getattr(self._task_info, 'task_name', '') or '').strip() \
+                    or self._save_repo_name
                 if exists:
+                    # D58: a dataset recorded with another scene camera is never
+                    # continued. Judged on the copy D14 settled on, BEFORE LeRobot
+                    # opens anything (D4 below is LeRobot's own check).
+                    then = scene_provenance.dataset_profile(self._save_path)
+                    if scene_provenance.resume_refused(then, live['profile']):
+                        print(f'Resume refused for {self._save_repo_name}: scene camera '
+                              f'{then} -> {live["profile"]}', file=sys.stderr, flush=True)
+                        self._last_warning_message = record_texts_de.resume_scene_camera_de(
+                            name, then, live['profile'])
+                        return False
+                    if then is None or live['profile'] is None:
+                        print(f'Scene camera of {self._save_repo_name} not judged (dataset: {then}, '
+                              f'robot: {live["profile"]}); resuming', file=sys.stderr, flush=True)
                     dataset = LeRobotDatasetWrapper(
                         self._save_repo_name,
                         self._save_path
@@ -2076,6 +2111,20 @@ class DataManager:
                     dataset = self._create_dataset(
                         self._save_repo_name,
                         images, joint_list)
+                    # D58: a tower session stamps the dataset it created, before
+                    # its record and its first frame. A failed write ends the
+                    # Start (the `except` below); the empty folder stays and the
+                    # next Start re-creates it (_check_dataset_exists).
+                    if live['profile'] == 'tower_v1':
+                        try:
+                            scene_provenance.write_stamp(
+                                self._save_path, live['profile_id'], live['platform'])
+                        except Exception:
+                            self._last_warning_message = record_texts_de.scene_stamp_failed_de(name)
+                            raise
+                    elif live['profile'] is None:
+                        print(f'Scene camera unknown: {self._save_repo_name} is created without a stamp',
+                              file=sys.stderr, flush=True)
                     self._write_create_record()
 
                 if not self._task_info.use_optimized_save_mode:
@@ -2115,6 +2164,12 @@ class DataManager:
         except Exception as e:  # noqa: BLE001
             print(f'Could not write the sync record of {self._save_repo_name}: {e}',
                   file=sys.stderr, flush=True)
+
+    def _live_scene_profile(self) -> dict:
+        """D58: the node's provider (``_scene_camera_profile``), checked. Unknown
+        (``profile`` None) when it is missing (a DataManager built with
+        __new__), raises or answers anything malformed."""
+        return scene_provenance.live_profile(getattr(self, '_scene_camera_profile', None))
 
     def _resume_is_compatible(self, dataset, images, joint_list) -> bool:
         features = self._dataset_features(images or {}, joint_list)

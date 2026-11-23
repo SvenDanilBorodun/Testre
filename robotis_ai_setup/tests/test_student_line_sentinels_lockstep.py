@@ -44,6 +44,9 @@ _READERS = {
     'components/Workshop/SimStage.jsx',
     'features/workshop/workshopSlice.js',
     'hooks/useSimPreview.js',
+    # The calibration panel's Protokoll (spec 40 S8): the arm check's lines,
+    # rendered as plain text; it parses no sentinel.
+    'components/Workshop/calibration/CalibrationPanel.jsx',
 }
 
 # Every head a client parser of a student line looks for at a line's start.

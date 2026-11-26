@@ -6,7 +6,7 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
-### 2026-11-25: the arm check's stillness window could never close on a real clock
+### 2026-11-25, release 2.41.1: the arm check's stillness window could never close on a real clock
 
 **What was wrong.** The arm check records a pose only once the arm has rested: its joints moved less than 0.002 rad over 0.3 s (`workflow/autocal/service.py::capture_tick`). The window held only the readings at most 0.3 s old and asked them to cover at least 0.3 s. `_capture_loop` does one tick's work and then sleeps 0.1 s, so on a real clock two readings are always a little more than 0.1 s apart and none is ever taken exactly 0.3 s ago: the window covered about 0.2 s and the arm was never at rest. Every real arm check of 2.41.0 would have ended `too_few_poses`, and no kit could have been calibrated. The tests did not see it because their fake clock stepped exactly 0.1 s, which puts a reading exactly on the window's edge.
 

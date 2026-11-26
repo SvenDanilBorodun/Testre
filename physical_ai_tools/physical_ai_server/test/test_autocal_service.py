@@ -227,9 +227,11 @@ class _Env:
     def wid(self):
         return self.programs[-1][1]
 
-    def play(self, upto=None, finish=True):
+    def play(self, upto=None, finish=True, spacing=None):
         """Play the arm-check program: each pose's move, its dwell at 10 Hz, then HOME and the end.
-        Stops early when the service stopped the program."""
+        Stops early when the service stopped the program. ``spacing`` (a callable giving the time from one
+        capture tick to the next) plays the dwells on the production loop's timing instead: ticks until the
+        dwell's time has passed, never exactly ``CAPTURE_PERIOD_S`` apart."""
         n = len(self.poses) if upto is None else upto
         wid = self.wid
         for i in range(n):
@@ -237,8 +239,18 @@ class _Env:
             self.put(i)
             self.status(f'armcheck-wait-{i + 1:02d}', wid)
             dwell = SV.FIRST_DWELL_S if i == 0 else SV.DWELL_S
-            for _ in range(int(round(dwell / SV.CAPTURE_PERIOD_S))):
-                self.clock.advance(SV.CAPTURE_PERIOD_S)
+            if spacing is None:
+                steps = [SV.CAPTURE_PERIOD_S] * int(round(dwell / SV.CAPTURE_PERIOD_S))
+            else:
+                steps, elapsed = [], 0.0
+                while True:
+                    dt = float(spacing())
+                    if elapsed + dt > dwell:
+                        break
+                    steps.append(dt)
+                    elapsed += dt
+            for dt in steps:
+                self.clock.advance(dt)
                 self.svc.capture_tick()
                 if self.stops:
                     return 'stopped'
@@ -647,6 +659,166 @@ def test_a_target_moving_half_a_pixel_per_look_is_never_captured(kind, motion, t
     run = env.svc._run
     assert run.captured == {} and sorted(run.rested) == list(range(20))
     assert min(looks.values()) >= SV.CAPTURE_LOOKS                  # every pose was looked at often enough
+
+
+# ── the stillness window on real timing (efficiency review of 2.41.0, 2026-11-24) ──
+# The capture thread (_capture_loop) does one tick's work and then sleeps CAPTURE_PERIOD_S, so on a real clock two
+# readings are always a little MORE than a period apart, never exactly one: three periods of real time hold no
+# reading taken exactly STILL_WINDOW_S ago. A window of only the readings at most STILL_WINDOW_S old then covers about
+# 0.2 s and never 0.3 s: no pose ever came to rest and every real arm check ended too_few_poses. The tests above
+# step a fake clock by exactly one period and could not see it.
+
+def _start_at_pose_1(env):
+    """The arm check started and the arm resting at AC01 in its dwell; no tick run yet."""
+    assert env.svc.start('arm_check')[0]
+    wid = env.wid
+    env.status('armcheck-move-01', wid)
+    env.put(0)
+    env.status('armcheck-wait-01', wid)
+    return env.svc._run
+
+
+@pytest.mark.parametrize('extra_s', (1e-6, 3e-4, 0.03))
+@pytest.mark.parametrize('kind', KINDS)
+def test_every_pose_is_captured_with_ticks_a_little_more_than_a_period_apart(kind, extra_s, tmp_path):
+    """FAILS FIRST (review 2026-11-24): with every tick ``extra_s`` (the tick's own work: a microsecond, a
+    look, a slow look) more than CAPTURE_PERIOD_S after the last, as in production, every pose is captured within
+    its dwell and the run writes the arm check. Before the fix not one pose came to rest."""
+    env = _Env(kind, calib_dir=tmp_path)
+    assert env.svc.start('arm_check')[0]
+    run = env.svc._run
+    assert env.play(spacing=lambda: SV.CAPTURE_PERIOD_S + extra_s) == 'finished'
+    assert sorted(run.captured) == list(range(20))
+    got = _stored(env)
+    assert got.status == 'ok', env.svc.state()
+    assert got.data['quality']['poses_used'] == 20
+
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_every_pose_is_captured_with_jittered_ticks(kind, tmp_path):
+    """FAILS FIRST: ticks 0.1001 to 0.16 s apart at random (a busy machine) capture every pose in each of five
+    seeded runs, without the pose-1 check ever stopping the program."""
+    for seed in range(5):
+        env = _Env(kind, seed=seed, calib_dir=tmp_path / str(seed))
+        rng = np.random.default_rng([seed, 11])
+        assert env.svc.start('arm_check')[0]
+        assert env.play(finish=False, spacing=lambda: rng.uniform(0.1001, 0.16)) == 'finished', seed
+        assert sorted(env.svc._run.captured) == list(range(20)), seed
+
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_slow_ticks_prove_rest_from_the_second_reading(kind, tmp_path):
+    """FAILS FIRST: ticks 0.7 s apart (a slow machine's look between them): the first reading alone proves
+    nothing, the second one 0.7 s later proves rest; the rest counts from STILL_WINDOW_S before that tick."""
+    env = _Env(kind, calib_dir=tmp_path)
+    run = _start_at_pose_1(env)
+    env.clock.advance(0.7)
+    env.svc.capture_tick()
+    assert run.still_since is None and 0 not in run.rested
+    env.clock.advance(0.7)
+    env.svc.capture_tick()
+    assert 0 in run.rested
+    assert run.still_since == pytest.approx(env.clock.t - SV.STILL_WINDOW_S)
+
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_rest_needs_a_full_window_of_readings(kind, tmp_path):
+    """The rule keeps its length: readings 0.1003 s apart prove rest only once one of them is at least
+    STILL_WINDOW_S old (the fourth), never on the third (0.2006 s)."""
+    env = _Env(kind, calib_dir=tmp_path)
+    run = _start_at_pose_1(env)
+    for _ in range(3):
+        env.clock.advance(0.1003)
+        env.svc.capture_tick()
+        assert run.still_since is None
+    env.clock.advance(0.1003)
+    env.svc.capture_tick()
+    assert run.still_since is not None and 0 in run.rested
+
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_a_reading_that_fails_breaks_the_rest(kind, tmp_path):
+    """FAILS FIRST: a tick whose joints cannot be read (``None``) breaks the rest and its look streak: no window
+    bridges a reading that was never taken, and rest is proven again only by a full window after it."""
+    env = _Env(kind, calib_dir=tmp_path)
+    run = _start_at_pose_1(env)
+    for _ in range(5):
+        env.clock.advance(0.1003)
+        env.svc.capture_tick()
+    assert run.still_since is not None
+    enc = env.enc
+    env.enc = None
+    env.clock.advance(0.1003)
+    env.svc.capture_tick()
+    assert run.still_since is None and run.streak == [] and run.samples == []
+    env.enc = enc
+    for _ in range(3):
+        env.clock.advance(0.1003)
+        env.svc.capture_tick()
+        assert run.still_since is None
+    env.clock.advance(0.1003)
+    env.svc.capture_tick()
+    assert run.still_since is not None
+
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_a_long_gap_never_counts_as_seconds_of_rest(kind, tmp_path):
+    """FAILS FIRST: two readings 5 s apart (a stalled thread) prove rest, but the pose-1 check counts it from
+    STILL_WINDOW_S before the tick that proved it, never from the old reading: with no target on the gripper the
+    program is stopped only POSE1_CHECK_S − STILL_WINDOW_S (2.7 s) of ticks after that tick, never on it."""
+    env = _Env(kind, calib_dir=tmp_path)
+    env.target_attached = False
+    run = _start_at_pose_1(env)
+    wid = env.wid
+    env.clock.advance(0.1)
+    env.svc.capture_tick()
+    env.clock.advance(5.0)
+    env.svc.capture_tick()
+    proven = env.clock.t
+    assert run.still_since == pytest.approx(proven - SV.STILL_WINDOW_S)
+    assert env.stops == []
+    while env.clock.t < proven + SV.POSE1_CHECK_S - SV.STILL_WINDOW_S - 0.15:
+        env.clock.advance(0.1)
+        env.svc.capture_tick()
+        assert env.stops == []
+    for _ in range(3):
+        env.clock.advance(0.1)
+        env.svc.capture_tick()
+    assert env.stops == [wid] and env.svc.state()['code'] == 'target_not_seen'
+
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_the_readings_kept_stay_bounded(kind, tmp_path):
+    """The window keeps only the readings that can still open or fill one: over 300 ticks at rest, a tick at least
+    CAPTURE_PERIOD_S after the last, never more than four (the three of the last STILL_WINDOW_S, the newest
+    included, and the one that opens the window)."""
+    env = _Env(kind, calib_dir=tmp_path)
+    run = _start_at_pose_1(env)
+    bound = round(SV.STILL_WINDOW_S / SV.CAPTURE_PERIOD_S) + 1
+    assert bound == 4
+    for k in range(300):
+        env.clock.advance(SV.CAPTURE_PERIOD_S if k % 2 else 0.1003)
+        env.svc.capture_tick()
+        assert len(run.samples) <= bound
+
+
+@pytest.mark.parametrize('kind', KINDS)
+def test_the_capture_loop_comes_to_rest_on_the_real_clock(kind, tmp_path):
+    """FAILS FIRST: the production loop itself (``_capture_loop``: one tick's work, then time.sleep) on
+    time.monotonic: the arm resting at AC01 is a rested record within two seconds."""
+    env = _Env(kind, calib_dir=tmp_path)
+    env.svc._clock = time.monotonic
+    env.svc._sleep = time.sleep
+    run = _start_at_pose_1(env)
+    thread = threading.Thread(target=env.svc._capture_loop, args=(run,), daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and 0 not in run.rested:
+        time.sleep(0.02)
+    env.svc.on_program_end(env.wid, 'stopped')
+    thread.join(2.0)
+    assert not thread.is_alive()
+    assert 0 in run.rested and run.still_since is not None
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1248,6 +1420,47 @@ def _legacy_yamls(calib_dir):
     fs = cv2.FileStorage(os.path.join(calib_dir, 'scene_handeye.yaml'), cv2.FILE_STORAGE_WRITE)
     fs.write('transform', np.eye(4))
     fs.release()
+
+
+class _AgedComm:
+    """A communicator whose last follower JointState is ``age`` seconds old (``None``: none arrived)."""
+
+    def __init__(self, joints, age):
+        self.joints, self.age = joints, age
+
+    def get_latest_follower_joints(self):
+        return self.joints
+
+    def get_follower_joints_age_s(self):
+        return self.age
+
+
+def test_the_arm_check_never_reads_a_frozen_joint_stream(tmp_path, monkeypatch):
+    """FAILS FIRST (review of the stillness fix, 2026-11-25): the service's joints are the node's latest follower
+    reading only while that stream is fresh — older than _FOLLOWER_JOINT_MAX_AGE_S (jog's and replay's rule) the
+    reading is None, so a frozen feed (a dead driver publishes nothing and the last message stays cached) is never
+    rest: it records no pose, and the start at HOME refuses it like unreadable joints."""
+    monkeypatch.setenv('EDUBOTICS_CALIB_DIR', str(tmp_path))
+    from physical_ai_server.workflow.autocal import service as calibration_service
+    node = _StubNode('_build_scene_calibration', '_follower_joints_stale', extra={
+        'os': os, '_FOLLOWER_JOINT_MAX_AGE_S': 1.0, 'calibration_service': calibration_service})
+    for name in ('_calibration_guard_parts', '_start_calibration_program', '_stop_calibration_program',
+                 '_claim_calibration_mode', '_set_calibration_active', '_calibration_log',
+                 '_publish_calibration_state', '_build_perception', '_build_ik_solver'):
+        setattr(node, name, lambda *a, **k: None)
+    node.studio_camera = _Camera()
+    joints = [0.0, 0.64, 0.64, 0.0, 0.0, 0.9]
+    node.communicator = _AgedComm(joints, 0.02)
+    svc = node._build_scene_calibration()
+    assert svc._get_joints() == joints
+    node.communicator.age = 1.5
+    assert svc._get_joints() is None
+    assert svc._measured() is None
+    node.communicator.age = None                    # none arrived yet: the reader's own None decides
+    node.communicator.joints = None
+    assert svc._get_joints() is None
+    node.communicator = None
+    assert svc._get_joints() is None
 
 
 def test_load_workflow_calibration_takes_the_tower_calibration_the_gate_approved(tmp_path, monkeypatch):

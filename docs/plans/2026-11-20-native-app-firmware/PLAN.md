@@ -6,6 +6,8 @@ technical claim is in `FINDINGS.md`, the four reports under `research/` and `VER
 corrects some of them); this file does not repeat it. Where this plan and `BRIEF.md`, `FINDINGS.md` or a
 report disagree, this plan wins. **[owner]** marks an owner decision.
 
+**Release numbers amended 2026-11-26 (owner, `SPEC-DECISIONS.md` Q1-A):** the arm-check stillness fix shipped alone as **2.41.1**; Phase 0 ships as **2.41.2**, and `release/2.41` is cut from `v2.41.2`. Every „2.41.1" below that names Phase 0's release or the cut reads „2.41.2".
+
 Proof status, stated once: nothing here has run on Windows, on an iPad or on a robot. Every such claim
 has a named test (16 Windows spikes: S0–S5, S7–S14, S16, S-J in `research/03` §15; 13 bench scripts
 B1–B13 in `research/02` §10). The owner allowed Windows spikes on GitHub Actions under a standard account

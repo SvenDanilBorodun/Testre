@@ -171,6 +171,30 @@ _FIXTURE_STATE = {'id': _sf.FIXTURE_ID, 'lift_m': _sf.LIFT_M}
 _CAPTURE_SIZE = (int(_sf.CAPTURE['width']), int(_sf.CAPTURE['height']))
 
 
+def _rest_window(samples, now):
+    """The capture rule's stillness window at ``now`` and how long it covers.
+
+    ``samples`` are the run's ``(t, q)`` readings, oldest first, the newest
+    taken at ``now``. The window runs from the NEWEST reading taken at least
+    ``STILL_WINDOW_S`` before ``now`` (it opens the window) to ``now``.
+    ``_capture_loop`` sleeps ``CAPTURE_PERIOD_S`` after each tick's work, so
+    two readings are always a little MORE than a period apart and none is
+    taken exactly ``STILL_WINDOW_S`` ago: a window of only the readings at
+    most ``STILL_WINDOW_S`` old covered about two periods and never proved
+    rest, and every real arm check ended ``too_few_poses`` (efficiency review
+    of 2.41.0, 2026-11-24). A reading older than the one that opens the window
+    can never open a later one, so the window is also all the run keeps.
+    Without a reading that old the window is every reading and covers less
+    than ``STILL_WINDOW_S``.
+    """
+    start = 0
+    for k, (t, _q) in enumerate(samples):
+        if t <= now - STILL_WINDOW_S + 1e-9:
+            start = k
+    kept = samples[start:]
+    return kept, now - kept[0][0]
+
+
 def _start_daemon(target, name):
     thread = threading.Thread(target=target, name=name, daemon=True)
     thread.start()
@@ -364,7 +388,7 @@ class _Run:
         self.poses = [np.asarray(p, dtype=np.float64) for p in poses]
         self.pose = None             # 0-based pose of the program's current block
         self.dwell = False           # True while that pose's dwell (its wait block) runs
-        self.samples = []            # (t, q (5,)) measured joints of the last STILL_WINDOW_S and a little more
+        self.samples = []            # (t, q (5,)) the stillness window's readings (_rest_window)
         self.still_since = None
         self.rested = {}             # pose -> median encoder readings of its rest
         self.captured = {}           # pose -> (median encoder readings, {tag id: median corners})
@@ -1003,12 +1027,15 @@ class SceneCalibration:
         now = self._clock()
         q = self._measured()
         if q is None:
+            # a reading that cannot be taken breaks the rest and its look streak: no window bridges it
+            with self._lock:
+                run.samples = []
+                run.still_since = None
+                run.streak = []
             return
         with self._lock:
-            run.samples = [(t, s) for t, s in run.samples if t >= now - 2.0 * STILL_WINDOW_S] + [(now, q)]
-            window = [s for t, s in run.samples if t >= now - STILL_WINDOW_S - 1e-9]
-            span = now - min(t for t, _s in run.samples if t >= now - STILL_WINDOW_S - 1e-9)
-            stack = np.stack(window)
+            run.samples, span = _rest_window(run.samples + [(now, q)], now)
+            stack = np.stack([s for _t, s in run.samples])
             still = span >= STILL_WINDOW_S - 1e-9 and float(np.max(stack.max(axis=0) - stack.min(axis=0))) < \
                 STILL_TOL_RAD
             if not still:
@@ -1016,7 +1043,9 @@ class SceneCalibration:
                 run.streak = []
                 return
             if run.still_since is None:
-                run.still_since = now - span
+                # counted from STILL_WINDOW_S before the tick that proved it, never from an older reading: a
+                # stalled thread's gap is no rest the pose-1 check may count
+                run.still_since = now - min(span, STILL_WINDOW_S)
             i, dwell = run.pose, run.dwell
             if i is None or not dwell:
                 return

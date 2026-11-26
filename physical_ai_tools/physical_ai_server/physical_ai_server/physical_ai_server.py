@@ -4303,8 +4303,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             profile, self.studio_camera,
             os.environ.get('EDUBOTICS_CALIB_DIR', '/root/.cache/edubotics/calibration'),
             detect=lambda frame, roi=None: calibration_service.detect_tags(self._build_perception(), frame, roi),
+            # a frozen stream (a dead driver publishes nothing; its last message stays cached) is no reading:
+            # the stillness window would read it as perfect rest and record a pose the arm never reached
             get_joints=lambda: (self.communicator.get_latest_follower_joints()
-                                if self.communicator is not None else None),
+                                if self.communicator is not None and not self._follower_joints_stale()
+                                else None),
             fk=lambda q: self._build_ik_solver().fk(q),
             guard_parts=self._calibration_guard_parts,
             start_program=self._start_calibration_program,
@@ -7081,7 +7084,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             get_current_pose_xyz=self._get_current_gripper_xyz,
             # Audit S2: lambda so the call is deferred to workflow start
             # time (communicator may not yet be wired at WorkflowManager
-            # construction). Returns None on absent comm or stale joints.
+            # construction). Returns None on absent comm or before the first
+            # JointState; it does NOT judge staleness (a frozen stream answers
+            # its last reading; docs/KNOWN-ISSUES.md).
             get_follower_joints=lambda: (
                 self.communicator.get_latest_follower_joints()
                 if self.communicator is not None

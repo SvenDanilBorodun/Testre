@@ -5,6 +5,8 @@ Date 2026-11-25. Architect C. Base `main` @ `66382d27`. Proposed build branch `f
 (owner answers Q0–Q32). They override `FINDINGS.md`, `BRIEF.md`, the research reports and `CLAUDE.md`;
 the CODE overrides all of them (§10).
 
+**Release numbers amended 2026-11-26 (owner, `SPEC-DECISIONS.md` Q1-A):** spec A's release is 2.41.2 (the arm-check fix shipped alone as 2.41.1); `A-BRANCH-CUT` and `A-WP-A8` therefore mean `v2.41.2`. Every „2.41.1" below that names spec A's release or the cut reads „2.41.2".
+
 **Timing override (owner, 2026-11-25).** PLAN §8 wanted this spec written after spec B's Phase-1
 results. It is written now. So every decision that depends on a spec-B result has a DEFAULT (the
 expected result), an ALTERNATIVE (if it fails) and an `externalGates` entry on the affected packages

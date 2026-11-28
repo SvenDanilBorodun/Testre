@@ -405,10 +405,14 @@ class ARaisingReadIsAFailedRead(_NodeCase):
         self.assertFalse(self.capture.released)
 
     def test_a_read_that_keeps_raising_is_no_frames_and_the_device_is_opened_again(self):
+        """While streaming, SILENCE_S (2 s) of raising reads end it; after a
+        reopen the camera has its start-up allowance first (FIRST_FRAME_WAIT_S,
+        2.41.2), so a reopened device that never sends a frame takes longer."""
         self.stream()
         self.capture.raising = True
         for attempt in range(3):
-            for _ in range(6):
+            steps = 6 if attempt == 0 else int(2 * _SPLIT.FIRST_FRAME_WAIT_S) + 2
+            for _ in range(steps):
                 self.node.step()
             self.assertEqual(self.states()[-1]['fault'], 'no_frames', attempt)
             self.assertTrue(self.capture.released, attempt)

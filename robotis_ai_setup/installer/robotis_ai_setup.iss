@@ -34,7 +34,7 @@
 [Setup]
 AppId={{B7E3F2A1-8C4D-4E5F-9A6B-1D2E3F4A5B6C}
 AppName=EduBotics
-AppVersion=2.41.1
+AppVersion=2.41.2
 AppPublisher=EduBotics
 ; Shown in the .exe's file properties (VersionInfoCopyright defaults to it).
 AppCopyright=© 2025–2026 [Anbieter – wird nach Klärung der Rechtsform ergänzt] (EduBotics)

@@ -68,15 +68,44 @@ SCENE_OPEN_FAILED_DE = (
     "Die Turm-Kamera wird von einem anderen Programm verwendet oder ist nicht "
     "angeschlossen.")
 SCENE_WRONG_MODE_DE = (
-    "Die Turm-Kamera liefert kein MJPEG-Bild mit 1920 × 1080 Bildpunkten und "
+    "Die Turm-Kamera liefert kein Bild mit 1920 × 1080 Bildpunkten und "
     "mindestens 10 Bildern pro Sekunde — sie wird erneut geöffnet.")
 SCENE_NO_FRAMES_DE = "Die Turm-Kamera liefert keine Bilder — sie wird erneut geöffnet."
 SCENE_BAD_FRAMES_DE = "Die Turm-Kamera liefert beschädigte Bilder — sie wird erneut geöffnet."
 SCENE_STOPPED_DE = "Die Turm-Kamera ist ausgefallen — bitte die Umgebung neu starten."
-SCENE_STREAMING_DE = "Turm-Kamera: 1920×1080 MJPG, {fps:.1f} Bilder/s, Direktdurchleitung {passthrough}"
+SCENE_STREAMING_DE = ("Turm-Kamera: 1920×1080 {fmt}, {fps:.1f} Bilder/s, "
+                      "Direktdurchleitung {passthrough}")
 _NOT_ACTIVATED_DE = "Die Turm-Kamera wurde nicht aktiviert."
+# The „Turm-Kamera" box's probe names what the camera really did (2.41.2:
+# every refusal read like the first one, also for a camera that only started
+# slowly).
 SCENE_PROBE_REFUSED_DE = (
     f"Diese Kamera liefert kein Bild mit 1920 × 1080 Bildpunkten. {_NOT_ACTIVATED_DE}")
+SCENE_PROBE_NO_FRAMES_DE = (
+    "Die Kamera liefert keine Bilder. Bitte andere Programme schließen, die die "
+    f"Kamera benutzen, und das USB-Kabel prüfen. {_NOT_ACTIVATED_DE}")
+SCENE_PROBE_BROKEN_DE = (
+    "Die Kamera liefert beschädigte Bilder. Bitte das USB-Kabel und die "
+    f"Verlängerung prüfen und das Häkchen erneut setzen. {_NOT_ACTIVATED_DE}")
+SCENE_PROBE_TOO_SLOW_DE = (
+    "Die Kamera liefert zu wenige Bilder pro Sekunde{rate}. Meist ist es zu dunkel: "
+    f"bitte für mehr Licht sorgen und das Häkchen erneut setzen. {_NOT_ACTIVATED_DE}")
+SCENE_PROBE_UNCOMPRESSED_DE = (
+    "Diese Kamera liefert 1920 × 1080 Bildpunkte nur unkomprimiert und zu langsam"
+    f"{{rate}}. {_NOT_ACTIVATED_DE}")
+SCENE_PROBE_SELFTEST_DE = (
+    "Die Bildaufbereitung hat ihren Selbsttest nicht bestanden. Bitte EduBotics "
+    f"aktualisieren. {_NOT_ACTIVATED_DE}")
+SCENE_PROBE_FAILED_DE = (
+    "Die Prüfung der Turm-Kamera ist fehlgeschlagen. Bitte das Häkchen erneut "
+    f"setzen. {_NOT_ACTIVATED_DE}")
+SCENE_PROBE_REPORT_DE = "Turm-Kamera-Prüfung: {format}; {first}; {frames}."
+# The camera's own uncompressed formats: a decoded stream in one of them that
+# is too slow is the camera's slow raw mode, anything else (NV12, which Windows
+# may decode from MJPEG, or an unreadable format) is more likely a dark room.
+_UNCOMPRESSED_FOURCCS = frozenset(("YUY2", "YUYV", "UYVY"))
+PROBE_OPEN_ATTEMPTS = 3             # a device the previews just released may still be closing
+PROBE_OPEN_RETRY_S = 1.0
 OLDER_IMAGE_DE = (
     "Das Roboter-Abbild ist älter als die Software — Roboter Studio bekommt kein "
     "Bild der Turm-Kamera.")
@@ -490,6 +519,7 @@ class _SceneCaptureWorker(threading.Thread):
         self._seen_generation = None
         self._state_at = None
         self._announced = False
+        self._mode = None          # the SceneMode of the current open (win_camera)
         # What CameraBridge.status() reads, as on _CaptureWorker.
         self.fps = 0.0
         self.negotiated_fps = 0.0
@@ -591,6 +621,7 @@ class _SceneCaptureWorker(threading.Thread):
             if cap is None:
                 verifier.open_failed(self._clock())
             else:
+                self._mode = getattr(cap, "mode", None)
                 verifier.opened(self._clock())
         self._note(self._clock())
         return cap
@@ -638,7 +669,8 @@ class _SceneCaptureWorker(threading.Thread):
                     self.last_error_de = ""
                     if not self._announced and self._log is not None:
                         line = SCENE_STREAMING_DE.format(
-                            fps=self.fps, passthrough="aktiv" if verifier.passthrough else "aus")
+                            fmt=_format_name(self._mode, verifier.passthrough), fps=self.fps,
+                            passthrough="aktiv" if verifier.passthrough else "aus")
                     self._announced = True
                 elif verifier.state == scene_split.STATE_FAULT:
                     self.last_error_de = _SCENE_FAULT_DE.get(verifier.fault, "")
@@ -649,6 +681,14 @@ class _SceneCaptureWorker(threading.Thread):
                 (scene_split.state_message(**verifier.state_fields()), time.time_ns()))
         if line is not None:
             self._log(line)
+
+
+def _format_name(mode, passthrough) -> str:
+    """The camera format for the Protokoll: the one Windows negotiated, else
+    MJPG for a passed-through JPEG."""
+    if mode is not None and mode.fourcc:
+        return mode.fourcc
+    return "MJPG" if passthrough else "unbekanntes Format"
 
 
 def _release(cap):
@@ -776,28 +816,107 @@ class _HelloSenderWorker(_ConnectMixin, threading.Thread):
                 pass
 
 
-def probe_scene_camera(index: int, clock=time.monotonic) -> str:
-    """The „Turm-Kamera" box's capability probe (spec 40 S1): open the camera
-    as the tower worker does and read until ``scene_split.VERIFY_FRAMES``
-    frames passed the frame check, within the verifier's bounds (3 s for the
-    frames, 2 s of silence). ``''`` when the camera delivers them, else the
-    German reason. The device is always released."""
-    verifier = scene_split.CaptureVerifier("windows", constants.CAMERA_JPEG_QUALITY)
-    verifier.opening(clock())
-    try:
-        cap = win_camera.open_scene_capture(index)
-    except Exception:  # noqa: BLE001 — every open failure refuses the box
-        return f"{SCENE_OPEN_FAILED_DE} {_NOT_ACTIVATED_DE}"
+def probe_scene_camera(index: int, clock=time.monotonic, log=None, sleep=time.sleep) -> str:
+    """The „Turm-Kamera" box's capability probe (spec 40 S1): the split's
+    self-test, then open the camera as the tower worker does and read until
+    the verifier decides (``scene_split.VERIFY_FRAMES`` passing frames within
+    its window, the camera's start-up allowed for). ``''`` when the camera
+    delivers them, else the German reason that names what it did. An open
+    that fails is tried ``PROBE_OPEN_ATTEMPTS`` times, ``PROBE_OPEN_RETRY_S``
+    apart (the previews have just released the device). ``log`` gets one
+    German Protokoll line describing the camera (its format, its first frame,
+    its frames). The device is always released."""
+    if scene_split.selftest():
+        return SCENE_PROBE_SELFTEST_DE
+    for attempt in range(PROBE_OPEN_ATTEMPTS):
+        verifier = scene_split.CaptureVerifier("windows", constants.CAMERA_JPEG_QUALITY)
+        verifier.opening(clock())
+        try:
+            cap = win_camera.open_scene_capture(index)
+            break
+        except Exception:  # noqa: BLE001 — every open failure refuses the box
+            if attempt + 1 == PROBE_OPEN_ATTEMPTS:
+                return f"{SCENE_OPEN_FAILED_DE} {_NOT_ACTIVATED_DE}"
+            sleep(PROBE_OPEN_RETRY_S)
+    mode = getattr(cap, "mode", None)
+    seen, passed_at = 0, []
     try:
         verifier.opened(clock())
         while verifier.state == scene_split.STATE_VERIFYING:
-            ok, frame = cap.read()
-            verifier.frame(clock(), frame if ok else None)
-            if not ok or frame is None:
-                time.sleep(_FAILED_READ_WAIT_S)
+            try:
+                ok, frame = cap.read()
+            except Exception:  # noqa: BLE001 — a read that raises returned nothing (K-1)
+                ok, frame = False, None
+            if not ok:
+                frame = None
+            now, before = clock(), verifier.passed
+            verifier.frame(now, frame)
+            if frame is None:
+                sleep(_FAILED_READ_WAIT_S)
+                continue
+            seen += 1
+            if verifier.passed > before:
+                passed_at.append(now)
     finally:
-        cap.release()
-    return "" if verifier.state == scene_split.STATE_STREAMING else SCENE_PROBE_REFUSED_DE
+        _release(cap)
+    rate = _probe_rate(passed_at)
+    if log is not None:
+        log(_probe_report(mode, verifier, seen, rate))
+    return _probe_reason(verifier, rate, mode)
+
+
+def _probe_rate(passed_at):
+    """The rate of the passing frames, ``None`` below two."""
+    if len(passed_at) < 2 or passed_at[-1] <= passed_at[0]:
+        return None
+    return (len(passed_at) - 1) / (passed_at[-1] - passed_at[0])
+
+
+def _probe_reason(verifier, rate, mode=None) -> str:
+    """The probe's verdict in German, from what the verifier saw and the
+    format Windows negotiated."""
+    if verifier.state == scene_split.STATE_STREAMING:
+        return ""
+    if verifier.fault == scene_split.FAULT_WRONG_MODE:
+        if verifier.passed and verifier.dropped < verifier.passed:   # the right picture, too slowly
+            fourcc = (getattr(mode, "fourcc", "") or "").upper()
+            if verifier.passthrough or fourcc not in _UNCOMPRESSED_FOURCCS:
+                return SCENE_PROBE_TOO_SLOW_DE.format(
+                    rate="" if rate is None else f" (nur {rate:.0f})")
+            return SCENE_PROBE_UNCOMPRESSED_DE.format(
+                rate="" if rate is None else f" ({rate:.0f} Bilder pro Sekunde)")
+        if verifier.passed or (verifier.width, verifier.height) == (
+                scene_split.CAPTURE_W, scene_split.CAPTURE_H):
+            return SCENE_PROBE_BROKEN_DE     # the right size, but mostly cut or damaged
+        return SCENE_PROBE_REFUSED_DE
+    if verifier.fault == scene_split.FAULT_NO_FRAMES:
+        return SCENE_PROBE_NO_FRAMES_DE
+    return SCENE_PROBE_REFUSED_DE
+
+
+def _size_text(width, height) -> str:
+    return "{}×{}".format(width, height)
+
+
+def _probe_report(mode, verifier, seen, rate) -> str:
+    """One German Protokoll line: what Windows negotiated, when the first
+    frame came and how many frames passed."""
+    if mode is None:
+        fmt = "Format unbekannt"
+    else:
+        name = mode.fourcc or "unbekanntes Format"
+        fmt = (f"Windows liefert {name} {_size_text(mode.width, mode.height)} bei "
+               f"{mode.fps:.1f} Bilder/s, Direktdurchleitung {'aktiv' if mode.passthrough else 'aus'}")
+    if verifier.first_frame_at is None or verifier.opened_at is None:
+        first = "kein Bild erhalten"
+    else:
+        first = f"erstes Bild nach {verifier.first_frame_at - verifier.opened_at:.1f} s"
+    frames = f"{verifier.passed} von {seen} Bildern in Ordnung"
+    if rate is not None:
+        frames += f" ({rate:.1f} Bilder/s)"
+    if seen and not verifier.passed and verifier.width is not None:
+        frames += f", zuletzt {_size_text(verifier.width, verifier.height)}"
+    return SCENE_PROBE_REPORT_DE.format(format=fmt, first=first, frames=frames)
 
 
 class CameraBridge:

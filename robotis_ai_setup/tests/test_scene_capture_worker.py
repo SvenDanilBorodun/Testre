@@ -331,14 +331,17 @@ class ThePassthroughStream(_Patched):
 class TheDecodedFallback(_Patched):
 
     def test_decoded_frames_take_the_fallback(self):
-        """No raw sample from the backend: outside_from_bgr, and the studio
-        frame is the decoded frame encoded at quality 90."""
+        """No raw sample from the backend (Windows runs the camera as NV12, so
+        win_camera lets the backend decode): outside_from_bgr, the studio frame
+        is the decoded frame encoded at quality 90, and the Protokoll line
+        names the format Windows negotiated."""
         frame = cv2.imdecode(np.frombuffer(_FIXTURE.read_bytes(), np.uint8), cv2.IMREAD_COLOR)
         self.assertEqual(frame.shape, (1080, 1920, 3))
         logs = []
         worker = self._worker(log=logs.append)
         self.cam = _Cam(self.clock, lambda i: frame,
                         lambda i: worker.stop() if i == 40 else None)
+        self.cam.mode = win_camera.SceneMode('NV12', 1920, 1080, 30.0, passthrough=False)
         worker.run()
         self.assertIs(worker.verifier.passthrough, False)
         (outside, ns), seq = worker.latest()
@@ -348,7 +351,7 @@ class TheDecodedFallback(_Patched):
         self.assertEqual(studio, _jpeg(frame, camera_bridge.STUDIO_FALLBACK_JPEG_QUALITY))
         self.assertIs(_state(worker)['passthrough'], False)
         self.assertEqual(logs, [
-            'Turm-Kamera: 1920×1080 MJPG, 30.0 Bilder/s, Direktdurchleitung aus'])
+            'Turm-Kamera: 1920×1080 NV12, 30.0 Bilder/s, Direktdurchleitung aus'])
 
 
 @unittest.skipUnless(_HAVE_CV2, 'cv2/numpy not available')
@@ -774,17 +777,193 @@ class TheProbe(_Patched):
                          'Die Turm-Kamera wurde nicht aktiviert.')
         self.assertTrue(self.cam.released)
 
-    def test_a_silent_camera_is_refused(self):
+    def test_a_silent_camera_is_refused_as_silent(self):
+        """It is given the whole start-up allowance, and the sentence says it
+        sent nothing (not that it sent the wrong size)."""
         self.cam = _Cam(self.clock, lambda i: None)
-        self.assertEqual(camera_bridge.probe_scene_camera(3, clock=self.clock),
-                         camera_bridge.SCENE_PROBE_REFUSED_DE)
+        self.assertEqual(camera_bridge.probe_scene_camera(3, clock=self.clock, sleep=_no_sleep),
+                         camera_bridge.SCENE_PROBE_NO_FRAMES_DE)
+        self.assertGreaterEqual(self.cam.reads / _FPS, scene_split.FIRST_FRAME_WAIT_S)
         self.assertTrue(self.cam.released)
+        self.assertEqual(camera_bridge.SCENE_PROBE_NO_FRAMES_DE,
+                         'Die Kamera liefert keine Bilder. Bitte andere Programme schließen, '
+                         'die die Kamera benutzen, und das USB-Kabel prüfen. '
+                         'Die Turm-Kamera wurde nicht aktiviert.')
 
     def test_a_camera_that_does_not_open_is_named(self):
         self.opened.side_effect = win_camera.CameraUnavailableError('busy')
-        reason = camera_bridge.probe_scene_camera(3, clock=self.clock)
+        slept = []
+        reason = camera_bridge.probe_scene_camera(3, clock=self.clock, sleep=slept.append)
         self.assertTrue(reason.startswith(camera_bridge.SCENE_OPEN_FAILED_DE), reason)
         self.assertIn('Die Turm-Kamera wurde nicht aktiviert.', reason)
+        self.assertEqual(self.opened.call_count, camera_bridge.PROBE_OPEN_ATTEMPTS)
+        self.assertEqual(slept, [camera_bridge.PROBE_OPEN_RETRY_S] * (camera_bridge.PROBE_OPEN_ATTEMPTS - 1))
+
+    @unittest.skipUnless(_HAVE_CV2, 'cv2/numpy not available')
+    def test_a_device_still_closing_after_the_previews_opens_on_the_next_try(self):
+        frame = _passthrough(_FIXTURE.read_bytes())
+        cam = _Cam(self.clock, lambda i: frame)
+        self.opened.side_effect = [win_camera.CameraUnavailableError('busy'), cam]
+        self.assertEqual(camera_bridge.probe_scene_camera(3, clock=self.clock, sleep=_no_sleep), '')
+        self.assertEqual(self.opened.call_count, 2)
+        self.assertTrue(cam.released)
+
+    def test_a_failing_selftest_refuses_without_opening(self):
+        with mock.patch.object(camera_bridge.scene_split, 'selftest', return_value='bad build'):
+            self.assertEqual(camera_bridge.probe_scene_camera(3, clock=self.clock),
+                             camera_bridge.SCENE_PROBE_SELFTEST_DE)
+        self.opened.assert_not_called()
+
+
+def _no_sleep(_seconds):
+    pass
+
+
+class _SlowStartCam:
+    """The first read blocks ``first_s`` (Media Foundation and V4L2 start the
+    stream at the first read), every later one ``1 / fps``; ``frame_at(i)``
+    as on ``_Cam``. The clock is a float the camera moves."""
+
+    def __init__(self, clock, first_s, fps, frame_at, mode=None):
+        self.clock, self.first_s, self.fps, self.frame_at = clock, first_s, fps, frame_at
+        self.reads, self.released, self.mode = 0, False, mode
+
+    def read(self):
+        self.clock.t += self.first_s if self.reads == 0 else 1.0 / self.fps
+        self.reads += 1
+        frame = self.frame_at(self.reads - 1)
+        return frame is not None, frame
+
+    def release(self):
+        self.released = True
+
+
+class _SecondsClock:
+
+    def __init__(self):
+        self.t = 500.0
+
+    def __call__(self):
+        return self.t
+
+
+@unittest.skipUnless(_HAVE_CV2, 'cv2/numpy not available')
+class TheProbeAllowsForTheCameraStartUp(_Patched):
+    """2.41.2: the verifier counted the camera's start-up against its 2 s
+    silence and its 3 s window, so a camera whose every frame was a complete
+    1920x1080 MJPEG was refused with „kein Bild mit 1920 × 1080" when its
+    first frame took 2 s (or 1.8 s at 15 fps in a dim room). The start-up now
+    has its own allowance and the window counts from the first frame."""
+
+    def _probe(self, first_s, fps, frame_at, mode=None):
+        clock = _SecondsClock()
+        self.cam = _SlowStartCam(clock, first_s, fps, frame_at, mode)
+        logs = []
+        reason = camera_bridge.probe_scene_camera(3, clock=clock, log=logs.append, sleep=_no_sleep)
+        self.assertTrue(self.cam.released)
+        self.assertEqual(len(logs), 1, logs)
+        return reason, logs[0]
+
+    def setUp(self):
+        super().setUp()
+        self.good = _passthrough(_FIXTURE.read_bytes())
+
+    def test_a_camera_that_starts_slowly_passes(self):
+        for first_s, fps in ((2.0, 30.0), (2.5, 30.0), (6.0, 30.0), (1.8, 15.0), (9.5, 15.0)):
+            with self.subTest(first_s=first_s, fps=fps):
+                reason, _line = self._probe(first_s, fps, lambda i: self.good)
+                self.assertEqual(reason, '')
+
+    def test_the_report_names_the_format_the_first_frame_and_the_frames(self):
+        mode = win_camera.SceneMode('MJPG', 1920, 1080, 30.0, passthrough=True)
+        reason, line = self._probe(2.5, 30.0, lambda i: self.good, mode)
+        self.assertEqual(reason, '')
+        self.assertEqual(line, 'Turm-Kamera-Prüfung: Windows liefert MJPG 1920×1080 bei 30.0 '
+                               'Bilder/s, Direktdurchleitung aktiv; erstes Bild nach 2.5 s; '
+                               '20 von 20 Bildern in Ordnung (30.0 Bilder/s).')
+
+    def test_the_wrong_size_is_still_refused_with_its_sentence(self):
+        small = _passthrough(_jpeg(cv2.resize(cv2.imdecode(
+            np.frombuffer(_FIXTURE.read_bytes(), np.uint8), cv2.IMREAD_COLOR), (1280, 720))))
+        reason, line = self._probe(2.5, 30.0, lambda i: small)
+        self.assertEqual(reason, camera_bridge.SCENE_PROBE_REFUSED_DE)
+        self.assertIn('kein Bild mit 1920 × 1080', reason)
+        self.assertIn('erstes Bild nach 2.5 s', line)
+        self.assertIn('0 von ', line)
+        self.assertIn('zuletzt 1280×720', line)
+
+    def test_a_camera_that_sends_nothing_within_the_allowance_is_silent(self):
+        reason, line = self._probe(scene_split.FIRST_FRAME_WAIT_S + 0.5, 30.0, lambda i: self.good)
+        self.assertEqual(reason, camera_bridge.SCENE_PROBE_NO_FRAMES_DE)
+        self.assertIn('kein Bild erhalten', line)
+
+    def test_cut_frames_are_named_damaged(self):
+        cut = _passthrough(_FIXTURE.read_bytes()[:150_000])
+        reason, _line = self._probe(0.3, 30.0, lambda i: cut)
+        self.assertEqual(reason, camera_bridge.SCENE_PROBE_BROKEN_DE)
+
+    def test_mostly_cut_frames_are_named_damaged(self):
+        cut = _passthrough(_FIXTURE.read_bytes()[:150_000])
+        reason, _line = self._probe(0.3, 30.0, lambda i: self.good if i % 10 == 0 else cut)
+        self.assertEqual(reason, camera_bridge.SCENE_PROBE_BROKEN_DE)
+
+    def test_a_few_cut_frames_while_verifying_still_pass(self):
+        cut = _passthrough(_FIXTURE.read_bytes()[:150_000])
+        reason, _line = self._probe(0.3, 30.0, lambda i: self.good if i % 4 else cut)
+        self.assertEqual(reason, '')
+
+    def test_a_dark_room_too_slow_for_the_window_says_so(self):
+        reason, line = self._probe(0.3, 5.0, lambda i: self.good)
+        self.assertEqual(reason, camera_bridge.SCENE_PROBE_TOO_SLOW_DE.format(rate=' (nur 5)'))
+        self.assertTrue(reason.startswith('Die Kamera liefert zu wenige Bilder pro Sekunde (nur 5). '
+                                          'Meist ist es zu dunkel'), reason)
+        self.assertIn('(5.0 Bilder/s)', line)
+
+    def test_an_uncompressed_mode_too_slow_says_so(self):
+        decoded = np.zeros((1080, 1920, 3), np.uint8)
+        mode = win_camera.SceneMode('YUY2', 1920, 1080, 30.0, passthrough=False)
+        reason, line = self._probe(0.3, 5.0, lambda i: decoded, mode)
+        self.assertEqual(reason, camera_bridge.SCENE_PROBE_UNCOMPRESSED_DE.format(
+            rate=' (5 Bilder pro Sekunde)'))
+        self.assertIn('Windows liefert YUY2 1920×1080', line)
+        self.assertIn('Direktdurchleitung aus', line)
+
+    def test_a_slow_decoded_stream_of_another_format_is_named_dark(self):
+        """NV12 may be MJPEG that Windows decoded, and an unreadable format is
+        unknown: a slow stream of either is most likely a dark room."""
+        decoded = np.zeros((1080, 1920, 3), np.uint8)
+        for fourcc in ('NV12', ''):
+            with self.subTest(fourcc=fourcc):
+                mode = win_camera.SceneMode(fourcc, 1920, 1080, 30.0, passthrough=False)
+                reason, _line = self._probe(0.3, 7.5, lambda i: decoded, mode)
+                self.assertEqual(reason, camera_bridge.SCENE_PROBE_TOO_SLOW_DE.format(
+                    rate=' (nur 8)'))
+
+    def test_decoded_frames_at_the_full_rate_pass(self):
+        decoded = np.zeros((1080, 1920, 3), np.uint8)
+        mode = win_camera.SceneMode('NV12', 1920, 1080, 30.0, passthrough=False)
+        reason, _line = self._probe(1.0, 30.0, lambda i: decoded, mode)
+        self.assertEqual(reason, '')
+
+    def test_a_read_that_raises_is_a_failed_read(self):
+        def frame_at(i):
+            if i < 3:
+                raise OSError('MSMF hiccup')
+            return self.good
+        clock = _SecondsClock()
+        self.cam = _SlowStartCam(clock, 0.5, 30.0, frame_at)
+        self.assertEqual(camera_bridge.probe_scene_camera(3, clock=clock, sleep=_no_sleep), '')
+
+    def test_every_sentence_is_german_and_ends_with_not_activated(self):
+        for name in ('SCENE_PROBE_REFUSED_DE', 'SCENE_PROBE_NO_FRAMES_DE', 'SCENE_PROBE_BROKEN_DE',
+                     'SCENE_PROBE_TOO_SLOW_DE', 'SCENE_PROBE_UNCOMPRESSED_DE',
+                     'SCENE_PROBE_SELFTEST_DE', 'SCENE_PROBE_FAILED_DE'):
+            text = getattr(camera_bridge, name).format(rate='')
+            with self.subTest(name=name):
+                self.assertTrue(text.endswith('Die Turm-Kamera wurde nicht aktiviert.'), text)
+                for pair in ('ae', 'oe', 'ue'):
+                    self.assertNotIn(f'schlie{pair}', text)
+                self.assertNotIn('{', text)
 
 
 if __name__ == '__main__':

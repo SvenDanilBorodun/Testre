@@ -7,7 +7,7 @@ The specs fold these answers in; where a spec and this file disagree, this file 
 Specs: `SPEC-A-phase0-wsl-field-fix.md`, `SPEC-B-proofs-firmware-armlink.md` (+ appendices `protocol`, `proofs`), `SPEC-C-native-app.md` (+ six appendices).
 Architects: A and B on Opus 5.5, C on Fable 5.2, all at effort xhigh. Spec C was written now, ahead of PLAN.md §8's "after spec B's Phase 1 results" (owner, 2026-11-25). Every B-dependent decision in C carries an `externalGates` entry.
 
-## Spec A — Phase 0, release 2.41.2 (was 2.41.1; see Q1-A)
+## Spec A — Phase 0, release 2.41.3 (was 2.41.1, then 2.41.2; see Q1-A, Q1-B)
 
 | # | Question | Answer | By |
 |---|---|---|---|
@@ -16,6 +16,7 @@ Architects: A and B on Opus 5.5, C on Fable 5.2, all at effort xhigh. Spec C was
 | Q3 | How does `release/2.41` ship after the cut? | A maintenance path: CI also on `release/**`, plus a `release.yml` maintenance mode, decided by git ancestry, that skips W1/W2/W2b/W3/trainer for tags not on `main` (spec A WP-A8, on `main` before the `v2.41.1` tag). This pre-approves exactly that CI edit. | owner |
 | Q4 | W6 also force-updates every Pi (same source, ~6 GB) | Accept; W6 unchanged. | owner |
 | Q1-A | Amends Q1 (2026-11-26): ship the arm-check fix first? | **Yes, alone.** 2.41.1 = the arm-check stillness fix and the version bump only, through the normal `main` pipeline. Phase 0 follows as **2.41.2**; WP-A8 must be on `main` before the `v2.41.2` tag, and `release/2.41` is cut from `v2.41.2`. In `PLAN.md`, `VERIFICATION.md` and specs A–C every „2.41.1" that names Phase 0's release or the cut reads „2.41.2", and every „2.41.0" that names the release before Phase 0 reads „2.41.1". Cost accepted: a second hardware test round and a second ~6 GB pull on every Pi. | owner |
+| Q1-B | Amends Q1-A (2026-11-28): a field fix before Phase 0? | **Yes, alone.** The first RG-1 attempt found the „Turm-Kamera“ probe refusing a working camera; 2.41.2 = that fix (the verifier's start-up allowance, the MSMF format read-back with the decoded fallback, the probe's precise reasons) and the version bump only, through the normal `main` pipeline. Phase 0 follows as **2.41.3**: every „2.41.2“ Q1-A gave Phase 0 reads „2.41.3“, and every release Q1-A names before Phase 0 reads „2.41.2“. | owner |
 
 ## Spec B — proofs, firmware, arm link
 

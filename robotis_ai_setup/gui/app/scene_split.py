@@ -103,9 +103,15 @@ FAULT_NONE, FAULT_SELFTEST, FAULT_OPEN_FAILED, FAULT_WRONG_MODE, FAULT_NO_FRAMES
 FAULTS = (FAULT_NONE, FAULT_SELFTEST, FAULT_OPEN_FAILED, FAULT_WRONG_MODE, FAULT_NO_FRAMES,
           FAULT_BAD_FRAMES)
 VERIFY_FRAMES = 20               # passing frames that prove the mode ...
-VERIFY_WINDOW_S = 3.0            # ... within this long after the open, else wrong_mode
+VERIFY_WINDOW_S = 3.0            # ... within this long after the FIRST frame, else wrong_mode
 BAD_FRAMES_LIMIT = 15            # consecutive refused frames while streaming -> bad_frames
-SILENCE_S = 2.0                  # this long without any frame -> no_frames
+SILENCE_S = 2.0                  # this long without any frame after the first one -> no_frames
+# The camera's own start-up: Media Foundation and V4L2 start the stream at the
+# first read, and a UVC camera may take seconds for its first frame (sensor
+# power-up, automatic exposure). Counted against SILENCE_S and the window, a
+# working camera was switched off before it had sent anything (2.41.2). Ten
+# seconds is OpenCV's own MSMF grab timeout.
+FIRST_FRAME_WAIT_S = 10.0        # this long after the open without any frame -> no_frames
 RETRY_FIRST_S, RETRY_MAX_S = 2.0, 10.0   # after a fault: 2, 4, 8, 10, 10 ... s
 FPS_WINDOW_FRAMES = 31           # the measured rate spans the last 30 frame intervals
 
@@ -421,16 +427,20 @@ class CaptureVerifier:
     device and opens it again once ``retry_due(now)``; ``selftest_failed`` is
     final. ``close(now)`` is the owner stopping.
 
-    verifying: within ``VERIFY_WINDOW_S`` of the open, ``VERIFY_FRAMES`` frames
-    must pass the frame check (passthrough: a complete 1920x1080 JPEG; decoded:
-    a 1080x1920x3 uint8 frame) and, for a decoded stream, arrive at
-    ``MIN_MODE_FPS`` or faster; else ``wrong_mode``. The first passing frame
-    freezes the kind (passthrough or decoded); a frame of the other kind is
-    refused. streaming: every frame is checked again; a refused frame is
-    dropped and counted; ``BAD_FRAMES_LIMIT`` refused frames in a row are
-    ``bad_frames``. ``SILENCE_S`` without any frame is ``no_frames`` in both.
+    verifying: the first frame may take ``FIRST_FRAME_WAIT_S`` after the open
+    (the camera's start-up), else ``no_frames``; within ``VERIFY_WINDOW_S`` of
+    that FIRST frame, ``VERIFY_FRAMES`` frames must pass the frame check
+    (passthrough: a complete 1920x1080 JPEG; decoded: a 1080x1920x3 uint8
+    frame) and, for a decoded stream, arrive at ``MIN_MODE_FPS`` or faster;
+    else ``wrong_mode``. The first passing frame freezes the kind (passthrough
+    or decoded); a frame of the other kind is refused. streaming: every frame
+    is checked again; a refused frame is dropped and counted;
+    ``BAD_FRAMES_LIMIT`` refused frames in a row are ``bad_frames``. After the
+    first frame, ``SILENCE_S`` without any frame is ``no_frames`` in both.
     After a fault the device is retried after 2, 4, 8, then every 10 s;
-    reaching ``streaming`` starts that sequence over.
+    reaching ``streaming`` starts that sequence over. ``opened_at``,
+    ``first_frame_at`` and ``passed`` (frames that passed the check) describe
+    the current open for a caller that reports what the camera did.
     """
 
     def __init__(self, platform: str, jpeg_quality: int):
@@ -443,11 +453,14 @@ class CaptureVerifier:
         self.generation = 0          # moves on every change of state or fault
         self.retry_at = None
         self.dropped = 0             # frames the check refused since the device was last opened
+        self.passed = 0              # frames that passed the check since the device was last opened
+        self.opened_at = None        # when the device was last opened, None before
+        self.first_frame_at = None   # the first frame of this open, None while there is none
         self.width = None            # of the last frame seen, None while unknown
         self.height = None
         self.passthrough = None      # True: the camera's own JPEG; False: a decoded frame
         self._faults_in_a_row = 0
-        self._start_session(None)
+        self._start_session()
 
     # -- the owner's calls ------------------------------------------------
 
@@ -460,9 +473,10 @@ class CaptureVerifier:
 
     def opened(self, now):
         self._require(STATE_OPENING)
-        self.dropped = 0
+        self.dropped = self.passed = 0
+        self.opened_at, self.first_frame_at = now, None
         self.width = self.height = self.passthrough = None
-        self._start_session(now)
+        self._start_session()
         self._set(STATE_VERIFYING, FAULT_NONE)
 
     def open_failed(self, now):
@@ -487,7 +501,10 @@ class CaptureVerifier:
     def tick(self, now):
         if self.state not in (STATE_VERIFYING, STATE_STREAMING):
             return
-        if now - self._last_frame_at >= SILENCE_S:
+        if self._last_frame_at is None:          # the camera is still starting
+            if now - self.opened_at >= FIRST_FRAME_WAIT_S:
+                self._fail(now, FAULT_NO_FRAMES)
+        elif now - self._last_frame_at >= SILENCE_S:
             self._fail(now, FAULT_NO_FRAMES)
         elif self.state == STATE_VERIFYING and now >= self._deadline:
             self._fail(now, FAULT_WRONG_MODE)
@@ -496,6 +513,9 @@ class CaptureVerifier:
         self.tick(now)
         if frame is None or self.state not in (STATE_VERIFYING, STATE_STREAMING):
             return False
+        if self._last_frame_at is None:          # the first frame opens the window
+            self.first_frame_at = now
+            self._deadline = now + VERIFY_WINDOW_S
         self._last_frame_at = now
         kind, size, ok = _inspect(frame)
         self.width, self.height = size if size is not None else (None, None)
@@ -509,6 +529,7 @@ class CaptureVerifier:
         if self._kind is None:
             self._kind = kind
             self.passthrough = kind == 'jpeg'
+        self.passed += 1
         self._times.append(now)
         if self.state == STATE_VERIFYING:
             self._good += 1
@@ -558,9 +579,9 @@ class CaptureVerifier:
 
     # -- inside -------------------------------------------------------------
 
-    def _start_session(self, now):
-        self._last_frame_at = now
-        self._deadline = None if now is None else now + VERIFY_WINDOW_S
+    def _start_session(self):
+        self._last_frame_at = None   # no frame yet: FIRST_FRAME_WAIT_S applies
+        self._deadline = None        # set by the first frame
         self._good = 0
         self._bad_in_a_row = 0
         self._run_at_release = 0     # the run of refused frames the last released frame ended

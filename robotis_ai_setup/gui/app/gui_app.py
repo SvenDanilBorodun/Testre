@@ -4289,8 +4289,9 @@ class EduBoticsApp:
 
         Clearing needs nothing. Ticking runs one bounded probe of the
         scene-role camera (`camera_bridge.probe_scene_camera`: 20 frames of
-        1920x1080 MJPEG) off the main thread and clears the box again with the
-        reason when the camera cannot deliver them. The previews hold the
+        1920x1080, the camera's start-up allowed for) off the main thread,
+        logs its one line about what the camera did, and clears the box again
+        with the reason when the camera cannot deliver them. The previews hold the
         cameras, so they are released for the probe and re-opened after it;
         the camera step and the start are frozen meanwhile. The value itself is
         stored at „Umgebung starten", like the robot type."""
@@ -4311,9 +4312,10 @@ class EduBoticsApp:
 
         def _probe():
             try:
-                reason = camera_bridge_mod.probe_scene_camera(index)
+                reason = camera_bridge_mod.probe_scene_camera(
+                    index, log=lambda line: self.root.after(0, self._log, line))
             except Exception:  # noqa: BLE001 — never leave the camera step frozen
-                reason = camera_bridge_mod.SCENE_PROBE_REFUSED_DE
+                reason = camera_bridge_mod.SCENE_PROBE_FAILED_DE
             self.root.after(0, lambda: self._finish_tower_probe(reason))
 
         threading.Thread(target=_probe, daemon=True).start()
@@ -4329,7 +4331,7 @@ class EduBoticsApp:
             self._log(f"[WARNUNG] {reason}")
             messagebox.showwarning("Turm-Kamera", reason)
         else:
-            self._log("Turm-Kamera geprüft: 1920 × 1080 MJPEG. Sie wird ab dem "
+            self._log("Turm-Kamera geprüft: 1920 × 1080 Bildpunkte. Sie wird ab dem "
                       "nächsten Start verwendet.")
         self._restart_camera_previews()
         self._update_start_button()

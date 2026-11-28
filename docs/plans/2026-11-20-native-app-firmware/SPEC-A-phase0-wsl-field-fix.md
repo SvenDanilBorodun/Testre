@@ -7,6 +7,8 @@ Status: **build-ready spec, architect A, 2026-11-25; the owner's answers to Q1�
 `release/2.41` the owner approved (WP-A8). Specs B and C are written in parallel and share no file with this one;
 Spec C's C4-00 (main stops building WSL) is gated on WP-A8 existing.
 
+**Release numbers amended again 2026-11-28 (owner: „do the release so students get the fix“, `SPEC-DECISIONS.md` Q1-B):** the tower-camera probe fix shipped alone as **2.41.2**; Phase 0 ships as **2.41.3**, and `release/2.41` is cut from `v2.41.3`. In the note below, read every „2.41.2“ as „2.41.3“, and every release it names before Phase 0 as „2.41.2“.
+
 **Amended 2026-11-26 (owner, `SPEC-DECISIONS.md` Q1-A): this spec's release is 2.41.2.** The arm-check stillness fix shipped alone as **2.41.1**. Read every „2.41.1" in this spec as „2.41.2" (the version WP-A6 sets, the tag of §12 step 8, the tag `release/2.41` is cut from, A8 on `main` before that tag), and every „2.41.0" that names the release before Phase 0 (the W5 prove-build's `version_tag`, the dev rig's installed version, the S0-2 base install, the rollback target) as „2.41.1". The stillness fix is already on `main` and in `v2.41.1`, so §12 step 1 and the pre-tag stillness grep hold as written, and WP-A7 keeps that fix's doc edits as they landed.
 
 **What 2.41.1 ships (owner Q1 = a):** Phase 0 (WP-A1…A6, A8, A7) **plus the arm check's stillness-window fix**

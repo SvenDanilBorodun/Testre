@@ -16,8 +16,9 @@ somehow missing from a build — callers get a clear German error when they
 actually try to use a camera.
 
 The tower scene camera (``EDUBOTICS_SCENE_CAMERA_PROFILE=tower_v1``) is opened
-by ``open_scene_capture`` in one frozen mode, 1920x1080 at 30 fps with the
-camera's own JPEG passed through; this module is the only place under
+by ``open_scene_capture`` in one frozen mode, 1920x1080 at 30 fps, with the
+camera's own JPEG passed through when Windows hands it over as MJPEG and
+decoded by the backend otherwise; this module is the only place under
 ``gui/app`` that sets a capture property (guard G10).
 
 Disambiguating two identical cameras (R1): the Innomaker U20CAM-720P pair both
@@ -294,8 +295,11 @@ def open_capture(index: int, width: int, height: int, fps: float):
             # MSMF: set ONLY the MJPG fourcc. Measured 2026-05-24 that setting
             # CAP_PROP_FRAME_WIDTH/HEIGHT/FPS on MSMF triggers a ~12 s open
             # re-negotiation AND pins the camera to a slower ~24 fps mode;
-            # setting only the fourcc opens in ~3 s and runs the camera's native
-            # mode — 640x480 MJPG @ ~30 fps on the Innomaker U20CAM-720P. We do
+            # setting only the fourcc opens in ~3 s — 640x480 MJPG @ ~30 fps on
+            # the Innomaker U20CAM-720P. (By OpenCV's MSMF source that set is
+            # refused and changes nothing: the FOURCC selects an output
+            # conversion there, and the 640x480 @ 30 is MSMF's default mode,
+            # chosen by size and rate; see open_scene_capture.) We do
             # NOT request a resolution here; if a camera's native size differs
             # from the target, the capture worker centre-crops a frame of
             # another aspect ratio to the target's and then resizes it
@@ -330,20 +334,81 @@ def open_capture(index: int, width: int, height: int, fps: float):
     return cap, info
 
 
-def open_scene_capture(index: int):
+@dataclass(frozen=True)
+class SceneMode:
+    """What the backend negotiated for the tower camera, read back at the open.
+
+    ``fourcc`` is the camera's own format (``"MJPG"``, ``"YUY2"``, ``"NV12"``,
+    ...; ``""`` when the backend reports none), ``passthrough`` whether the
+    camera's own JPEG is handed over (else the backend decodes every frame)."""
+    fourcc: str
+    width: int
+    height: int
+    fps: float
+    passthrough: bool
+
+
+@dataclass
+class SceneCapture:
+    """The tower camera's VideoCapture together with the mode it opened in.
+    ``read`` and ``release`` are the VideoCapture's."""
+    cap: object
+    mode: SceneMode | None = None
+
+    def read(self):
+        return self.cap.read()
+
+    def release(self):
+        self.cap.release()
+
+
+def _fourcc_text(value) -> str:
+    """A FOURCC read back as a double, as text; ``""`` for anything that is not
+    four printable characters (MSMF reports a decoded output format's GUID
+    as a small number, DSHOW may report 0)."""
+    try:
+        raw = int(value) & 0xFFFFFFFF
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    text = raw.to_bytes(4, "little").decode("latin1").strip("\x00 ")
+    return text if len(text) == 4 and text.isascii() and text.isprintable() else ""
+
+
+def _scene_mode(cap, cv2, passthrough: bool) -> SceneMode:
+    def number(prop):
+        try:
+            return float(cap.get(prop) or 0.0)
+        except Exception:  # noqa: BLE001 — an unreadable property is unknown
+            return 0.0
+    return SceneMode(fourcc=_fourcc_text(number(cv2.CAP_PROP_FOURCC)),
+                     width=int(number(cv2.CAP_PROP_FRAME_WIDTH)),
+                     height=int(number(cv2.CAP_PROP_FRAME_HEIGHT)),
+                     fps=number(cv2.CAP_PROP_FPS), passthrough=passthrough)
+
+
+def open_scene_capture(index: int) -> SceneCapture:
     """Open the tower scene camera in its one mode (spec 40 S1, decision D4).
 
-    MSMF: ``cv2.VideoCapture(index, cv2.CAP_MSMF, SCENE_OPEN_PARAMS)``, so the
-    mode is negotiated while the device opens. With
+    MSMF: ``cv2.VideoCapture(index, cv2.CAP_MSMF, SCENE_OPEN_PARAMS)``; OpenCV
+    applies the size and the rate right after the open. With
     ``EDUBOTICS_CAMERA_BACKEND=dshow`` the DSHOW order of ``open_capture``
     instead (size and rate first, the MJPG fourcc last). Then
-    ``CAP_PROP_CONVERT_RGB`` 0, so the backend hands over the camera's own JPEG
-    (PLAUSIBLY a 1xN uint8 sample on MSMF, rig gate RG-1); a frame with three
-    dimensions is the decoded fallback. Nothing is read back: the capture
-    worker's verifier judges the frames themselves.
+    ``CAP_PROP_CONVERT_RGB`` 0, so the backend hands over the camera's own
+    sample (on MSMF always a 1xN uint8 array of the raw buffer, whatever its
+    format), and the camera's format is read back.
 
-    Returns the VideoCapture; raises CameraUnavailableError if the device does
-    not open.
+    OpenCV's MSMF backend picks the camera mode by size and rate ONLY, never
+    by format (``FormatStorage::findBestVideoFormat``; setting the FOURCC
+    selects an output conversion there, not a camera format), and a tie goes
+    to whichever mode Windows lists first. So the camera may run 1920x1080 as
+    YUY2 or NV12, or as an NV12 the Windows camera service decodes from MJPEG,
+    whose raw buffers are no JPEG at all. When the format read back is not
+    MJPG, ``CAP_PROP_CONVERT_RGB`` goes back to 1 and the backend decodes every
+    frame (the verifier's decoded fallback, judged by its rate). An unknown
+    format is treated the same way: a decoded frame works for every format.
+
+    Returns a ``SceneCapture`` (its ``mode`` is the negotiated ``SceneMode``);
+    raises CameraUnavailableError if the device does not open.
     """
     cv2 = _import_cv2()
     backend = _capture_backend(cv2)
@@ -362,4 +427,9 @@ def open_scene_capture(index: int):
         cap.set(cv2.CAP_PROP_FPS, scene_split.CAPTURE_FPS)
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
-    return cap
+    native = _scene_mode(cap, cv2, passthrough=True)
+    if native.fourcc.upper() == "MJPG":
+        return SceneCapture(cap, native)
+    cap.set(cv2.CAP_PROP_CONVERT_RGB, 1)
+    return SceneCapture(cap, SceneMode(native.fourcc, native.width, native.height,
+                                       native.fps, passthrough=False))

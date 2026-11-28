@@ -350,12 +350,16 @@ class TheSessionProfileReachesTheBridgeAndTheLeaderToggle(unittest.TestCase):
 
 class TheBoxProbesTheSceneCamera(unittest.TestCase):
 
-    def _owner(self, cameras, probe_reason='', cloud_only=False):
+    def _owner(self, cameras, probe_reason='', cloud_only=False, probe_line=None, raises=False):
         rec = types.SimpleNamespace(warnings=[], logs=[], events=[], probed=[])
 
-        def probe(index):
+        def probe(index, log=None):
             rec.probed.append(index)
             rec.events.append('probe')
+            if probe_line is not None:
+                log(probe_line)
+            if raises:
+                raise RuntimeError('the probe broke')
             return probe_reason
 
         ns = {
@@ -365,7 +369,8 @@ class TheBoxProbesTheSceneCamera(unittest.TestCase):
                 showwarning=lambda title, msg: rec.warnings.append((title, msg))),
             'camera_bridge_mod': types.SimpleNamespace(
                 probe_scene_camera=probe,
-                SCENE_PROBE_REFUSED_DE=_scene_probe_refused()),
+                SCENE_PROBE_REFUSED_DE=_scene_probe_refused(),
+                SCENE_PROBE_FAILED_DE=_scene_probe_failed()),
             'TOWER_NEEDS_SCENE_CAMERA_DE': _module_constant('TOWER_NEEDS_SCENE_CAMERA_DE'),
         }
         toggled = _method('_on_tower_camera_toggled', ns)
@@ -420,6 +425,28 @@ class TheBoxProbesTheSceneCamera(unittest.TestCase):
         self.assertLess(events.index('probe'), events.index('previews restarted'))
         self.assertLess(events.index('probe'), events.index(('camera_frame', 'normal')))
 
+    def test_the_probe_report_reaches_the_protokoll(self):
+        """The probe's line about what the camera did (format, first frame,
+        frames) reaches the Protokoll through Tk's main loop, before the verdict."""
+        line = 'Turm-Kamera-Prüfung: Windows liefert MJPG 1920×1080 bei 30.0 Bilder/s, …'
+        reason = _scene_probe_refused()
+        owner, rec, toggled = self._owner(
+            [types.SimpleNamespace(role='scene', win_index=3, name='Cam')],
+            probe_reason=reason, probe_line=line)
+        toggled(owner)
+        self.assertIn(line, rec.logs)
+        self.assertLess(rec.logs.index(line), rec.logs.index('[WARNUNG] ' + reason))
+
+    def test_a_probe_that_breaks_says_so_and_unfreezes_the_step(self):
+        """Not the wrong-size sentence: nothing was learnt about the camera."""
+        owner, rec, toggled = self._owner(
+            [types.SimpleNamespace(role='scene', win_index=3, name='Cam')], raises=True)
+        toggled(owner)
+        self.assertIs(owner.tower_camera_enabled.get(), False)
+        self.assertEqual(rec.warnings, [('Turm-Kamera', _scene_probe_failed())])
+        self.assertIs(owner._tower_probe_running, False)
+        self.assertIn(('camera_frame', 'normal'), rec.events)
+
     def test_clearing_the_box_probes_nothing(self):
         owner, rec, toggled = self._owner(
             [types.SimpleNamespace(role='scene', win_index=3, name='Cam')])
@@ -438,6 +465,11 @@ class TheBoxProbesTheSceneCamera(unittest.TestCase):
 def _scene_probe_refused():
     from gui.app import camera_bridge
     return camera_bridge.SCENE_PROBE_REFUSED_DE
+
+
+def _scene_probe_failed():
+    from gui.app import camera_bridge
+    return camera_bridge.SCENE_PROBE_FAILED_DE
 
 
 class _Check:

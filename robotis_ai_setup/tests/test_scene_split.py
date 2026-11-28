@@ -621,12 +621,54 @@ class VerifierTable(_Verifier, unittest.TestCase):
         v.tick(t + 2.0)
         self.assertEqual((v.state, v.fault), ('fault', 'no_frames'))
 
-    def test_silence_while_verifying_is_no_frames(self):
+    def test_no_first_frame_within_the_start_up_allowance_is_no_frames(self):
         v = self.make()
-        v.tick(1.99)
+        v.tick(ss.FIRST_FRAME_WAIT_S - 0.01)
         self.assertEqual(v.state, 'verifying')
-        v.tick(2.0)
+        self.assertFalse(v.frame(ss.FIRST_FRAME_WAIT_S - 0.005, None))   # a failed read is no frame
+        self.assertEqual(v.state, 'verifying')
+        v.tick(ss.FIRST_FRAME_WAIT_S)
+        self.assertEqual((v.state, v.fault, v.first_frame_at), ('fault', 'no_frames', None))
+        self.assertEqual(ss.FIRST_FRAME_WAIT_S, 10.0)
+
+    def test_silence_after_the_first_frame_while_verifying_is_no_frames(self):
+        v = self.make()
+        self.assertFalse(v.frame(4.0, GOOD))
+        v.tick(5.99)
+        self.assertEqual(v.state, 'verifying')
+        v.tick(6.0)
         self.assertEqual((v.state, v.fault), ('fault', 'no_frames'))
+
+    def test_the_start_up_counts_against_neither_the_window_nor_the_silence(self):
+        """2.41.2: the first frame 2.5 s after the open (a UVC camera powering
+        up) at 30 fps, and 9.5 s at 15 fps, both reach streaming; before, the
+        2 s silence and the 3 s window from the open refused a camera whose
+        every frame was right."""
+        for first, fps in ((2.5, 30.0), (9.5, 15.0)):
+            with self.subTest(first=first, fps=fps):
+                v = self.make()
+                released, _t = self.feed(v, [GOOD] * ss.VERIFY_FRAMES, first, fps)
+                self.assertEqual((released, v.state), ([ss.VERIFY_FRAMES - 1], 'streaming'))
+                self.assertEqual((v.opened_at, v.first_frame_at, v.passed),
+                                 (0.0, first, ss.VERIFY_FRAMES))
+
+    def test_the_window_counts_from_the_first_frame(self):
+        v = self.make()
+        released, _ = self.feed(v, [WRONG_SIZE] * 89, 5.0, 30.0)   # up to t = 7.93 s
+        self.assertEqual((released, v.state), ([], 'verifying'))
+        self.assertFalse(v.frame(5.0 + ss.VERIFY_WINDOW_S, WRONG_SIZE))
+        self.assertEqual((v.state, v.fault, v.passed, v.dropped), ('fault', 'wrong_mode', 0, 89))
+
+    def test_a_reopen_starts_the_allowance_and_the_counts_over(self):
+        v, t = self.streaming()
+        v.tick(t + ss.SILENCE_S)
+        self.assertEqual(v.fault, 'no_frames')
+        t0 = v.retry_at
+        v.opening(t0)
+        v.opened(t0)
+        self.assertEqual((v.opened_at, v.first_frame_at, v.passed, v.dropped), (t0, None, 0, 0))
+        v.tick(t0 + ss.SILENCE_S + 1.0)                  # no first frame yet: still starting
+        self.assertEqual(v.state, 'verifying')
 
     def test_a_failed_read_is_no_frame(self):
         v, t = self.streaming()
